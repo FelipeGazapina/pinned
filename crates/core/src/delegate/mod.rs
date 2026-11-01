@@ -22,6 +22,7 @@ pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+const STDERR_CLOSE_WAIT: Duration = Duration::from_secs(1);
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
@@ -279,8 +280,7 @@ pub struct Task {
     pub error: Option<String>,
     pub conversation: Option<String>,
     pub steps: Vec<Item>,
-    /// The full latest assistant message, kept after the step ring drops it.
-    pub assistant: Option<String>,
+    pub newest_text: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
     /// This task's folder is a worktree `new_worktree` made.
@@ -903,7 +903,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[cfg(unix)]
-    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    pub(super) fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -963,7 +963,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[cfg(unix)]
-    fn stopped(pid: i32) -> bool {
+    pub(super) fn stopped(pid: i32) -> bool {
         let start = Instant::now();
         while unsafe { libc::kill(pid, 0) } == 0 {
             if start.elapsed() > Duration::from_secs(3) {
@@ -1002,7 +1002,7 @@ grok-4.7-high - Grok 4.7  High
         (pid, rx)
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-delegate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1140,16 +1140,15 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
-    #[test]
-    fn a_cancelled_task_keeps_the_reply_so_far() {
-        let dir = scratch("cancel-keeps");
+    fn after_each_stop(name: &str, provider: Provider, lines: &[&str]) -> Vec<Value> {
+        let dir = scratch(name);
         let file = dir.join("delegates.json");
         let mut seen = vec![];
         for how in ["task_cancel", "limit", "quit", "crash"] {
             let delegates = Delegates::load(Some(file.clone()));
-            let task = new_on(&delegates, Provider::Cursor);
-            for line in [INIT, REPLY] {
-                delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            let task = new_on(&delegates, provider);
+            for line in lines {
+                delegates.apply(&task.id, ChildEvent::Line((*line).to_owned()), None);
             }
             let delegates = match how {
                 "task_cancel" => {
@@ -1172,8 +1171,14 @@ grok-4.7-high - Grok 4.7  High
             let status = delegates.status(&parent(), &task.id).unwrap();
             seen.push(json!([how, status["workState"], status["summary"], status["error"]]));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+        seen
+    }
+
+    #[test]
+    fn a_cancelled_task_keeps_the_reply_so_far() {
         assert_eq!(
-            seen,
+            after_each_stop("cancel-keeps", Provider::Cursor, &[INIT, REPLY]),
             vec![
                 json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
                 json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
@@ -1181,7 +1186,22 @@ grok-4.7-high - Grok 4.7  High
                 json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
             ]
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_task_keeps_its_newest_reply() {
+        let recording = fixture("claude-background-shell.jsonl");
+        let before_the_final_result: Vec<&str> = recording.lines().take(17).collect();
+        let shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened and CI is green"}"#;
+        let subagent = fixture("claude-background-agent.jsonl");
+        let held_first_result: Vec<&str> = subagent.lines().take(22).collect();
+        let summaries = |name: &str, lines: &[&str]| after_each_stop(name, Provider::Claude, lines).into_iter().map(|row| row[2].clone()).collect::<Vec<_>>();
+        assert_eq!(
+            [summaries("newest-text", &before_the_final_result), summaries("newest-result", &[INIT, shell, REPLY, result]), summaries("held-result", &held_first_result)],
+            [vec![json!("FINAL-REPORT\nbgdone\n\n[exited with code 0]"); 4], vec![json!("PR opened and CI is green"); 4], vec![json!("FINAL-REPORT\nDONE-SUB"); 4]],
+            "a text written after the last turn end is newer than the summary that turn left, a later result is newer than both, and the first turn's result held past the second turn's text is not"
+        );
     }
 
     #[test]
@@ -1443,6 +1463,68 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
         assert!(stopped(shell), "the worker exited and left its shell {shell} running");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_whose_stderr_outlives_it_finishes_when_it_exits() {
+        let dir = scratch("stderr-held");
+        let mut seen = vec![];
+        for (name, end) in [("reply", format!("echo '{REPLY}'\nexit 0")), ("crash", "echo boom >&2\nexit 1".to_owned())] {
+            let leftover = Leftover(dir.join(format!("{name}.pid")));
+            let body = format!(
+                "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; exec sleep 30' '{pidfile}' >/dev/null &\nwhile [ ! -s '{pidfile}' ]; do sleep 0.05; done\necho '{INIT}'\n{end}",
+                pidfile = leftover.0.display(),
+            );
+            let bin = script(&dir, &format!("agent-{name}"), &body);
+            let delegates = Arc::new(Delegates::default());
+            let task = new_on(&delegates, Provider::Cursor);
+            let (_, told) = run(&delegates, &task, &bin, &dir);
+            let holder = leftover.pid();
+            let finished = told.recv_timeout(Duration::from_secs(5)).is_ok();
+            let status = delegates.status(&parent(), &task.id).unwrap();
+            seen.push(json!([name, finished, alive(holder), delegates.remembered(&task.id), status["workState"], status["summary"], status["error"]]));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            seen,
+            vec![
+                json!(["reply", true, true, null, "result_available", "PR opened", null]),
+                json!(["crash", true, true, null, "failed", null, "boom"]),
+            ],
+            "[case, finished, the stderr holder still runs, remembered pid, workState, summary, error]"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_stops_the_agent_before_it_removes_the_worktree() {
+        let dir = scratch("kill-then-drop");
+        let (tree, tools) = (dir.join("tree"), dir.join("tools"));
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let (pidfile, witness) = (dir.join("agent.pid"), dir.join("witness"));
+        script(
+            &tools,
+            "git",
+            &format!(
+                "case \"$(ps -o stat= -p \"$(cat '{}')\")\" in ''|Z*) agent=stopped ;; *) agent=running ;; esac\necho \"$1 $agent\" >> '{}'",
+                pidfile.display(),
+                witness.display()
+            ),
+        );
+        let bin = script(&dir, "claude", "exec sleep 30");
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.place(&task.id, tree.clone(), true);
+        let (agent, _) = run(&delegates, &task, &bin, &dir);
+        std::fs::write(&pidfile, agent.to_string()).unwrap();
+        let path = format!("{}:/bin:/usr/bin", tools.display());
+        delegates.cancel(&parent(), &task.id, "the parent asked", Some(&path)).unwrap();
+        let seen = std::fs::read_to_string(&witness).unwrap_or_default();
+        assert!(stopped(agent as i32), "the agent {agent} outlived the cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, "symbolic-ref stopped\nworktree stopped\n", "the state of the agent at each git call that removes its worktree");
     }
 
     #[cfg(unix)]

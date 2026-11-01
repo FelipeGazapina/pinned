@@ -112,6 +112,9 @@ class ReleaseSandbox(Remote):
     def foreign_tag(self, version):
         return f'cd "{self.other}" && git switch -q -c side && echo side >> log.txt && git add log.txt && git commit -qm side && git tag v{version} && git push -q origin v{version}'
 
+    def wip_commit(self):
+        return "echo wip >> README.md && git add README.md && git commit -qm 'my wip'"
+
     def during_build(self, during, version):
         return {
             None: {},
@@ -123,6 +126,8 @@ class ReleaseSandbox(Remote):
             "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
             "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
             "index held": {"RACE": "touch .git/index.lock", "RACE_ON": "run"},
+            "commit lands": {"RACE": self.wip_commit()},
+            "commit lands, cargo fails": {"RACE": self.wip_commit(), "FAIL": "run"},
         }[during]
 
     def label(self, sha):
@@ -330,6 +335,42 @@ RELEASE_CASES = (
         },
     ),
     (
+        "a commit lands on main while the release builds",
+        "0.16.1",
+        None,
+        "commit lands",
+        {
+            "refused": "a commit landed on main while the release built",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "my wip on start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "a commit lands on main and the snapshot build fails",
+        "0.16.1",
+        None,
+        "commit lands, cargo fails",
+        {
+            "code": 101,
+            "refused": "HEAD moved while the release ran",
+            "unsaid": "reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "my wip on start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "Cargo.toml changes while the release fetches origin",
+        "0.16.1",
+        "edit Cargo.toml during fetch",
+        None,
+        {
+            "refused": "commit or stash your changes first",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
         "the release is killed right after its commit",
         "0.16.1",
         "killed after commit",
@@ -371,6 +412,18 @@ RELEASE_CASES = (
             "refused": "Stash them, then run: git tag -d v0.16.1 && git reset --keep",
             "remote": {"refs/heads/main": "start"},
             "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": [" M Cargo.toml"]},
+        },
+    ),
+    (
+        "another git holds the index while a rejected push rolls back",
+        "0.16.1",
+        "index held during push",
+        None,
+        {
+            "refused": "because git reset --keep failed:\nfatal: Unable to create",
+            "unsaid": "Stash them",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": []},
         },
     ),
     (
@@ -470,6 +523,12 @@ status=$?
 kill -TERM $PPID
 exit $status
 """
+EDIT_ON_FETCH = """#!/bin/bash
+if [[ "$1" == fetch ]]; then
+  echo edit >> Cargo.toml
+fi
+exec "{git}" "$@"
+"""
 KILL_RELEASE_HOOK = """#!/bin/bash
 kill -TERM $(ps -o ppid= -p $PPID)
 sleep 1
@@ -498,6 +557,12 @@ def prepare(sandbox, setup, version):
         install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
     elif setup == "edit Cargo.toml during push":
         install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "index held during push":
+        install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / ".git" / "index.lock"))
+    elif setup == "edit Cargo.toml during fetch":
+        shim = sandbox.bin / "git"
+        shim.write_text(EDIT_ON_FETCH.format(git=shutil.which("git")))
+        shim.chmod(0o755)
     elif setup == "killed after commit":
         install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
     elif setup == "killed after sed":
@@ -533,6 +598,8 @@ def release_errors(root, version, setup, during, expect):
             errors.append("exit 0, want a refusal")
         if expect["refused"] not in proc.stderr:
             errors.append(f"stderr missing [{expect['refused']}]: {proc.stderr.strip()}")
+    if "unsaid" in expect and expect["unsaid"] in proc.stderr:
+        errors.append(f"stderr says [{expect['unsaid']}]: {proc.stderr.strip()}")
     for key in ("remote", "local"):
         if seen[key] != expect[key]:
             errors.append(f"{key} is {seen[key]}, want {expect[key]}")

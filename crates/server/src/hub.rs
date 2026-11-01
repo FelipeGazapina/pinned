@@ -483,10 +483,17 @@ impl Hub {
 }
 
 impl Account {
-    /// Registers a machine's connection. An older one must have gone offline first.
+    /// Registers a machine's connection and sends it every client's watch of it. An older one must
+    /// have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, version: String, out: Outbox) {
+        let mut live = self.live.lock().unwrap();
+        for (id, client) in &live.clients {
+            if let Some(tabs) = client.threads.get(machine) {
+                let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
+            }
+        }
         let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version };
-        self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
+        live.machines.insert(machine.to_owned(), online);
     }
 
     /// Forgets the machine's connection, `socket` or whichever it has: its calls fail and its
@@ -928,6 +935,27 @@ impl Storage for PgStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() };
+        for client in [1, 2] {
+            account.client_connected(client, vec![], Outbox::new().0, vec![]);
+        }
+        let (old, _, _) = Outbox::new();
+        account.came_online("m", 1, "box".into(), false, "0.16.1".into(), old);
+        account.watch_threads(1, "m", vec!["tab-1".into()]);
+        account.watch_threads(2, "m", vec!["tab-2".into()]);
+        assert!(account.went_offline("m", Some(1)), "the old socket's close");
+        account.watch_threads(2, "m", vec![]);
+        let (new, mut sent, _) = Outbox::new();
+        account.came_online("m", 2, "box".into(), false, "0.16.1".into(), new);
+        let mut frames = vec![];
+        while let Ok(text) = sent.try_recv() {
+            frames.push(serde_json::from_str::<Value>(&text).unwrap());
+        }
+        assert_eq!(frames, vec![serde_json::json!({ "type": "watch_threads", "viewer": "client-1", "tabs": ["tab-1"] })], "the watch of client 1, which never saw the machine leave, and none for client 2, which unwatched it");
+    }
 
     #[test]
     fn a_lost_prompt_is_not_delivered() {

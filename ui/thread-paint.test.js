@@ -45,6 +45,7 @@ const tasksTab = element();
 const contextMeter = element();
 const composerBanners = element();
 const threadView = element();
+const crumb = element();
 
 const clock = { now: 0, timers: [] };
 clock.advance = (ms) => {
@@ -53,6 +54,7 @@ clock.advance = (ms) => {
   clock.timers = clock.timers.filter((timer) => timer.at > clock.now);
   for (const timer of due) timer.run();
 };
+clock.next = () => clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
 
 const sandbox = {
   tasksTab,
@@ -70,10 +72,15 @@ const sandbox = {
   setTimeout: (run, ms) => clock.timers.push({ at: clock.now + ms, run }),
   document: {
     hidden: false,
-    body: { dataset: {} },
+    activeElement: null,
+    body: { dataset: { mode: "gui" }, toggleAttribute() {} },
+    addEventListener() {},
     getElementById(id) {
       if (id === "context-meter") return contextMeter;
       return element();
+    },
+    querySelector() {
+      return crumb;
     },
   },
   callOn: async () => null,
@@ -82,13 +89,15 @@ vm.createContext(sandbox);
 
 const gui = read("./gui.js");
 const main = read("./main.js");
+const timeline = read("./gui-timeline.js");
 const agents = read("./gui-agents.js");
 const composer = read("./gui-composer.js");
+vm.runInContext(read("./vendor/marked.js"), sandbox);
 vm.runInContext(
   `
 function threadOf(tab) { return tab.thread; }
 function statusOf(tab) { return tab.view.status ?? "idle"; }
-function guiOn() { return true; }
+function guiOn() { return document.body.dataset.mode === "gui"; }
 function keyOf(machine, id) { return machine + ":" + id; }
 function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
@@ -96,7 +105,6 @@ function threadKey(tab) { return tab.key; }
 function limitBanner() { return null; }
 function icon(name, cls = "") { return '<svg data-icon="' + name + '" class="' + cls + '"></svg>'; }
 function esc(text) { return String(text ?? "").replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";"); }
-function duration(ms) { return String(ms); }
 function terminalOnly() { return false; }
 function renderSidebar() {}
 function markThreadSeen() {}
@@ -109,19 +117,32 @@ function terminalDialog() { return null; }
 function fetchWorkspace() {}
 function noteVisit() {}
 function renderPanel() {}
+function crumbHtml() { return ""; }
+function promptLinkFor() { return null; }
+function windowStale() { return false; }
+function drawUploadImages() {}
+function markClippedTables() {}
+function renderDialog() {}
+function showScrollEnd() {}
+function renderMinimap() {}
+function renderComposer(tab) {
+  renderBanners(tab);
+  renderTasks(tab);
+  renderContext(tab);
+}
 const threads = new Map();
-var THREAD_READ_GAP_MS = 0;
+const finder = { open: false };
+const laneGrowth = { observe() {}, disconnect() {} };
+let threadAtEnd = true;
 const bannerDismissed = new Set();
 let restoringBranch = null;
 let bannersOpen = false;
-function renderThread() {
-  renderTasks(active);
-  renderContext(active);
-  renderBanners(active);
-  threadView.dataset.items = JSON.stringify(threadOf(active).items.map((item) => item.text));
-  threadView.innerHTML = agentCardsHtml(active, null, true) + agentsFooterHtml(active);
-}
 
+${between(gui, "const THREAD_READ_GAP_MS", "\n")}
+${between(main, "const tilde =", "\n")}
+${between(timeline, "const PLAN_TOOL", "let uploadImages = null;")}
+${between(timeline, "function userHtml", "const DIALOG_KEYS")}
+${between(timeline, "const CITATIONS_BLOCK", "const citeButton")}
 ${agents.slice(agents.indexOf("const agentsOf"))}
 ${between(gui, "function hookPhase", "async function fetchWorkspace")}
 ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
@@ -203,8 +224,16 @@ function network(transcripts) {
       next();
       await settle();
     },
-    async drain(pick = () => 0) {
+    async flush(pick = () => 0) {
+      await settle();
       while (queue.length) await this.deliver(pick(queue.length));
+    },
+    async drain(pick = () => 0) {
+      for (;;) {
+        await this.flush(pick);
+        if (!clock.timers.length) return;
+        clock.next();
+      }
     },
   });
 }
@@ -225,13 +254,45 @@ function clearScreen() {
   Object.assign(threadView, { innerHTML: "", dataset: {} });
 }
 
+function blocks(html, open) {
+  const tag = /^<(\w+)/.exec(open)[1];
+  const edges = new RegExp(`<${tag}\\b|</${tag}>`, "g");
+  const out = [];
+  for (let at = html.indexOf(open); at >= 0; at = html.indexOf(open, at + 1)) {
+    let depth = 0;
+    for (const edge of html.slice(at).matchAll(edges)) {
+      depth += edge[0][1] === "/" ? -1 : 1;
+      if (depth) continue;
+      out.push(html.slice(at, at + edge.index + edge[0].length));
+      break;
+    }
+  }
+  return out;
+}
+
+const textOf = (html) => html.replace(/<[^>]*>/g, "").trim();
+const LINES = {
+  '<div class="body md': textOf,
+  '<div class="narration md': textOf,
+  '<div class="assistant md': textOf,
+  '<details class="tool': (row) => textOf(/<span class="label">.*?<\/span>/s.exec(row)[0]),
+};
+
+function inTranscriptOrderThenStale(lines, items) {
+  const order = items.map((item) => item.text ?? item.name);
+  const rank = (line) => (order.includes(line) ? order.indexOf(line) : order.length);
+  return lines.sort((a, b) => rank(a) - rank(b));
+}
+
 function painted() {
+  const html = threadView.innerHTML;
+  const lines = Object.entries(LINES).flatMap(([open, text]) => blocks(html, open).map(text));
   return {
-    items: JSON.parse(threadView.dataset.items ?? "[]"),
+    items: inTranscriptOrderThenStale(lines, sandbox.active.thread.items),
     tasks: tasksTab.hidden ? "" : tasksTab.innerHTML,
     context: contextMeter.hidden ? null : contextMeter.getAttribute("aria-label"),
     branch: composerBanners.innerHTML,
-    agents: threadView.innerHTML,
+    agents: [...blocks(html, '<div class="agents">'), ...blocks(html, '<div class="agents-working">')].join(""),
   };
 }
 
@@ -253,9 +314,17 @@ async function poll(tab, net) {
   await net.drain();
 }
 
+async function startUnansweredRead(tab) {
+  sandbox.fetchThread(tab);
+  clock.next();
+  await settle();
+}
+
 const text = (body) => ({ kind: "text", at: "t3", text: body });
 const todos = { at: "t1", steps: [{ step: "Ship the fix", status: "in_progress" }] };
-const runningAgent = { id: "a1", name: "Look around", state: "running", tool: "toolu_1", updated: "t5", steps: [] };
+const spawning = { kind: "tool", at: "t4", id: "toolu_1", name: "spawning" };
+const runningAgent = { id: "a1", name: "Look around", state: "running", updated: "t5", steps: [] };
+const spawnedAgent = { ...runningAgent, tool: spawning.id };
 
 test("a task list line with no other item repaints the tasks", async () => {
   const { tab, s, net } = await opened();
@@ -303,6 +372,37 @@ test("a nudge reads the new line without waiting for the poll", async () => {
   assert.deepEqual(painted().items, ["start", "visible"]);
 });
 
+test("a nudge reads only a tab the page follows, and nothing while the page is hidden", async () => {
+  clearScreen();
+  const shown = tabFor("tab-1", "idle");
+  const background = tabFor("tab-2", "idle");
+  const net = network({ "tab-1": transcript(), "tab-2": transcript() });
+  sandbox.tabs = [shown, background];
+  sandbox.active = shown;
+  net.nudge("tab-2");
+  await net.drain();
+  assert.equal(net.reads, 0, "a background tab that only the phone follows");
+  sandbox.document.hidden = true;
+  try {
+    net.nudge("tab-1");
+    await net.drain();
+    assert.equal(net.reads, 0, "the shown tab of a hidden page");
+  } finally {
+    sandbox.document.hidden = false;
+  }
+  sandbox.document.body.dataset.mode = "terminal";
+  try {
+    net.nudge("tab-1");
+    await net.drain();
+    assert.equal(net.reads, 0, "the shown tab of a page in terminal mode");
+  } finally {
+    sandbox.document.body.dataset.mode = "gui";
+  }
+  net.nudge("tab-1");
+  await net.drain();
+  assert.equal(net.reads, 1, "the shown tab of a visible page");
+});
+
 test("a thread event from the hub reads the tab and paints the new line", async () => {
   const { s, net } = await opened();
   s.append({ item: text("pushed") });
@@ -321,35 +421,32 @@ test("a render watches the shown thread at once, not on the next poll tick", asy
 
 test("a streaming tab reads at most once per gap, and the first nudge after a pause reads at once", async () => {
   const { s, net } = await opened();
-  sandbox.THREAD_READ_GAP_MS = 100;
-  try {
-    clock.advance(1000);
-    s.append({ item: text("a") });
+  clock.advance(1000);
+  s.append({ item: text("a") });
+  net.nudge("tab-1");
+  await net.flush();
+  assert.deepEqual(painted().items, ["start", "a"], "the first nudge after a pause reads at once");
+  for (const body of ["b", "c", "d"]) {
+    clock.advance(10);
+    s.append({ item: text(body) });
     net.nudge("tab-1");
-    await net.drain();
-    assert.deepEqual(painted().items, ["start", "a"], "the first nudge after a pause reads at once");
-    for (const body of ["b", "c", "d"]) {
-      clock.advance(10);
-      s.append({ item: text(body) });
-      net.nudge("tab-1");
-      await net.drain();
-    }
-    assert.deepEqual(painted().items, ["start", "a"], "nudges 10 ms apart wait for the gap");
-    clock.advance(100);
-    await settle();
-    await net.drain();
-    assert.deepEqual(painted().items, ["start", "a", "b", "c", "d"]);
-    assert.equal(net.reads, 3, "the open, the first nudge, and one read for the three that followed");
-  } finally {
-    sandbox.THREAD_READ_GAP_MS = 0;
+    await net.flush();
   }
+  assert.deepEqual(painted().items, ["start", "a"], "nudges 10 ms apart wait for the gap");
+  clock.advance(69);
+  await net.flush();
+  assert.deepEqual(painted().items, ["start", "a"], "99 ms after the read nothing has been read yet");
+  clock.advance(1);
+  await net.flush();
+  assert.deepEqual(painted().items, ["start", "a", "b", "c", "d"]);
+  assert.equal(net.reads, 3, "the open, the first nudge, and one read for the three that followed");
 });
 
 test("a nudge during a read reads again, so the new line and its agent card show", async () => {
   const { tab, s, net } = await opened();
-  sandbox.fetchThread(tab);
-  s.append({ item: { kind: "tool", at: "t4", id: "toolu_1", text: "spawning" } });
-  s.agents = [runningAgent];
+  await startUnansweredRead(tab);
+  s.append({ item: spawning });
+  s.agents = [spawnedAgent];
   net.nudge("tab-1");
   await net.deliver(1);
   await net.drain();
@@ -368,9 +465,9 @@ test("a background tab's agents arrive during its turn and keep it watched after
   sandbox.fetchThread(background);
   sandbox.fetchThread(shown);
   await net.drain();
-  sandbox.fetchThread(background);
-  busy.append({ item: { kind: "tool", at: "t4", id: "toolu_1", text: "spawning" } });
-  busy.agents = [runningAgent];
+  await startUnansweredRead(background);
+  busy.append({ item: spawning });
+  busy.agents = [spawnedAgent];
   net.nudge("tab-1");
   await net.deliver(1);
   await net.drain();
@@ -428,7 +525,7 @@ function appends(seed) {
     if (kind === "todos") steps.push({ todos: { at: `t${i}`, steps: [{ step: `task ${i}`, status: "in_progress" }] } });
     if (kind === "context") steps.push({ context: { tokens: 100000 * (1 + (i % 9)), at: `t${i}` } });
     if (kind === "branch") steps.push({ branch: pick(["main", "feature", "fix"]) });
-    if (kind === "agents") steps.push({ agents: [{ ...runningAgent, id: `a${i}`, name: `agent ${i}`, tool: `toolu_${i}` }] });
+    if (kind === "agents") steps.push({ agents: [{ ...runningAgent, id: `a${i}`, name: `agent ${i}` }] });
     if (kind === "partial") steps.push({ partial: true, item: text(`slow ${i}`) });
   }
   return { steps, rand };

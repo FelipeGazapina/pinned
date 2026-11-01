@@ -2,7 +2,7 @@
 
 use crate::account::Credentials;
 use crate::agent::Message;
-use crate::machine::{Machine, SyncHold, ViewerId};
+use crate::machine::{Machine, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
@@ -36,6 +36,7 @@ pub struct Link {
     shared: Arc<Shared>,
     stop: watch::Sender<bool>,
     thread: std::thread::JoinHandle<()>,
+    syncing: std::thread::JoinHandle<()>,
 }
 
 struct Outgoing {
@@ -102,13 +103,12 @@ impl Shared {
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
-    machine.watch_threads();
     let shared = Arc::new(Shared::default());
     let flushing = shared.clone();
     machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));
     let (stop, stopped) = watch::channel(false);
-    let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
-    std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
+    let (synced, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
+    let syncing = std::thread::spawn(move || sync_projects(&synced, &synced_machine, &sync_stopped));
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
         events.send(&MachineFrame::Event { event: event.clone() });
@@ -118,7 +118,7 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
         runtime.block_on(run(link, creds, machine, version, stopped, listener));
     });
-    Link { shared, stop, thread }
+    Link { shared, stop, thread, syncing }
 }
 
 impl Link {
@@ -151,7 +151,9 @@ impl Link {
 
     pub fn stop(self) {
         let _ = self.stop.send(true);
+        self.syncing.thread().unpark();
         let _ = self.thread.join();
+        let _ = self.syncing.join();
     }
 }
 
@@ -196,35 +198,39 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
 }
 
 #[derive(Default)]
-struct Syncer<'a> {
-    state: Option<(sync::State, SyncHold<'a>)>,
+struct Syncer {
+    state: Option<sync::State>,
     reported_unreadable: bool,
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
 }
 
-impl<'a> Syncer<'a> {
-    fn run(mut self, shared: &Shared, machine: &'a Machine, file: &Path, stopped: &watch::Receiver<bool>) {
+impl Syncer {
+    fn run(mut self, shared: &Shared, machine: &Machine, file: &Path, stopped: &watch::Receiver<bool>) {
         let mut wait = SYNC_FIRST;
         'run: loop {
             let until = Instant::now() + wait;
-            while Instant::now() < until {
-                if *stopped.borrow() {
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::park_timeout(left);
             }
             wait = SYNC_EVERY;
             if shared.online() {
                 self.cycle(shared, machine, file);
             }
         }
+        machine.hold_sync_state(false);
     }
 
-    fn cycle(&mut self, shared: &Shared, machine: &'a Machine, file: &Path) {
+    fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => self.state = Some((loaded, machine.hold_sync_state())),
+                Ok(loaded) => {
+                    self.state = Some(loaded);
+                    machine.hold_sync_state(true);
+                }
                 Err(e) => {
                     if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
@@ -234,8 +240,11 @@ impl<'a> Syncer<'a> {
                 }
             }
         }
-        let Some((state, _)) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else { return };
         for checkout in machine.checkouts() {
+            if !shared.online() {
+                break;
+            }
             let key = checkout.project.key.clone();
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 self.shared_projects.insert(key.clone());
@@ -554,17 +563,80 @@ mod tests {
     }
 
     #[test]
-    fn an_old_sync_loop_that_ends_late_leaves_the_new_loops_state_held() {
-        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("overlap");
-        let mut old = Syncer::default();
-        old.cycle(&shared, &machine, &file);
-        let mut new = Syncer::default();
-        new.cycle(&shared, &machine, &file);
+    fn a_sync_loop_ends_once_its_link_is_dropped() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("dropped");
+        let (stop, stopped) = watch::channel(false);
+        drop(stop);
+        let (ended, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            Syncer::default().run(&shared, &machine, &file, &stopped);
+            let _ = ended.send(());
+        });
+        assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok(()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn creds(hub: String) -> Credentials {
+        Credentials { hub, email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() }
+    }
+
+    #[test]
+    fn a_link_stopped_between_cycles_does_not_wait_for_the_next() {
+        let (dir, _file, machine, _shared, _frames) = stopped_sync_fixture("link-idle");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let link = spawn(creds(format!("http://{closed}")), machine.clone(), "0.0.0-test");
+        std::thread::sleep(Duration::from_millis(200));
+        let stopping = Instant::now();
+        link.stop();
+        assert!(stopping.elapsed() < Duration::from_secs(2), "stop waited {:?} for the sync loop's next cycle", stopping.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn a_hub_that_answers_no_call(calls: mpsc::Sender<String>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let (socket, _) = tokio::net::TcpListener::from_std(listener).unwrap().accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                socket.next().await;
+                let hello = r#"{"type":"hello","machine":{"id":"m-1","name":"mac","os":"macos","online":true,"last_seen":0}}"#;
+                socket.send(Frame::Text(hello.into())).await.unwrap();
+                while let Some(Ok(frame)) = socket.next().await {
+                    if let Frame::Text(text) = frame {
+                        let sent: Value = serde_json::from_str(&text).unwrap();
+                        if sent["type"] == "call" {
+                            let _ = calls.send(sent["call"]["cmd"].as_str().unwrap().to_owned());
+                        }
+                    }
+                }
+            });
+        });
+        url
+    }
+
+    #[test]
+    fn a_link_stopped_inside_a_cycle_saves_the_checkout_in_hand_and_lets_go() {
+        let (dir, file, machine, _shared, _frames) = stopped_sync_fixture("link-stop");
+        for name in ["one", "two"] {
+            let app = dir.join(name);
+            std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+            for args in [&["init", "-q"][..], &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]] {
+                assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+            }
+            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 16 << 20]).unwrap();
+            machine.open_project(app);
+        }
+        let (calls, called) = mpsc::channel();
+        let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
+        assert_eq!(called.recv_timeout(Duration::from_secs(30)).as_deref(), Ok("share_project"));
+        link.stop();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("the stopped loop saved its state")).unwrap();
+        let hashed: Vec<String> = saved["hashes"].as_object().unwrap().keys().map(|path| Path::new(path).file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(hashed, ["skill.md"]);
         std::fs::write(&file, b"").unwrap();
-        let (_stop, stopped) = watch::channel(true);
-        old.run(&shared, &machine, &file, &stopped);
-        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
-        new.run(&shared, &machine, &file, &stopped);
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         let _ = std::fs::remove_dir_all(dir);

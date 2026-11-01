@@ -233,6 +233,7 @@ struct Tab {
     claude_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
+    last_found_transcript: Option<PathBuf>,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
@@ -352,8 +353,7 @@ pub struct Machine {
     snapshots: AtomicU64,
     saved_snapshot: Mutex<u64>,
     sync_file: Option<PathBuf>,
-    sync_state_holder: AtomicU64,
-    next_sync_hold: AtomicU64,
+    sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -472,19 +472,6 @@ impl Drop for Busy<'_> {
     }
 }
 
-const NO_SYNC_HOLD: u64 = 0;
-
-pub(crate) struct SyncHold<'a> {
-    machine: &'a Machine,
-    id: u64,
-}
-
-impl Drop for SyncHold<'_> {
-    fn drop(&mut self) {
-        let _ = self.machine.sync_state_holder.compare_exchange(self.id, NO_SYNC_HOLD, Ordering::SeqCst, Ordering::SeqCst);
-    }
-}
-
 #[derive(Default)]
 struct TranscriptLook {
     found: Option<Transcript>,
@@ -547,8 +534,7 @@ impl Machine {
             snapshots: AtomicU64::new(0),
             saved_snapshot: Mutex::new(0),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_state_holder: AtomicU64::new(NO_SYNC_HOLD),
-            next_sync_hold: AtomicU64::new(NO_SYNC_HOLD + 1),
+            sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -911,6 +897,7 @@ impl Machine {
             watchers.remove(viewer);
         } else {
             watchers.insert(viewer.to_owned(), tabs.iter().cloned().collect());
+            self.watch_threads();
         }
     }
 
@@ -995,12 +982,11 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook) -> Option<PathBuf> {
+    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook, now: Instant) -> Option<PathBuf> {
         let home = self.accounts.home(account);
         if let Some(found) = look.found.as_ref().filter(|found| found.session == session && found.path.starts_with(&home) && found.path.is_file()) {
             return Some(found.path.clone());
         }
-        let now = Instant::now();
         let gap = match &look.missed {
             Some(missed) if missed.session == session && missed.status == status => {
                 if now < missed.at + missed.gap {
@@ -1027,17 +1013,25 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, account, process) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started)))?;
-        let Some(file) = session.as_deref().and_then(|s| self.find_transcript(&account, s)) else {
+        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
+        let file = session.as_deref().and_then(|s| {
+            let home = self.accounts.home(&account);
+            let still = known.as_ref().filter(|path| path.file_stem().is_some_and(|stem| stem == s) && path.starts_with(&home) && path.is_file());
+            still.cloned().or_else(|| self.find_transcript(&account, s))
+        });
+        let Some(file) = file else {
             return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
+        if known.as_ref() != Some(&file) {
+            self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
+        }
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
-    pub fn watch_threads(&self) {
+    fn watch_threads(&self) {
         if self.threads_watched.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -1058,17 +1052,21 @@ impl Machine {
 
     fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
         let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
+        if watched.is_empty() {
+            return;
+        }
         let open: Vec<(String, String, Option<AgentStatus>, Account)> = {
             let tabs = self.tabs.lock().unwrap();
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
+        let now = Instant::now();
         for (id, session, status, account) in open {
             if !watched.contains(&id) {
                 continue;
             }
             let look = seen.entry(id.clone()).or_default();
-            let Some(path) = self.locate_transcript(&account, &session, status, look) else { continue };
+            let Some(path) = self.locate_transcript(&account, &session, status, look, now) else { continue };
             let Ok(len) = std::fs::metadata(&path).map(|meta| meta.len()) else { continue };
             let found = Transcript { session, path, len };
             if look.found.as_ref() == Some(&found) {
@@ -1913,14 +1911,12 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self) -> SyncHold<'_> {
-        let id = self.next_sync_hold.fetch_add(1, Ordering::SeqCst);
-        self.sync_state_holder.store(id, Ordering::SeqCst);
-        SyncHold { machine: self, id }
+    pub(crate) fn hold_sync_state(&self, held: bool) {
+        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_state_holder.load(Ordering::SeqCst) != NO_SYNC_HOLD {
+        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)
@@ -2416,7 +2412,7 @@ impl Machine {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let Some(machine) = me.upgrade() else { return };
             if machine.quitting.load(Ordering::Relaxed) {
-                return;
+                continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
@@ -2534,6 +2530,7 @@ impl Machine {
             bypass,
             claude_session,
             tally: Tally::default(),
+            last_found_transcript: None,
             interrupted: false,
             resume_at: None,
             held_at_limit: false,
@@ -3855,6 +3852,10 @@ pub(crate) mod tests {
         page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
     }
 
+    fn ticked_by_hand(m: &Machine) {
+        m.threads_watched.store(true, Ordering::Relaxed);
+    }
+
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
         let root = temp(name);
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
@@ -3863,6 +3864,7 @@ pub(crate) mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
+        ticked_by_hand(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3966,12 +3968,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_watcher_nudges_a_grown_transcript_within_a_tick() {
+    fn the_first_watch_starts_the_watcher_which_nudges_within_a_tick() {
         let root = temp("thread-loop");
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
-        m.watch_threads();
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
@@ -4053,6 +4054,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reads_of_a_tab_search_the_projects_once_until_its_transcript_moves() {
+        let (root, m, _, tab, dir) = watching("thread-read-cache");
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let before = scans();
+        for _ in 0..5 {
+            assert_eq!(texts_from(&m, &tab, 0), vec!["ready"]);
+        }
+        assert_eq!(scans(), before + 1, "five reads search once");
+        let other = projects.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::rename(dir.join("s1.jsonl"), other.join("s1.jsonl")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"], "a moved transcript is found again");
+        assert_eq!(scans(), before + 2);
+        std::fs::remove_file(other.join("s1.jsonl")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), Vec::<String>::new(), "a deleted transcript reads as none");
+        std::fs::write(dir.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("back"))).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready", "back"], "a transcript written again is found again");
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("fresh")).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s2".into())).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["fresh"], "a new session reads its own transcript");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
         let (root, m, heard, tab, _) = watching("thread-unwritten");
         let projects = root.join("config/accounts/work/projects");
@@ -4077,6 +4104,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_transcript_not_found_is_searched_again_after_40_ms_then_twice_as_long_up_to_the_poll() {
+        let (root, m, _, _, _) = watching("thread-backoff");
+        let projects = root.join("config/accounts/work/projects");
+        let account = m.accounts.get("work").unwrap();
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let searched = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, now: Instant| {
+            let before = scans();
+            m.locate_transcript(&account, session, status, look, now);
+            scans() > before
+        };
+        let next_search = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, after: Instant| {
+            (1..=3000).find(|ms| searched(look, session, status, after + Duration::from_millis(*ms))).unwrap()
+        };
+        let mut look = TranscriptLook::default();
+        let mut at = Instant::now();
+        assert!(searched(&mut look, "s1", None, at), "the first look searches");
+        let mut gaps = vec![];
+        for _ in 0..7 {
+            let gap = next_search(&mut look, "s1", None, at);
+            gaps.push(gap);
+            at += Duration::from_millis(gap);
+        }
+        assert_eq!(gaps, [40, 80, 160, 320, 640, 1200, 1200]);
+        at += Duration::from_millis(1);
+        assert!(searched(&mut look, "s1", Some(AgentStatus::Working), at), "a new status searches at once");
+        assert_eq!(next_search(&mut look, "s1", Some(AgentStatus::Working), at), 40, "and waits 40 ms again");
+        at += Duration::from_millis(40 + 1);
+        assert!(searched(&mut look, "s2", Some(AgentStatus::Working), at), "a new session searches at once");
+        assert_eq!(next_search(&mut look, "s2", Some(AgentStatus::Working), at), 40, "and waits 40 ms again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_dropped_hub_link_keeps_this_machines_own_watch() {
         let (root, m, heard, local, dir) = watching("thread-local-viewer");
         let remote = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into())).unwrap();
@@ -4087,6 +4147,51 @@ pub(crate) mod tests {
         let mut looks = HashMap::new();
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": local })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_loop_skips_its_ticks_while_the_machine_quits_and_ticks_again_after_a_reopen() {
+        let m = machine();
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counted = ticks.clone();
+        m.every(Duration::from_millis(1), move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        wait_for("a tick", || ticks.load(Ordering::SeqCst) > 0);
+        m.quit();
+        wait_for("the ticks to stop", || {
+            let before = ticks.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(10));
+            ticks.load(Ordering::SeqCst) == before
+        });
+        let stopped = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(ticks.load(Ordering::SeqCst), stopped, "no tick while the machine quits");
+        m.reopen_sessions();
+        wait_for("a tick after the reopen", || ticks.load(Ordering::SeqCst) > stopped);
+    }
+
+    #[test]
+    fn a_tick_with_nothing_watched_waits_for_no_tab() {
+        let (root, m, _, tab, dir) = watching("thread-idle");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        m.set_watched_threads(LOCAL_VIEWER, &[]);
+        let tick = |m: &Arc<Machine>| {
+            let (m, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
+            std::thread::spawn(move || {
+                m.nudge_thread_watchers(&mut HashMap::new());
+                let _ = done.send(());
+            });
+            finished
+        };
+        let held = m.tabs.lock().unwrap();
+        assert!(tick(&m).recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
+        m.set_watched_threads(LOCAL_VIEWER, std::slice::from_ref(&tab));
+        let watched = tick(&m);
+        assert!(watched.recv_timeout(Duration::from_millis(50)).is_err(), "a watched tab is read under the tabs lock");
+        drop(held);
+        assert!(watched.recv_timeout(Duration::from_secs(5)).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4107,6 +4212,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
+        ticked_by_hand(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();
@@ -4114,6 +4220,7 @@ pub(crate) mod tests {
         std::fs::write(&original, assistant_line("ready")).unwrap();
         let mut looks = HashMap::new();
         m.nudge_thread_watchers(&mut looks);
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"]);
         m.switch_account(&tab, "personal", 80, 24).unwrap();
         let copied = root.join("config/accounts/personal/projects/demo/s1.jsonl");
         assert!(original.is_file(), "the switch leaves the old transcript");
@@ -6409,12 +6516,8 @@ while True:
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
-        use std::os::unix::process::CommandExt;
-        let m = Machine::new(launch(), None, None, |_| {});
-        let task = m.delegates.begin(crate::delegate::NewTask {
+    fn runaway(m: &Machine) -> crate::delegate::Task {
+        m.delegates.begin(crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab("tab-1".into()),
             tool: None,
             title: "Runaway".into(),
@@ -6428,7 +6531,15 @@ while True:
             caller_key: "tab:tab-1".into(),
             client_request_id: None,
             role: None,
-        });
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = runaway(&m);
         m.delegates.set_limits(&task.id, 1, 2);
         let mut sleeper = crate::process::command("sleep");
         sleeper.arg("20").process_group(0);
@@ -6443,23 +6554,31 @@ while True:
     }
 
     #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_still_stops_a_task_after_a_quit_that_reopens() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        m.arm_delegate_pass();
+        m.quit();
+        std::thread::sleep(Duration::from_millis(2500));
+        m.reopen_sessions();
+        let task = runaway(&m);
+        m.delegates.set_limits(&task.id, 1, 2);
+        let mut sleeper = crate::process::command("sleep");
+        sleeper.arg("20").process_group(0);
+        let child = std::sync::Mutex::new(sleeper.spawn().unwrap());
+        m.delegates.remember_pid(&task.id, child.lock().unwrap().id());
+        m.arm_delegate_pass();
+        wait_for("the hard limit after a quit that reopened", || m.delegates.is_terminal(&task.id));
+        wait_for("the runaway child to stop", || child.lock().unwrap().try_wait().unwrap().is_some());
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "cancelled", "{status}");
+    }
+
+    #[test]
     fn the_delegate_pass_keeps_enforcing_limits_after_a_panic() {
         let m = Machine::new(launch(), None, None, |_| {});
-        let task = m.delegates.begin(crate::delegate::NewTask {
-            parent: crate::delegate::Parent::Tab("tab-1".into()),
-            tool: None,
-            title: "Runaway".into(),
-            account: "cursor".into(),
-            provider: Provider::Cursor,
-            model: None,
-            cwd: std::env::temp_dir(),
-            mode: crate::delegate::Mode::Async,
-            access: crate::delegate::Access::Auto,
-            isolated: false,
-            caller_key: "tab:tab-1".into(),
-            client_request_id: None,
-            role: None,
-        });
+        let task = runaway(&m);
         m.delegates.set_limits(&task.id, 2_000, 2_500);
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _tabs = m.tabs.lock().unwrap();

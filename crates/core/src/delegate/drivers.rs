@@ -699,20 +699,30 @@ pub fn spawn(
     let mut stderr = child.stderr.take().ok_or("the child has no stderr")?;
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stored = stderr_buf.clone();
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        if buf.len() > 4096 {
-            buf.drain(..buf.len() - 4096);
+    let (closed, stderr_closed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let mut buf = stored.lock().unwrap();
+                    buf.extend_from_slice(&chunk[..read]);
+                    let extra = buf.len().saturating_sub(4096);
+                    buf.drain(..extra);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
         }
-        *stored.lock().unwrap() = buf;
+        let _ = closed.send(());
     });
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             on_event(ChildEvent::Line(line));
         }
+        let _ = stderr_closed.recv_timeout(STDERR_CLOSE_WAIT);
         let code = child.wait().ok().and_then(|status| status.code());
-        let _ = stderr_thread.join();
         let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap())
             .trim()
             .to_owned();
@@ -763,13 +773,21 @@ pub fn seen_under(pid: u32, before: &[Process]) -> Vec<Process> {
         let mut ask: Vec<i32> = under.iter().copied().chain(before.iter().map(|seen| seen.pid)).collect();
         ask.sort_unstable();
         ask.dedup();
-        running(&ask).into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
+        recorded(&under, before, running(&ask))
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         before.to_vec()
     }
+}
+
+#[cfg(unix)]
+fn recorded(under: &[i32], before: &[Process], now: Vec<Running>) -> Vec<Process> {
+    if now.is_empty() {
+        return before.to_vec();
+    }
+    now.into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
 }
 
 pub fn kill_seen(seen: &[Process]) {
@@ -805,6 +823,8 @@ fn signal_targets_under(root: u32) -> Vec<i32> {
 fn ps(args: &[&str]) -> String {
     crate::process::command("/bin/ps")
         .args(args)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -876,6 +896,119 @@ fn targets_under(rows: &[Row], root: u32) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::{codex_notify_flag, codex_user_notify};
+    #[cfg(unix)]
+    use crate::delegate::tests::{scratch, script, stopped};
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn within(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while !done() {
+            if start.elapsed() > limit {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_recorded_pid_is_killed_only_while_it_names_the_same_process() {
+        let mut child = crate::process::command("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        super::kill_seen(&[super::Process { pid, started: "Thu Jan 1 00:00:00 1970".into() }]);
+        let reused = !within(Duration::from_millis(500), || child.try_wait().unwrap().is_some());
+        let seen: Vec<super::Process> = super::running(&[pid]).into_iter().map(|now| now.process).collect();
+        super::kill_seen(&seen);
+        let same = within(Duration::from_secs(3), || child.try_wait().unwrap().is_some());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!((reused, same), (true, true), "(survived a record with another start time, killed with its own start time)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_shell_recorded_before_it_was_reparented_is_still_killed() {
+        use std::os::unix::process::CommandExt;
+        let dir = scratch("reparented");
+        let (pidfile, release) = (dir.join("shell.pid"), dir.join("release"));
+        let middle = script(
+            &dir,
+            "middle",
+            &format!(
+                "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sleep 30 &\necho $! > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done",
+                pidfile.display(),
+                release.display()
+            ),
+        );
+        let agent = script(&dir, "agent", &format!("'{}' &\nexec sleep 30", middle.display()));
+        let mut agent = crate::process::command(&agent).process_group(0).spawn().unwrap();
+        let root = agent.id();
+        assert!(within(Duration::from_secs(5), || std::fs::read_to_string(&pidfile).is_ok_and(|text| text.ends_with('\n'))), "the shell never started");
+        let shell: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let first = super::seen_under(root, &[]);
+        std::fs::write(&release, "").unwrap();
+        let reparented = within(Duration::from_secs(5), || !super::targets_under(&super::process_table(), root).contains(&shell));
+        let second = super::seen_under(root, &first);
+        super::kill_seen(&second);
+        let killed = stopped(shell);
+        unsafe {
+            libc::kill(-(root as i32), libc::SIGKILL);
+            libc::kill(shell, libc::SIGKILL);
+        }
+        let _ = agent.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((reparented, killed), (true, true), "(the shell left the agent's tree, kill_seen stopped it)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_ps_that_prints_nothing_keeps_what_was_recorded() {
+        let process = |pid, started: &str| super::Process { pid, started: started.into() };
+        let before = [process(4242, "Sat Oct 31 19:52:52 2026")];
+        let fresh = super::Running { process: process(4343, "Sat Oct 31 20:00:00 2026"), pgid: 4343 };
+        assert_eq!(
+            [super::recorded(&[], &before, vec![]), super::recorded(&[4343], &before, vec![fresh])],
+            [vec![process(4242, "Sat Oct 31 19:52:52 2026")], vec![process(4343, "Sat Oct 31 20:00:00 2026")]],
+            "an empty ps keeps the list, and a ps that answers drops the shell it no longer lists"
+        );
+    }
+
+    #[cfg(unix)]
+    const RECORD_PID: &str = "PINNED_TEST_RECORD_PID";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_process_recorded_under_another_timezone_and_locale_is_still_killed() {
+        let mut child = crate::process::command("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let out = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", "delegate::drivers::tests::record_a_start_time", "--ignored", "--nocapture", "--test-threads=1"])
+            .env(RECORD_PID, pid.to_string())
+            .env("TZ", "JST-9")
+            .env("LC_ALL", "ja_JP.UTF-8")
+            .output()
+            .unwrap();
+        let started = String::from_utf8_lossy(&out.stdout).lines().find_map(|line| line.split_once("started=")).map(|(_, started)| started.to_owned()).unwrap_or_default();
+        let now: Vec<super::Process> = super::running(&[pid]).into_iter().map(|now| now.process).collect();
+        super::kill_seen(&[super::Process { pid, started: started.clone() }]);
+        let killed = within(Duration::from_secs(3), || child.try_wait().unwrap().is_some());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(killed, "recorded {started:?} under TZ=JST-9, and pinned now reads {now:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "a_process_recorded_under_another_timezone_and_locale_is_still_killed runs it in a child process"]
+    fn record_a_start_time() {
+        let Some(pid) = std::env::var(RECORD_PID).ok().and_then(|pid| pid.parse().ok()) else { return };
+        for now in super::running(&[pid]) {
+            println!("started={}", now.process.started);
+        }
+    }
 
     #[test]
     #[cfg(unix)]

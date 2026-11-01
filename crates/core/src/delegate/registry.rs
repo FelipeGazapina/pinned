@@ -478,7 +478,7 @@ impl Delegates {
                 return;
             }
             task.state = WorkState::Cancelled;
-            task.summary = task.summary.take().or_else(|| task.assistant.clone());
+            task.summary = task.newest_text.clone().or_else(|| task.summary.take());
             task.error = Some(reason.to_owned());
             task.ended = Some(unix_millis());
             let dir = isolated_cwd(task);
@@ -489,11 +489,11 @@ impl Delegates {
         if let Some(pause) = BEFORE_STOP.take() {
             pause();
         }
-        if let Some(dir) = dir {
-            crate::branches::drop_worktree(&dir, path);
-        }
         if let Some(agent) = agent {
             agent.stop();
+        }
+        if let Some(dir) = dir {
+            crate::branches::drop_worktree(&dir, path);
         }
     }
 
@@ -645,7 +645,7 @@ impl Delegates {
                 continue;
             }
             task.state = WorkState::Cancelled;
-            task.summary = task.summary.take().or_else(|| task.assistant.clone());
+            task.summary = task.newest_text.clone().or_else(|| task.summary.take());
             task.error = Some("stopped by restart".into());
             task.ended = Some(unix_millis());
             task.delivered = false;
@@ -878,7 +878,7 @@ impl Task {
             StreamEvent::Step(item) => {
                 if let Item::Text { text, .. } = &item {
                     if !text.is_empty() {
-                        self.assistant = Some(text.clone());
+                        self.newest_text = Some(text.clone());
                     }
                 }
                 push_step(&mut self.steps, item);
@@ -886,11 +886,14 @@ impl Task {
             }
             StreamEvent::TurnEnd { text, error } => {
                 self.run.last_error = error.clone();
-                let reply = Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone());
+                let reply = Some(text).filter(|text| !text.is_empty()).or_else(|| self.newest_text.clone());
+                self.run.open_turns = self.run.open_turns.saturating_sub(1);
                 if reply.is_some() {
                     self.summary = reply.clone();
+                    if self.run.open_turns == 0 {
+                        self.newest_text = reply.clone();
+                    }
                 }
-                self.run.open_turns = self.run.open_turns.saturating_sub(1);
                 if self.run.open_turns > 0 || !self.run.background.is_empty() {
                     return None;
                 }
@@ -912,7 +915,7 @@ impl Task {
             return None;
         }
         if code == Some(0) {
-            if let Some(text) = self.assistant.clone() {
+            if let Some(text) = self.newest_text.clone() {
                 return Some(HeldExit { summary: Some(text), error: None, failed: false });
             }
         }
@@ -921,7 +924,7 @@ impl Task {
         } else {
             stderr
         };
-        Some(HeldExit { summary: self.assistant.clone(), error: Some(error), failed: true })
+        Some(HeldExit { summary: self.newest_text.clone(), error: Some(error), failed: true })
     }
 }
 
@@ -1163,7 +1166,7 @@ fn fresh(new: NewTask) -> Task {
         error: None,
         conversation: None,
         steps: vec![],
-        assistant: None,
+        newest_text: None,
         mode: new.mode,
         delivered: false,
         isolated: new.isolated,
@@ -1260,7 +1263,7 @@ impl SavedTask {
             caller_key: task.caller_key.clone(),
             client_request_id: task.client_request_id.clone(),
             role: task.role.clone(),
-            assistant: task.assistant.clone().filter(|_| !task.state.terminal()),
+            assistant: task.newest_text.clone().filter(|_| !task.state.terminal()),
             ended_by: task.ended_by.clone(),
             budget_ms: task.run.budget_ms,
             limit_ms: task.run.limit_ms,
@@ -1289,7 +1292,7 @@ impl SavedTask {
             error: self.error,
             conversation: self.conversation,
             steps: vec![],
-            assistant: self.assistant,
+            newest_text: self.assistant,
             mode: self.mode,
             delivered: self.delivered,
             isolated: self.isolated,
