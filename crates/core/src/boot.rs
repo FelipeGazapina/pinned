@@ -276,6 +276,19 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_the_hub_accepted_stays_proven_when_its_marker_was_already_gone() {
+        let (boot, staged) = (Boot::new(), staged("accepted-marker-gone", CHECKSUM));
+        let marker = staged.proof.marker.clone().unwrap();
+        let mut hello = pin!(boot.commit_when_ready(&staged.proof));
+        assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
+        std::fs::remove_file(&marker).unwrap();
+        assert!(boot.ready());
+        std::fs::write(&marker, format!("{CHECKSUM}\n")).unwrap();
+        boot.refuse(&staged.proof);
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal rolled back a boot the hub accepted after its marker was gone");
+    }
+
+    #[test]
     fn a_refusal_while_the_boot_runs_unproven_restores_it() {
         let (boot, staged) = (Boot::new(), staged("refused-running", CHECKSUM));
         assert!(boot.ready());
