@@ -579,6 +579,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn a_sync_loop_that_panics_lets_the_state_file_decide_again() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("panicked");
+        let mut syncer = Syncer::default();
+        syncer.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        std::thread::scope(|scope| {
+            let _ = scope.spawn(|| {
+                let _out = shared.out.lock().unwrap();
+                panic!("a thread died holding the link's socket");
+            })
+            .join();
+            let ended = scope.spawn(|| syncer.run(&shared, &machine, &file, &stopped)).join();
+            assert!(ended.is_err(), "the loop panicked on the poisoned socket");
+        });
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sync_loop_that_never_loaded_the_state_leaves_another_loops_hold_alone() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("other-hold");
+        let mut holding = Syncer::default();
+        holding.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(true);
+        Syncer::default().run(&shared, &machine, &file, &stopped);
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        drop(holding);
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn creds(hub: String) -> Credentials {
         Credentials { hub, email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() }
     }
@@ -651,6 +687,28 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_parked_sync_loop_lets_go_once_its_link_is_dropped() {
+        let (dir, file, machine, _shared, _frames) = stopped_sync_fixture("link-dropped");
+        let (calls, _called) = mpsc::channel();
+        let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
+        let first_cycle = Instant::now() + Duration::from_secs(30);
+        while !file.exists() {
+            assert!(Instant::now() < first_cycle, "the loop never saved its state");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        drop(link);
+        let why = Value::String(format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display()));
+        let let_go = Instant::now() + Duration::from_secs(2);
+        while machine.call(Call::SyncStopped).as_ref() != Ok(&why) && Instant::now() < let_go {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(machine.call(Call::SyncStopped), Ok(why));
         let _ = std::fs::remove_dir_all(dir);
     }
 
