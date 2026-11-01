@@ -102,7 +102,6 @@ impl Shared {
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
-    machine.watch_threads();
     let shared = Arc::new(Shared::default());
     let flushing = shared.clone();
     machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));

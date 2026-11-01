@@ -852,6 +852,7 @@ impl Machine {
             watchers.remove(viewer);
         } else {
             watchers.insert(viewer.to_owned(), tabs.iter().cloned().collect());
+            self.watch_threads();
         }
     }
 
@@ -978,7 +979,7 @@ impl Machine {
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
-    pub fn watch_threads(&self) {
+    fn watch_threads(&self) {
         if self.threads_watched.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -3432,6 +3433,8 @@ pub(crate) mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        // These tests tick the watcher themselves.
+        m.threads_watched.store(true, Ordering::Relaxed);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3698,6 +3701,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.threads_watched.store(true, Ordering::Relaxed);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();
