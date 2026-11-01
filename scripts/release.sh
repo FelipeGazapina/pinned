@@ -38,8 +38,11 @@ put_back() {
 }
 restore() {
   if [[ "$(git rev-parse HEAD)" != "$start" ]]; then
-    echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
-    return
+    if [[ "$(git rev-parse -q --verify HEAD^)" == "$start" && "$(git log -1 --format=%s)" == "Release v$version" ]]; then
+      echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
+      return
+    fi
+    echo "HEAD moved while the release ran, so the release keeps the new commits and puts back only its own files." >&2
   fi
   put_back Cargo.toml "$wrote_toml"
   put_back Cargo.lock "$wrote_lock"
@@ -64,6 +67,7 @@ stray=$(
 )
 [[ -z "$stray" ]] || refuse "the release stopped before the commit, because these files changed while the release built:
 $stray"
+[[ "$(git rev-parse HEAD)" == "$start" ]] || refuse "the release stopped before the commit, because a commit landed on main while the release built. Push or drop that commit, then run the release again."
 git add Cargo.toml Cargo.lock
 git commit -m "Release v$version"
 trap - EXIT
