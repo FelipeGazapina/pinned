@@ -23,12 +23,12 @@ if [[ "$1" == "${FAIL:-}" ]]; then
 fi
 if [[ "$1" == update ]]; then
   echo "# updated" >> Cargo.lock
-  if [[ -n "${RACE:-}" ]]; then
-    bash -c "$RACE"
-  fi
 fi
 if [[ "$1" == run && "$*" == *" snapshot "* ]]; then
   cp crates/core/wire-contract/current.json "crates/core/wire-contract/${!#}.json"
+fi
+if [[ "$1" == "${RACE_ON:-update}" && -n "${RACE:-}" ]]; then
+  bash -c "$RACE"
 fi
 '''
 
@@ -119,6 +119,9 @@ class ReleaseSandbox(Remote):
             "foreign tag": {"RACE": self.foreign_tag(version)},
             "stray edit": {"RACE": "echo stray >> README.md"},
             "cargo fails": {"FAIL": "update"},
+            "Cargo.toml edit": {"RACE": "echo edit >> Cargo.toml"},
+            "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
+            "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
         }[during]
 
     def label(self, sha):
@@ -275,6 +278,42 @@ RELEASE_CASES = (
             "refused": "changed while the release built",
             "remote": {"refs/heads/main": "start"},
             "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M README.md"]},
+        },
+    ),
+    (
+        "Cargo.toml changes while the release builds",
+        "0.16.1",
+        None,
+        "Cargo.toml edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
+        "Cargo.lock changes while the snapshot builds",
+        "0.16.1",
+        None,
+        "Cargo.lock edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.lock",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock"]},
+            "kept": {"Cargo.lock": "edit"},
+        },
+    ),
+    (
+        "Cargo.toml changes and the snapshot build fails",
+        "0.16.1",
+        None,
+        "Cargo.toml edit, cargo fails",
+        {
+            "code": 101,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
         },
     ),
     (
@@ -447,6 +486,10 @@ def release_errors(root, version, setup, during, expect):
     for key in ("remote", "local"):
         if seen[key] != expect[key]:
             errors.append(f"{key} is {seen[key]}, want {expect[key]}")
+    for path, line in expect.get("kept", {}).items():
+        last = (sandbox.work / path).read_text().splitlines()[-1]
+        if last != line:
+            errors.append(f"{path} ends with [{last}], want the edit [{line}]")
     if "files" in expect:
         files = sandbox.released_files(f"v{version}")
         if files != expect["files"]:
