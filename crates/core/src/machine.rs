@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
@@ -2050,10 +2050,15 @@ impl Machine {
 
     /// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
     pub fn restore_tabs(&self) -> Vec<TabId> {
+        self.restore_if_empty(self.tabs.lock().unwrap())
+    }
+
+    fn restore_if_empty(&self, tabs: MutexGuard<'_, HashMap<TabId, Tab>>) -> Vec<TabId> {
         // A reloaded webview must not duplicate the tabs that are already open.
-        let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
+        let Some(file) = self.sessions_file.as_ref().filter(|_| tabs.is_empty()) else {
             return vec![];
         };
+        drop(tabs);
         let now = unix_now();
         let ids: Vec<TabId> = sessions::load(file)
             .into_iter()
@@ -2128,8 +2133,9 @@ impl Machine {
 
     /// Clears the shutdown flag and reopens sessions saved by the last `quit`.
     pub fn reopen_sessions(&self) -> Vec<TabId> {
+        let tabs = self.tabs.lock().unwrap();
         self.quitting.store(false, Ordering::SeqCst);
-        self.restore_tabs()
+        self.restore_if_empty(tabs)
     }
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
