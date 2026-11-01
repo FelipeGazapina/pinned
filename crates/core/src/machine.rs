@@ -937,12 +937,11 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook) -> Option<PathBuf> {
+    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook, now: Instant) -> Option<PathBuf> {
         let home = self.accounts.home(account);
         if let Some(found) = look.found.as_ref().filter(|found| found.session == session && found.path.starts_with(&home) && found.path.is_file()) {
             return Some(found.path.clone());
         }
-        let now = Instant::now();
         let gap = match &look.missed {
             Some(missed) if missed.session == session && missed.status == status => {
                 if now < missed.at + missed.gap {
@@ -1008,12 +1007,13 @@ impl Machine {
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
+        let now = Instant::now();
         for (id, session, status, account) in open {
             if !watched.contains(&id) {
                 continue;
             }
             let look = seen.entry(id.clone()).or_default();
-            let Some(path) = self.locate_transcript(&account, &session, status, look) else { continue };
+            let Some(path) = self.locate_transcript(&account, &session, status, look, now) else { continue };
             let Ok(len) = std::fs::metadata(&path).map(|meta| meta.len()) else { continue };
             let found = Transcript { session, path, len };
             if look.found.as_ref() == Some(&found) {
@@ -3644,6 +3644,39 @@ pub(crate) mod tests {
         std::thread::sleep(THREAD_LOOK_EVERY * 2);
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started nudges");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_transcript_not_found_is_searched_again_after_40_ms_then_twice_as_long_up_to_the_poll() {
+        let (root, m, _, _, _) = watching("thread-backoff");
+        let projects = root.join("config/accounts/work/projects");
+        let account = m.accounts.get("work").unwrap();
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let searched = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, now: Instant| {
+            let before = scans();
+            m.locate_transcript(&account, session, status, look, now);
+            scans() > before
+        };
+        let next_search = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, after: Instant| {
+            (1..=3000).find(|ms| searched(look, session, status, after + Duration::from_millis(*ms))).unwrap()
+        };
+        let mut look = TranscriptLook::default();
+        let mut at = Instant::now();
+        assert!(searched(&mut look, "s1", None, at), "the first look searches");
+        let mut gaps = vec![];
+        for _ in 0..7 {
+            let gap = next_search(&mut look, "s1", None, at);
+            gaps.push(gap);
+            at += Duration::from_millis(gap);
+        }
+        assert_eq!(gaps, [40, 80, 160, 320, 640, 1200, 1200]);
+        at += Duration::from_millis(1);
+        assert!(searched(&mut look, "s1", Some(AgentStatus::Working), at), "a new status searches at once");
+        assert_eq!(next_search(&mut look, "s1", Some(AgentStatus::Working), at), 40, "and waits 40 ms again");
+        at += Duration::from_millis(40 + 1);
+        assert!(searched(&mut look, "s2", Some(AgentStatus::Working), at), "a new session searches at once");
+        assert_eq!(next_search(&mut look, "s2", Some(AgentStatus::Working), at), 40, "and waits 40 ms again");
         let _ = std::fs::remove_dir_all(root);
     }
 
