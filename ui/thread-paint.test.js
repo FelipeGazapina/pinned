@@ -278,18 +278,17 @@ const LINES = {
   '<details class="tool': (row) => textOf(/<span class="label">.*?<\/span>/s.exec(row)[0]),
 };
 
+function inTranscriptOrderThenStale(lines, items) {
+  const order = items.map((item) => item.text ?? item.name);
+  const rank = (line) => (order.includes(line) ? order.indexOf(line) : order.length);
+  return lines.sort((a, b) => rank(a) - rank(b));
+}
+
 function painted() {
   const html = threadView.innerHTML;
-  // The work fold draws a turn's middle texts above its first, so document order is not transcript
-  // order. The thread ranks the lines on screen; a stale one it no longer has sorts last.
-  const order = sandbox.active.thread.items.map((item) => item.text ?? item.name);
-  const rank = (line) => {
-    const at = order.indexOf(line);
-    return at < 0 ? order.length : at;
-  };
   const lines = Object.entries(LINES).flatMap(([open, text]) => blocks(html, open).map(text));
   return {
-    items: lines.sort((a, b) => rank(a) - rank(b)),
+    items: inTranscriptOrderThenStale(lines, sandbox.active.thread.items),
     tasks: tasksTab.hidden ? "" : tasksTab.innerHTML,
     context: contextMeter.hidden ? null : contextMeter.getAttribute("aria-label"),
     branch: composerBanners.innerHTML,
@@ -315,8 +314,7 @@ async function poll(tab, net) {
   await net.drain();
 }
 
-// A read that follows another waits out the gap; this lets it go out and leaves it unanswered.
-async function reading(tab) {
+async function startUnansweredRead(tab) {
   sandbox.fetchThread(tab);
   clock.next();
   await settle();
@@ -446,7 +444,7 @@ test("a streaming tab reads at most once per gap, and the first nudge after a pa
 
 test("a nudge during a read reads again, so the new line and its agent card show", async () => {
   const { tab, s, net } = await opened();
-  await reading(tab);
+  await startUnansweredRead(tab);
   s.append({ item: spawning });
   s.agents = [spawnedAgent];
   net.nudge("tab-1");
@@ -467,7 +465,7 @@ test("a background tab's agents arrive during its turn and keep it watched after
   sandbox.fetchThread(background);
   sandbox.fetchThread(shown);
   await net.drain();
-  await reading(background);
+  await startUnansweredRead(background);
   busy.append({ item: spawning });
   busy.agents = [spawnedAgent];
   net.nudge("tab-1");

@@ -233,8 +233,7 @@ struct Tab {
     claude_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
-    /// Where a read last found a transcript of this tab, so the next read searches the projects only once it moved.
-    transcript: Option<PathBuf>,
+    last_found_transcript: Option<PathBuf>,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
@@ -970,9 +969,9 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.transcript.clone()))?;
-        let home = self.accounts.home(&account);
+        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
         let file = session.as_deref().and_then(|s| {
+            let home = self.accounts.home(&account);
             let still = known.as_ref().filter(|path| path.file_stem().is_some_and(|stem| stem == s) && path.starts_with(&home) && path.is_file());
             still.cloned().or_else(|| self.find_transcript(&account, s))
         });
@@ -980,7 +979,7 @@ impl Machine {
             return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
         if known.as_ref() != Some(&file) {
-            self.tab(tab, |t| t.transcript = Some(file.clone()))?;
+            self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
         }
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
@@ -2457,7 +2456,7 @@ impl Machine {
             bypass,
             claude_session,
             tally: Tally::default(),
-            transcript: None,
+            last_found_transcript: None,
             interrupted: false,
             resume_at: None,
             held_at_limit: false,
@@ -3436,6 +3435,10 @@ pub(crate) mod tests {
         page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
     }
 
+    fn ticked_by_hand(m: &Machine) {
+        m.threads_watched.store(true, Ordering::Relaxed);
+    }
+
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
         let root = temp(name);
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
@@ -3444,8 +3447,7 @@ pub(crate) mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        // These tests tick the watcher themselves.
-        m.threads_watched.store(true, Ordering::Relaxed);
+        ticked_by_hand(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3793,7 +3795,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        m.threads_watched.store(true, Ordering::Relaxed);
+        ticked_by_hand(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();

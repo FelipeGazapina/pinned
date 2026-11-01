@@ -484,7 +484,7 @@ impl Hub {
 
 impl Account {
     /// Registers a machine's connection and sends it every client's watch of it. An older one must
-    /// have gone offline first. A client that never saw it leave does not send its watch again.
+    /// have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, version: String, out: Outbox) {
         let mut live = self.live.lock().unwrap();
         for (id, client) in &live.clients {
