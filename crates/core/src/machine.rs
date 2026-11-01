@@ -420,9 +420,9 @@ struct Kills {
 }
 
 impl Kills {
-    fn take(&self, _locked: &HashMap<TabId, Tab>, session: Option<pty::Session>) -> Kill<'_> {
+    fn start(&self, _locked: &HashMap<TabId, Tab>) -> Kill<'_> {
         *self.running.lock().unwrap() += 1;
-        Kill { session, kills: self }
+        Kill(self)
     }
 
     fn wait(&self) {
@@ -440,16 +440,12 @@ thread_local! {
     static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
-struct Kill<'a> {
-    session: Option<pty::Session>,
-    kills: &'a Kills,
-}
+struct Kill<'a>(&'a Kills);
 
 impl Drop for Kill<'_> {
     fn drop(&mut self) {
-        drop(self.session.take());
-        *self.kills.running.lock().unwrap() -= 1;
-        self.kills.done.notify_all();
+        *self.0.running.lock().unwrap() -= 1;
+        self.0.done.notify_all();
     }
 }
 
@@ -1494,12 +1490,12 @@ impl Machine {
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        let (old, screen) = {
+        let (old, screen, kill) = {
             let mut tabs = self.tabs.lock().unwrap();
+            let kill = self.kills.start(&tabs);
             let t = tabs.get_mut(tab).ok_or_else(|| format!("no tab {tab}"))?;
             t.held.clear();
-            let (session, screen) = (t.session.take(), t.screen.clone());
-            (self.kills.take(&tabs, session), screen)
+            (t.session.take(), t.screen.clone(), kill)
         };
         let session = screen.lock().unwrap().restart();
         // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
@@ -1526,6 +1522,7 @@ impl Machine {
             t.draft = Draft::default();
         })?;
         self.type_held_once_raw(tab, session);
+        drop(kill);
         Ok(())
     }
 
@@ -1628,22 +1625,24 @@ impl Machine {
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
-        let (closed, owned, last) = {
+        let (closed, owned, last, kill) = {
             let mut tabs = self.tabs.lock().unwrap();
-            let closed = tabs.remove(tab).map(|t| (self.kills.take(&tabs, t.session), t.made));
+            let kill = self.kills.start(&tabs);
+            let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty())
+            (closed, owned, tabs.is_empty(), kill)
         };
-        let (kill, made) = closed.unzip();
-        drop(kill);
+        let made = closed.as_ref().and_then(|t| t.made.clone());
+        drop(closed);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
-        if let Some(made) = made.flatten() {
+        if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
                 branches::drop_worktree(&made, path.as_deref());
             }
         }
         self.save_sessions();
         self.emit_tabs();
+        drop(kill);
         last
     }
 
@@ -2538,6 +2537,9 @@ impl Machine {
         let Some(file) = &self.sessions_file else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
+            if self.quitting.load(Ordering::SeqCst) {
+                return;
+            }
             let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
             open.sort_by_key(|(n, _)| *n);
             open.into_iter().map(|(_, s)| s).collect()
