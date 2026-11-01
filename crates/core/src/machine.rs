@@ -349,10 +349,7 @@ pub struct Machine {
     boot: u64,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
-    /// Numbers each snapshot of the open sessions, taken under the tabs lock.
     snapshots: AtomicU64,
-    /// The number of the snapshot in the sessions file. A save writes only a newer one, so a save
-    /// that took its snapshot before `quit()` cleared the tabs cannot write over quit's.
     saved_snapshot: Mutex<u64>,
     sync_file: Option<PathBuf>,
     sync_state_holder: AtomicU64,
@@ -2140,7 +2137,7 @@ impl Machine {
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
-        let first = !self.quitting.swap(true, Ordering::SeqCst);
+        let first_quit = !self.quitting.swap(true, Ordering::SeqCst);
         self.stamp_parent_sessions();
         self.delegates.stop_for_restart(self.launch.path_env.as_deref());
         self.delegates.kill_remembered();
@@ -2160,8 +2157,7 @@ impl Machine {
             let mut tabs = self.tabs.lock().unwrap();
             (self.open_sessions(&tabs), std::mem::take(&mut *tabs))
         };
-        // A second quit finds no tabs, and must not save that over the sessions the first one saved.
-        if let Some(file) = self.sessions_file.as_ref().filter(|_| first) {
+        if let Some(file) = self.sessions_file.as_ref().filter(|_| first_quit) {
             self.write_sessions(file, open);
         }
         drop(closed);
@@ -2603,7 +2599,7 @@ impl Machine {
         self.write_sessions(file, open);
     }
 
-    fn open_sessions(&self, tabs: &HashMap<TabId, Tab>) -> (u64, Vec<sessions::Saved>) {
+    fn open_sessions(&self, tabs: &MutexGuard<'_, HashMap<TabId, Tab>>) -> (u64, Vec<sessions::Saved>) {
         let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
         open.sort_by_key(|(n, _)| *n);
         (self.snapshots.fetch_add(1, Ordering::SeqCst) + 1, open.into_iter().map(|(_, s)| s).collect())
@@ -3313,7 +3309,7 @@ pub(crate) mod tests {
             return Quit::Returned;
         }
         {
-            let _parked = m.kills.running.lock().unwrap();
+            let _running = m.kills.running.lock().unwrap();
             m.kills.done.notify_all();
         }
         quit.recv_timeout(SOON).expect("quit neither parked nor returned")
