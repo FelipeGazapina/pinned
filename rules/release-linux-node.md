@@ -53,9 +53,14 @@ A tag without a suffix takes latest when it is not older than the current latest
 
 - The version is `MAJOR.MINOR.PATCH`, with an optional `-suffix`.
 - The tree is clean, and the current branch is `main`.
+- No local tag `v<version>` exists.
+- `crates/core/wire-contract/<version>.json` does not exist.
 - `HEAD` equals `origin/main` after a fetch.
+- Origin has no tag `v<version>`.
 
-It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, the push is rejected. The script then deletes the local tag and resets `main` to the commit it started from. It first reads origin with `git ls-remote`. If origin already has the tag, the connection dropped after origin took the push, and the script keeps the release commit and the tag. It also keeps them when it cannot read origin.
+The release commit holds only `Cargo.toml`, `Cargo.lock` and the snapshot. The script refuses before the commit when anything else changed during the build, and names the files. Any failure before the commit puts `Cargo.toml` and `Cargo.lock` back and removes the new snapshot.
+
+It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, or origin takes the tag at another commit, the push is rejected. The script then reads origin with `git ls-remote`. It says the release went out only when origin's tag is at the release commit. In that case the connection dropped after origin took the push, and the script keeps the release commit and the tag. It also keeps them when it cannot read origin. Otherwise it deletes the local tag and resets `main` to the commit it started from with `git reset --keep`, which keeps edits to files the release did not touch.
 
 A version without a suffix writes `crates/core/wire-contract/<version>.json`. A suffixed version writes no snapshot, because `AGENTS.md` makes every later hub honor every snapshot and the hub never runs a release candidate. A release candidate that someone installs by hand gets no compatibility promise from later hubs.
 
@@ -76,7 +81,7 @@ GitHub re-runs one job without the jobs it needs, so each uploading job drafts t
 - `gh release upload --clobber` deletes each asset right before it uploads that file, in five parallel workers. A cancelled upload can leave any mix of new, old, and missing files. `publish` checks content, not order, so it refuses every such mix.
 - A `build` re-run after `sign-node` replaces a bundle that `latest.json` signed. `publish` refuses until `sign-node` runs again.
 
-`publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. A group keeps one pending job. If three tags reach `publish` together, GitHub cancels the pending one when the third arrives, and that tag stays a draft until someone re-runs its `publish`. The `queue: max` option keeps every pending job, but actionlint 1.7.12 rejects the key.
+`publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. The group sets `queue: max`, which keeps every pending `publish`, up to 100, and runs them in the order they started waiting. Without it a group keeps one pending job. A third tag then cancels the pending one, and that tag stays a draft until someone re-runs its `publish`. actionlint 1.7.12 rejects the key with `unexpected key "queue"`, so run it as `actionlint -ignore 'unexpected key "queue"'`.
 
 ## Replay
 
@@ -92,7 +97,7 @@ GitHub re-runs one job without the jobs it needs, so each uploading job drafts t
 - `upload-artifact` fails when the artifact exists from an earlier attempt and `overwrite` is not true.
 - `REPLAY_LATEST_ERROR` fails the read of the latest release. `REPLAY_DRAFT_IGNORED` makes `gh release edit --draft=true` leave the release public.
 - The fake `gh` records a violation when an edit asks for `--latest=true` on a prerelease. GitHub ignores that request, so only the fake can see it.
-- Two tags publish at once. The replay reads the `concurrency` groups of the workflow and of `publish`. If the groups let the two runs overlap, both read the latest release before either edits it.
+- Two tags publish at once, and then three. The replay reads the `concurrency` groups of the workflow and of `publish`, and models GitHub's pending slot. If the groups let the runs overlap, every run reads the latest release before any edits it. With `queue: max` every tag runs in turn. Without it every pending tag but the last is cancelled and stays a draft.
 - A job with a checkout gets a throwaway `tauri.conf.json` that holds the replay key.
 
 It also checks `version_is_newer` against a table of tags, and `scripts/minisign-verify.mjs` against the `minisign-verify` 0.3.0 test vectors.
