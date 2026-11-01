@@ -496,6 +496,8 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// `null`. The tabs whose transcript changes this caller hears of as `MachineEvent::Thread`. Empty asks for none.
+    WatchThreads { tabs: Vec<TabId> },
     /// The machine's `UpdateStatus`.
     UpdateSelf,
     /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
@@ -668,6 +670,8 @@ pub enum MachineEvent {
         #[serde(default = "accounts::default_account")]
         account: AccountId,
     },
+    /// The transcript of a tab this client watches changed. The client reads it with `Call::Thread`.
+    Thread { tab: TabId },
     /// Some while this process is installing a release, None when it connects with nothing in progress.
     Update { status: Option<UpdateStatus> },
 }
@@ -906,6 +910,8 @@ pub enum ToMachine {
     /// seeing it twice.
     Subscribe { tab: TabId, viewer: String },
     Unsubscribe { tab: TabId, viewer: String },
+    /// Replace `viewer`'s set of tabs whose transcript changes it hears of. Empty removes that viewer.
+    WatchThreads { viewer: String, tabs: Vec<TabId> },
 }
 
 #[cfg(test)]
@@ -1109,6 +1115,7 @@ mod tests {
         let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
         assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
+        round_trip(MachineEvent::Thread { tab: "tab-1".into() }, json!({ "kind": "thread", "tab": "tab-1" }));
     }
 
     #[test]
@@ -1238,6 +1245,11 @@ mod tests {
             ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
+        round_trip(
+            ToMachine::WatchThreads { viewer: "client-4".into(), tabs: vec!["tab-1".into()] },
+            json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
+        );
+        round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
     }
 
     #[test]

@@ -95,12 +95,14 @@ impl Shared {
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
         }
+        machine.drop_remote_thread_watchers();
     }
 }
 
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
+    machine.watch_threads();
     let shared = Arc::new(Shared::default());
     let flushing = shared.clone();
     machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));
@@ -312,7 +314,9 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     sink.send(text(&auth)).await.map_err(transport)?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     accept_hello(hello)?;
-    crate::boot::commit_if_proving();
+    if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
+        return std::future::pending().await;
+    }
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
@@ -445,6 +449,7 @@ fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::Unbounded
             machine.detach(&tab, &viewer);
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
+        Ok(ToMachine::WatchThreads { viewer, tabs }) => machine.set_watched_threads(&viewer, &tabs),
         Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();

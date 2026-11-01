@@ -7,8 +7,31 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
+
 jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --draft=true --title "pinned $tag" --notes "$RELEASE_NOTES"
+          else
+            gh release create "$tag" --draft --title "pinned $tag" --notes "$RELEASE_NOTES"
+          fi
+
   build:
+    needs: draft
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +46,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,7 +60,13 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
       - run: npm ci
-      - uses: tauri-apps/tauri-action@v0
+      - name: Draft the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release-asset.sh draft "$GITHUB_REF_NAME"
+      - id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -42,6 +74,114 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: pinned ${{ github.ref_name }}
-          releaseBody: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
-          releaseDraft: false
+          releaseBody: ${{ env.RELEASE_NOTES }}
+          releaseDraft: true
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+      - name: Write this leg's updater fragment
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          TARGET: ${{ matrix.target }}
+          APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
+        run: |
+          bash scripts/updater-fragment.sh \
+            --target "$TARGET" \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --version "$APP_VERSION" \
+            --paths "$ARTIFACT_PATHS" \
+            --out updater-fragment.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater-${{ matrix.target }}
+          path: updater-fragment.json
+          if-no-files-found: error
+          overwrite: true
+
+  linux-node:
+    needs: draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk for the musl image
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      - name: Build the musl binaries the hub image builds
+        run: docker build --target build -t pinned-node-release .
+      - name: Copy the binaries out
+        run: |
+          id=$(docker create pinned-node-release)
+          trap 'docker rm "$id"' EXIT
+          mkdir -p node-release
+          docker cp "$id:/downloads/." node-release
+          test -s node-release/pinned-server-x86_64-unknown-linux-musl
+          test -s node-release/pinned-server-aarch64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-node-binaries
+          path: |
+            node-release/pinned-server-x86_64-unknown-linux-musl
+            node-release/pinned-server-aarch64-unknown-linux-musl
+          if-no-files-found: error
+          overwrite: true
+
+  sign-node:
+    needs: [build, linux-node]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-node-binaries
+          path: node-release
+      - run: ls -la node-release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: updater-*
+          path: updater-fragments
+      - name: Assemble latest.json
+        run: |
+          pub_date=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")')
+          bash scripts/assemble-latest-json.sh \
+            --notes "$RELEASE_NOTES" \
+            --pub-date "$pub_date" \
+            --tag "$GITHUB_REF_NAME" \
+            --out node-release/latest.json \
+            updater-fragments
+      - name: Sign checksums of those exact bytes
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: bash scripts/sign-node-sums.sh node-release
+      - name: Upload the signed node files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" \
+            node-release/SHA256SUMS \
+            node-release/SHA256SUMS.minisig \
+            node-release/pinned-server-x86_64-unknown-linux-musl \
+            node-release/pinned-server-aarch64-unknown-linux-musl \
+            node-release/latest.json
+
+  publish:
+    needs: [build, linux-node, sign-node]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release-asset.sh publish "$GITHUB_REF_NAME"

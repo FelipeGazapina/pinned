@@ -483,6 +483,121 @@ mod tests {
         assert_eq!(verify(&pubkey, &wrong, &signature, name, bytes), Err("the release checksum does not match".into()));
     }
 
+    struct Clean(PathBuf);
+
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn checked(cmd: &mut Command) {
+        let output = cmd.stdin(std::process::Stdio::null()).output().unwrap_or_else(|error| panic!("could not run {cmd:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "command failed: {cmd:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn sign_release(dir: &Path, version: &str, private_key: &str) {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::create_dir_all(dir).unwrap();
+        let latest = format!(r#"{{"version":"{version}"}}"#);
+        let x86_name = "pinned-server-x86_64-unknown-linux-musl";
+        let arm_name = "pinned-server-aarch64-unknown-linux-musl";
+        let x86 = b"x86-binary";
+        let arm = b"arm-binary";
+        std::fs::write(dir.join("latest.json"), latest).unwrap();
+        std::fs::write(dir.join(x86_name), x86).unwrap();
+        std::fs::write(dir.join(arm_name), arm).unwrap();
+        // A leftover list that omits latest.json must be replaced. Signing that file is not a release.
+        let stale = format!("{}{}", sums_for(x86_name, x86), sums_for(arm_name, arm));
+        std::fs::write(dir.join("SHA256SUMS"), stale).unwrap();
+        checked(
+            Command::new(repo.join("scripts/sign-node-sums.sh"))
+                .arg(dir)
+                .env("TAURI_SIGNING_PRIVATE_KEY", private_key)
+                .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
+                .current_dir(&repo),
+        );
+    }
+
+    fn served(dir: &Path) -> HashMap<String, Vec<u8>> {
+        ["latest.json", "pinned-server-x86_64-unknown-linux-musl", "pinned-server-aarch64-unknown-linux-musl", "SHA256SUMS", "SHA256SUMS.minisig"]
+            .into_iter()
+            .map(|name| (format!("/{name}"), std::fs::read(dir.join(name)).unwrap()))
+            .collect()
+    }
+
+    fn install_from(home: &Path, label: &str, files: HashMap<String, Vec<u8>>, pubkey: &str) -> (UpdateStatus, Vec<u8>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let base = serve(files);
+        let dir = home.join(label);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"old-binary").unwrap();
+        let (status, _) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, pubkey, &|_| {});
+        (status, std::fs::read(&dest).unwrap())
+    }
+
+    #[test]
+    fn a_signed_release_installs_a_newer_version_and_refuses_a_tampered_or_older_one() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let home = std::env::temp_dir().join(format!("pinned-release-sign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let _clean = Clean(home.clone());
+        let key = home.join("release.key");
+        checked(Command::new("npx").args(["tauri", "signer", "generate", "--ci", "--force", "-w"]).arg(&key).current_dir(&repo));
+        let private_key = std::fs::read_to_string(&key).unwrap();
+        let pubkey = std::fs::read_to_string(home.join("release.key.pub")).unwrap();
+        let private_key = private_key.trim();
+        let pubkey = pubkey.trim();
+
+        let current = home.join("current");
+        sign_release(&current, "9.9.9", private_key);
+        let signature = std::fs::read_to_string(current.join("SHA256SUMS.minisig")).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD.decode(signature.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(&raw[..2], b"ED");
+        let sums = std::fs::read_to_string(current.join("SHA256SUMS")).unwrap();
+        let wrapped = std::fs::read_to_string(current.join("SHA256SUMS.sig")).unwrap();
+        assert_eq!(
+            verify(pubkey, &sums, &wrapped, "latest.json", &std::fs::read(current.join("latest.json")).unwrap()).unwrap_err(),
+            "could not read the release signature: Invalid encoding in minisign data"
+        );
+
+        let files = served(&current);
+        let (status, bytes) = install_from(&home, "valid", files.clone(), pubkey);
+        assert_eq!(status, UpdateStatus::Restarting { to: "9.9.9".into() });
+        assert_eq!(bytes, b"x86-binary");
+
+        let mut tampered_latest = files.clone();
+        tampered_latest.insert("/latest.json".into(), b"{\"version\":\"9.9.9\"} ".to_vec());
+        let (status, bytes) = install_from(&home, "tampered-latest", tampered_latest, pubkey);
+        assert_eq!(status, UpdateStatus::Failed { to: String::new(), reason: "the release checksum does not match".into() });
+        assert_eq!(bytes, b"old-binary");
+
+        let mut tampered_binary = files;
+        tampered_binary.insert("/pinned-server-x86_64-unknown-linux-musl".into(), b"tampered".to_vec());
+        let (status, bytes) = install_from(&home, "tampered-binary", tampered_binary, pubkey);
+        assert_eq!(status, UpdateStatus::Failed { to: "9.9.9".into(), reason: "the release checksum does not match".into() });
+        assert_eq!(bytes, b"old-binary");
+
+        let legacy_key = "untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n";
+        let legacy_pubkey = base64::engine::general_purpose::STANDARD.encode(legacy_key);
+        let legacy_sig = "untrusted comment: signature from minisign secret key\nRWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\ntrusted comment: timestamp:1555779966\tfile:test\nQtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==";
+        let legacy = verify(&legacy_pubkey, "test", legacy_sig, "latest.json", b"test").unwrap_err();
+        assert_eq!(legacy, "the release signature does not match");
+
+        let older = home.join("older");
+        sign_release(&older, "0.0.1", private_key);
+        let (status, bytes) = install_from(&home, "older", served(&older), pubkey);
+        assert_eq!(status, UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() });
+        assert_eq!(bytes, b"old-binary");
+    }
+
     #[test]
     fn a_bad_checksum_leaves_the_binary_and_a_good_one_keeps_the_old_bytes_beside_it() {
         let dir = std::env::temp_dir().join(format!("pinned-stage-{}", std::process::id()));
@@ -729,6 +844,84 @@ mod tests {
         assert!(err.contains("could not start"), "{err}");
         assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
         assert!(!dir.join("pinned-server.unproven").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_hand_over_keeps_nudging_the_tabs_it_reopens() {
+        use pinned_core::accounts::Provider;
+        use pinned_core::machine::{Event, Launch};
+        use pinned_core::wire::Call;
+        let dir = std::env::temp_dir().join(format!("pinned-hand-over-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
+        std::fs::set_permissions(&claude, Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            exe: "/opt/pinned/bin/pinned-server".into(),
+            bins: std::collections::BTreeMap::from([(Provider::Claude, claude)]),
+            path_env: None,
+            settings: dir.join("settings.json"),
+            mcp_config: None,
+            reminders: false,
+            plugin_dir: dir.join("plugin"),
+            tutorial_helper: dir.join("plugin/tutorial.mjs"),
+            sock: dir.join("sock"),
+            vector_search: false,
+        };
+        let (nudge, nudges) = std::sync::mpsc::channel();
+        let nudge = Mutex::new(nudge);
+        let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), move |event| {
+            if let Event::Thread { tab } = event {
+                let _ = nudge.lock().unwrap().send(tab);
+            }
+        });
+        machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let projects = dir.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let saved = |session: &str| {
+            std::fs::write(projects.join(format!("{session}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+            pinned_core::sessions::Saved {
+                cwd: dir.join("app"),
+                session: session.into(),
+                env: vec![],
+                bypass: false,
+                interrupted: false,
+                resume_at: None,
+                held: false,
+                account: "work".into(),
+                model: None,
+                permission_mode: None,
+            }
+        };
+        pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>());
+        let before = machine.restore_tabs();
+        for tab in &before {
+            machine.start_claude(tab, 80, 24).unwrap();
+        }
+        machine.watch_threads();
+        machine.call(Call::WatchThreads { tabs: before.clone() }).unwrap();
+        let mut first: Vec<String> = (0..before.len()).map(|_| nudges.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
+        first.sort();
+        assert_eq!(first, before, "the first look");
+
+        let dest = dir.join("bin/pinned-server");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"not-a-binary").unwrap();
+        std::fs::set_permissions(&dest, Permissions::from_mode(0o644)).unwrap();
+        let plan = Plan { program: dest.clone(), args: vec![], cwd: std::env::current_dir().unwrap(), proof: String::new() };
+        let failed = hand_over(&machine, &plan, &dest, "9.9.9").unwrap_err();
+        assert!(failed.starts_with("could not replace this process"), "{failed}");
+
+        let s1 = machine.tabs().into_iter().find(|tab| tab.session.as_deref() == Some("s1")).expect("s1 did not reopen").id;
+        assert!(!before.contains(&s1), "the reopened tab {s1} has a new id");
+        while nudges.try_recv().is_ok() {}
+        machine.call(Call::WatchThreads { tabs: vec![s1.clone()] }).unwrap();
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1.clone()), "the reopened tab is looked at once it is watched");
+        std::fs::OpenOptions::new().append(true).open(projects.join("s1.jsonl")).unwrap().write_all(b"{\"type\":\"user\"}\n").unwrap();
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1), "a line appended after the failed hand-over nudges");
+        machine.quit();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
