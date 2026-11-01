@@ -435,11 +435,6 @@ impl Kills {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
-}
-
 struct Kill<'a>(&'a Kills);
 
 impl Drop for Kill<'_> {
@@ -447,6 +442,11 @@ impl Drop for Kill<'_> {
         *self.0.running.lock().unwrap() -= 1;
         self.0.done.notify_all();
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 struct Busy<'a> {
@@ -3183,7 +3183,7 @@ pub(crate) mod tests {
         Returned,
     }
 
-    /// Runs `quit` on its own thread, which says when `quit` parks on a call still ending a session and when it returns.
+    /// Runs `quit` on its own thread, which says when `quit` parks to wait for a close or a restart in flight, and when it returns.
     fn quitter(m: &Arc<Machine>) -> (std::sync::mpsc::Receiver<Quit>, std::thread::JoinHandle<()>) {
         let (says, heard) = std::sync::mpsc::channel();
         let m = m.clone();
@@ -3249,6 +3249,7 @@ pub(crate) mod tests {
     }
 
     /// Wakes a parked `quit` to count the calls in flight again, and answers whether it parked again or returned.
+    #[cfg(unix)]
     fn look_again(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>) -> Quit {
         if quit.try_iter().any(|said| said == Quit::Returned) {
             return Quit::Returned;
