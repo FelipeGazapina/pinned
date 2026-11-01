@@ -341,6 +341,17 @@ RELEASE_CASES = (
         },
     ),
     (
+        "the release is killed right after it bumps Cargo.toml",
+        "0.16.1",
+        "killed after sed",
+        None,
+        {
+            "code": -15,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
         "a tracked file changes while the push runs",
         "0.16.1",
         "edit during push",
@@ -453,6 +464,12 @@ echo stray >> "{path}"
 exit 1
 """
 HOOKS = ("reference-transaction", "pre-receive")
+KILL_AFTER_SED = """#!/bin/bash
+"{sed}" "$@"
+status=$?
+kill -TERM $PPID
+exit $status
+"""
 KILL_RELEASE_HOOK = """#!/bin/bash
 kill -TERM $(ps -o ppid= -p $PPID)
 sleep 1
@@ -483,6 +500,10 @@ def prepare(sandbox, setup, version):
         install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
     elif setup == "killed after commit":
         install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
+    elif setup == "killed after sed":
+        shim = sandbox.bin / "sed"
+        shim.write_text(KILL_AFTER_SED.format(sed=shutil.which("sed")))
+        shim.chmod(0o755)
     elif setup == "unpushed":
         sandbox.commit(sandbox.work, "unpushed")
     elif setup == "topic":
