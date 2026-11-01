@@ -66,7 +66,10 @@ function setMode(mode) {
   save("mode", mode);
   if (mode === "terminal") {
     if (active) refit(active);
-  } else renderGui();
+  } else {
+    renderGui();
+    readFollowedThreads();
+  }
   focusInput();
   if (TAURI) fitWindowTo(mode).catch(console.warn);
 }
@@ -299,15 +302,22 @@ function forgetThreadWatch() {
   watchGeneration++;
 }
 
-setInterval(() => {
-  publishThreadWatch();
+/** The node sends a nudge once per change, so one dropped while the page was hidden or in
+ * terminal mode is read here once the thread shows again. */
+function readFollowedThreads() {
   if (!guiOn() || document.hidden) return;
   for (const tab of tabs) if (followed(tab)) fetchThread(tab);
+}
+
+setInterval(() => {
+  publishThreadWatch();
+  readFollowedThreads();
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   markThreadSeen(active);
   publishThreadWatch();
+  readFollowedThreads();
 });
 
 function stepThread(step) {
