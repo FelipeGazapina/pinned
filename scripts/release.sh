@@ -24,22 +24,44 @@ start=$(git rev-parse HEAD)
 remote_tag=$(git ls-remote origin "refs/tags/v$version")
 [[ -z "$remote_tag" ]] || refuse "origin already has v$version. Pick another version."
 
+wrote_toml=
+wrote_lock=
+edited() {
+  [[ -n "$2" && "$(git hash-object -- "$1")" != "$2" ]]
+}
+put_back() {
+  if edited "$1" "$2"; then
+    echo "$1 changed while the release ran, so it keeps your edit and the v$version bump." >&2
+  else
+    git checkout -q HEAD -- "$1" || echo "the release could not restore $1. Run git checkout HEAD -- $1" >&2
+  fi
+}
 restore() {
-  git checkout -q HEAD -- Cargo.toml Cargo.lock
-  git rm -q --cached --ignore-unmatch -- "$snapshot"
+  if [[ "$(git rev-parse HEAD)" != "$start" ]]; then
+    echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
+    return
+  fi
+  put_back Cargo.toml "$wrote_toml"
+  put_back Cargo.lock "$wrote_lock"
+  git rm -q --cached --ignore-unmatch -- "$snapshot" || true
   rm -f "$snapshot"
 }
 trap restore EXIT
-sed -i.bak "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
-rm Cargo.toml.bak
+git show HEAD:Cargo.toml | sed "s/^version = \".*\"/version = \"$version\"/" > Cargo.toml
+wrote_toml=$(git hash-object Cargo.toml)
 cargo update -p pinned --quiet
+wrote_lock=$(git hash-object Cargo.lock)
 if [[ "$version" == *-* ]]; then
   echo "v$version is a release candidate. Hub deploy skips it, so it gets no wire snapshot."
 else
   cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
   git add "$snapshot"
 fi
-stray=$(git status --porcelain -- ':!Cargo.toml' ':!Cargo.lock' ":!$snapshot")
+stray=$(
+  git status --porcelain -- ':!Cargo.toml' ':!Cargo.lock' ":!$snapshot"
+  if edited Cargo.toml "$wrote_toml"; then echo " M Cargo.toml"; fi
+  if edited Cargo.lock "$wrote_lock"; then echo " M Cargo.lock"; fi
+)
 [[ -z "$stray" ]] || refuse "the release stopped before the commit, because these files changed while the release built:
 $stray"
 git add Cargo.toml Cargo.lock
@@ -51,8 +73,11 @@ if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$version"; then
     refuse "git push failed and origin cannot be read, so main keeps the release commit and v$version. Check origin before you run the release again."
   [[ "$remote_tag" != "$(git rev-parse "v$version")" ]] ||
     refuse "git push failed, but origin has v$version, so the release went out. The tag on origin is at the release commit. Fetch origin before you change anything."
+  git reset -q --keep "$start" ||
+    refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because these files changed while the push ran:
+$(git status --porcelain)
+Stash them, then run: git tag -d v$version && git reset --keep $start && git stash pop"
   git tag -d "v$version" > /dev/null
-  git reset -q --keep "$start"
   [[ -z "$remote_tag" ]] ||
     refuse "the push was rejected, and origin has v$version at another commit. The release did not go out, and main is back where it started. Check that tag on origin before you pick a version."
   refuse "the push was rejected, so origin has no new main and no v$version. Pull main, then run the release again."

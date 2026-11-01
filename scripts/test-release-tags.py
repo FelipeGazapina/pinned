@@ -23,12 +23,12 @@ if [[ "$1" == "${FAIL:-}" ]]; then
 fi
 if [[ "$1" == update ]]; then
   echo "# updated" >> Cargo.lock
-  if [[ -n "${RACE:-}" ]]; then
-    bash -c "$RACE"
-  fi
 fi
 if [[ "$1" == run && "$*" == *" snapshot "* ]]; then
   cp crates/core/wire-contract/current.json "crates/core/wire-contract/${!#}.json"
+fi
+if [[ "$1" == "${RACE_ON:-update}" && -n "${RACE:-}" ]]; then
+  bash -c "$RACE"
 fi
 '''
 
@@ -119,6 +119,10 @@ class ReleaseSandbox(Remote):
             "foreign tag": {"RACE": self.foreign_tag(version)},
             "stray edit": {"RACE": "echo stray >> README.md"},
             "cargo fails": {"FAIL": "update"},
+            "Cargo.toml edit": {"RACE": "echo edit >> Cargo.toml"},
+            "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
+            "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
+            "index held": {"RACE": "touch .git/index.lock", "RACE_ON": "run"},
         }[during]
 
     def label(self, sha):
@@ -278,6 +282,76 @@ RELEASE_CASES = (
         },
     ),
     (
+        "Cargo.toml changes while the release builds",
+        "0.16.1",
+        None,
+        "Cargo.toml edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
+        "Cargo.lock changes while the snapshot builds",
+        "0.16.1",
+        None,
+        "Cargo.lock edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.lock",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock"]},
+            "kept": {"Cargo.lock": "edit"},
+        },
+    ),
+    (
+        "Cargo.toml changes and the snapshot build fails",
+        "0.16.1",
+        None,
+        "Cargo.toml edit, cargo fails",
+        {
+            "code": 101,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
+        "another git holds the index while the release rolls back",
+        "0.16.1",
+        None,
+        "index held",
+        {
+            "code": 128,
+            "refused": "Run git checkout HEAD -- Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock", " M Cargo.toml"]},
+        },
+    ),
+    (
+        "the release is killed right after its commit",
+        "0.16.1",
+        "killed after commit",
+        None,
+        {
+            "refused": "Undo it with git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": [], "status": []},
+        },
+    ),
+    (
+        "the release is killed right after it bumps Cargo.toml",
+        "0.16.1",
+        "killed after sed",
+        None,
+        {
+            "code": -15,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
         "a tracked file changes while the push runs",
         "0.16.1",
         "edit during push",
@@ -286,6 +360,17 @@ RELEASE_CASES = (
             "refused": "the push was rejected, so origin has no new main and no v0.16.1",
             "remote": {"refs/heads/main": "start"},
             "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M README.md"]},
+        },
+    ),
+    (
+        "Cargo.toml changes while a rejected push runs",
+        "0.16.1",
+        "edit Cargo.toml during push",
+        None,
+        {
+            "refused": "Stash them, then run: git tag -d v0.16.1 && git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": [" M Cargo.toml"]},
         },
     ),
     (
@@ -375,14 +460,24 @@ fi
 """
 
 EDIT_AND_REJECT_HOOK = """#!/bin/bash
-echo stray >> "{readme}"
+echo stray >> "{path}"
 exit 1
 """
 HOOKS = ("reference-transaction", "pre-receive")
+KILL_AFTER_SED = """#!/bin/bash
+"{sed}" "$@"
+status=$?
+kill -TERM $PPID
+exit $status
+"""
+KILL_RELEASE_HOOK = """#!/bin/bash
+kill -TERM $(ps -o ppid= -p $PPID)
+sleep 1
+"""
 
 
-def install_hook(sandbox, name, source):
-    hook = sandbox.bare / "hooks" / name
+def install_hook(repo, name, source):
+    hook = repo / "hooks" / name
     hook.write_text(source)
     hook.chmod(0o755)
 
@@ -400,7 +495,15 @@ def prepare(sandbox, setup, version):
         sandbox.git(sandbox.work, "commit", "-q", "-m", "shipped snapshot")
         sandbox.git(sandbox.work, "push", "-q", "origin", "main")
     elif setup == "edit during push":
-        install_hook(sandbox, "pre-receive", EDIT_AND_REJECT_HOOK.format(readme=sandbox.work / "README.md"))
+        install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
+    elif setup == "edit Cargo.toml during push":
+        install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "killed after commit":
+        install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
+    elif setup == "killed after sed":
+        shim = sandbox.bin / "sed"
+        shim.write_text(KILL_AFTER_SED.format(sed=shutil.which("sed")))
+        shim.chmod(0o755)
     elif setup == "unpushed":
         sandbox.commit(sandbox.work, "unpushed")
     elif setup == "topic":
@@ -409,13 +512,14 @@ def prepare(sandbox, setup, version):
         (sandbox.work / "notes.txt").write_text("draft\n")
     elif setup in ("dropped", "unreadable"):
         hide = f'mv "{sandbox.bare}" "{sandbox.hidden}"' if setup == "unreadable" else ":"
-        install_hook(sandbox, "reference-transaction", DROP_HOOK.format(hide=hide))
+        install_hook(sandbox.bare, "reference-transaction", DROP_HOOK.format(hide=hide))
 
 
 def release_errors(root, version, setup, during, expect):
     sandbox = ReleaseSandbox(root)
     prepare(sandbox, setup, version)
     proc = sandbox.release(version, during)
+    (sandbox.work / ".git" / "index.lock").unlink(missing_ok=True)
     if sandbox.hidden.exists():
         sandbox.hidden.rename(sandbox.bare)
     for hook in HOOKS:
@@ -432,6 +536,10 @@ def release_errors(root, version, setup, during, expect):
     for key in ("remote", "local"):
         if seen[key] != expect[key]:
             errors.append(f"{key} is {seen[key]}, want {expect[key]}")
+    for path, line in expect.get("kept", {}).items():
+        last = (sandbox.work / path).read_text().splitlines()[-1]
+        if last != line:
+            errors.append(f"{path} ends with [{last}], want the edit [{line}]")
     if "files" in expect:
         files = sandbox.released_files(f"v{version}")
         if files != expect["files"]:
