@@ -8,12 +8,12 @@ use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
@@ -21,7 +21,10 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
-const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
+const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
+const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
+const PAGE_POLL: Duration = Duration::from_millis(1200);
+const LOCAL_VIEWER: &str = "local";
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -368,6 +371,8 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
+    threads_watched: AtomicBool,
+    thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -457,6 +462,28 @@ impl Drop for Busy<'_> {
     }
 }
 
+#[derive(Default)]
+struct TranscriptLook {
+    found: Option<Transcript>,
+    missed: Option<Missed>,
+}
+
+#[derive(PartialEq)]
+struct Transcript {
+    session: String,
+    path: PathBuf,
+    len: u64,
+}
+
+/// Claude writes a session's transcript with its first message, so the hook names a session the
+/// folders do not hold yet. A turn that starts is when the file appears.
+struct Missed {
+    session: String,
+    status: Option<AgentStatus>,
+    at: Instant,
+    gap: Duration,
+}
+
 impl Machine {
     /// A machine that keeps its sessions, projects and history in `dir`, or nothing without one,
     /// and opens new tabs on `open`, else the most recent project. Everything it reports goes to `events`.
@@ -511,6 +538,8 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
+            threads_watched: AtomicBool::new(false),
+            thread_watchers: Mutex::default(),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates,
@@ -842,8 +871,25 @@ impl Machine {
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
             Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
+            Call::WatchThreads { tabs } => {
+                self.set_watched_threads(LOCAL_VIEWER, &tabs);
+                Ok(Value::Null)
+            }
             Call::UpdateSelf => json(self.update_self()),
         }
+    }
+
+    pub fn set_watched_threads(&self, viewer: &str, tabs: &[String]) {
+        let mut watchers = self.thread_watchers.lock().unwrap();
+        if tabs.is_empty() {
+            watchers.remove(viewer);
+        } else {
+            watchers.insert(viewer.to_owned(), tabs.iter().cloned().collect());
+        }
+    }
+
+    pub fn drop_remote_thread_watchers(&self) {
+        self.thread_watchers.lock().unwrap().retain(|viewer, _| viewer == LOCAL_VIEWER);
     }
 
     /// The tab's transcript file, in the home of the account it runs under.
@@ -923,6 +969,26 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
+    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook) -> Option<PathBuf> {
+        let home = self.accounts.home(account);
+        if let Some(found) = look.found.as_ref().filter(|found| found.session == session && found.path.starts_with(&home) && found.path.is_file()) {
+            return Some(found.path.clone());
+        }
+        let now = Instant::now();
+        let gap = match &look.missed {
+            Some(missed) if missed.session == session && missed.status == status => {
+                if now < missed.at + missed.gap {
+                    return None;
+                }
+                (missed.gap * 2).min(PAGE_POLL)
+            }
+            _ => THREAD_LOOK_EVERY,
+        };
+        let path = self.find_transcript(account, session);
+        look.missed = path.is_none().then(|| Missed { session: session.to_owned(), status, at: now, gap });
+        path
+    }
+
     /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
     /// T3 Code's "Fork from this response" does, and returns the new tab's id.
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
@@ -945,6 +1011,48 @@ impl Machine {
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
+    pub fn watch_threads(&self) {
+        if self.threads_watched.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let mut seen = HashMap::new();
+        self.every(THREAD_LOOK_EVERY, move |machine| machine.nudge_thread_watchers(&mut seen));
+    }
+
+    fn every(&self, period: Duration, mut tick: impl FnMut(&Machine) + Send + 'static) {
+        let me = self.me.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(period);
+            let Some(machine) = me.upgrade() else { return };
+            if !machine.quitting.load(Ordering::Relaxed) {
+                tick(&machine);
+            }
+        });
+    }
+
+    fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
+        let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
+        let open: Vec<(String, String, Option<AgentStatus>, Account)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
+        };
+        seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
+        for (id, session, status, account) in open {
+            if !watched.contains(&id) {
+                continue;
+            }
+            let look = seen.entry(id.clone()).or_default();
+            let Some(path) = self.locate_transcript(&account, &session, status, look) else { continue };
+            let Ok(len) = std::fs::metadata(&path).map(|meta| meta.len()) else { continue };
+            let found = Transcript { session, path, len };
+            if look.found.as_ref() == Some(&found) {
+                continue;
+            }
+            look.found = Some(found);
+            self.emit(Event::Thread { tab: id });
+        }
+    }
+
     /// Every tab, in the order they opened.
     pub fn tabs(&self) -> Vec<TabView> {
         let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id)).collect();
@@ -961,6 +1069,7 @@ impl Machine {
     pub fn open_tab(&self, path: Option<String>, bypass: bool) -> Result<TabId, String> {
         let cwd = match path {
             Some(path) if Path::new(&path) == self.scratch => self.scratch.clone(),
+            Some(path) if !Path::new(&path).is_dir() => return Err(format!("{path} is not a folder on this machine")),
             Some(path) => self.open_project(path.into()),
             None => self.default_cwd.clone(),
         };
@@ -1843,16 +1952,8 @@ impl Machine {
         if self.pr_watches.started.swap(true, Ordering::Relaxed) {
             return;
         }
-        let me = self.me.clone();
         let every = std::env::var("PINNED_PR_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(every));
-            let Some(machine) = me.upgrade() else { return };
-            if machine.quitting.load(Ordering::Relaxed) {
-                return;
-            }
-            machine.read_watches();
-        });
+        self.every(Duration::from_secs(every), Machine::read_watches);
     }
 
     fn read_watches(&self) {
@@ -3403,6 +3504,301 @@ pub(crate) mod tests {
         assert_eq!(find_bin("claude", Some(&path)), npm.join("claude.cmd"));
         assert_eq!(find_bin("claude", None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn assistant_line(text: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+        )
+    }
+
+    fn thread_events(heard: &Mutex<Vec<Value>>) -> Vec<Value> {
+        heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").cloned().collect()
+    }
+
+    fn texts_from(m: &Machine, tab: &str, from: u64) -> Vec<String> {
+        let page = serde_json::to_value(m.thread(tab, from).unwrap()).unwrap();
+        page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
+    }
+
+    fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
+        let root = temp(name);
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        (root, m, heard, tab, dir)
+    }
+
+    #[test]
+    fn a_grown_transcript_names_only_its_tab() {
+        let (root, m, heard, tab, dir) = watching("thread-nudge");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        let todo = r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"w1","name":"TodoWrite","input":{"todos":[{"content":"Ship the fix","status":"in_progress"}]}}]}}"#;
+        std::fs::write(&file, format!("{}{todo}\n", assistant_line("ready"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard).len(), 1, "an unchanged file is quiet");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_newly_watched_tab_is_nudged_once() {
+        let (root, m, heard, tab, dir) = watching("thread-first-look");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("written before the watch")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_new_session_on_a_watched_tab_nudges() {
+        let (root, m, heard, tab, dir) = watching("thread-new-session");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        m.tabs.lock().unwrap().get_mut(&tab).unwrap().claude_session = Some("s2".into());
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("fresh")).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        std::fs::write(dir.join("s2.jsonl"), format!("{}{}", assistant_line("fresh"), assistant_line("next"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard).len(), 2, "the new session's own file is watched from then on");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_line_finished_after_a_partial_first_look_nudges() {
+        let (root, m, heard, tab, dir) = watching("thread-partial");
+        let file = dir.join("s1.jsonl");
+        let whole = format!("{}{}", assistant_line("ready"), assistant_line("visible"));
+        let cut = assistant_line("ready").len() + 20;
+        std::fs::write(&file, &whole[..cut]).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        std::fs::write(&file, &whole).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let read = m.thread(&tab, assistant_line("ready").len() as u64).unwrap();
+        assert_eq!(serde_json::to_value(&read).unwrap()["items"][0]["text"], "visible");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_moved_transcript_is_found_again() {
+        let (root, m, heard, tab, dir) = watching("thread-move");
+        let other = dir.parent().unwrap().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        std::fs::remove_file(dir.join("s1.jsonl")).unwrap();
+        std::fs::write(other.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("moved"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["moved"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unwatched_tab_is_not_nudged() {
+        let (root, m, heard, watched, dir) = watching("thread-unwatched");
+        let background = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        std::fs::write(dir.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        std::fs::write(dir.join("s2.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("hidden"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        let nudge = json!({ "kind": "thread", "tab": watched });
+        assert_eq!(thread_events(&heard), vec![nudge.clone(), nudge], "the first look and the growth of {watched}, nothing for {background}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_watcher_nudges_a_grown_transcript_within_a_tick() {
+        let root = temp("thread-loop");
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
+        m.watch_threads();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        wait_for("the first look", || thread_events(&heard).len() == 1);
+        let started = Instant::now();
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        wait_for("the nudge", || thread_events(&heard).len() == 2);
+        assert!(started.elapsed() < Duration::from_millis(500), "the nudge took {:?}, the poll is 1200 ms", started.elapsed());
+        std::thread::sleep(Duration::from_millis(150));
+        let nudge = json!({ "kind": "thread", "tab": tab });
+        assert_eq!(thread_events(&heard), vec![nudge.clone(), nudge], "one look, one growth, then quiet");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_shorter_transcript_nudges_and_reads_as_a_reset() {
+        let (root, m, heard, tab, dir) = watching("thread-shrink");
+        let file = dir.join("s1.jsonl");
+        let long = format!("{}{}", assistant_line("ready"), assistant_line("gone"));
+        std::fs::write(&file, &long).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let page = serde_json::to_value(m.thread(&tab, long.len() as u64).unwrap()).unwrap();
+        assert_eq!(page["reset"], true);
+        assert_eq!(texts_from(&m, &tab, long.len() as u64), vec!["ready"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_transcript_missing_for_one_tick_nudges_when_it_returns_longer() {
+        let (root, m, heard, tab, dir) = watching("thread-miss");
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        heard.lock().unwrap().clear();
+        std::fs::remove_file(&file).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), Vec::<Value>::new(), "a missing file is quiet");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), Vec::<Value>::new(), "the same file back is quiet");
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("after"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["after"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_cached_transcript_is_not_scanned_again() {
+        let (root, m, heard, tab, _) = watching("thread-cache");
+        let projects = root.join("config/accounts/work/projects");
+        for i in 0..300 {
+            std::fs::create_dir_all(projects.join(format!("p{i:03}"))).unwrap();
+        }
+        let file = projects.join("p001/s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(scans(), before + 1, "the first look searches the project directories");
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(scans(), before + 1, "a file that is still there is not searched again");
+        let nudge = json!({ "kind": "thread", "tab": tab });
+        assert_eq!(thread_events(&heard), vec![nudge.clone(), nudge]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
+        let (root, m, heard, tab, _) = watching("thread-unwritten");
+        let projects = root.join("config/accounts/work/projects");
+        for i in 0..300 {
+            std::fs::create_dir_all(projects.join(format!("p{i:03}"))).unwrap();
+        }
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+        let mut looks = HashMap::new();
+        for _ in 0..10 {
+            m.nudge_thread_watchers(&mut looks);
+        }
+        assert_eq!(scans(), before + 1, "ten ticks at the prompt search once");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(scans(), before + 2, "a turn that starts searches at once");
+        std::fs::write(projects.join("p007/s1.jsonl"), assistant_line("first")).unwrap();
+        std::thread::sleep(THREAD_LOOK_EVERY * 2);
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started nudges");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dropped_hub_link_keeps_this_machines_own_watch() {
+        let (root, m, heard, local, dir) = watching("thread-local-viewer");
+        let remote = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        m.set_watched_threads("client-7", std::slice::from_ref(&remote));
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("local")).unwrap();
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("remote")).unwrap();
+        m.drop_remote_thread_watchers();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": local })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_switched_account_is_read_from_its_new_home() {
+        let root = temp("thread-switch");
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        let m = Machine::new(
+            Launch { bins: fake_bins(&root.join("bin")), ..launch() },
+            Some(root.join("config")),
+            None,
+            move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()),
+        );
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Personal".into() }).unwrap();
+        std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let from = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&from).unwrap();
+        let original = from.join("s1.jsonl");
+        std::fs::write(&original, assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        m.switch_account(&tab, "personal", 80, 24).unwrap();
+        let copied = root.join("config/accounts/personal/projects/demo/s1.jsonl");
+        assert!(original.is_file(), "the switch leaves the old transcript");
+        assert!(copied.is_file(), "the switch copies the transcript");
+        heard.lock().unwrap().clear();
+        std::fs::write(&copied, format!("{}{}", assistant_line("ready"), assistant_line("moved"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "a line written in the new home nudges");
+        assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["moved"]);
+        m.close_tab(&tab);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_tab_rejects_a_path_that_is_not_a_folder() {
+        let m = machine();
+        let err = m.open_tab(Some("/no/such/pinned-folder".into()), false).unwrap_err();
+        assert_eq!(err, "/no/such/pinned-folder is not a folder on this machine");
+        assert!(m.tabs().is_empty());
     }
 
     #[test]

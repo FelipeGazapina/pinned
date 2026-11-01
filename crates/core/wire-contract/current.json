@@ -2520,6 +2520,26 @@
                 ]
               },
               {
+                "description": "`null`. The tabs whose transcript changes this caller hears of as `MachineEvent::Thread`. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
+                ]
+              },
+              {
                 "description": "The machine's `UpdateStatus`.",
                 "type": "object",
                 "properties": {
@@ -7896,6 +7916,26 @@
                 ]
               },
               {
+                "description": "`null`. The tabs whose transcript changes this caller hears of as `MachineEvent::Thread`. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
+                ]
+              },
+              {
                 "description": "The machine's `UpdateStatus`.",
                 "type": "object",
                 "properties": {
@@ -10980,6 +11020,23 @@
                 ]
               },
               {
+                "description": "The transcript of a tab this client watches changed. The client reads it with `Call::Thread`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab"
+                ]
+              },
+              {
                 "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
                 "type": "object",
                 "properties": {
@@ -13615,6 +13672,23 @@
                 "required": [
                   "kind",
                   "usage"
+                ]
+              },
+              {
+                "description": "The transcript of a tab this client watches changed. The client reads it with `Call::Thread`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab"
                 ]
               },
               {
@@ -23750,6 +23824,23 @@
                 ]
               },
               {
+                "description": "The transcript of a tab this client watches changed. The client reads it with `Call::Thread`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab"
+                ]
+              },
+              {
                 "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
                 "type": "object",
                 "properties": {
@@ -25876,6 +25967,23 @@
                 ]
               },
               {
+                "description": "The transcript of a tab this client watches changed. The client reads it with `Call::Thread`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab"
+                ]
+              },
+              {
                 "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
                 "type": "object",
                 "properties": {
@@ -27402,6 +27510,30 @@
               "type",
               "tab",
               "viewer"
+            ]
+          },
+          {
+            "description": "Replace `viewer`'s set of tabs whose transcript changes it hears of. Empty removes that viewer.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "watch_threads"
+              },
+              "viewer": {
+                "type": "string"
+              },
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "viewer",
+              "tabs"
             ]
           }
         ],
@@ -29952,6 +30084,26 @@
                 ]
               },
               {
+                "description": "`null`. The tabs whose transcript changes this caller hears of as `MachineEvent::Thread`. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
+                ]
+              },
+              {
                 "description": "The machine's `UpdateStatus`.",
                 "type": "object",
                 "properties": {
@@ -31069,6 +31221,30 @@
               "type",
               "tab",
               "viewer"
+            ]
+          },
+          {
+            "description": "Replace `viewer`'s set of tabs whose transcript changes it hears of. Empty removes that viewer.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "watch_threads"
+              },
+              "viewer": {
+                "type": "string"
+              },
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "viewer",
+              "tabs"
             ]
           }
         ],
@@ -33594,6 +33770,26 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "`null`. The tabs whose transcript changes this caller hears of as `MachineEvent::Thread`. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
                 ]
               },
               {
