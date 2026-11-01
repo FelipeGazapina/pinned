@@ -1850,7 +1850,6 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    /// The sync loop holds the state until it drops the hold, even by unwinding.
     #[must_use]
     pub(crate) fn hold_sync_state(&self) -> SyncHold {
         self.sync_loop_holds_state.store(true, Ordering::SeqCst);
