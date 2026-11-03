@@ -12,6 +12,8 @@
 .agent-card[data-state="done"] .state { color: var(--g-success); }
 .agent-card[data-state="failed"] .state, .agent-card .agent-error, .delegated-strip .agent-error { color: var(--g-error); }
 .agent-card[data-state="stopped"] .state, .agent-card[data-state="cancelled"] .state { color: var(--g-muted); }
+.agent-card[data-state="waiting"] .state { color: var(--g-warning); }
+.live-agent[data-state="waiting"] .line .label { animation: none; background: none; color: var(--g-muted); }
 .agent-card .state-label, .delegated-strip .state-label { font-size: 12px; color: var(--g-muted); }
 .agent-card .agent-error, .delegated-strip .agent-error { flex-basis: 100%; font-size: 12px; }
 .agent-card .agent-step { display: flex; align-items: center; gap: 6px; min-height: 22px; padding: 0 2px; color: var(--g-muted); font-size: 13px; }

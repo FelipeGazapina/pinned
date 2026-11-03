@@ -369,6 +369,30 @@ test("a working turn shows the agent card with its full latest step", async () =
   assert.doesNotMatch(card, /Running cd/);
 });
 
+test("a live card waiting for approval shows a waiting state without a spinner", async () => {
+  const { tab, s, net } = await opened();
+  tab.menu = {};
+  s.append({ item: { kind: "tool", at: "t4", id: "toolu_ask", name: "Bash", summary: "Remove the build", detail: "rm -rf build" } });
+  await poll(tab, net);
+  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(card, /data-state="waiting"/);
+  assert.match(card, />needs approval</);
+  assert.match(card, /data-icon="shield-question"/);
+  assert.doesNotMatch(card, /data-icon="loader-circle"/);
+});
+
+test("a live card waiting for an answer shows a waiting state without a spinner", async () => {
+  const { tab, s, net } = await opened();
+  Object.assign(tab.view, { status: "needs-input", message: "Claude needs your input" });
+  s.append({ item: { kind: "tool", at: "t4", id: "toolu_answer", name: "AskUserQuestion", summary: "Pick a color" } });
+  await poll(tab, net);
+  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(card, /data-state="waiting"/);
+  assert.match(card, />needs input</);
+  assert.match(card, /data-icon="message-circle-question"/);
+  assert.doesNotMatch(card, /data-icon="loader-circle"/);
+});
+
 test("a rewind that rewrites the last line in place repaints it", async () => {
   const { tab, s, net } = await opened();
   s.append({ item: text("before") });

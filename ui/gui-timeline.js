@@ -609,15 +609,19 @@ function liveHtml(tab, turn, active, cwd) {
   const thought = active.findLast((s) => s.kind === "thinking");
   const tool = active.findLast((s) => s.kind === "tool");
   const since = turn.start || Date.now();
+  const phase = phaseOf(tab);
+  const waiting = phase === "asking" || phase === "input";
+  const state = phase === "asking" ? "needs approval" : phase === "input" ? "needs input" : "working";
+  const mark = waiting ? icon(phase === "asking" ? "shield-question" : "message-circle-question", "state") : icon("loader-circle", "state");
   const model = modelName(tab);
   const chip = model && model !== "Default" ? `<span class="chip">${esc(model)}</span>` : "";
-  const head = `<span class="agent-head live-head">${icon("bot", "kind")}<span class="name">Claude</span>${chip}<span class="state-label">working</span><span class="time ticker" data-since="${since}">${ticking(Math.max(0, Date.now() - since))}</span>${icon("loader-circle", "state")}</span>`;
+  const head = `<span class="agent-head live-head">${icon("bot", "kind")}<span class="name">Claude</span>${chip}<span class="state-label">${state}</span><span class="time ticker" data-since="${since}">${ticking(Math.max(0, Date.now() - since))}</span>${mark}</span>`;
   const thoughtRow = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
   const thinking = `<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span>`;
   const step = tool ? stepLine(tool, cwd) : null;
   const toolRow = tool ? `<span class="line${tool.result ? " done" : ""}">${icon(step.icon, "kind")}<span class="label" title="${esc(step.label)}">${esc(step.label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span>` : "";
   const body = !tool || active.at(-1) === thought ? thoughtRow + thinking : thoughtRow + toolRow + (tool.result ? thinking : "");
-  return `<button type="button" class="live-tool agent-card live-agent" data-open-turn="${esc(turn.id)}" data-state="running" title="Open the turn's steps">${head}${body}</button>`;
+  return `<button type="button" class="live-tool agent-card live-agent" data-open-turn="${esc(turn.id)}" data-state="${waiting ? "waiting" : "running"}" title="Open the turn's steps">${head}${body}</button>`;
 }
 
 const ANSWER = /"([^"]*)"="([^"]*)"/g;
@@ -875,6 +879,7 @@ function userHtml(user, t, tab, first) {
     <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div></div>`;
 }
 
+/** One turn: its prompt, the work fold, the live card while it runs, and what it answered. */
 function turnHtml(tab, turn, change, live, first, t, latest) {
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
