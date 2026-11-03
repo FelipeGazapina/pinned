@@ -329,12 +329,12 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
+    // The updater, the Linear client and the statusline's OpenCode Go usage share reqwest's
+    // rustls, which ships without a crypto provider. The statusline runs as a subcommand below.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if let Some(code) = pinned_core::cli::dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
         std::process::exit(code);
     }
-
-    // The updater and the Linear client share reqwest's rustls, which ships without a crypto provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let exe = std::env::current_exe().expect("could not find pinned's own binary");
     let launch = Launch::prepare(&exe).expect("could not prepare claude launch");
     let builder = tauri::Builder::default()

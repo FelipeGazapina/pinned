@@ -180,13 +180,31 @@ fn tell(sock: &str, message: &Message) {
 pub fn statusline() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
+    if let (Some(usage), Ok(sock)) = (status_usage(&input), std::env::var(SOCK_ENV)) {
         tell(&sock, &Message::Usage { usage, account: std::env::var(crate::accounts::ACCOUNT_ENV).ok() });
     }
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
     if let Some(command) = user_statusline(&config_dir) {
         let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
     }
+}
+
+/// A Go session reports the gateway's allowances. Anything else keeps the figures Claude Code
+/// pipes to its statusline. A failed Go call falls back to those figures, and this prints nothing.
+fn status_usage(input: &str) -> Option<Usage> {
+    let key = std::env::var(crate::opencode_go::KEY_ENV).ok();
+    usage_for_statusline(input, key.as_deref(), crate::opencode_go::usage_for_statusline)
+}
+
+fn usage_for_statusline(input: &str, go_key: Option<&str>, fetch: impl FnOnce(&str) -> Result<Usage, String>) -> Option<Usage> {
+    if let Some(key) = go_key.map(str::trim).filter(|key| !key.is_empty()) {
+        if let Ok(usage) = fetch(key) {
+            if usage.five_hour.is_some() || usage.seven_day.is_some() || usage.monthly.is_some() {
+                return Some(usage);
+            }
+        }
+    }
+    usage_from_status(input)
 }
 
 /// The usage in the JSON Claude Code pipes to its statusline. It has none until the session's
@@ -196,7 +214,7 @@ fn usage_from_status(input: &str) -> Option<Usage> {
     struct Status {
         rate_limits: Option<Usage>,
     }
-    serde_json::from_str::<Status>(input).ok()?.rate_limits.filter(|u| u.five_hour.is_some() || u.seven_day.is_some())
+    serde_json::from_str::<Status>(input).ok()?.rate_limits.filter(|u| u.five_hour.is_some() || u.seven_day.is_some() || u.monthly.is_some())
 }
 
 /// The statusline command set in the user's own Claude Code settings.
@@ -548,18 +566,29 @@ mod tests {
             Some(Usage {
                 five_hour: Some(LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }),
                 seven_day: Some(LimitWindow { used_percentage: 41.2, resets_at: 1792900000 }),
+                monthly: None,
             })
         );
         let weekly_only = r#"{"rate_limits":{"seven_day":{"used_percentage":90,"resets_at":1792900000}}}"#;
         assert_eq!(
             usage_from_status(weekly_only),
-            Some(Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 90.0, resets_at: 1792900000 }) })
+            Some(Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 90.0, resets_at: 1792900000 }), monthly: None })
         );
         assert_eq!(usage_from_status(r#"{"session_id":"s1","cwd":"/repo"}"#), None);
         assert_eq!(usage_from_status(r#"{"rate_limits":{}}"#), None);
         assert_eq!(usage_from_status(r#"{"rate_limits":{"five_hour":{"used_percentage":"lots"}}}"#), None);
         assert_eq!(usage_from_status("{broken"), None);
         assert_eq!(usage_from_status(""), None);
+    }
+
+    #[test]
+    fn a_go_usage_body_wins_and_a_failed_call_keeps_the_statusline() {
+        let input = r#"{"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1792400000}}}"#;
+        let go = Usage { five_hour: Some(LimitWindow { used_percentage: 42.0, resets_at: 1793660400 }), seven_day: None, monthly: Some(LimitWindow { used_percentage: 100.0, resets_at: 1795996800 }) };
+        assert_eq!(usage_for_statusline(input, Some("oc_sk_test"), |_| Ok(go)), Some(go));
+        assert_eq!(usage_for_statusline(input, None, |_| Ok(go)), usage_from_status(input));
+        assert_eq!(usage_for_statusline(input, Some("   "), |_| Ok(go)), usage_from_status(input));
+        assert_eq!(usage_for_statusline(input, Some("oc_sk_test"), |_| Err("down".into())), usage_from_status(input));
     }
 
     #[test]

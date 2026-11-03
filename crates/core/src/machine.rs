@@ -1,4 +1,4 @@
-use crate::accounts::{self, Account, Accounts, Provider};
+use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
@@ -98,11 +98,17 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
-    fn command(&self, program: Program, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf]) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf]) -> CommandBuilder {
+        let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
         for key in INHERITED_SESSION_ENV {
             cmd.env_remove(key);
+        }
+        if account.auth == Auth::OpenCodeGo {
+            for key in crate::opencode_go::STRIP_ENV {
+                cmd.env_remove(key);
+            }
         }
         match program {
             Program::Agent => {
@@ -156,10 +162,10 @@ impl Launch {
     }
 }
 
-/// What a Claude Code session sets for the processes it runs. pinned started from inside one (a
-/// terminal tab of claude, or a node run from it) would pass them on, and each tab's claude
-/// would then take itself for a nested session: no transcript, so `--resume` finds nothing.
-pub(crate) const INHERITED_SESSION_ENV: [&str; 11] = [
+/// What a Claude Code session or a parent shell can leak into a pinned session. pinned strips
+/// them before it applies the account's own env, so a nested Claude session is not mistaken for
+/// this one and a stale Go marker cannot make a login account report Go usage.
+pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -171,7 +177,14 @@ pub(crate) const INHERITED_SESSION_ENV: [&str; 11] = [
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SSE_PORT",
+    "PINNED_OPENCODE_GO_KEY",
 ];
+
+/// The environment a headless `claude -p` gets, and the variables it must drop before applying it.
+pub struct Headless<'a> {
+    pub env: &'a [(String, String)],
+    pub strip: &'a [&'a str],
+}
 
 #[derive(Default)]
 struct Screen {
@@ -686,8 +699,41 @@ impl Machine {
                 json(uploads::image(dir, &path)?)
             }
             Call::ListAccounts => json(self.list_accounts()),
-            Call::AddAccount { provider, name } => {
-                let account = self.accounts.add(provider, &name)?;
+            Call::AddAccount { provider, name, auth, key } => {
+                let auth = auth.unwrap_or(Auth::Login);
+                if auth == Auth::OpenCodeGo {
+                    if provider != Provider::Claude {
+                        return Err("OpenCode Go runs through Claude Code".into());
+                    }
+                    let Some(key) = key.as_deref().map(str::trim).filter(|key| !key.is_empty()) else {
+                        return Err("OpenCode Go needs an API key".into());
+                    };
+                    crate::opencode_go::validate(key)?;
+                    let account = self.accounts.add(provider, &name, auth)?;
+                    if let Err(error) = self.accounts.set_key(&account, key) {
+                        let _ = self.accounts.remove(&account.id);
+                        return Err(error);
+                    }
+                    self.prepare_go_home(&account);
+                    json(self.view_account(account))
+                } else if key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
+                    Err("only an OpenCode Go account takes an API key".into())
+                } else {
+                    json(self.view_account(self.accounts.add(provider, &name, auth)?))
+                }
+            }
+            Call::SetAccountKey { account, key } => {
+                let account = self.accounts.get(&account).ok_or_else(|| format!("no account {account} on this machine"))?;
+                if account.auth != Auth::OpenCodeGo {
+                    return Err(format!("{id} signs in through its CLI. Replace the API key under Settings > Accounts.", id = account.id));
+                }
+                let key = key.trim();
+                if key.is_empty() {
+                    return Err("OpenCode Go needs an API key".into());
+                }
+                crate::opencode_go::validate(key)?;
+                self.accounts.set_key(&account, key)?;
+                self.prepare_go_home(&account);
                 json(self.view_account(account))
             }
             Call::RemoveAccount { account } => {
@@ -719,7 +765,9 @@ impl Machine {
             }
             Call::RegenerateTitle { tab, previous, thread } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
-                json(titles::regenerate(&self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
+                let env = self.headless_env(&tab)?;
+                let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
+                json(titles::regenerate(&self.launch.bin(Provider::Claude), &headless, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
             }
             Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
@@ -760,7 +808,9 @@ impl Machine {
             }
             Call::Git { tab, step } => {
                 let cwd = self.idle_folder(&tab, "Run git")?;
-                json(branches::run_step(&cwd, &step, &self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, self.launch.path_env.as_deref())?)
+                let env = self.headless_env(&tab)?;
+                let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
+                json(branches::run_step(&cwd, &step, &self.launch.bin(Provider::Claude), &headless, self.launch.path_env.as_deref())?)
             }
             Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
             Call::PullRequests { paths, state, involvement, query, filters, limit } => {
@@ -794,7 +844,11 @@ impl Machine {
             Call::PrComment { tab, pr, body, reply_to } => json(panel::pr_comment(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &body, reply_to.as_deref(), self.launch.path_env.as_deref())?),
             Call::PrReview { tab, pr, event, body, comments } => json(panel::pr_review(&self.tab(&tab, |t| t.cwd.clone())?, &pr, event, &body, &comments, self.launch.path_env.as_deref())?),
             Call::PrRerun { tab, check } => json(panel::pr_rerun(&self.tab(&tab, |t| t.cwd.clone())?, &check, self.launch.path_env.as_deref())?),
-            Call::PrGuide { tab, pr, write } => json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, self.launch.path_env.as_deref())?),
+            Call::PrGuide { tab, pr, write } => {
+                let env = self.headless_env(&tab)?;
+                let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
+                json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.bin(Provider::Claude), &headless, self.launch.path_env.as_deref())?)
+            }
             Call::PrChange { tab, pr, change } => json(panel::pr_change(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &change, self.launch.path_env.as_deref())?),
             Call::PrCandidates { tab, pr, of } => json(panel::pr_candidates(&self.tab(&tab, |t| t.cwd.clone())?, &pr, of, self.launch.path_env.as_deref())?),
             Call::PrStack { tab, pr, action, method, heads } => json(panel::pr_stack(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, method.unwrap_or(panel::MergeMethod::Merge), &heads, self.launch.path_env.as_deref())?),
@@ -1077,6 +1131,13 @@ impl Machine {
         Ok(self.accounts.env(&if account.provider == Provider::Claude { account } else { Account::builtin(Provider::Claude) }))
     }
 
+    /// What a headless call must strip before it applies `headless_env`. A Go tab must not keep a
+    /// parent shell's Anthropic key or provider flag.
+    fn headless_strip(&self, tab: &str) -> Result<&'static [&'static str], String> {
+        let account = self.tab(tab, |t| t.account.clone())?;
+        Ok(if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] })
+    }
+
     /// Who each account's CLI says is signed in, asked of every account at once.
     pub fn list_accounts(&self) -> Vec<accounts::View> {
         std::thread::scope(|scope| {
@@ -1254,9 +1315,21 @@ impl Machine {
         self.tabs.lock().unwrap().get(id).is_some_and(|tab| tab.session.is_some())
     }
 
+    /// Drops a login a reused home may still hold, then skips Claude Code's theme wizard. A Go
+    /// account must not send the user's Claude login to the gateway, and its first launch is a
+    /// session, not a setup screen.
+    fn prepare_go_home(&self, account: &Account) {
+        let home = self.accounts.home(account);
+        crate::opencode_go::clear_login(&home, &self.launch.bin(Provider::Claude), self.launch.path_env.as_deref());
+        let _ = crate::opencode_go::prepare_home(&home);
+    }
+
     /// Opens a tab running the CLI's login for the account, in the account's home, and returns its id.
     pub fn sign_in(&self, account: &str) -> Result<TabId, String> {
         let account = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        if account.auth == Auth::OpenCodeGo {
+            return Err("OpenCode Go signs in with an API key. Replace the API key under Settings > Accounts.".into());
+        }
         let home = self.accounts.home(&account);
         std::fs::create_dir_all(&home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
         let id = self.add_tab(home, account, vec![], vec![], false, None);
@@ -1318,7 +1391,7 @@ impl Machine {
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
-        let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env, &plugin_dirs);
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs);
         if let Err(error) = self.spawn(tab, cmd, pty::size(cols, rows)) {
             let _ = self.tab(tab, |t| t.starting = false);
             return Err(error);
@@ -1359,6 +1432,11 @@ impl Machine {
             std::fs::create_dir_all(&into).and_then(|_| copy_tree(file.parent().unwrap(), &into, session)).map_err(|e| format!("could not copy the conversation to {}: {e}", to.id))?;
         }
         self.tab(tab, |t| {
+            // A model id belongs to the auth that served it. Moving between a Claude login and a
+            // Go key must not carry one gateway's model into the other.
+            if t.account.auth != to.auth {
+                t.model = None;
+            }
             t.account = to;
             t.resume_at = None;
             if let Some(saved) = t.saved() {
@@ -2156,12 +2234,13 @@ impl Machine {
         } else {
             Parent::Task(caller.task.clone().unwrap_or_default())
         };
-        let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), t.child_access()))?
+        let (account_id, inherited_model, parent_provider, parent_auth, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?
         } else {
             let id = caller.task.as_deref().unwrap_or_default();
             let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
-            (Some(task.account), task.model, task.provider, task.cwd, task.access)
+            let parent_auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
+            (Some(task.account), task.model, task.provider, parent_auth, task.cwd, task.access)
         };
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
@@ -2181,6 +2260,8 @@ impl Machine {
             return Err(format!("account {} is not signed in on this machine", account.id));
         }
         let access = resolve_access(ceiling, &request)?;
+        // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
+        let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
         self.ensure_parent(caller.tab.as_deref(), None)?;
@@ -2256,8 +2337,12 @@ impl Machine {
         let id = task.id.clone();
         let me = self.me.clone();
         let path_env = self.launch.path_env.clone();
+        let mut strip: Vec<&str> = INHERITED_SESSION_ENV.to_vec();
+        if account.auth == Auth::OpenCodeGo {
+            strip.extend_from_slice(&crate::opencode_go::STRIP_ENV);
+        }
         let pid = match spawn(
-            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &INHERITED_SESSION_ENV },
+            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &strip },
             move |event| {
                 let Some(machine) = me.upgrade() else { return };
                 if let Some(tab) = machine.delegates.apply(&id, event, path_env.as_deref()) {
@@ -2370,6 +2455,9 @@ impl Machine {
                 let bin = self.launch.bin(account.provider);
                 let found = bin.is_file();
                 let (models, mut constraints) = match account.provider {
+                    Provider::Claude if account.auth == Auth::OpenCodeGo => {
+                        (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()])
+                    }
                     Provider::Claude => (provider_models(Provider::Claude), vec![]),
                     Provider::Codex => (vec![], codex_constraints()),
                     Provider::Cursor => {
@@ -3442,7 +3530,7 @@ pub(crate) mod tests {
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
         let root = temp(name);
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
@@ -3556,7 +3644,7 @@ pub(crate) mod tests {
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3790,8 +3878,8 @@ pub(crate) mod tests {
             None,
             move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()),
         );
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Personal".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Personal".into(), auth: None, key: None }).unwrap();
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
@@ -4368,7 +4456,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[], &[]);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[]);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -4380,7 +4468,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[], &[plugin.clone()]);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin));
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -4444,8 +4532,8 @@ pub(crate) mod tests {
         let root = temp("account-tabs");
         let m = accounts_machine(&root);
         let (work_app, side_app, own_app) = (root.join("work-app"), root.join("side-app"), root.join("own-app"));
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         for (app, account) in [(&work_app, Some("work")), (&side_app, Some("side")), (&own_app, None)] {
             std::fs::create_dir_all(app).unwrap();
             m.open_project(app.clone());
@@ -4467,6 +4555,64 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Writes a Go account and its key without validation, so a launch test stays offline.
+    #[cfg(unix)]
+    fn write_go_account(root: &Path) {
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/go")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id":"go","provider":"claude","name":"Go","auth":"opencode-go"}]"#).unwrap();
+        std::fs::write(config.join("accounts/go/opencode-go.key"), "oc_sk_test").unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_go_account_launches_claude_with_the_go_gateway_and_strips_a_parent_login() {
+        let root = temp("go-launch");
+        write_go_account(&root);
+        let claude = root.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$ANTHROPIC_BASE_URL\" \"$ANTHROPIC_AUTH_TOKEN\" \"$PINNED_OPENCODE_GO_KEY\" \"$CLAUDE_CONFIG_DIR\"\nsleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        m.open_project(app.clone());
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("go".into()) }).unwrap();
+        let tab = m.open_tab(Some(app.display().to_string()), false).unwrap();
+        let printed = first_line(&m, &tab);
+        let config = root.join("config").display().to_string();
+        assert_eq!(
+            printed,
+            format!("https://opencode.ai/inference/go/anthropic|oc_sk_test|oc_sk_test|{config}/accounts/go\r\n")
+        );
+        assert!(crate::opencode_go::STRIP_ENV.contains(&"ANTHROPIC_API_KEY"));
+        assert!(crate::opencode_go::STRIP_ENV.contains(&"CLAUDE_CODE_USE_BEDROCK"));
+        assert!(INHERITED_SESSION_ENV.contains(&"PINNED_OPENCODE_GO_KEY"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn moving_between_a_login_and_a_go_account_drops_the_other_models_id() {
+        let root = temp("go-switch-model");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        m.open_project(app.clone());
+        let tab = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        m.call(Call::SwitchAccount { tab: tab.clone(), account: "go".into(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(m.tab(&tab, |t| (t.account.id.clone(), t.model.clone())).unwrap(), ("go".into(), None));
+        m.tab(&tab, |t| t.model = Some("kimi-k3".into())).unwrap();
+        m.call(Call::SwitchAccount { tab: tab.clone(), account: "claude".into(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(m.tab(&tab, |t| (t.account.id.clone(), t.model.clone())).unwrap(), ("claude".into(), None));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_headless_claude_runs_under_the_tabs_claude_account() {
@@ -4475,8 +4621,8 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\necho \"{\\\"title\\\":\\\"as $PINNED_ACCOUNT\\\"}\"\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         let title = |account: &str| {
             let tab = m.add_tab(root.clone(), m.accounts.get(account).unwrap(), vec![], vec![], false, None);
             m.call(Call::RegenerateTitle { tab, previous: String::new(), thread: "USER: hi".into() })
@@ -4495,24 +4641,24 @@ pub(crate) mod tests {
         let m = accounts_machine(&root);
         m.open_project(app.clone());
         let work = json!({
-            "id": "work", "provider": "claude", "name": "Work", "provider_name": "Claude Code", "builtin": false,
+            "id": "work", "provider": "claude", "name": "Work", "auth": "login", "provider_name": "Claude Code", "builtin": false,
             "signed_in": false, "email": null, "org": null, "plan": null,
         });
-        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }), Ok(work.clone()));
-        assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into() }), Err("an account work already exists".into()));
+        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }), Ok(work.clone()));
+        assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into(), auth: None, key: None }), Err("an account work already exists".into()));
         assert_eq!(
             m.call(Call::ListAccounts),
             Ok(json!([
                 {
-                    "id": "claude", "provider": "claude", "name": "Claude Code", "provider_name": "Claude Code", "builtin": true,
+                    "id": "claude", "provider": "claude", "name": "Claude Code", "auth": "login", "provider_name": "Claude Code", "builtin": true,
                     "signed_in": true, "email": "ana@acme.dev", "org": "Acme", "plan": "max",
                 },
                 {
-                    "id": "codex", "provider": "codex", "name": "Codex", "provider_name": "Codex", "builtin": true,
+                    "id": "codex", "provider": "codex", "name": "Codex", "auth": "login", "provider_name": "Codex", "builtin": true,
                     "signed_in": true, "email": null, "org": null, "plan": null,
                 },
                 {
-                    "id": "cursor", "provider": "cursor", "name": "Cursor", "provider_name": "Cursor", "builtin": true,
+                    "id": "cursor", "provider": "cursor", "name": "Cursor", "auth": "login", "provider_name": "Cursor", "builtin": true,
                     "signed_in": true, "email": "ana@acme.dev", "org": null, "plan": null,
                 },
                 work,
@@ -4538,8 +4684,8 @@ pub(crate) mod tests {
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         let m = accounts_machine(&root);
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         m.open_project(app.clone());
         let run = |account: Option<&str>| {
             let spec = RunSpec { folder: app.display().to_string(), repo: None, args: vec!["Fix ENG-7".into()], env: vec![], token: None, account: account.map(Into::into) };
@@ -4598,8 +4744,8 @@ pub(crate) mod tests {
     fn a_project_syncs_the_claude_files_of_its_account() {
         let root = temp("sync-account");
         let m = accounts_machine(&root);
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         for (name, account) in [("own", None), ("work", Some("work")), ("side", Some("side"))] {
             let app = root.join(name);
             std::fs::create_dir_all(&app).unwrap();
@@ -4625,8 +4771,8 @@ pub(crate) mod tests {
     fn signing_in_runs_the_providers_login_in_the_accounts_home_and_is_never_resumed() {
         let root = temp("sign-in");
         let m = accounts_machine(&root);
-        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         let config = root.join("config").display().to_string();
         let tab = m.call(Call::SignIn { account: "work".into() }).unwrap();
         let id = tab.as_str().unwrap().to_owned();
@@ -4677,7 +4823,7 @@ pub(crate) mod tests {
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         let m = accounts_machine(&root);
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         std::fs::write(
             root.join("config/sessions.json"),
             format!(r#"[{{"cwd": "{}", "session": "thr-9", "env": [], "bypass": false, "interrupted": false, "resume_at": null, "account": "side"}}]"#, app.display()),
@@ -4698,7 +4844,7 @@ pub(crate) mod tests {
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         let m = accounts_machine(&root);
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         let script = root.join("user-notify");
         let home = root.join("config/accounts/side");
         std::fs::write(
@@ -4725,7 +4871,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&app).unwrap();
         let m = accounts_machine(&root);
         for (provider, name) in [(Provider::Claude, "Work"), (Provider::Claude, "Spare"), (Provider::Codex, "Side")] {
-            m.call(Call::AddAccount { provider, name: name.into() }).unwrap();
+            m.call(Call::AddAccount { provider, name: name.into(), auth: None, key: None }).unwrap();
         }
         m.open_project(app.clone());
         m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
@@ -5770,7 +5916,7 @@ while True:
         let api_tab = open(&api).unwrap();
         assert_ne!(api_tab, app_tab);
         assert_eq!(m.view(api_tab.as_str().unwrap()).unwrap().opened, 2);
-        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         m.open_project(side.clone());
         m.call(Call::SetProjectAccount { path: side.display().to_string(), account: Some("side".into()) }).unwrap();
         assert_eq!(open(&side), Err("account side runs Codex, which can't be a project's orchestrator".into()));

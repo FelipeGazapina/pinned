@@ -16,7 +16,8 @@ schemars = "=1.2.3"
 # The binary installs rustls's ring provider before the first request.
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "rustls-no-provider"] }
 tokio = { version = "1", features = ["time", "sync", "rt", "net", "macros"] }
-# The binary installs rustls's ring provider, as for reqwest.
+# The binary installs rustls's ring provider, as for reqwest. The Go statusline installs it too.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

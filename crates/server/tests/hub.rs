@@ -2203,7 +2203,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
     let machine = creds.machine_id.clone();
     let node = Node::start(&dir, creds);
     client.wait_machines(&[("watch-node", true)]);
-    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
     let app = dir.join("app");
     std::fs::create_dir_all(&app).unwrap();
     let projects = dir.join("accounts/work/projects/demo");

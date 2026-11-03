@@ -686,7 +686,7 @@
                 ]
               },
               {
-                "description": "The new account's `accounts::View`. Its id is a slug of `name`.",
+                "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -698,12 +698,49 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "auth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Auth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
                   "cmd",
                   "provider",
                   "name"
+                ]
+              },
+              {
+                "description": "The account's `accounts::View`. Refused for an account that signs in with a CLI login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_account_key"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "key"
                 ]
               },
               {
@@ -2652,6 +2689,14 @@
               "claude",
               "codex",
               "cursor"
+            ]
+          },
+          "Auth": {
+            "description": "How an account signs in. An account written before this field existed is a CLI login.",
+            "type": "string",
+            "enum": [
+              "login",
+              "opencode-go"
             ]
           },
           "PrAction": {
@@ -6101,7 +6146,7 @@
                 ]
               },
               {
-                "description": "The new account's `accounts::View`. Its id is a slug of `name`.",
+                "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -6113,12 +6158,49 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "auth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Auth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
                   "cmd",
                   "provider",
                   "name"
+                ]
+              },
+              {
+                "description": "The account's `accounts::View`. Refused for an account that signs in with a CLI login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_account_key"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "key"
                 ]
               },
               {
@@ -8046,6 +8128,14 @@
               "claude",
               "codex",
               "cursor"
+            ]
+          },
+          "Auth": {
+            "description": "How an account signs in. An account written before this field existed is a CLI login.",
+            "type": "string",
+            "enum": [
+              "login",
+              "opencode-go"
             ]
           },
           "PrAction": {
@@ -11419,6 +11509,16 @@
                     "type": "null"
                   }
                 ]
+              },
+              "monthly": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LimitWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -14048,6 +14148,16 @@
                 ]
               },
               "seven_day": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LimitWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "monthly": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/LimitWindow"
@@ -23981,6 +24091,16 @@
                     "type": "null"
                   }
                 ]
+              },
+              "monthly": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LimitWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -26105,6 +26225,16 @@
                 ]
               },
               "seven_day": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/LimitWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "monthly": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/LimitWindow"
@@ -28250,7 +28380,7 @@
                 ]
               },
               {
-                "description": "The new account's `accounts::View`. Its id is a slug of `name`.",
+                "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -28262,12 +28392,49 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "auth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Auth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
                   "cmd",
                   "provider",
                   "name"
+                ]
+              },
+              {
+                "description": "The account's `accounts::View`. Refused for an account that signs in with a CLI login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_account_key"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "key"
                 ]
               },
               {
@@ -30218,6 +30385,14 @@
               "cursor"
             ]
           },
+          "Auth": {
+            "description": "How an account signs in. An account written before this field existed is a CLI login.",
+            "type": "string",
+            "enum": [
+              "login",
+              "opencode-go"
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -31958,7 +32133,7 @@
                 ]
               },
               {
-                "description": "The new account's `accounts::View`. Its id is a slug of `name`.",
+                "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -31970,12 +32145,49 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "auth": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Auth"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
                   "cmd",
                   "provider",
                   "name"
+                ]
+              },
+              {
+                "description": "The account's `accounts::View`. Refused for an account that signs in with a CLI login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_account_key"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "key"
                 ]
               },
               {
@@ -33903,6 +34115,14 @@
               "claude",
               "codex",
               "cursor"
+            ]
+          },
+          "Auth": {
+            "description": "How an account signs in. An account written before this field existed is a CLI login.",
+            "type": "string",
+            "enum": [
+              "login",
+              "opencode-go"
             ]
           },
           "PrAction": {

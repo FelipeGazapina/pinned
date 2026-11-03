@@ -29,17 +29,17 @@ fn prompt(previous: &str, thread: &str) -> String {
 }
 
 /// Runs `claude` without tools, hooks or a saved session, since only its answer matters.
-pub fn regenerate(claude: &Path, env: &[(String, String)], cwd: &Path, path: Option<&str>, previous: &str, thread: &str) -> Result<String, String> {
+pub fn regenerate(claude: &Path, headless: &crate::machine::Headless<'_>, cwd: &Path, path: Option<&str>, previous: &str, thread: &str) -> Result<String, String> {
     let mut command = crate::process::command(claude);
     command
         .args(["-p", "--no-session-persistence", "--model", "haiku", "--tools", "", "--settings", r#"{"disableAllHooks":true}"#])
         .arg(prompt(previous, thread))
         .current_dir(cwd)
-        .envs(env.iter().cloned())
         .stdin(Stdio::null());
-    for key in crate::machine::INHERITED_SESSION_ENV {
+    for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(headless.strip) {
         command.env_remove(key);
     }
+    command.envs(headless.env.iter().cloned());
     if let Some(path) = path {
         command.env("PATH", path);
     }
