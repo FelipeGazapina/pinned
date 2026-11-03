@@ -571,6 +571,8 @@ function hideCard() {
   hoverCard.hidden = true;
   card = null;
 }
+/** Whether a card `width` wide fits in the `viewport` beside a row that ends at `right`. */
+const cardFitsBeside = (right, width, viewport) => right + 4 + width <= viewport - 8;
 function showCard(target) {
   card = target;
   hoverCard.className = target.side;
@@ -578,6 +580,9 @@ function showCard(target) {
   hoverCard.hidden = false;
   const a = target.anchor.getBoundingClientRect();
   const r = hoverCard.getBoundingClientRect();
+  // A narrow window, where the sidebar covers almost all of it, has no room beside the row.
+  // Clamping the card there would cover the row's own settle and snooze actions.
+  if (target.side === "right" && !cardFitsBeside(a.right, r.width, innerWidth)) return hideCard();
   const x = target.side === "right" ? a.right + 4 : a.left + a.width / 2 - r.width / 2;
   const y = target.side === "right" ? a.top : a.top - r.height;
   hoverCard.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
