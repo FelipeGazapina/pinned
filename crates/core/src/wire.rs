@@ -142,8 +142,16 @@ pub enum Call {
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,
-    /// which picks it for that conversation alone.
-    SetModel { tab: TabId, model: String, cols: u16, rows: u16 },
+    /// which picks it for that conversation alone. With `account`, moves the conversation to that
+    /// account first when it is another one, so a model from another provider keeps the thread.
+    SetModel {
+        tab: TabId,
+        model: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+    },
     /// The folder claude runs in. Restarts claude on the tab's conversation, so its skills,
     /// plugins and MCP servers load again.
     RestartClaude { tab: TabId, cols: u16, rows: u16 },
@@ -551,6 +559,7 @@ impl Call {
                 | Call::SetAccountKey { .. }
                 | Call::SignIn { .. }
                 | Call::SwitchAccount { .. }
+                | Call::SetModel { .. }
                 | Call::TokenUsage { .. }
                 | Call::UsageLimits
                 | Call::PullRequests { .. }

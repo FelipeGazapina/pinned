@@ -498,7 +498,7 @@ function cardRow(tab) {
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
-  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "sparkles" : "claude";
+  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
@@ -571,6 +571,8 @@ function hideCard() {
   hoverCard.hidden = true;
   card = null;
 }
+/** Whether a card `width` wide fits in the `viewport` beside a row that ends at `right`. */
+const cardFitsBeside = (right, width, viewport) => right + 4 + width <= viewport - 8;
 function showCard(target) {
   card = target;
   hoverCard.className = target.side;
@@ -578,6 +580,9 @@ function showCard(target) {
   hoverCard.hidden = false;
   const a = target.anchor.getBoundingClientRect();
   const r = hoverCard.getBoundingClientRect();
+  // A narrow window, where the sidebar covers almost all of it, has no room beside the row.
+  // Clamping the card there would cover the row's own settle and snooze actions.
+  if (target.side === "right" && !cardFitsBeside(a.right, r.width, innerWidth)) return hideCard();
   const x = target.side === "right" ? a.right + 4 : a.left + a.width / 2 - r.width / 2;
   const y = target.side === "right" ? a.top : a.top - r.height;
   hoverCard.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;

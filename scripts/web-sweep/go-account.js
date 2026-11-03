@@ -81,19 +81,7 @@ const waitFor = async (what, fn, timeout = 20000) => {
   await page.evaluate(() => setMode("gui"));
   await page.click("#model-button");
   await page.waitForSelector('[data-provider="claude"]', { timeout: 10000 });
-  check((await page.locator('[data-provider="go"]').count()) === 0, "a Claude account shows the Go rail");
-  await page.keyboard.press("Escape");
-  await page.evaluate(async ([m, p]) => {
-    await callOn(m, { cmd: "set_project_account", path: p, account: "go" });
-    await switchAccount(tabByKey(active.key), "go");
-  }, [machine, folder]);
-  await waitFor("the Go tab to run", () => page.evaluate((k) => tabByKey(k)?.view.account === "go" && tabByKey(k)?.view.running === true, tabKey));
-  await page.evaluate(() => {
-    if (settingsOpen()) toggleSettings();
-    setMode("gui");
-  });
-  await page.click("#model-button");
-  await page.waitForSelector('[data-provider="go"]', { timeout: 10000 });
+  check((await page.locator('[data-provider="go"]').count()) === 1, "the Claude thread does not offer the Go provider");
   await page.click('[data-provider="go"]');
   await page.waitForSelector('[data-row="kimi-k3"]', { timeout: 10000 });
   await page.click('[data-row="kimi-k3"] [data-fav="kimi-k3"]');
@@ -101,6 +89,10 @@ const waitFor = async (what, fn, timeout = 20000) => {
   check((await page.locator('[data-row="kimi-k3"]').count()) === 1, "the Go favorite is missing");
   check((await page.locator('[data-row="claude-opus-5-5"]').count()) === 0, "the Go favorites list shows a Claude model");
   await page.click('[data-row="kimi-k3"]');
+  await waitFor("the Go tab to run", () => page.evaluate((k) => tabByKey(k)?.view.account === "go" && tabByKey(k)?.view.running === true, tabKey));
+  check((await page.evaluate(() => tabs.length)) === 1, "selecting a Go model opened another thread");
+  const mark = await page.getAttribute("#model-button svg", "class");
+  check(/\bopencode\b/.test(mark), `the Go model button shows ${mark}`);
   const launch = path.join(HOME, "claude-launch.log");
   await waitFor("the chosen Go model", () => fs.existsSync(launch) && fs.readFileSync(launch, "utf8").includes("--model kimi-k3"));
   await waitFor("the Go usage meter", async () => /5h 42%/.test(await page.textContent("#usage")), 20000);

@@ -651,7 +651,7 @@ impl Machine {
             Call::AutoResume { tab, on } => json(self.auto_resume(&tab, on)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
-            Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
+            Call::SetModel { tab, model, cols, rows, account } => json(self.set_model(&tab, &model, cols, rows, account.as_deref())?),
             Call::RestartClaude { tab, cols, rows } => json(self.restart_claude(&tab, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
@@ -1412,6 +1412,12 @@ impl Machine {
     /// stopped, as on a usage limit, continues at once instead of waiting for the old account.
     pub fn switch_account(&self, tab: &str, account: &str, cols: u16, rows: u16) -> Result<String, String> {
         let to = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        self.move_to_account(tab, to, None, cols, rows)
+    }
+
+    /// Moves the tab to `to`, keeping its conversation. `model` replaces the picked model, or when
+    /// absent, a model from another auth is dropped instead of carried into the new account.
+    fn move_to_account(&self, tab: &str, to: Account, model: Option<&str>, cols: u16, rows: u16) -> Result<String, String> {
         let (from, program, session, working) = self.tab(tab, |t| {
             let working = t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted);
             (t.account.clone(), t.program, t.claude_session.clone(), working)
@@ -1438,10 +1444,12 @@ impl Machine {
             std::fs::create_dir_all(&into).and_then(|_| copy_tree(file.parent().unwrap(), &into, session)).map_err(|e| format!("could not copy the conversation to {}: {e}", to.id))?;
         }
         self.tab(tab, |t| {
-            // A model id belongs to the auth that served it. Moving between a Claude login and a
-            // Go key must not carry one gateway's model into the other.
-            if t.account.auth != to.auth {
-                t.model = None;
+            match model {
+                Some(model) => t.model = Some(model.to_owned()),
+                // A model id belongs to the auth that served it. Moving between a Claude login and
+                // a Go key must not carry one gateway's model into the other.
+                None if t.account.auth != to.auth => t.model = None,
+                None => {}
             }
             t.account = to;
             t.resume_at = None;
@@ -1524,9 +1532,16 @@ impl Machine {
 
     /// Restarts the tab's claude on its conversation with `model`, for this conversation alone, and
     /// returns its folder. Claude's own /model saves its pick as the default for every session.
-    pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16) -> Result<String, String> {
+    /// With `account`, a model from another account moves the conversation there first.
+    pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16, account: Option<&str>) -> Result<String, String> {
         if model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
             return Err(format!("{model:?} is not a model name"));
+        }
+        if let Some(id) = account.filter(|id| !id.is_empty()) {
+            let to = self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?;
+            if self.tab(tab, |t| t.account.id != to.id)? {
+                return self.move_to_account(tab, to, Some(model), cols, rows);
+            }
         }
         self.tab(tab, |t| {
             t.model = Some(model.to_owned());
@@ -4090,8 +4105,8 @@ pub(crate) mod tests {
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
-        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "--evil".into(), cols: 80, rows: 24 }), Err("\"--evil\" is not a model name".into()));
-        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "claude-opus-4-8".into(), cols: 80, rows: 24 }), Ok(json!(dir.display().to_string())));
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "--evil".into(), cols: 80, rows: 24, account: None }), Err("\"--evil\" is not a model name".into()));
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "claude-opus-4-8".into(), cols: 80, rows: 24, account: None }), Ok(json!(dir.display().to_string())));
         wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
         assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
         assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
@@ -4661,6 +4676,22 @@ pub(crate) mod tests {
         m.tab(&tab, |t| t.model = Some("kimi-k3".into())).unwrap();
         m.call(Call::SwitchAccount { tab: tab.clone(), account: "claude".into(), cols: 80, rows: 24 }).unwrap();
         assert_eq!(m.tab(&tab, |t| (t.account.id.clone(), t.model.clone())).unwrap(), ("claude".into(), None));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_model_from_another_account_moves_the_same_tab_and_sets_both() {
+        let root = temp("go-set-model-account");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        m.open_project(app.clone());
+        let tab = m.add_tab(app, Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        m.call(Call::SetModel { tab: tab.clone(), model: "kimi-k3".into(), cols: 80, rows: 24, account: Some("go".into()) }).unwrap();
+        assert_eq!(m.tab(&tab, |t| (t.account.id.clone(), t.model.clone())).unwrap(), ("go".into(), Some("kimi-k3".into())));
         let _ = std::fs::remove_dir_all(root);
     }
 

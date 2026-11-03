@@ -288,10 +288,11 @@ Codex tabs run the `codex` CLI. pinned asks Codex to report when a turn ends, so
 can land after that turn. They still have no usage meter and no resume after a restart.
 
 An OpenCode Go account runs the Claude Code CLI, so it is not a separate provider in the tab
-strip and takes part in delegation like any Claude Code account. Its model picker offers the
-Go gateway's models and restarts the session with `--model` for the one you choose. A model id
-belongs to one auth, so moving a conversation between a Claude login and a Go key drops the
-picked model and lets the new account choose its own.
+strip and takes part in delegation like any Claude Code account. The model picker's left rail
+lists Favorites and every signed-in Claude Code and OpenCode Go account. Pick a model from another
+account and the same conversation moves there. pinned copies its transcript into that account's
+home and resumes it with `--model`, so the thread continues instead of starting over. A model id
+belongs to one auth, so a move without a new pick drops the old model and lets the account choose.
 
 ## Delegating to other providers
 
@@ -658,10 +659,16 @@ install, and restart.
 ## Develop
 
 ```sh
-cargo run -- ~/path/to/project    # debug build
+cargo run -p pinned-dev           # isolated dev app, rebuilds and restarts on changes
+cargo run -- ~/path/to/project    # debug build on the normal config
 npm run tauri build               # .app and .dmg in target/release/bundle
 npm run tauri build -- --bundles nsis   # on Windows: the setup .exe in target/release/bundle/nsis
 ```
+
+`cargo run -p pinned-dev` keeps the app's config under `.dev/home`, so it never shares accounts,
+projects, sessions, history or the hub sign-in with the installed app. It watches `src`, `crates` and
+`ui`, then rebuilds and restarts the app after a change. The log is `.dev/dev.log`. Delete
+`.dev` to start again with an empty environment.
 
 The `windows` workflow runs the tests on Windows and builds the installer for every
 pull request. Download it from the run's `pinned-windows-setup` artifact to try a change on

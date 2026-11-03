@@ -230,6 +230,9 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 
 @media (max-width: 768px) {
   #sidebar-resize, #chat-head .crumb .stats { display: none; }
+  /* The row's actions are what the pointer came for. Drop the role badge while they show so they
+   * never run past the overlay sidebar's right edge. */
+  .thread-row:hover .role:not(.worker), .thread-row:focus-visible .role:not(.worker) { display: none; }
 }
 @media (pointer: coarse) {
   #side-menu button, #chat-head .crumb :is(.project, .parent, button.title) { min-height: 40px; }
