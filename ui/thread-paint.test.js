@@ -101,6 +101,8 @@ function guiOn() { return document.body.dataset.mode === "gui"; }
 function keyOf(machine, id) { return machine + ":" + id; }
 function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
+function modelName(tab) { return tab.model ?? "Default"; }
+function highlightLines(lines) { return lines; }
 function threadKey(tab) { return tab.key; }
 function limitBanner() { return null; }
 function icon(name, cls = "") { return '<svg data-icon="' + name + '" class="' + cls + '"></svg>'; }
@@ -352,6 +354,19 @@ test("an agent that starts with no new line shows its card", async () => {
   s.agents = [runningAgent];
   await poll(tab, net);
   assert.match(painted().agents, /Look around/);
+});
+
+test("a working turn shows the agent card with its full latest step", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "thinking", at: "t3", text: "Planning the build" } });
+  s.append({ item: { kind: "tool", at: "t4", id: "toolu_bash", name: "Bash", summary: "Build the app", detail: "cd app && npm run build" } });
+  await poll(tab, net);
+  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(card, /class="agent-head live-head"/);
+  assert.match(card, />Claude</);
+  assert.match(card, /working/);
+  assert.match(card, /Planning the build[\s\S]*npm run build/);
+  assert.doesNotMatch(card, /Running cd/);
 });
 
 test("a rewind that rewrites the last line in place repaints it", async () => {

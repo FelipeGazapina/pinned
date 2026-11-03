@@ -494,8 +494,6 @@ function thoughtText(text) {
   return words.join("").replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]).replace(/\s+/g, " ").trim();
 }
 
-const programOf = (command) => command.trim().split(/\s+/).find((w) => !/^\w+=/.test(w))?.split("/").pop() || "command";
-
 /** T3 Code's summary of a run of tools, such as "Read 3 files and ran 2 commands". */
 const ACTIONS = {
   command: [0, (n) => `Ran ${n} ${n === 1 ? "command" : "commands"}`],
@@ -605,20 +603,21 @@ function workHtml(steps, work, cwd, t, live, change) {
   return out.join("");
 }
 
-/** The running turn's latest work: its last thought above its last tool, and "Thinking" while no tool runs,
- * since claude writes a thought to the transcript only once it is done. */
-function liveHtml(turn, active, cwd) {
+/** The running turn's latest work, in the same card an orchestrator's worker gets: the agent, its model,
+ * its state, how long it has run and the step it is on, with its last thought above it. */
+function liveHtml(tab, turn, active, cwd) {
   const thought = active.findLast((s) => s.kind === "thinking");
   const tool = active.findLast((s) => s.kind === "tool");
-  const open = `data-open-turn="${esc(turn.id)}"`;
-  const thinking = (above = "") => `<button type="button" class="live-tool" ${open}>${above}<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span></button>`;
-  const line = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
-  if (!tool || active.at(-1) === thought) return thinking(line);
-  const label =
-    tool.name === "Bash" ? `${!tool.result ? "Running" : interruption(tool) ? "Stopped" : tool.result.error ? "Failed" : "Ran"} ${programOf(tool.detail || tool.summary)}`
-    : toolLabel(tool, cwd);
-  const row = `<button type="button" class="live-tool" ${open}>${line}<span class="line${tool.result ? " done" : ""}">${icon(toolIcon(tool), "kind")}<span class="label">${esc(label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span></button>`;
-  return tool.result ? row + thinking() : row;
+  const since = turn.start || Date.now();
+  const model = modelName(tab);
+  const chip = model && model !== "Default" ? `<span class="chip">${esc(model)}</span>` : "";
+  const head = `<span class="agent-head live-head">${icon("bot", "kind")}<span class="name">Claude</span>${chip}<span class="state-label">working</span><span class="time ticker" data-since="${since}">${ticking(Math.max(0, Date.now() - since))}</span>${icon("loader-circle", "state")}</span>`;
+  const thoughtRow = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
+  const thinking = `<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span>`;
+  const step = tool ? stepLine(tool, cwd) : null;
+  const toolRow = tool ? `<span class="line${tool.result ? " done" : ""}">${icon(step.icon, "kind")}<span class="label" title="${esc(step.label)}">${esc(step.label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span>` : "";
+  const body = !tool || active.at(-1) === thought ? thoughtRow + thinking : thoughtRow + toolRow + (tool.result ? thinking : "");
+  return `<button type="button" class="live-tool agent-card live-agent" data-open-turn="${esc(turn.id)}" data-state="running" title="Open the turn's steps">${head}${body}</button>`;
 }
 
 const ANSWER = /"([^"]*)"="([^"]*)"/g;
@@ -889,7 +888,7 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
-      ${!t.open.has(turn.id) && !compacting ? liveHtml(turn, active, cwd) : ""}`;
+      ${!t.open.has(turn.id) && !compacting ? liveHtml(tab, turn, active, cwd) : ""}`;
   } else if (work.length) {
     const end = turn.user?.steer ? turn.end : turn.runEnd;
     const took = end > turn.start ? duration(end - turn.start) : "";

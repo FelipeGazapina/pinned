@@ -22,6 +22,11 @@
 .agents-working .ticker { font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .agent-card .state, .agents-working .i { animation: none; } }
 @media (pointer: coarse) { .agent-card .agent-head { min-height: 40px; } }
+.live-agent { margin: 2px 0 12px; text-align: left; }
+.live-agent .live-head .name { flex: 0 1 auto; }
+.live-agent .live-head .chip { flex: 0 1 auto; max-width: 35%; }
+.live-agent .live-head .time { flex: none; }
+@media (pointer: coarse) { .live-agent .live-head { min-height: 40px; } }
 .delegated-strip { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 .delegated-strip .delegated { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .delegated-strip .name { font-size: 13px; font-weight: 500; }

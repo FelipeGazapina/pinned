@@ -116,7 +116,9 @@ The app view has three columns:
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. A page Claude published with its
   Artifact tool shows as a card; **Open** opens it on claude.ai. Type below and press Enter to send.
-  While Claude works, Enter queues your message and the red button stops the turn.
+  While Claude works, a card sits under the turn with the agent, its model, how long it has run
+  and the step it is on, the same latest step an orchestrator's worker card shows; click it to
+  see the turn's steps. Enter queues your message and the red button stops the turn.
   Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
   now and how long it has run; click a card to see its recent steps. While any agent runs after
   Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
