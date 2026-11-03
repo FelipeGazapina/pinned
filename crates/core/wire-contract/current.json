@@ -261,7 +261,7 @@
                 ]
               },
               {
-                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone.",
+                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone. With `account`, moves the conversation to that\naccount first when it is another one, so a model from another provider keeps the thread.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -285,6 +285,12 @@
                     "format": "uint16",
                     "minimum": 0,
                     "maximum": 65535
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -5721,7 +5727,7 @@
                 ]
               },
               {
-                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone.",
+                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone. With `account`, moves the conversation to that\naccount first when it is another one, so a model from another provider keeps the thread.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -5745,6 +5751,12 @@
                     "format": "uint16",
                     "minimum": 0,
                     "maximum": 65535
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -27955,7 +27967,7 @@
                 ]
               },
               {
-                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone.",
+                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone. With `account`, moves the conversation to that\naccount first when it is another one, so a model from another provider keeps the thread.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -27979,6 +27991,12 @@
                     "format": "uint16",
                     "minimum": 0,
                     "maximum": 65535
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -31708,7 +31726,7 @@
                 ]
               },
               {
-                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone.",
+                "description": "The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,\nwhich picks it for that conversation alone. With `account`, moves the conversation to that\naccount first when it is another one, so a model from another provider keeps the thread.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -31732,6 +31750,12 @@
                     "format": "uint16",
                     "minimum": 0,
                     "maximum": 65535
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

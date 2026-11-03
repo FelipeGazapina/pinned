@@ -286,10 +286,11 @@ Codex tabs run the `codex` CLI. pinned asks Codex to report when a turn ends, so
 can land after that turn. They still have no usage meter and no resume after a restart.
 
 An OpenCode Go account runs the Claude Code CLI, so it is not a separate provider in the tab
-strip and takes part in delegation like any Claude Code account. Its model picker offers the
-Go gateway's models and restarts the session with `--model` for the one you choose. A model id
-belongs to one auth, so moving a conversation between a Claude login and a Go key drops the
-picked model and lets the new account choose its own.
+strip and takes part in delegation like any Claude Code account. The model picker's left rail
+lists Favorites and every signed-in Claude Code and OpenCode Go account. Pick a model from another
+account and the same conversation moves there. pinned copies its transcript into that account's
+home and resumes it with `--model`, so the thread continues instead of starting over. A model id
+belongs to one auth, so a move without a new pick drops the old model and lets the account choose.
 
 ## Delegating to other providers
 

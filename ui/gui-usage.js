@@ -512,7 +512,7 @@ const limitAccountName = (a) => (a.email ? accountChip(a.email) : esc(limitAccou
 function segmentPopHtml(account, w, reset, now) {
   const timeLeft = windowElapsed(w, now) === null ? null : Math.round((1 - windowElapsed(w, now)) * 100);
   const row = (label, value) => `<div class="pop-row"><span>${label}</span><span>${value}</span></div>`;
-  return `<div class="segment-pop"><div class="who"><span class="name">${icon(account.go ? "sparkles" : "claude")}<span>${esc(account.go ? account.name ?? "OpenCode Go" : "Claude")}</span></span>${
+  return `<div class="segment-pop"><div class="who"><span class="name">${icon(account.go ? "opencode" : "claude")}<span>${esc(account.go ? account.name ?? "OpenCode Go" : "Claude")}</span></span>${
     account.email ? `<button type="button" class="redacted" data-email="${esc(account.email)}" aria-label="Toggle account email visibility" title="Click to reveal email">${esc(redactedText(account.email))}</button>` : ""}</div>
     ${account.plan || account.environments.length ? `<div class="pop-rows">${account.plan ? row("Plan", esc(account.plan)) : ""}${row("Signed in", esc(account.environments.join(", ")))}</div>` : ""}
     <div class="pop-rows">${row("Left", `${windowLeft(w)}%`)}${w.resets_at ? row("Resets", `${upcomingText(w.resets_at, now)}${w.resets_at > now + 59 ? ` · ${resetsInText(w.resets_at, now).replace("resets in ", "in ")}` : ""}`) : ""}${
@@ -557,7 +557,7 @@ function limitsHtml() {
     return text ? [usageSelected().length > 1 ? `${machineName(m)} · ${text}` : text] : [];
   });
   return `<div class="limits-view">${pools.length || notices.length ? "" : `<p class="muted note">No provider on the selected environments reports subscription limits.</p>`}
-    ${pools.length ? `<section class="limits"><h2>${icon(go ? "sparkles" : "claude")}${go ? "Subscriptions" : "Claude"}</h2>${pools.map((pool) => limitCardHtml(pool, now)).join("")}</section>` : ""}
+    ${pools.length ? `<section class="limits"><h2>${icon(go ? "opencode" : "claude")}${go ? "Subscriptions" : "Claude"}</h2>${pools.map((pool) => limitCardHtml(pool, now)).join("")}</section>` : ""}
     ${notices.length ? `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div>${[...new Set(notices)].map((n) => `<p>${esc(n)}</p>`).join("")}</div></div>` : ""}</div>`;
 }
 document.addEventListener("click", (e) => {

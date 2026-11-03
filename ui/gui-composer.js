@@ -1152,11 +1152,19 @@ function modelName(tab) {
   return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
 }
 const authOf = (tab) => accountOf(tab.machine, tab.view.account)?.auth ?? "login";
-const modelsFor = (tab) => (authOf(tab) === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS);
+const modelsForAccount = (account) => (account?.auth === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS);
+const modelsFor = (tab) => modelsForAccount(accountOf(tab.machine, tab.view.account));
 const modelOf = (tab) => {
   const name = modelName(tab);
   return modelsFor(tab).find((m) => m.name === name || m.slug === name || m.name === `Claude ${name}`) ?? null;
 };
+/** The signed-in Claude Code and OpenCode Go accounts the model picker can run under. */
+function modelAccounts(tab) {
+  const accounts = (machines.get(tab.machine)?.accounts ?? []).filter((a) => a.provider === "claude" && (a.id === tab.view.account || a.signed_in));
+  if (!accounts.length) return [{ id: DEFAULT_ACCOUNT, name: "Claude Code", auth: "login", provider: "claude", provider_name: "Claude Code", signed_in: true }];
+  return accounts.sort((a, b) => Number(b.id === tab.view.account) - Number(a.id === tab.view.account));
+}
+const providerLabel = (account) => (account.auth === "opencode-go" ? "OpenCode Go" : account.id === DEFAULT_ACCOUNT ? "Claude" : `Claude · ${account.name}`);
 /** Claude's /model menu: the numbered rows under "Select model", ❯ on the chosen one. Its effort
  * and fast mode lines under the rows keep `menuOn` from reading it. */
 function modelMenuOn(lines) {
@@ -1167,18 +1175,24 @@ function modelMenuOn(lines) {
 }
 
 /** A model T3 Code lists is picked from claude's /model menu with "s", for this session alone,
- * since Enter there saves it as every session's default. Any other restarts claude with --model. */
-function pickModel(tab, model) {
+ * since Enter there saves it as every session's default. A model from another account, or any
+ * model Go serves, restarts the same conversation there with --model. */
+function pickModel(tab, model, account) {
+  if (!model || !account) return;
   composerMenu.hidden = true;
-  if (modelOf(tab) === model) return;
+  const same = account.id === tab.view.account;
+  if (same && modelOf(tab) === model) return;
   const done = (ok) => {
     if (!ok) return;
-    threadOf(tab).picked = model.provider === "opencode-go" ? model.name : model.name.replace(/^Claude /, "");
+    threadOf(tab).picked = account.auth === "opencode-go" ? model.name : model.name.replace(/^Claude /, "");
     if (tab === active) renderComposer(tab);
   };
-  if (model.provider === "opencode-go" || model.legacy) {
+  if (!same || account.auth === "opencode-go" || model.legacy) {
     refit(tab);
-    return whenIdle(tab, () => callOn(tab.machine, { cmd: "set_model", tab: tab.view.id, model: model.slug, cols: tab.term.cols, rows: tab.term.rows }).then(() => done(true), (e) => showComposerNote(String(e), true)));
+    return whenIdle(tab, () =>
+      callOn(tab.machine, { cmd: "set_model", tab: tab.view.id, model: model.slug, cols: tab.term.cols, rows: tab.term.rows, account: account.id })
+        .then(() => refreshTabs(tab.machine))
+        .then(() => done(true), (e) => showComposerNote(String(e), true)));
   }
   whenIdle(tab, async () =>
     done(await throughMenu(tab, "/model", modelMenuOn, async (menu) => {
@@ -1195,22 +1209,24 @@ let modelFavorites = [];
 try {
   modelFavorites = JSON.parse(load("gui-model-favorites")) ?? [];
 } catch {}
-const modelPicker = { provider: "claude", search: "", legacy: false, highlight: 0 };
+const modelPicker = { provider: "", search: "", legacy: false, highlight: 0 };
 
-/** T3 Code's model picker: a provider rail with Favorites, a search, and the models with their
- * NEW badge, a check on the current one and a star. */
+/** T3 Code's model picker: a provider rail with Favorites and every signed-in Claude Code or
+ * OpenCode Go account, a search, and the models with their NEW badge, a check on the current one
+ * and a star. */
 function openModels(anchor) {
   const tab = active;
   if (!tab) return;
-  // A Go account is not the built-in one, so its auth comes from the machine's account list.
-  if (tab.view.account !== DEFAULT_ACCOUNT && !accountOf(tab.machine, tab.view.account)) {
+  const loaded = machines.get(tab.machine)?.accounts;
+  const missing = tab.view.account !== DEFAULT_ACCOUNT && !accountOf(tab.machine, tab.view.account);
+  if (!loaded || missing) {
     composerMenu.hidden = false;
     composerMenu.dataset.kind = "models";
     composerMenu.innerHTML = `<p class="none">Loading models…</p>`;
     placeMenu(anchor);
     accountsOf(tab.machine, true).then(() => {
       if (active !== tab || composerMenu.hidden) return;
-      if (!accountOf(tab.machine, tab.view.account)) {
+      if (tab.view.account !== DEFAULT_ACCOUNT && !accountOf(tab.machine, tab.view.account)) {
         composerMenu.innerHTML = `<p class="none">Account is not available on this machine.</p>`;
         return;
       }
@@ -1220,11 +1236,15 @@ function openModels(anchor) {
     });
     return;
   }
-  const go = authOf(tab) === "opencode-go";
-  Object.assign(modelPicker, { provider: go ? "go" : "claude", search: "", highlight: 0, legacy: !!modelOf(tab)?.legacy });
+  const accounts = modelAccounts(tab);
+  const current = accounts.find((a) => a.id === tab.view.account) ?? accounts[0];
+  Object.assign(modelPicker, { provider: current?.id ?? "favorites", search: "", highlight: 0, legacy: !!modelOf(tab)?.legacy });
   composerMenu.dataset.kind = "models";
-  composerMenu.innerHTML = `<nav class="providers" aria-label="Providers"><button type="button" data-provider="favorites" title="Favorites" aria-label="Favorites">${icon("star")}</button><span class="rule"></span>
-      <button type="button" data-provider="${go ? "go" : "claude"}" title="${go ? "OpenCode Go" : "Claude"}" aria-label="${go ? "OpenCode Go" : "Claude"}">${icon(go ? "sparkles" : "claude")}</button></nav>
+  const providers = accounts.map((a) => {
+    const go = a.auth === "opencode-go";
+    return `<button type="button" data-provider="${esc(a.id)}" title="${esc(`${a.name} · ${a.provider_name}`)}" aria-label="${esc(`${a.name}, ${a.provider_name}`)}">${icon(go ? "opencode" : "claude")}</button>`;
+  }).join("");
+  composerMenu.innerHTML = `<nav class="providers" aria-label="Providers"><button type="button" data-provider="favorites" title="Favorites" aria-label="Favorites">${icon("star")}</button><span class="rule"></span>${providers}</nav>
     <div class="pane"><input class="search" placeholder="Search models..." autocomplete="off" spellcheck="false"><div class="list" role="listbox"></div></div>`;
   composerMenu.hidden = false;
   placeMenu(anchor);
@@ -1245,7 +1265,7 @@ function openModels(anchor) {
     } else if (e.key === "Escape") {
       composerMenu.hidden = true;
       prompt.focus();
-    } else if (e.key === "ArrowLeft" && !search.value) composerMenu.querySelector(`[data-provider="${modelPicker.provider}"]`).focus();
+    } else if (e.key === "ArrowLeft" && !search.value) composerMenu.querySelector(`[data-provider="${modelPicker.provider}"]`)?.focus();
     e.stopPropagation();
   };
   composerMenu.querySelector(".providers").onclick = (e) => {
@@ -1269,30 +1289,50 @@ function openModels(anchor) {
       modelPicker.legacy = !modelPicker.legacy;
       return renderModels(tab);
     }
-    pickModel(tab, modelsFor(tab).find((m) => m.slug === row.dataset.row));
+    const account = accountOf(tab.machine, row.dataset.account);
+    pickModel(tab, modelsForAccount(account).find((m) => m.slug === row.dataset.row), account);
   };
   renderModels(tab);
   search.focus();
 }
+
 function renderModels(tab) {
   const { provider, search, legacy, highlight } = modelPicker;
+  const accounts = modelAccounts(tab);
   for (const b of composerMenu.querySelectorAll("[data-provider]")) b.setAttribute("aria-pressed", b.dataset.provider === provider);
   const current = modelOf(tab);
-  const models = authOf(tab) === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS;
-  const row = (m) => `<div class="model" data-row="${m.slug}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.isNew ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
-      <div class="sub">${icon(m.provider === "opencode-go" ? "sparkles" : "claude")}<span>${m.provider === "opencode-go" ? "OpenCode Go" : "Claude"}</span></div></div>${m === current ? icon("check", "check") : ""}
-      <button type="button" class="fav${modelFavorites.includes(m.slug) ? " on" : ""}" data-fav="${m.slug}" aria-label="${modelFavorites.includes(m.slug) ? "Remove from favorites" : "Add to favorites"}" title="${modelFavorites.includes(m.slug) ? "Remove from favorites" : "Add to favorites"}">${icon("star")}</button></div>`;
+  const selected = accounts.find((a) => a.id === provider) ?? accounts.find((a) => a.id === tab.view.account) ?? accounts[0];
+  const models = modelsForAccount(selected);
+  const row = (m, account) => {
+    const go = account.auth === "opencode-go";
+    const checked = account.id === tab.view.account && !!current && (m.slug === current.slug || m.name === current.name);
+    const favorited = modelFavorites.includes(m.slug);
+    return `<div class="model" data-row="${esc(m.slug)}" data-account="${esc(account.id)}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.isNew ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
+      <div class="sub">${icon(go ? "opencode" : "claude")}<span>${esc(providerLabel(account))}</span></div></div>${checked ? icon("check", "check") : ""}
+      <button type="button" class="fav${favorited ? " on" : ""}" data-fav="${esc(m.slug)}" aria-label="${favorited ? "Remove from favorites" : "Add to favorites"}" title="${favorited ? "Remove from favorites" : "Add to favorites"}">${icon("star")}</button></div>`;
+  };
+  // A model id can exist under both auths. Prefer the tab's own account for repetition.
+  const grouped = () => {
+    const found = new Map();
+    for (const account of accounts) for (const model of modelsForAccount(account)) {
+      const key = `${account.auth}:${model.slug}`;
+      if (!found.has(key) || account.id === tab.view.account) found.set(key, { model, account });
+    }
+    return [...found.values()];
+  };
   let rows;
-  if (search) rows = models.filter((m) => `${m.name} ${m.slug}`.toLowerCase().includes(search)).map(row);
-  else if (provider === "favorites") rows = models.filter((m) => modelFavorites.includes(m.slug)).map(row);
-  else if (provider === "go") rows = [...models.filter((m) => modelFavorites.includes(m.slug)), ...models.filter((m) => !modelFavorites.includes(m.slug))].map(row);
-  else {
+  if (search) rows = grouped().filter(({ model }) => `${model.name} ${model.slug}`.toLowerCase().includes(search)).map(({ model, account }) => row(model, account));
+  else if (provider === "favorites") rows = grouped().filter(({ model }) => modelFavorites.includes(model.slug)).map(({ model, account }) => row(model, account));
+  else if (selected?.auth === "opencode-go") {
+    const favored = (m) => modelFavorites.includes(m.slug);
+    rows = [...models.filter(favored), ...models.filter((m) => !favored(m))].map((m) => row(m, selected));
+  } else {
     const favored = (m) => modelFavorites.includes(m.slug);
     const shown = [...models.filter(favored), ...models.filter((m) => !favored(m) && !m.legacy)];
     const old = models.filter((m) => m.legacy && !favored(m));
-    rows = shown.map(row);
+    rows = shown.map((m) => row(m, selected));
     rows.push(`<div class="model legacy" data-row="legacy" role="option" aria-expanded="${legacy}"><div class="text"><div class="name">Legacy models</div><div class="sub"><span>${old.length} models</span></div></div>${icon("chevron-right", "chev")}</div>`);
-    if (legacy) rows.push(...old.map(row));
+    if (legacy) rows.push(...old.map((m) => row(m, selected)));
   }
   const list = composerMenu.querySelector(".list");
   list.innerHTML = rows.join("") || `<p class="none">${provider === "favorites" && !search ? "Star a model to keep it here." : "No models found"}</p>`;
@@ -1422,6 +1462,9 @@ function renderControls(tab) {
   // An unchanged label is left alone: rewriting it swaps the node a press landed on, and WebKit then drops the click.
   const nameEl = modelButton.querySelector(".name");
   if (nameEl.textContent !== name) nameEl.textContent = name;
+  const mark = tab && authOf(tab) === "opencode-go" ? "opencode" : "claude";
+  const markEl = modelButton.querySelector(".i");
+  if (!markEl.classList.contains(mark)) markEl.outerHTML = icon(mark);
   modelButton.title = `${name} · ${bindingLabel("modelPicker.toggle") ?? ""}`;
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");

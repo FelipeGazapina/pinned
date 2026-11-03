@@ -75,7 +75,7 @@ function accountCardHtml(a) {
     ? `<button class="secondary" data-action="replace-account-key">Replace key</button>`
     : `<button class="${a.signed_in ? "secondary" : "primary"}" data-action="sign-in-account">${a.signed_in ? "Sign in again" : "Sign in"}</button>`;
   return `<div class="card" data-account="${esc(a.id)}">
-      <div class="card-head"><span class="logo ${esc(a.provider)}">${go ? "◆" : a.provider === "codex" ? "◎" : a.provider === "cursor" ? "▸" : "✳"}</span>
+      <div class="card-head"><span class="logo ${go ? "opencode" : esc(a.provider)}">${go ? icon("opencode") : a.provider === "codex" ? "◎" : a.provider === "cursor" ? "▸" : "✳"}</span>
         <div><b>${esc(a.name)}</b><div class="hint">${esc(a.provider_name)}${a.builtin ? " · built in" : ""}</div></div></div>
       <p>${esc(status)}</p>
       <div class="actions start">${action}
