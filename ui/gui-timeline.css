@@ -127,9 +127,10 @@ button.xs.copied { color: var(--g-success); }
 .group > .rows.scrolls { -webkit-mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
   mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent); }
 .tool.thought .thought-body { margin: 4px 0 8px 28px; max-height: 384px; overflow: auto; color: var(--g-muted); font-size: 13px; }
-.live-tool .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-tool .label { flex: 1; min-width: 0; }
 .live-tool { flex-direction: column; align-items: stretch; gap: 0; }
-.live-tool .line { display: flex; align-items: center; gap: 6px; min-height: 24px; min-width: 0; }
+.live-tool .line { display: flex; align-items: flex-start; gap: 6px; min-height: 24px; min-width: 0; }
+.live-tool .line:not(.thought-line) .label { white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-tool .thought-line { align-items: flex-start; }
 .live-tool .thought-line .kind { margin-top: 4px; }
 .live-tool :is(.thought-line, .done) .label { animation: none; background: none; color: var(--g-muted); }
