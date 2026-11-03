@@ -379,6 +379,7 @@ const PACE = {
 const STATUSLINE_WINDOWS = [
   ["five_hour", "session", "Session", 300],
   ["seven_day", "weekly", "Weekly", 10080],
+  ["monthly", "monthly", "Monthly", null],
 ];
 function resetsInText(resetsAt, now) {
   const left = resetsAt - now;
@@ -439,15 +440,18 @@ function limitAccounts() {
       const key = probe?.email ? `email:${probe.email.toLowerCase()}` : `machine:${m}:${account}`;
       const at = probe?.windows?.length ? probe.at : 0;
       const held = accounts.get(key);
+      const view = account === DEFAULT_ACCOUNT ? null : accountOf(m, account);
+      const go = view?.auth === "opencode-go";
+      const name = go ? view?.name ?? "OpenCode Go" : undefined;
       const environments = [...(held?.environments ?? []), account === DEFAULT_ACCOUNT ? machineName(m) : `${machineName(m)} · ${accountName(m, account)}`];
-      accounts.set(key, held && held.at >= at ? { ...held, environments, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments });
+      accounts.set(key, held && held.at >= at ? { ...held, environments, go: held.go || go, name: held.name ?? name, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments, go, name });
     }
   }
   return [...accounts.values()];
 }
 /** T3 Code's `poolMember`: a spent weekly window holds the session at 100% until it can refill. */
 function poolMember(account, w, now) {
-  const weekly = w.kind === "session" && account.windows.find((x) => x.id === "seven_day" && x.used >= 100);
+  const weekly = !account.go && w.kind === "session" && account.windows.find((x) => x.id === "seven_day" && x.used >= 100);
   if (!weekly) return { account, window: w, refill: w.used };
   const cutoff = Math.max(now, account.at || 0);
   let resetsAt;
@@ -501,13 +505,14 @@ function accountChip(email) {
   const hue = Math.abs(hash) % 360;
   return `<span class="account-chip" role="img" aria-label="Account ${accountInitials(email)}" style="background:oklch(0.85 0.08 ${hue});color:oklch(0.35 0.1 ${hue})">${accountInitials(email)}</span>`;
 }
-const limitAccountName = (a) => (a.email ? accountChip(a.email) : "Claude");
+const limitAccountText = (a) => (a.email ? accountInitials(a.email) : a.go ? a.name ?? "OpenCode Go" : "Claude");
+const limitAccountName = (a) => (a.email ? accountChip(a.email) : esc(limitAccountText(a)));
 
 /** T3 Code's segment popover: the account, its plan and machines, then the window's figures. */
 function segmentPopHtml(account, w, reset, now) {
   const timeLeft = windowElapsed(w, now) === null ? null : Math.round((1 - windowElapsed(w, now)) * 100);
   const row = (label, value) => `<div class="pop-row"><span>${label}</span><span>${value}</span></div>`;
-  return `<div class="segment-pop"><div class="who"><span class="name">${icon("claude")}<span>Claude</span></span>${
+  return `<div class="segment-pop"><div class="who"><span class="name">${icon(account.go ? "sparkles" : "claude")}<span>${esc(account.go ? account.name ?? "OpenCode Go" : "Claude")}</span></span>${
     account.email ? `<button type="button" class="redacted" data-email="${esc(account.email)}" aria-label="Toggle account email visibility" title="Click to reveal email">${esc(redactedText(account.email))}</button>` : ""}</div>
     ${account.plan || account.environments.length ? `<div class="pop-rows">${account.plan ? row("Plan", esc(account.plan)) : ""}${row("Signed in", esc(account.environments.join(", ")))}</div>` : ""}
     <div class="pop-rows">${row("Left", `${windowLeft(w)}%`)}${w.resets_at ? row("Resets", `${upcomingText(w.resets_at, now)}${w.resets_at > now + 59 ? ` · ${resetsInText(w.resets_at, now).replace("resets in ", "in ")}` : ""}`) : ""}${
@@ -528,7 +533,7 @@ function limitCardHtml(pool, now) {
     const clip = timeLeft === null ? "" : `clip-path:polygon(-1px -1px, calc(${at} - 3px) -1px, calc(${at} - 3px) calc(100% + 1px), calc(${at} + 3px) calc(100% + 1px), calc(${at} + 3px) -1px, calc(100% + 1px) -1px, calc(100% + 1px) calc(100% + 1px), -1px calc(100% + 1px))`;
     const resets = w.resets_at ? resetsInText(w.resets_at, now) : "";
     const pop = popAttr(segmentPopHtml(member.account, w, pool.resets.find((r) => r.member === member), now));
-    const label = `${member.account.email ? accountInitials(member.account.email) : "Claude"}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
+    const label = `${limitAccountText(member.account)}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
     return `<button type="button" class="segment" style="grid-column:${i + 1};grid-row:1;${gap}" aria-label="${esc(label)}"${pop}>
         <span class="clip"><span class="cut" style="${clip}"><span class="fill" style="width:${left}%;background:${CLAUDE_COLOR}"></span>${
           left < 100 && member.refill > 0 && pool.resets.some((r) => r.member === member) ? `<span class="refill" style="width:${Math.min(100 - left, member.refill)}%;--refill:${CLAUDE_COLOR}"></span>` : ""}</span></span>
@@ -543,14 +548,16 @@ function limitCardHtml(pool, now) {
 }
 function limitsHtml() {
   const now = usageState.limitsNow || Date.now() / 1000;
-  const pools = limitPools(limitAccounts(), now);
+  const accounts = limitAccounts();
+  const pools = limitPools(accounts, now);
+  const go = accounts.some((a) => a.go);
   const notices = usageSelected().flatMap((m) => {
     const probe = limitsOf(m);
-    const text = probe?.error ? `Could not read limits: ${probe.error}` : probe?.unavailable && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.five_hour && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.seven_day ? probe.unavailable : "";
+    const text = probe?.error ? `Could not read limits: ${probe.error}` : probe?.unavailable && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.five_hour && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.seven_day && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.monthly ? probe.unavailable : "";
     return text ? [usageSelected().length > 1 ? `${machineName(m)} · ${text}` : text] : [];
   });
   return `<div class="limits-view">${pools.length || notices.length ? "" : `<p class="muted note">No provider on the selected environments reports subscription limits.</p>`}
-    ${pools.length ? `<section class="limits"><h2>${icon("claude")}Claude</h2>${pools.map((pool) => limitCardHtml(pool, now)).join("")}</section>` : ""}
+    ${pools.length ? `<section class="limits"><h2>${icon(go ? "sparkles" : "claude")}${go ? "Subscriptions" : "Claude"}</h2>${pools.map((pool) => limitCardHtml(pool, now)).join("")}</section>` : ""}
     ${notices.length ? `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div>${[...new Set(notices)].map((n) => `<p>${esc(n)}</p>`).join("")}</div></div>` : ""}</div>`;
 }
 document.addEventListener("click", (e) => {

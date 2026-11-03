@@ -213,6 +213,8 @@ pub struct Usage {
     pub five_hour: Option<LimitWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<LimitWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly: Option<LimitWindow>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
@@ -231,6 +233,7 @@ impl Usage {
         Usage {
             five_hour: self.five_hour.or(live(known.five_hour)),
             seven_day: self.seven_day.or(live(known.seven_day)),
+            monthly: self.monthly.or(live(known.monthly)),
         }
     }
 }
@@ -283,6 +286,9 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
     },
+    /// Asks the machine to read an OpenCode Go account's allowance in the background. The
+    /// statusline sends this and returns without waiting on the gateway.
+    RefreshUsage { account: AccountId },
     /// Starts a child agent. `tab` is the session that asked, when it has one. `task` is the
     /// parent task when the asker is itself a child (`PINNED_TASK`).
     Delegate {
@@ -337,6 +343,7 @@ mod tests {
                 used_percentage: 41.2,
                 resets_at: 1792900000,
             }),
+            monthly: Some(LimitWindow { used_percentage: 80.0, resets_at: 1793400000 }),
         };
         let report = Usage {
             five_hour: None,
@@ -344,6 +351,7 @@ mod tests {
                 used_percentage: 42.0,
                 resets_at: 1792900000,
             }),
+            monthly: None,
         };
         assert_eq!(
             report.over(known, 1792399999),
@@ -352,15 +360,18 @@ mod tests {
                 seven_day: Some(LimitWindow {
                     used_percentage: 42.0,
                     resets_at: 1792900000
-                })
+                }),
+                monthly: known.monthly,
             },
         );
         assert_eq!(report.over(known, 1792400000).five_hour, None);
+        assert_eq!(report.over(known, 1793400000).monthly, None, "a monthly window leaves once it resets");
         assert_eq!(
             Usage::default().over(known, 1792400000),
             Usage {
                 five_hour: None,
-                seven_day: known.seven_day
+                seven_day: known.seven_day,
+                monthly: known.monthly,
             }
         );
     }
@@ -392,9 +403,13 @@ mod tests {
             r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
         assert!(
-            matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None })
+            matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None, monthly: None })
         );
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let monthly = r#"{"kind":"usage","monthly":{"used_percentage":100.0,"resets_at":1793400000}}"#;
+        let message: Message = serde_json::from_str(monthly).unwrap();
+        assert!(matches!(&message, Message::Usage { usage, .. } if usage.monthly == Some(LimitWindow { used_percentage: 100.0, resets_at: 1793400000 })));
+        assert_eq!(serde_json::to_string(&message).unwrap(), monthly);
         let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000},"account":"work"}"#;
         let message: Message = serde_json::from_str(line).unwrap();
         assert!(matches!(&message, Message::Usage { account: Some(a), .. } if a == "work"));

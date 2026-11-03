@@ -877,7 +877,7 @@ mod tests {
                 let _ = nudge.lock().unwrap().send(tab);
             }
         });
-        machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let projects = dir.join("accounts/work/projects/app");
         std::fs::create_dir_all(&projects).unwrap();
         let saved = |session: &str| {

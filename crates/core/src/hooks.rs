@@ -175,13 +175,24 @@ fn tell(sock: &str, message: &Message) {
     }
 }
 
-/// Runs as the session's statusline: forwards the subscription usage Claude Code reports, then
-/// prints the user's own statusline, which the `--settings` entry would otherwise replace.
+/// Runs as the session's statusline: forwards the subscription usage Claude Code reports, asks
+/// the machine to refresh a Go account's allowance without waiting for it, then prints the user's
+/// own statusline, which the `--settings` entry would otherwise replace.
 pub fn statusline() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
-        tell(&sock, &Message::Usage { usage, account: std::env::var(crate::accounts::ACCOUNT_ENV).ok() });
+    let sock = std::env::var(SOCK_ENV).ok();
+    let account = std::env::var(crate::accounts::ACCOUNT_ENV).ok();
+    let go = std::env::var(crate::opencode_go::KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
+    // A Go session's statusline input describes no Anthropic rate limits. Its allowance comes
+    // from the machine's refresh, not from the figures Claude Code wrote for the gateway.
+    if !go {
+        if let (Some(usage), Some(sock)) = (usage_from_status(&input), sock.as_deref()) {
+            tell(sock, &Message::Usage { usage, account: account.clone() });
+        }
+    }
+    if let (Some(sock), Some(account), true) = (sock.as_deref(), account, go) {
+        tell(sock, &Message::RefreshUsage { account });
     }
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
     if let Some(command) = user_statusline(&config_dir) {
@@ -196,7 +207,7 @@ fn usage_from_status(input: &str) -> Option<Usage> {
     struct Status {
         rate_limits: Option<Usage>,
     }
-    serde_json::from_str::<Status>(input).ok()?.rate_limits.filter(|u| u.five_hour.is_some() || u.seven_day.is_some())
+    serde_json::from_str::<Status>(input).ok()?.rate_limits.filter(|u| u.five_hour.is_some() || u.seven_day.is_some() || u.monthly.is_some())
 }
 
 /// The statusline command set in the user's own Claude Code settings.
@@ -548,18 +559,27 @@ mod tests {
             Some(Usage {
                 five_hour: Some(LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }),
                 seven_day: Some(LimitWindow { used_percentage: 41.2, resets_at: 1792900000 }),
+                monthly: None,
             })
         );
         let weekly_only = r#"{"rate_limits":{"seven_day":{"used_percentage":90,"resets_at":1792900000}}}"#;
         assert_eq!(
             usage_from_status(weekly_only),
-            Some(Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 90.0, resets_at: 1792900000 }) })
+            Some(Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 90.0, resets_at: 1792900000 }), monthly: None })
         );
         assert_eq!(usage_from_status(r#"{"session_id":"s1","cwd":"/repo"}"#), None);
         assert_eq!(usage_from_status(r#"{"rate_limits":{}}"#), None);
         assert_eq!(usage_from_status(r#"{"rate_limits":{"five_hour":{"used_percentage":"lots"}}}"#), None);
         assert_eq!(usage_from_status("{broken"), None);
         assert_eq!(usage_from_status(""), None);
+    }
+
+    #[test]
+    fn a_go_statusline_asks_for_a_refresh_without_fetching() {
+        assert_eq!(
+            serde_json::to_string(&Message::RefreshUsage { account: "go".into() }).unwrap(),
+            r#"{"kind":"refresh-usage","account":"go"}"#
+        );
     }
 
     #[test]

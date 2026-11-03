@@ -239,20 +239,28 @@ project picks the account that runs its sessions, and pays for them, so a work p
 personal one can use different subscriptions on the same Mac.
 
 Settings → **Accounts** lists them, with the email, organization and plan each CLI reports.
-Two are built in and can't be removed: **Claude Code**, the login in `~/.claude`, and
-**Codex**, the login in `~/.codex`. Without changing anything, every project runs under the
-built-in Claude Code account, as before.
+Three are built in and can't be removed: **Claude Code**, the login in `~/.claude`,
+**Codex**, the login in `~/.codex`, and **Cursor**, the login in Cursor's own home. Without
+changing anything, every project runs under the built-in Claude Code account, as before.
 
 To add one, pick the provider, type a name such as `Work` and click **Add account**. Then click
 **Sign in**: pinned opens a tab running the CLI's own login (`claude auth login` or `codex
 login`) for that account. Finish it in the browser page it opens and close the tab. **Sign in
 again** switches the login of an account that already has one.
 
+Pick **OpenCode Go** to add a Go subscription. Paste the `oc_sk_...` API key from the OpenCode
+Console and pinned checks it before keeping it. The account runs the same Claude Code CLI against
+Go's Anthropic gateway, so the orchestrator, workflows, memory, delegation, resume and the rest
+work as they do for a Claude Code account. Go is an auth mode of Claude Code, not another CLI.
+**Replace key** changes the key without losing the account's conversations.
+
 Each added account keeps its credentials in a home of its own, which pinned passes to the CLI
 as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`: on a Mac,
 `~/Library/Application Support/dev.personal-harness.pinned/accounts/<id>`, and on a server,
-`accounts/<id>` in the node's config directory. pinned never reads the credentials. Removing
-an account leaves its home in place, so adding it again finds it signed in.
+`accounts/<id>` in the node's config directory. pinned never reads a CLI login. An OpenCode Go
+key is the one secret pinned reads and passes on, and it lives in that home in a file only its
+owner can read, never in `accounts.json`. Removing a Go account deletes its key. Removing a CLI
+login leaves its home in place, so adding it again finds it signed in.
 
 Pick a project's account from the menu on its row under Settings → **Projects**. Tabs opened on
 the project from then on run under that account, and a resumed session reopens under the
@@ -264,7 +272,9 @@ under **Account**. Only Claude Code accounts can run a workflow. A machine where
 is missing or signed out refuses the run, so it goes to the next online machine where it is
 signed in.
 
-The usage meter shows the active tab's account. Each Claude Code account has its own limits.
+The usage meter shows the active tab's account. Each Claude Code account has its own limits. A
+Go account reports the rolling 5-hour and weekly allowances, and Usage → **Limits** also shows
+its monthly allowance.
 
 A tab that hits its account's usage limit continues by itself when the limit lifts. To go on
 sooner, pick **Continue under** another signed-in Claude Code account from the note above the
@@ -274,6 +284,12 @@ project keeps its account.
 
 Codex tabs run the `codex` CLI. pinned asks Codex to report when a turn ends, so a notice
 can land after that turn. They still have no usage meter and no resume after a restart.
+
+An OpenCode Go account runs the Claude Code CLI, so it is not a separate provider in the tab
+strip and takes part in delegation like any Claude Code account. Its model picker offers the
+Go gateway's models and restarts the session with `--model` for the one you choose. A model id
+belongs to one auth, so moving a conversation between a Claude login and a Go key drops the
+picked model and lets the new account choose its own.
 
 ## Delegating to other providers
 
@@ -625,8 +641,11 @@ install, and restart.
   sets `pinned statusline` as the statusline, which forwards the 5-hour and 7-day figures to
   the window. Claude Code reports them only for Pro and Max subscriptions, and only after a
   session's first response, so the meter stays hidden until then. A window leaves the meter
-  when it resets. If you set a `statusLine` in `~/.claude/settings.json`, `pinned statusline`
-  runs it with the same input and prints its output, so your statusline still shows.
+  when it resets. An OpenCode Go session's statusline asks the machine to read
+  `/zen/go/v1/usage` with the account's key in the background, so the statusline never waits
+  on the gateway, and the machine adds the monthly window. If you set a `statusLine` in
+  `~/.claude/settings.json`, `pinned statusline` runs it with the same input and prints its
+  output, so your statusline still shows.
 - Signed in, `crates/core/src/link.rs` keeps one outbound WebSocket from this Mac to the hub,
   which routes calls and terminal output between machines and clients.
   `crates/server` (`pinned-server`) is the hub and the headless node, and the hub serves

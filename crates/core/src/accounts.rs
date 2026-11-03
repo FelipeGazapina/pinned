@@ -105,17 +105,32 @@ impl Provider {
 /// the user, so a connector saved on one names the same account on another.
 pub type AccountId = String;
 
+/// How an account signs in. An account written before this field existed is a CLI login.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Auth {
+    #[default]
+    #[serde(rename = "login")]
+    Login,
+    #[serde(rename = "opencode-go")]
+    OpenCodeGo,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, schemars::JsonSchema)]
 pub struct Account {
     pub id: AccountId,
     pub provider: Provider,
     pub name: String,
+    #[serde(default)]
+    pub auth: Auth,
 }
+
+const KEY_FILE: &str = "opencode-go.key";
 
 impl Account {
     pub fn builtin(provider: Provider) -> Account {
         let spec = provider.spec();
-        Account { id: spec.builtin.into(), provider, name: spec.name.into() }
+        Account { id: spec.builtin.into(), provider, name: spec.name.into(), auth: Auth::Login }
     }
 
     pub fn is_builtin(&self) -> bool {
@@ -145,7 +160,8 @@ pub struct View {
 
 impl View {
     pub fn new(account: Account, status: Status) -> View {
-        View { provider_name: account.provider.spec().name.into(), builtin: account.is_builtin(), account, status }
+        let provider_name = if account.auth == Auth::OpenCodeGo { "OpenCode Go" } else { account.provider.spec().name };
+        View { provider_name: provider_name.into(), builtin: account.is_builtin(), account, status }
     }
 }
 
@@ -174,9 +190,13 @@ impl Accounts {
         self.list().into_iter().find(|a| a.id == id)
     }
 
-    /// Adds an account with its own empty home, where signing in keeps its login.
-    pub fn add(&self, provider: Provider, name: &str) -> Result<Account, String> {
+    /// Adds an account with its own empty home, where signing in keeps its login. OpenCode Go is
+    /// a Claude Code account: the same CLI, pointed at Go's gateway by a key kept beside the home.
+    pub fn add(&self, provider: Provider, name: &str, auth: Auth) -> Result<Account, String> {
         let Some(dir) = &self.dir else { return Err("this machine keeps no accounts".into()) };
+        if auth == Auth::OpenCodeGo && provider != Provider::Claude {
+            return Err("OpenCode Go runs through Claude Code".into());
+        }
         if provider.spec().home_env.is_empty() {
             return Err(format!("{} signs in only through its built-in account", provider.spec().name));
         }
@@ -190,7 +210,7 @@ impl Accounts {
         if Provider::ALL.iter().any(|p| p.spec().builtin == id) || added.iter().any(|a| a.id == id) {
             return Err(format!("an account {id} already exists"));
         }
-        let account = Account { id, provider, name: name.into() };
+        let account = Account { id, provider, name: name.into(), auth };
         let mut folder = std::fs::DirBuilder::new();
         folder.recursive(true);
         // The home holds the CLI's login, so only its owner reads it.
@@ -212,7 +232,51 @@ impl Accounts {
         }
         let mut added = self.added.lock().unwrap();
         added.retain(|a| a.id != id);
-        save(self.dir.as_ref().expect("an added account has a folder"), &added)
+        save(self.dir.as_ref().expect("an added account has a folder"), &added)?;
+        if account.auth == Auth::OpenCodeGo {
+            let path = self.home(&account).join(KEY_FILE);
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("could not delete {}'s key: {e}", account.id));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The Go key, trimmed. It is not part of the account record.
+    pub fn key(&self, account: &Account) -> Option<String> {
+        if account.auth != Auth::OpenCodeGo {
+            return None;
+        }
+        let text = std::fs::read_to_string(self.home(account).join(KEY_FILE)).ok()?;
+        let key = text.trim();
+        if key.is_empty() { None } else { Some(key.to_owned()) }
+    }
+
+    /// Writes the Go key where only this user can read it. Refuses a login account and an empty key.
+    pub fn set_key(&self, account: &Account, key: &str) -> Result<(), String> {
+        if account.auth != Auth::OpenCodeGo {
+            return Err("only an OpenCode Go account takes an API key".into());
+        }
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("OpenCode Go needs an API key".into());
+        }
+        let path = self.home(account).join(KEY_FILE);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("could not save the OpenCode Go key: {e}"))?;
+        }
+        let mut options = crate::private::file();
+        options.create(true).truncate(true);
+        let mut file = options.open(&path).map_err(|e| format!("could not save the OpenCode Go key: {e}"))?;
+        std::io::Write::write_all(&mut file, key.as_bytes()).map_err(|e| format!("could not save the OpenCode Go key: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("could not save the OpenCode Go key: {e}"))?;
+        }
+        Ok(())
     }
 
     /// The CLI home the account's sessions run on. A built-in account's sessions inherit pinned's
@@ -234,11 +298,20 @@ impl Accounts {
             env.push((account.provider.spec().home_env.to_owned(), self.home(account).display().to_string()));
         }
         env.push((ACCOUNT_ENV.to_owned(), account.id.clone()));
+        if account.auth == Auth::OpenCodeGo {
+            if let Some(key) = self.key(account) {
+                env.extend(crate::opencode_go::env(&key));
+            }
+        }
         env
     }
 
-    /// Asks the account's CLI, at `bin`, who is signed in.
+    /// Asks the account's CLI, at `bin`, who is signed in. A Go account is signed in while its key
+    /// file holds a key. Its empty home would otherwise look signed out.
     pub fn status(&self, account: &Account, bin: &Path, path_env: Option<&str>) -> Status {
+        if account.auth == Auth::OpenCodeGo {
+            return Status { signed_in: self.key(account).is_some(), plan: Some("OpenCode Go".into()), ..Status::default() };
+        }
         let spec = account.provider.spec();
         let mut cmd = crate::process::command(bin);
         cmd.args(spec.status).envs(self.env(account)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -250,7 +323,7 @@ impl Accounts {
 }
 
 /// Runs `cmd` to its end, or kills it after `STATUS_WAIT`. Its output must fit a pipe's buffer.
-fn run(mut cmd: Command) -> Option<Output> {
+pub(crate) fn run(mut cmd: Command) -> Option<Output> {
     let mut child = cmd.spawn().ok()?;
     let start = Instant::now();
     while child.try_wait().ok()?.is_none() {
@@ -332,12 +405,12 @@ mod tests {
     fn an_added_account_is_named_by_a_slug_and_kept_across_loads() {
         let dir = temp("add");
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
-        assert_eq!(accounts.add(Provider::Claude, "  Claude Teams! "), Ok(Account { id: "claude-teams".into(), provider: Provider::Claude, name: "Claude Teams!".into() }));
-        assert_eq!(accounts.add(Provider::Claude, "claude teams"), Err("an account claude-teams already exists".into()));
-        assert_eq!(accounts.add(Provider::Codex, "Claude"), Err("an account claude already exists".into()), "a built-in id is taken");
-        assert_eq!(accounts.add(Provider::Codex, " ?! "), Err("an account needs a name with a letter or digit".into()));
+        assert_eq!(accounts.add(Provider::Claude, "  Claude Teams! ", Auth::Login), Ok(Account { id: "claude-teams".into(), provider: Provider::Claude, name: "Claude Teams!".into(), auth: Auth::Login }));
+        assert_eq!(accounts.add(Provider::Claude, "claude teams", Auth::Login), Err("an account claude-teams already exists".into()));
+        assert_eq!(accounts.add(Provider::Codex, "Claude", Auth::Login), Err("an account claude already exists".into()), "a built-in id is taken");
+        assert_eq!(accounts.add(Provider::Codex, " ?! ", Auth::Login), Err("an account needs a name with a letter or digit".into()));
         assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex", "cursor", "claude-teams"]);
-        assert_eq!(accounts.add(Provider::Cursor, "Other"), Err("Cursor signs in only through its built-in account".into()));
+        assert_eq!(accounts.add(Provider::Cursor, "Other", Auth::Login), Err("Cursor signs in only through its built-in account".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -345,20 +418,20 @@ mod tests {
     fn a_machine_without_a_folder_has_only_the_built_in_accounts() {
         let accounts = Accounts::load(None, "/Users/ana".into());
         assert_eq!(ids(&accounts), ["claude", "codex", "cursor"]);
-        assert_eq!(accounts.add(Provider::Claude, "work"), Err("this machine keeps no accounts".into()));
+        assert_eq!(accounts.add(Provider::Claude, "work", Auth::Login), Err("this machine keeps no accounts".into()));
     }
 
     #[test]
     fn removing_an_account_keeps_its_login_for_a_later_add() {
         let dir = temp("remove");
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
-        let work = accounts.add(Provider::Claude, "work").unwrap();
+        let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
         std::fs::write(dir.join("accounts/work/.credentials.json"), "{}").unwrap();
         assert_eq!(accounts.remove("claude"), Err("claude is built in and can't be removed".into()));
         assert_eq!(accounts.remove("home"), Err("no account home on this machine".into()));
         assert_eq!(accounts.remove("work"), Ok(()));
         assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex", "cursor"]);
-        assert_eq!(accounts.add(Provider::Claude, "Work").map(|a| accounts.home(&a)), Ok(accounts.home(&work)));
+        assert_eq!(accounts.add(Provider::Claude, "Work", Auth::Login).map(|a| accounts.home(&a)), Ok(accounts.home(&work)));
         assert!(dir.join("accounts/work/.credentials.json").is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -368,8 +441,8 @@ mod tests {
     fn only_an_added_account_points_its_cli_at_another_home() {
         let dir = temp("env");
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
-        let work = accounts.add(Provider::Claude, "work").unwrap();
-        let side = accounts.add(Provider::Codex, "side").unwrap();
+        let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
         let env = |id: &str| accounts.env(&accounts.get(id).unwrap());
         let pair = |k: &str, v: String| (k.to_owned(), v);
         assert_eq!(env("claude"), [pair("PINNED_ACCOUNT", "claude".into())]);
@@ -404,8 +477,8 @@ echo "Logged in using ChatGPT""#);
         let cursor = script(&dir, "cursor-agent", r#"[ "$1" = "status" ] || exit 2
 echo "✓ Logged in as ana@acme.dev""#);
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
-        accounts.add(Provider::Claude, "work").unwrap();
-        accounts.add(Provider::Codex, "side").unwrap();
+        accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
         let status = |id: &str, bin: &Path| accounts.status(&accounts.get(id).unwrap(), bin, None);
         assert_eq!(
             status("claude", &claude),
@@ -421,13 +494,63 @@ echo "✓ Logged in as ana@acme.dev""#);
 
     #[test]
     fn an_account_lists_with_its_provider_and_status() {
-        let view = View::new(Account { id: "work".into(), provider: Provider::Claude, name: "Work".into() }, Status { signed_in: true, email: Some("ana@acme.dev".into()), org: Some("Acme".into()), plan: Some("team".into()) });
+        let view = View::new(Account { id: "work".into(), provider: Provider::Claude, name: "Work".into(), auth: Auth::Login }, Status { signed_in: true, email: Some("ana@acme.dev".into()), org: Some("Acme".into()), plan: Some("team".into()) });
         assert_eq!(
             serde_json::to_value(view).unwrap(),
             serde_json::json!({
-                "id": "work", "provider": "claude", "name": "Work", "provider_name": "Claude Code", "builtin": false,
+                "id": "work", "provider": "claude", "name": "Work", "auth": "login", "provider_name": "Claude Code", "builtin": false,
                 "signed_in": true, "email": "ana@acme.dev", "org": "Acme", "plan": "team",
             })
         );
+    }
+
+    #[test]
+    fn an_old_accounts_file_loads_as_a_cli_login() {
+        let dir = temp("old-auth");
+        std::fs::write(dir.join(FILE), r#"[{"id":"work","provider":"claude","name":"Work"}]"#).unwrap();
+        let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
+        let work = accounts.get("work").unwrap();
+        assert_eq!(work.auth, Auth::Login);
+        assert_eq!(accounts.key(&work), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_go_account_keeps_its_key_out_of_the_record_and_signs_in_only_with_it() {
+        let dir = temp("go-key");
+        let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
+        assert_eq!(accounts.add(Provider::Codex, "Go", Auth::OpenCodeGo).unwrap_err(), "OpenCode Go runs through Claude Code");
+        let go = accounts.add(Provider::Claude, "Go", Auth::OpenCodeGo).unwrap();
+        assert_eq!(go.auth, Auth::OpenCodeGo);
+        assert_eq!(accounts.set_key(&go, "  ").unwrap_err(), "OpenCode Go needs an API key");
+        let login = accounts.add(Provider::Claude, "Work", Auth::Login).unwrap();
+        assert_eq!(accounts.set_key(&login, "oc_sk_test").unwrap_err(), "only an OpenCode Go account takes an API key");
+        assert!(!accounts.status(&go, Path::new("missing"), None).signed_in);
+        accounts.set_key(&go, "  oc_sk_test \n").unwrap();
+        assert_eq!(accounts.key(&go).as_deref(), Some("oc_sk_test"));
+        assert!(accounts.status(&go, Path::new("missing"), None).signed_in);
+        let saved = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!saved.contains("oc_sk_test"), "the key was written into accounts.json");
+        let view = View::new(go.clone(), accounts.status(&go, Path::new("missing"), None));
+        assert_eq!(view.provider_name, "OpenCode Go");
+        assert!(!serde_json::to_string(&view).unwrap().contains("oc_sk_test"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(accounts.home(&go).join("opencode-go.key")).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let env = accounts.env(&go);
+        assert!(env.iter().any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v == &accounts.home(&go).display().to_string()));
+        assert!(env.iter().any(|(k, v)| k == "PINNED_ACCOUNT" && v == "go"));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_AUTH_TOKEN" && v == "oc_sk_test"));
+        assert!(env.iter().any(|(k, v)| k == "PINNED_OPENCODE_GO_KEY" && v == "oc_sk_test"));
+        assert!(env.iter().any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://opencode.ai/inference/go/anthropic"));
+        let login_env = accounts.env(&login);
+        assert!(login_env.iter().all(|(k, _)| k != "ANTHROPIC_AUTH_TOKEN" && k != "PINNED_OPENCODE_GO_KEY"));
+        accounts.remove("go").unwrap();
+        assert!(!accounts.home(&go).join("opencode-go.key").exists());
+        assert!(accounts.home(&go).is_dir(), "removing a Go account still leaves its home");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

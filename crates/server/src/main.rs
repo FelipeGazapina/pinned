@@ -16,12 +16,13 @@ const UNWATCHED: (u16, u16) = (120, 32);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // reqwest, the hub link and the statusline's OpenCode Go usage share rustls, built here with
+    // no default crypto provider. The statusline runs as a subcommand below.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // Claude Code calls back the binary that started the session, which on a node is this one.
     if let Some(code) = pinned_core::cli::dispatch(&args) {
         std::process::exit(code);
     }
-    // reqwest and the hub link use rustls, built here with no default crypto provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let result = match args.split_first() {
         Some((command, rest)) => match command.as_str() {
             "hub" => hub(rest),

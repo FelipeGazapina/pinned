@@ -1,7 +1,7 @@
 //! The protocol between machines, the hub and clients: one JSON object per WebSocket text frame.
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
-use crate::accounts::{self, AccountId, Provider};
+use crate::accounts::{self, AccountId, Auth, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{BoxAccess, Connector, Settings};
 use crate::branches::GitStep;
@@ -199,8 +199,18 @@ pub enum Call {
     ReadUpload { path: String },
     /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
     ListAccounts,
-    /// The new account's `accounts::View`. Its id is a slug of `name`.
-    AddAccount { provider: Provider, name: String },
+    /// The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`
+    /// when `key` is an OpenCode Go API key.
+    AddAccount {
+        provider: Provider,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<Auth>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
+    /// The account's `accounts::View`. Refused for an account that signs in with a CLI login.
+    SetAccountKey { account: AccountId, key: String },
     /// `null`. Projects that ran under it fall back to the default account.
     RemoveAccount { account: AccountId },
     /// The project's `ProjectView`. `account: null` runs it under the default account again.
@@ -538,6 +548,7 @@ impl Call {
                 | Call::Checkout { .. }
                 | Call::ListAccounts
                 | Call::AddAccount { .. }
+                | Call::SetAccountKey { .. }
                 | Call::SignIn { .. }
                 | Call::SwitchAccount { .. }
                 | Call::TokenUsage { .. }
@@ -999,7 +1010,18 @@ mod tests {
             }),
         );
         round_trip(Call::ListAccounts, json!({ "cmd": "list_accounts" }));
-        round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
+        round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
+        round_trip(
+            Call::AddAccount { provider: Provider::Claude, name: "Go".into(), auth: Some(Auth::OpenCodeGo), key: Some("oc_sk_test".into()) },
+            json!({ "cmd": "add_account", "provider": "claude", "name": "Go", "auth": "opencode-go", "key": "oc_sk_test" }),
+        );
+        assert_eq!(
+            serde_json::from_value::<Call>(json!({ "cmd": "add_account", "provider": "codex", "name": "Side" })).unwrap(),
+            Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }
+        );
+        round_trip(Call::SetAccountKey { account: "go".into(), key: "oc_sk_next".into() }, json!({ "cmd": "set_account_key", "account": "go", "key": "oc_sk_next" }));
+        let old_account: crate::accounts::Account = serde_json::from_value(json!({ "id": "work", "provider": "claude", "name": "Work" })).unwrap();
+        assert_eq!(old_account.auth, Auth::Login);
         round_trip(Call::SignIn { account: "work".into() }, json!({ "cmd": "sign_in", "account": "work" }));
         round_trip(
             Call::SwitchAccount { tab: "tab-1".into(), account: "spare".into(), cols: 120, rows: 32 },
@@ -1107,10 +1129,17 @@ mod tests {
         );
         round_trip(
             MachineEvent::Usage {
-                usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None },
+                usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None, monthly: None },
                 account: "work".into(),
             },
             json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } }, "account": "work" }),
+        );
+        round_trip(
+            MachineEvent::Usage {
+                usage: Usage { five_hour: None, seven_day: None, monthly: Some(crate::agent::LimitWindow { used_percentage: 100.0, resets_at: 1795996800 }) },
+                account: "go".into(),
+            },
+            json!({ "kind": "usage", "usage": { "monthly": { "used_percentage": 100.0, "resets_at": 1795996800 } }, "account": "go" }),
         );
         let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
         assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
