@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+// Stands in for OpenCode Go in the web sweep: the models endpoint validates the key, and the
+// usage endpoint reports a rolling, weekly and monthly allowance. It answers on 127.0.0.1 only.
+const http = require("http");
+
+const port = Number(process.argv[2] || 8798);
+const KEY = "oc_sk_sweep";
+const meter = (percent, seconds) => ({ status: "ok", percent, resetsAt: new Date(Date.now() + seconds * 1000).toISOString() });
+
+http
+  .createServer((req, res) => {
+    if (req.url === "/health") return res.end("ok");
+    if (req.headers.authorization !== `Bearer ${KEY}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { type: "server_error", message: "Invalid credential" } }));
+    }
+    res.setHeader("content-type", "application/json");
+    if (req.url.startsWith("/v1/models") || req.url.startsWith("/inference/go/v1/models")) {
+      return res.end(JSON.stringify({ object: "list", data: [{ id: "kimi-k3", name: "Kimi K3" }] }));
+    }
+    if (req.url.startsWith("/zen/go/v1/usage")) {
+      return res.end(
+        JSON.stringify({
+          usage: {
+            rolling: meter(42, 3600),
+            weekly: meter(18, 86400),
+            monthly: meter(80, 864000),
+          },
+        }),
+      );
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end("{}");
+  })
+  .listen(port, "127.0.0.1");

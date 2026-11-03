@@ -14,13 +14,14 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 DIR=${SWEEP_DIR:-${TMPDIR:-/tmp}/pinned-web-sweep}
 PG_PORT=${SWEEP_PG_PORT:-5497}
 HUB_PORT=${SWEEP_HUB_PORT:-8797}
+GO_PORT=${SWEEP_GO_PORT:-8798}
 HUB=http://127.0.0.1:$HUB_PORT
 EMAIL=sweep@example.test
 PASSWORD="sweep password 1"
 SERVER=${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned-server
 
 stop() {
-  for name in node hub; do
+  for name in node hub go; do
     [ -f "$DIR/$name.pid" ] && kill "$(cat "$DIR/$name.pid")" 2>/dev/null || true
     rm -f "$DIR/$name.pid"
   done
@@ -71,12 +72,16 @@ start() {
     git -C "$DIR/home/work/$p" remote add origin "https://github.com/example/$p.git"
   done
   touch "$DIR/home/work/gamma/.untrusted"
-  env HOME="$DIR/home" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
-  env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_PR_WATCH_SECS=2 "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
+  "$REPO/scripts/web-sweep/mock-opencode-go" "$GO_PORT" >"$DIR/go.log" 2>&1 &
+  echo $! >"$DIR/go.pid"
+  wait_for "curl -fs http://127.0.0.1:$GO_PORT/health" "the OpenCode Go mock"
+  env HOME="$DIR/home" PINNED_OPENCODE_GO_MODELS_BASE="http://127.0.0.1:$GO_PORT" PINNED_OPENCODE_GO_USAGE_URL="http://127.0.0.1:$GO_PORT/zen/go/v1/usage" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
+  env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_OPENCODE_GO_MODELS_BASE="http://127.0.0.1:$GO_PORT" PINNED_OPENCODE_GO_USAGE_URL="http://127.0.0.1:$GO_PORT/zen/go/v1/usage" PINNED_PR_WATCH_SECS=2 "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
   echo $! >"$DIR/node.pid"
 
   echo "hub $HUB"
   echo "account $EMAIL / $PASSWORD"
+  echo "opencode-go http://127.0.0.1:$GO_PORT"
   echo "dir $DIR"
 }
 
