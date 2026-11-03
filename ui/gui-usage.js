@@ -452,7 +452,7 @@ function limitAccounts() {
 /** T3 Code's `poolMember`: a spent weekly window holds the session at 100% until it can refill. */
 function poolMember(account, w, now) {
   const weekly = !account.go && w.kind === "session" && account.windows.find((x) => x.id === "seven_day" && x.used >= 100);
-  if (!weekly) return { account, window: w, refill: account.go ? 0 : w.used };
+  if (!weekly) return { account, window: w, refill: w.used };
   const cutoff = Math.max(now, account.at || 0);
   let resetsAt;
   let refill = 0;

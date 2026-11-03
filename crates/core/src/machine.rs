@@ -717,7 +717,10 @@ impl Machine {
                         let _ = self.accounts.remove(&account.id);
                         return Err(error);
                     }
-                    self.prepare_go_home(&account);
+                    if let Err(error) = self.prepare_go_home(&account) {
+                        let _ = self.accounts.remove(&account.id);
+                        return Err(error);
+                    }
                     json(self.view_account(account))
                 } else if key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
                     Err("only an OpenCode Go account takes an API key".into())
@@ -736,7 +739,7 @@ impl Machine {
                 }
                 crate::opencode_go::validate(key)?;
                 self.accounts.set_key(&account, key)?;
-                self.prepare_go_home(&account);
+                self.prepare_go_home(&account)?;
                 json(self.view_account(account))
             }
             Call::RemoveAccount { account } => {
@@ -1321,10 +1324,10 @@ impl Machine {
     /// Drops a login a reused home may still hold, then skips Claude Code's theme wizard. A Go
     /// account must not send the user's Claude login to the gateway, and its first launch is a
     /// session, not a setup screen.
-    fn prepare_go_home(&self, account: &Account) {
+    fn prepare_go_home(&self, account: &Account) -> Result<(), String> {
         let home = self.accounts.home(account);
         crate::opencode_go::clear_login(&home, &self.launch.bin(Provider::Claude), self.launch.path_env.as_deref());
-        let _ = crate::opencode_go::prepare_home(&home);
+        crate::opencode_go::prepare_home(&home)
     }
 
     /// Opens a tab running the CLI's login for the account, in the account's home, and returns its id.
@@ -4532,6 +4535,7 @@ pub(crate) mod tests {
                 &path,
                 format!(
                     "#!/bin/sh\nif [ \"$1 $2\" = \"{status}\" ]; then\n  [ -n \"${home}\" ] && [ ! -e \"${home}/signed-in\" ] && {{ echo '{signed_out}'; exit 1; }}\n  echo '{signed_in}'; exit 0\nfi\n\
+                     if [ \"$1 $2\" = \"auth logout\" ]; then exit 0; fi\n\
                      printf '%s|%s|%s|%s|%s\\n' \"$(basename \"$0\")\" \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PINNED_ACCOUNT\"\nsleep 30\n"
                 ),
             )
@@ -4626,6 +4630,18 @@ pub(crate) mod tests {
         assert!(crate::opencode_go::STRIP_ENV.contains(&"ANTHROPIC_API_KEY"));
         assert!(crate::opencode_go::STRIP_ENV.contains(&"CLAUDE_CODE_USE_BEDROCK"));
         assert!(INHERITED_SESSION_ENV.contains(&"PINNED_OPENCODE_GO_KEY"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_malformed_go_home_refuses_preparation() {
+        let root = temp("go-home-bad");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        std::fs::write(root.join("config/accounts/go/.claude.json"), "not json").unwrap();
+        let account = m.accounts.get("go").unwrap();
+        assert!(m.prepare_go_home(&account).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
