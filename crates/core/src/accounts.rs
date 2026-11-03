@@ -323,7 +323,7 @@ impl Accounts {
 }
 
 /// Runs `cmd` to its end, or kills it after `STATUS_WAIT`. Its output must fit a pipe's buffer.
-fn run(mut cmd: Command) -> Option<Output> {
+pub(crate) fn run(mut cmd: Command) -> Option<Output> {
     let mut child = cmd.spawn().ok()?;
     let start = Instant::now();
     while child.try_wait().ok()?.is_none() {

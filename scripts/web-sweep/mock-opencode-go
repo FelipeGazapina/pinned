@@ -9,6 +9,7 @@ const meter = (percent, seconds) => ({ status: "ok", percent, resetsAt: new Date
 
 http
   .createServer((req, res) => {
+    console.log(req.method, req.url, req.headers.authorization === `Bearer ${KEY}` ? "ok" : "unauthorized");
     if (req.url === "/health") return res.end("ok");
     if (req.headers.authorization !== `Bearer ${KEY}`) {
       res.writeHead(401, { "content-type": "application/json" });

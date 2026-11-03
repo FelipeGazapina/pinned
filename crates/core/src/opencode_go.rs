@@ -147,8 +147,17 @@ fn usage_url() -> String {
     override_url("PINNED_OPENCODE_GO_USAGE_URL").unwrap_or_else(|| USAGE_URL.to_owned())
 }
 
+/// A gateway override must not send the key to a stranger. Accept HTTPS anywhere, and HTTP only
+/// on this machine, where the web sweep and a local proxy run.
 fn override_url(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|url| url.trim().trim_end_matches('/').to_owned()).filter(|url| !url.is_empty())
+    allowed_override(std::env::var(name).ok()?.trim())
+}
+
+fn allowed_override(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (url.scheme() == "https" || (url.scheme() == "http" && loopback)).then(|| url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// `rolling` is the 5-hour window, `weekly` the 7-day window, and `monthly` the monthly one.
@@ -206,53 +215,6 @@ fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| format!("could not reach OpenCode Go: {e}"))
 }
 
-/// The statusline runs on almost every render, so a fresh report is reused for 15 seconds and a
-/// failed refresh keeps the last one for five minutes. Both files live in the account's home.
-const CACHE_FILE: &str = "opencode-go-usage.json";
-const CACHE_FRESH: u64 = 15;
-const CACHE_STALE: u64 = 300;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Cached {
-    at: u64,
-    usage: Usage,
-}
-
-pub fn usage_for_statusline(key: &str) -> Result<Usage, String> {
-    let home = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
-    usage_cached(home.as_deref(), key, &usage_url(), unix_now())
-}
-
-fn usage_cached(home: Option<&std::path::Path>, key: &str, url: &str, now: u64) -> Result<Usage, String> {
-    if let Some(usage) = home.and_then(|home| read_cache(home, now, CACHE_FRESH)) {
-        return Ok(usage);
-    }
-    match usage_at(url, key) {
-        Ok(usage) => {
-            if let Some(home) = home {
-                write_cache(home, &usage, now);
-            }
-            Ok(usage)
-        }
-        Err(error) => home.and_then(|home| read_cache(home, now, CACHE_STALE)).ok_or(error),
-    }
-}
-
-fn read_cache(home: &std::path::Path, now: u64, ttl: u64) -> Option<Usage> {
-    let cached: Cached = serde_json::from_slice(&std::fs::read(home.join(CACHE_FILE)).ok()?).ok()?;
-    (now.saturating_sub(cached.at) <= ttl).then_some(cached.usage)
-}
-
-fn write_cache(home: &std::path::Path, usage: &Usage, now: u64) {
-    let _ = std::fs::create_dir_all(home);
-    let cached = Cached { at: now, usage: *usage };
-    let _ = std::fs::write(home.join(CACHE_FILE), serde_json::to_vec(&cached).unwrap_or_default());
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 /// Skips Claude Code's theme wizard on the first launch in a new home. A folder's trust prompt is
 /// still the user's call, as it is for every added account.
 pub fn prepare_home(home: &std::path::Path) -> Result<(), String> {
@@ -281,7 +243,7 @@ pub fn clear_login(home: &std::path::Path, claude: &std::path::Path, path_env: O
     if let Some(path) = path_env {
         cmd.env("PATH", path);
     }
-    let _ = cmd.status();
+    let _ = crate::accounts::run(cmd);
 }
 
 #[cfg(test)]
@@ -401,20 +363,16 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_report_is_cached_and_a_failed_refresh_keeps_the_last_one() {
-        let home = std::env::temp_dir().join(format!("pinned-go-cache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let body = r#"{"usage":{"rolling":{"percent":42,"resetsAt":1793660400}}}"#;
-        let url = serve_body(200, body, Arc::new(Mutex::new(String::new())));
-        let first = usage_cached(Some(&home), "oc_sk_ok", &url, 1_000).unwrap();
-        assert_eq!(first.five_hour.map(|w| w.used_percentage), Some(42.0));
-        let cached = usage_cached(Some(&home), "oc_sk_ok", "http://127.0.0.1:9", 1_010).unwrap();
-        assert_eq!(cached, first, "a fresh report was fetched again");
-        let stale = usage_cached(Some(&home), "oc_sk_ok", "http://127.0.0.1:9", 1_300).unwrap();
-        assert_eq!(stale, first, "a failed refresh dropped the last report");
-        assert!(usage_cached(Some(&home), "oc_sk_ok", "http://127.0.0.1:9", 1_301).is_err(), "a report older than five minutes held");
-        let _ = std::fs::remove_dir_all(&home);
+    fn gateway_overrides_are_https_or_loopback() {
+        assert_eq!(allowed_override("https://opencode.ai/inference/go/"), Some("https://opencode.ai/inference/go".into()));
+        assert_eq!(allowed_override(" http://127.0.0.1:8798/ "), Some("http://127.0.0.1:8798".into()));
+        assert_eq!(allowed_override("http://localhost:8798"), Some("http://localhost:8798".into()));
+        assert_eq!(allowed_override("http://[::1]:8798/"), Some("http://[::1]:8798".into()));
+        assert_eq!(allowed_override("http://192.168.1.2:8798"), None);
+        assert_eq!(allowed_override("http://localhost.evil.com"), None);
+        assert_eq!(allowed_override("ftp://opencode.ai"), None);
+        assert_eq!(allowed_override("not a url"), None);
+        assert_eq!(allowed_override(""), None);
     }
 
     #[test]

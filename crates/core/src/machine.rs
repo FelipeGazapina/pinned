@@ -387,6 +387,8 @@ pub struct Machine {
     threads_watched: AtomicBool,
     thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
+    /// When a Go account's allowance was last asked for, so a burst of statuslines makes one request.
+    usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
     memories: Arc<memory::Memories>,
@@ -522,6 +524,7 @@ impl Machine {
             threads_watched: AtomicBool::new(false),
             thread_watchers: Mutex::default(),
             usage: Mutex::default(),
+            usage_refreshed: Mutex::default(),
             agents: Mutex::default(),
             delegates,
             memories,
@@ -2098,6 +2101,41 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
+    fn record_usage(&self, account: accounts::AccountId, report: Usage) {
+        let usage = {
+            let mut all = self.usage.lock().unwrap();
+            let known = all.entry(account.clone()).or_default();
+            *known = report.over(*known, unix_now());
+            *known
+        };
+        self.emit(Event::Usage { usage, account });
+    }
+
+    /// Reads a Go account's allowance off the statusline path. The statusline asks for this and
+    /// returns at once, so a slow or unreachable gateway never delays the user's own statusline.
+    fn refresh_go_usage(&self, account: accounts::AccountId) {
+        let Some(account) = self.accounts.get(&account) else { return };
+        if account.auth != Auth::OpenCodeGo {
+            return;
+        }
+        let Some(key) = self.accounts.key(&account) else { return };
+        let now = Instant::now();
+        {
+            let mut refreshed = self.usage_refreshed.lock().unwrap();
+            if refreshed.get(&account.id).is_some_and(|at| now.duration_since(*at) < Duration::from_secs(15)) {
+                return;
+            }
+            refreshed.insert(account.id.clone(), now);
+        }
+        let Some(machine) = self.me.upgrade() else { return };
+        let id = account.id.clone();
+        std::thread::spawn(move || {
+            if let Ok(usage) = crate::opencode_go::usage(&key) {
+                machine.record_usage(id, usage);
+            }
+        });
+    }
+
     /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
@@ -2115,15 +2153,12 @@ impl Machine {
                     }
                     Ok(merge_context(&machine.recall(&event), &notices))
                 }
-                Message::Usage { usage: report, account } => {
-                    let account = account.unwrap_or_else(accounts::default_account);
-                    let usage = {
-                        let mut all = machine.usage.lock().unwrap();
-                        let known = all.entry(account.clone()).or_default();
-                        *known = report.over(*known, unix_now());
-                        *known
-                    };
-                    machine.emit(Event::Usage { usage, account });
+                Message::Usage { usage, account } => {
+                    machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
+                    Ok(String::new())
+                }
+                Message::RefreshUsage { account } => {
+                    machine.refresh_go_usage(account);
                     Ok(String::new())
                 }
                 Message::Delegate { tab, task, tool, request } => machine.start_delegate(tab, task, tool, *request),

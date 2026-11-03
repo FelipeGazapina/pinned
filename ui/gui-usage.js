@@ -505,7 +505,8 @@ function accountChip(email) {
   const hue = Math.abs(hash) % 360;
   return `<span class="account-chip" role="img" aria-label="Account ${accountInitials(email)}" style="background:oklch(0.85 0.08 ${hue});color:oklch(0.35 0.1 ${hue})">${accountInitials(email)}</span>`;
 }
-const limitAccountName = (a) => (a.email ? accountChip(a.email) : esc(a.go ? a.name ?? "OpenCode Go" : "Claude"));
+const limitAccountText = (a) => (a.email ? accountInitials(a.email) : a.go ? a.name ?? "OpenCode Go" : "Claude");
+const limitAccountName = (a) => (a.email ? accountChip(a.email) : esc(limitAccountText(a)));
 
 /** T3 Code's segment popover: the account, its plan and machines, then the window's figures. */
 function segmentPopHtml(account, w, reset, now) {
@@ -532,7 +533,7 @@ function limitCardHtml(pool, now) {
     const clip = timeLeft === null ? "" : `clip-path:polygon(-1px -1px, calc(${at} - 3px) -1px, calc(${at} - 3px) calc(100% + 1px), calc(${at} + 3px) calc(100% + 1px), calc(${at} + 3px) -1px, calc(100% + 1px) -1px, calc(100% + 1px) calc(100% + 1px), -1px calc(100% + 1px))`;
     const resets = w.resets_at ? resetsInText(w.resets_at, now) : "";
     const pop = popAttr(segmentPopHtml(member.account, w, pool.resets.find((r) => r.member === member), now));
-    const label = `${member.account.email ? accountInitials(member.account.email) : "Claude"}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
+    const label = `${limitAccountText(member.account)}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
     return `<button type="button" class="segment" style="grid-column:${i + 1};grid-row:1;${gap}" aria-label="${esc(label)}"${pop}>
         <span class="clip"><span class="cut" style="${clip}"><span class="fill" style="width:${left}%;background:${CLAUDE_COLOR}"></span>${
           left < 100 && member.refill > 0 && pool.resets.some((r) => r.member === member) ? `<span class="refill" style="width:${Math.min(100 - left, member.refill)}%;--refill:${CLAUDE_COLOR}"></span>` : ""}</span></span>

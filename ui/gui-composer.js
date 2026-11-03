@@ -1208,7 +1208,14 @@ function openModels(anchor) {
     composerMenu.dataset.kind = "models";
     composerMenu.innerHTML = `<p class="none">Loading models…</p>`;
     placeMenu(anchor);
-    accountsOf(tab.machine).then(() => active === tab && !composerMenu.hidden && openModels(anchor)).catch((e) => {
+    accountsOf(tab.machine, true).then(() => {
+      if (active !== tab || composerMenu.hidden) return;
+      if (!accountOf(tab.machine, tab.view.account)) {
+        composerMenu.innerHTML = `<p class="none">Account is not available on this machine.</p>`;
+        return;
+      }
+      openModels(anchor);
+    }).catch((e) => {
       composerMenu.innerHTML = `<p class="none">${esc(String(e))}</p>`;
     });
     return;

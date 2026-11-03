@@ -286,6 +286,9 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
     },
+    /// Asks the machine to read an OpenCode Go account's allowance in the background. The
+    /// statusline sends this and returns without waiting on the gateway.
+    RefreshUsage { account: AccountId },
     /// Starts a child agent. `tab` is the session that asked, when it has one. `task` is the
     /// parent task when the asker is itself a child (`PINNED_TASK`).
     Delegate {

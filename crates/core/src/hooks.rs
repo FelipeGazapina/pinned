@@ -175,36 +175,29 @@ fn tell(sock: &str, message: &Message) {
     }
 }
 
-/// Runs as the session's statusline: forwards the subscription usage Claude Code reports, then
-/// prints the user's own statusline, which the `--settings` entry would otherwise replace.
+/// Runs as the session's statusline: forwards the subscription usage Claude Code reports, asks
+/// the machine to refresh a Go account's allowance without waiting for it, then prints the user's
+/// own statusline, which the `--settings` entry would otherwise replace.
 pub fn statusline() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    if let (Some(usage), Ok(sock)) = (status_usage(&input), std::env::var(SOCK_ENV)) {
-        tell(&sock, &Message::Usage { usage, account: std::env::var(crate::accounts::ACCOUNT_ENV).ok() });
+    let sock = std::env::var(SOCK_ENV).ok();
+    let account = std::env::var(crate::accounts::ACCOUNT_ENV).ok();
+    let go = std::env::var(crate::opencode_go::KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
+    // A Go session's statusline input describes no Anthropic rate limits. Its allowance comes
+    // from the machine's refresh, not from the figures Claude Code wrote for the gateway.
+    if !go {
+        if let (Some(usage), Some(sock)) = (usage_from_status(&input), sock.as_deref()) {
+            tell(sock, &Message::Usage { usage, account: account.clone() });
+        }
+    }
+    if let (Some(sock), Some(account), true) = (sock.as_deref(), account, go) {
+        tell(sock, &Message::RefreshUsage { account });
     }
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
     if let Some(command) = user_statusline(&config_dir) {
         let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
     }
-}
-
-/// A Go session reports the gateway's allowances. Anything else keeps the figures Claude Code
-/// pipes to its statusline. A failed Go call falls back to those figures, and this prints nothing.
-fn status_usage(input: &str) -> Option<Usage> {
-    let key = std::env::var(crate::opencode_go::KEY_ENV).ok();
-    usage_for_statusline(input, key.as_deref(), crate::opencode_go::usage_for_statusline)
-}
-
-fn usage_for_statusline(input: &str, go_key: Option<&str>, fetch: impl FnOnce(&str) -> Result<Usage, String>) -> Option<Usage> {
-    if let Some(key) = go_key.map(str::trim).filter(|key| !key.is_empty()) {
-        if let Ok(usage) = fetch(key) {
-            if usage.five_hour.is_some() || usage.seven_day.is_some() || usage.monthly.is_some() {
-                return Some(usage);
-            }
-        }
-    }
-    usage_from_status(input)
 }
 
 /// The usage in the JSON Claude Code pipes to its statusline. It has none until the session's
@@ -582,13 +575,11 @@ mod tests {
     }
 
     #[test]
-    fn a_go_usage_body_wins_and_a_failed_call_keeps_the_statusline() {
-        let input = r#"{"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1792400000}}}"#;
-        let go = Usage { five_hour: Some(LimitWindow { used_percentage: 42.0, resets_at: 1793660400 }), seven_day: None, monthly: Some(LimitWindow { used_percentage: 100.0, resets_at: 1795996800 }) };
-        assert_eq!(usage_for_statusline(input, Some("oc_sk_test"), |_| Ok(go)), Some(go));
-        assert_eq!(usage_for_statusline(input, None, |_| Ok(go)), usage_from_status(input));
-        assert_eq!(usage_for_statusline(input, Some("   "), |_| Ok(go)), usage_from_status(input));
-        assert_eq!(usage_for_statusline(input, Some("oc_sk_test"), |_| Err("down".into())), usage_from_status(input));
+    fn a_go_statusline_asks_for_a_refresh_without_fetching() {
+        assert_eq!(
+            serde_json::to_string(&Message::RefreshUsage { account: "go".into() }).unwrap(),
+            r#"{"kind":"refresh-usage","account":"go"}"#
+        );
     }
 
     #[test]

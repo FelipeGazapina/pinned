@@ -641,10 +641,11 @@ install, and restart.
   sets `pinned statusline` as the statusline, which forwards the 5-hour and 7-day figures to
   the window. Claude Code reports them only for Pro and Max subscriptions, and only after a
   session's first response, so the meter stays hidden until then. A window leaves the meter
-  when it resets. An OpenCode Go session makes the same statusline read
-  `/zen/go/v1/usage` with the account's key, cache the answer briefly, and add the monthly
-  window. If you set a `statusLine` in `~/.claude/settings.json`, `pinned statusline` runs it
-  with the same input and prints its output, so your statusline still shows.
+  when it resets. An OpenCode Go session's statusline asks the machine to read
+  `/zen/go/v1/usage` with the account's key in the background, so the statusline never waits
+  on the gateway, and the machine adds the monthly window. If you set a `statusLine` in
+  `~/.claude/settings.json`, `pinned statusline` runs it with the same input and prints its
+  output, so your statusline still shows.
 - Signed in, `crates/core/src/link.rs` keeps one outbound WebSocket from this Mac to the hub,
   which routes calls and terminal output between machines and clients.
   `crates/server` (`pinned-server`) is the hub and the headless node, and the hub serves
