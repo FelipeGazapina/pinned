@@ -520,3 +520,9 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
   #projects { width: calc(100% - 16px); }
   .tab .close { visibility: visible; }
 }
+
+.add-account .row { flex-wrap: wrap; }
+.add-account [name=key] { flex: 1 1 240px; }
+.replace-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.replace-key input { flex: 1 1 240px; }
+.replace-key .error { flex-basis: 100%; margin: 0; }

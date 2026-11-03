@@ -48,6 +48,39 @@ const CLAUDE_MODELS = [
   { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", legacy: true, efforts: ["low", "medium", "high", "max", "ultrathink"], context: 2e5 },
   { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5", legacy: true, efforts: [], context: 2e5 },
 ];
+/** The OpenCode Go gateway's models and context windows, from `GET /inference/go/v1/models` on
+ * 2026-11-02. They change with the gateway; keep this list in step with `opencode_go.rs`. Every
+ * one is picked with `--model`, not Claude's own /model menu. */
+const OPENCODE_GO_MODELS = [
+  { slug: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
+  { slug: "deepseek-v4-pro", name: "DeepSeek V4 Pro (New)", provider: "opencode-go", legacy: true, efforts: ["high", "max"], context: 1e6 },
+  { slug: "glm-5.2", name: "GLM-5.2", provider: "opencode-go", legacy: true, efforts: ["high", "max"], context: 1e6 },
+  { slug: "glm-5.3", name: "GLM-5.3", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
+  { slug: "grok-4.7", name: "Grok 4.7", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh"], context: 5e5 },
+  { slug: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh"], context: 1048576 },
+  { slug: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh"], context: 1048576 },
+  { slug: "glm-5.3-flash", name: "GLM-5.3-Flash", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
+  { slug: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1050000 },
+  { slug: "gpt-6-luna", name: "GPT-6 Luna", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1050000 },
+  { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1e6 },
+  { slug: "hy3", name: "Hy3", provider: "opencode-go", legacy: true, efforts: ["low", "high"], context: 256000 },
+  { slug: "hy4-preview", name: "Hy4 preview", provider: "opencode-go", legacy: true, efforts: ["high"], context: 1024000 },
+  { slug: "kimi-k2.7-code", name: "Kimi K2.7 Code", provider: "opencode-go", legacy: true, efforts: [], context: 262144 },
+  { slug: "kimi-k3", name: "Kimi K3", provider: "opencode-go", legacy: true, efforts: ["max"], context: 1048576 },
+  { slug: "mimo-v2.6-flash", name: "MiMo-V2.6-Flash", provider: "opencode-go", legacy: true, efforts: [], context: 1048576 },
+  { slug: "mimo-v2.6-pro", name: "MiMo-V2.6-Pro", provider: "opencode-go", legacy: true, efforts: [], context: 1048576 },
+  { slug: "minimax-m3", name: "MiniMax-M3", provider: "opencode-go", legacy: true, efforts: [], context: 1e6 },
+  { slug: "minimax-m3.1-flash", name: "MiniMax M3.1 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1e6 },
+  { slug: "longcat-2.0", name: "LongCat-2.0", provider: "opencode-go", legacy: true, efforts: [], context: 1e6 },
+  { slug: "step-5-preview", name: "Step 5 Preview", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high"], context: 1e6 },
+  { slug: "beam-free", name: "Beam Free", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1048576 },
+  { slug: "qwen3.8-max", name: "Qwen3.8 Max", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "xhigh"], context: 1e6 },
+  { slug: "qwen3.8-flash", name: "Qwen3.8 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "xhigh"], context: 1e6 },
+  { slug: "qwen3.7-plus", name: "Qwen3.7 Plus", provider: "opencode-go", legacy: true, efforts: [], context: 1e6 },
+  { slug: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1048576 },
+  { slug: "iceman-contributor-free", name: "Iceman Contributor Free", provider: "opencode-go", legacy: true, efforts: [], context: 262144 },
+  { slug: "gemini-4-argon", name: "Gemini 4 Argon", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high"], context: 1048576 },
+];
 const ULTRATHINK = "Ultrathink:\n";
 
 /** Claude's permission modes, named and drawn as T3 Code's runtime modes. Plan is T3's separate
@@ -1118,7 +1151,12 @@ function modelName(tab) {
   const t = threadOf(tab);
   return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
 }
-const modelOf = (tab) => CLAUDE_MODELS.find((m) => m.name === `Claude ${modelName(tab)}` || m.name === modelName(tab)) ?? null;
+const authOf = (tab) => accountOf(tab.machine, tab.view.account)?.auth ?? "login";
+const modelsFor = (tab) => (authOf(tab) === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS);
+const modelOf = (tab) => {
+  const name = modelName(tab);
+  return modelsFor(tab).find((m) => m.name === name || m.slug === name || m.name === `Claude ${name}`) ?? null;
+};
 /** Claude's /model menu: the numbered rows under "Select model", ❯ on the chosen one. Its effort
  * and fast mode lines under the rows keep `menuOn` from reading it. */
 function modelMenuOn(lines) {
@@ -1135,10 +1173,10 @@ function pickModel(tab, model) {
   if (modelOf(tab) === model) return;
   const done = (ok) => {
     if (!ok) return;
-    threadOf(tab).picked = model.name.replace(/^Claude /, "");
+    threadOf(tab).picked = model.provider === "opencode-go" ? model.name : model.name.replace(/^Claude /, "");
     if (tab === active) renderComposer(tab);
   };
-  if (model.legacy) {
+  if (model.provider === "opencode-go" || model.legacy) {
     refit(tab);
     return whenIdle(tab, () => callOn(tab.machine, { cmd: "set_model", tab: tab.view.id, model: model.slug, cols: tab.term.cols, rows: tab.term.rows }).then(() => done(true), (e) => showComposerNote(String(e), true)));
   }
@@ -1164,10 +1202,22 @@ const modelPicker = { provider: "claude", search: "", legacy: false, highlight: 
 function openModels(anchor) {
   const tab = active;
   if (!tab) return;
-  Object.assign(modelPicker, { search: "", highlight: 0, legacy: !!modelOf(tab)?.legacy });
+  // A Go account is not the built-in one, so its auth comes from the machine's account list.
+  if (tab.view.account !== DEFAULT_ACCOUNT && !accountOf(tab.machine, tab.view.account)) {
+    composerMenu.hidden = false;
+    composerMenu.dataset.kind = "models";
+    composerMenu.innerHTML = `<p class="none">Loading models…</p>`;
+    placeMenu(anchor);
+    accountsOf(tab.machine).then(() => active === tab && !composerMenu.hidden && openModels(anchor)).catch((e) => {
+      composerMenu.innerHTML = `<p class="none">${esc(String(e))}</p>`;
+    });
+    return;
+  }
+  const go = authOf(tab) === "opencode-go";
+  Object.assign(modelPicker, { provider: go ? "go" : "claude", search: "", highlight: 0, legacy: !!modelOf(tab)?.legacy });
   composerMenu.dataset.kind = "models";
   composerMenu.innerHTML = `<nav class="providers" aria-label="Providers"><button type="button" data-provider="favorites" title="Favorites" aria-label="Favorites">${icon("star")}</button><span class="rule"></span>
-      <button type="button" data-provider="claude" title="Claude" aria-label="Claude">${icon("claude")}</button></nav>
+      <button type="button" data-provider="${go ? "go" : "claude"}" title="${go ? "OpenCode Go" : "Claude"}" aria-label="${go ? "OpenCode Go" : "Claude"}">${icon(go ? "sparkles" : "claude")}</button></nav>
     <div class="pane"><input class="search" placeholder="Search models..." autocomplete="off" spellcheck="false"><div class="list" role="listbox"></div></div>`;
   composerMenu.hidden = false;
   placeMenu(anchor);
@@ -1212,7 +1262,7 @@ function openModels(anchor) {
       modelPicker.legacy = !modelPicker.legacy;
       return renderModels(tab);
     }
-    pickModel(tab, CLAUDE_MODELS.find((m) => m.slug === row.dataset.row));
+    pickModel(tab, modelsFor(tab).find((m) => m.slug === row.dataset.row));
   };
   renderModels(tab);
   search.focus();
@@ -1221,16 +1271,18 @@ function renderModels(tab) {
   const { provider, search, legacy, highlight } = modelPicker;
   for (const b of composerMenu.querySelectorAll("[data-provider]")) b.setAttribute("aria-pressed", b.dataset.provider === provider);
   const current = modelOf(tab);
+  const models = authOf(tab) === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS;
   const row = (m) => `<div class="model" data-row="${m.slug}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.isNew ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
-      <div class="sub">${icon("claude")}<span>Claude</span></div></div>${m === current ? icon("check", "check") : ""}
+      <div class="sub">${icon(m.provider === "opencode-go" ? "sparkles" : "claude")}<span>${m.provider === "opencode-go" ? "OpenCode Go" : "Claude"}</span></div></div>${m === current ? icon("check", "check") : ""}
       <button type="button" class="fav${modelFavorites.includes(m.slug) ? " on" : ""}" data-fav="${m.slug}" aria-label="${modelFavorites.includes(m.slug) ? "Remove from favorites" : "Add to favorites"}" title="${modelFavorites.includes(m.slug) ? "Remove from favorites" : "Add to favorites"}">${icon("star")}</button></div>`;
   let rows;
-  if (search) rows = CLAUDE_MODELS.filter((m) => `${m.name} ${m.slug}`.toLowerCase().includes(search)).map(row);
-  else if (provider === "favorites") rows = CLAUDE_MODELS.filter((m) => modelFavorites.includes(m.slug)).map(row);
+  if (search) rows = models.filter((m) => `${m.name} ${m.slug}`.toLowerCase().includes(search)).map(row);
+  else if (provider === "favorites") rows = models.filter((m) => modelFavorites.includes(m.slug)).map(row);
+  else if (provider === "go") rows = [...models.filter((m) => modelFavorites.includes(m.slug)), ...models.filter((m) => !modelFavorites.includes(m.slug))].map(row);
   else {
     const favored = (m) => modelFavorites.includes(m.slug);
-    const shown = [...CLAUDE_MODELS.filter(favored), ...CLAUDE_MODELS.filter((m) => !favored(m) && !m.legacy)];
-    const old = CLAUDE_MODELS.filter((m) => m.legacy && !favored(m));
+    const shown = [...models.filter(favored), ...models.filter((m) => !favored(m) && !m.legacy)];
+    const old = models.filter((m) => m.legacy && !favored(m));
     rows = shown.map(row);
     rows.push(`<div class="model legacy" data-row="legacy" role="option" aria-expanded="${legacy}"><div class="text"><div class="name">Legacy models</div><div class="sub"><span>${old.length} models</span></div></div>${icon("chevron-right", "chev")}</div>`);
     if (legacy) rows.push(...old.map(row));
