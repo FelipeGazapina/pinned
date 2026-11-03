@@ -657,10 +657,16 @@ install, and restart.
 ## Develop
 
 ```sh
-cargo run -- ~/path/to/project    # debug build
+cargo run -p pinned-dev           # isolated dev app, rebuilds and restarts on changes
+cargo run -- ~/path/to/project    # debug build on the normal config
 npm run tauri build               # .app and .dmg in target/release/bundle
 npm run tauri build -- --bundles nsis   # on Windows: the setup .exe in target/release/bundle/nsis
 ```
+
+`cargo run -p pinned-dev` keeps the app's config under `.dev/home`, so it never shares accounts,
+projects, sessions, history or the hub sign-in with the installed app. It watches `src`, `crates` and
+`ui`, then rebuilds and restarts the app after a change. The log is `.dev/dev.log`. Delete
+`.dev` to start again with an empty environment.
 
 The `windows` workflow runs the tests on Windows and builds the installer for every
 pull request. Download it from the run's `pinned-windows-setup` artifact to try a change on

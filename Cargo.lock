@@ -3370,6 +3370,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pinned-dev"
+version = "0.17.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pinned-server"
 version = "0.17.0"
 dependencies = [
