@@ -498,7 +498,7 @@ function cardRow(tab) {
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
-  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "sparkles" : "claude";
+  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
