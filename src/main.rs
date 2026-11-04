@@ -4,6 +4,7 @@ mod account;
 mod awake;
 mod browser;
 mod commands;
+mod dictation;
 mod fonts;
 mod navigation;
 
@@ -398,6 +399,9 @@ fn main() {
             browser::save_capture,
             browser::reveal_file,
             browser::browser_debug_key,
+            dictation::dictation_start,
+            dictation::dictation_stop,
+            dictation::dictation_status,
             navigation::permit_frame_navigation
         ])
         .setup(move |app| {
@@ -424,6 +428,7 @@ fn main() {
             let storage = connectors::FileStorage::new(app.path().app_config_dir()?);
             app.manage(connectors::Connectors::new(storage, exe.display().to_string()));
             app.manage(account::Account::start(app.handle(), app.path().app_config_dir()?, machine.clone()));
+            app.manage(std::sync::Arc::new(dictation::Dictation::new(app.handle().clone())));
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;

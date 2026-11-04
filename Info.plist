@@ -4,5 +4,9 @@
 <dict>
   <key>LSUIElement</key>
   <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>pinned listens to your voice only while you hold a dictation session from the composer's mic button, and transcribes it on your Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>pinned transcribes your dictation on your Mac to write it into the composer.</string>
 </dict>
 </plist>

@@ -36,6 +36,9 @@
       "app",
       "dmg"
     ],
+    "resources": [
+      "binaries/dictation-helper"
+    ],
     "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "Claude Code in an always-on-top panel",

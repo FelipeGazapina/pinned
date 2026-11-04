@@ -3,3 +3,5 @@ node_modules/
 gen/
 __pycache__/
 .dev/
+# Compiled at build time by build.rs (swiftc) and bundled as a resource.
+binaries/dictation-helper
