@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-function load() {
+function loadCase() {
   const source = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const start = source.indexOf("async function checkUpdate");
   const end = source.indexOf('for (const button of document.querySelectorAll(".update"))');
@@ -19,7 +19,7 @@ async function press(status) {
     if (cmd === "check_update") return "0.17.0";
     throw new Error(cmd);
   };
-  const api = load()(invoke, document, { term });
+  const api = loadCase()(invoke, document, { term });
   await api.installUpdate();
   return { button, term: term.text };
 }

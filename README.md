@@ -159,11 +159,14 @@ the drawer, and the Git action commits (with a message Claude writes), pushes an
 requests itself. ⌘⇧B shows the thread's details in one card.
 
 When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
-command, the app view shows the question above the prompt with Claude's own options. Pick one,
-or click **Terminal** to answer there. Typing instead answers it too: on a permission it declines
-and tells Claude what to do instead, on a question it is your own answer, and on a plan it is
-feedback that refines it. A question's options also take the keys 1 to 9. ⌘J opens the terminal
-under the thread at any time; drag its top edge to resize it.
+command, the app view opens a popup above the prompt with Claude's own options. It opens again
+whenever you select the thread, even if the question arrived while the thread was in the
+background. Pick an option, or click **Terminal** to answer there. Typing instead answers it too:
+on a permission it declines and tells Claude what to do instead, on a question it is your own
+answer, and on a plan it is feedback that refines it. A question's options also take the keys 1
+to 9. If pinned cannot read the terminal's form, the popup shows the terminal's lines and a
+**Retry** button instead of staying hidden. ⌘J opens the terminal under the thread at any time;
+drag its top edge to resize it.
 
 The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
 aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's

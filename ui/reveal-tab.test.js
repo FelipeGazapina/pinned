@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function load(callOn) {
+function loadCase(callOn) {
   const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const start = src.indexOf("function setTabs");
   const end = src.indexOf("/** The machine's accounts");
@@ -45,7 +45,7 @@ function load(callOn) {
 const view = (id) => ({ id, cwd: "/work" });
 
 test("a tab the machine already pushed is shown without asking for the list again", async () => {
-  const app = load(() => {
+  const app = loadCase(() => {
     throw new Error("tabs was fetched");
   });
   app.setTabs("remote", [view("tab-1")]);
@@ -56,7 +56,7 @@ test("a tab the machine already pushed is shown without asking for the list agai
 });
 
 test("a tab push that arrives after the open answers is still not a second fetch", async () => {
-  const app = load(() => {
+  const app = loadCase(() => {
     throw new Error("tabs was fetched");
   });
   const shown = app.revealTab("remote", "tab-2");
@@ -119,7 +119,7 @@ for (const version of ["0.16.0", "0.9.1", ""]) {
 }
 
 test("a node that never pushes the tab falls back to one tabs fetch", async () => {
-  const app = load((call) => {
+  const app = loadCase((call) => {
     assert.equal(call.cmd, "tabs");
     return [view("tab-9")];
   });
