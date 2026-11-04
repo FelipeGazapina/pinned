@@ -1,26 +1,14 @@
 /** The General page: app-wide switches. */
 async function showGeneral() {
-  const awake = TAURI && (await invoke("get_keep_awake"));
   settingsPage.innerHTML = `<h2>General</h2>
-    ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this ${COMPUTER} awake</label></p>
-    <p class="meta">While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
-    <p class="error" id="awake-error"></p>` : ""}
+    ${await featuresSettingsHtml()}
     ${sidebarSettingsHtml()}
     ${sendShortcutHtml()}
     ${browserSettingsHtml()}`;
+  bindFeaturesSettings();
   bindSidebarSettings();
   bindSendShortcut();
   bindBrowserSettings();
-  if (!TAURI) return;
-  document.getElementById("keep-awake").onchange = async (e) => {
-    try {
-      await invoke("set_keep_awake", { on: e.target.checked });
-      document.getElementById("awake-error").textContent = "";
-    } catch (err) {
-      e.target.checked = !e.target.checked;
-      document.getElementById("awake-error").textContent = err;
-    }
-  };
 }
 
 /** T3 Code's Appearance page: colors and themes, the interface, motion and typography. */
