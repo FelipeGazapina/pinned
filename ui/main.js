@@ -212,6 +212,7 @@ function updateView(tab, view) {
   if (threadKey(tab) !== key) rekeyThread(key, threadKey(tab));
   const after = statusOf(tab);
   if (after === before) return;
+  if (after === "needs-input" && tab === active && typeof syncInputPopup === "function") syncInputPopup(tab);
   if (!TAURI) return attend(tab, ALERTS.includes(after));
   if (ALERTS.includes(after) && document.body.dataset.view === "pill") {
     pill.dataset.status = after;
@@ -703,6 +704,7 @@ function show(tab) {
   }
   refit(tab);
   render();
+  if (typeof syncInputPopup === "function") syncInputPopup(tab);
   if (!pickerOpen() && !settingsOpen()) focusInput();
   markSeen(tab);
 }

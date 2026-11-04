@@ -3,6 +3,8 @@ const threadView = document.getElementById("thread");
 const composer = document.getElementById("composer");
 const prompt = document.getElementById("prompt");
 const approval = document.getElementById("approval");
+// The input popup floats over the thread, so it outlives the composer's own stacking context.
+document.body.append(approval);
 const panelBody = document.getElementById("panel-body");
 
 const guiOn = () => document.body.dataset.mode === "gui";
@@ -244,6 +246,8 @@ function renderGui() {
       watchMenu(tab);
     }
     tab.menu = tab.answering ? null : terminalMenu(tab);
+    if (tab.menu || statusOf(tab) !== "needs-input") tab.missingInput = false;
+    if (tab.menu) tab.inputFallback = "";
     if (terminalOnly(tab)) {
       if (tab.view.program !== "sign-in" && !threadOf(tab).loaded) fetchThread(tab);
       continue;

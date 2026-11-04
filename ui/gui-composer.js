@@ -298,6 +298,40 @@ function watchMenu(tab) {
   });
 }
 
+/** Reads the input menu again when a thread comes into view. A background terminal can draw its
+ * question after the tab was last rendered, and a long form can sit above the old parser's window.
+ * If nothing readable appears while the hook says the thread needs input, the popup says so instead
+ * of staying invisible. */
+let inputPoll;
+function syncInputPopup(tab) {
+  clearTimeout(inputPoll);
+  let attempts = 0;
+  const check = () => {
+    if (!tab || tab !== active || !guiOn() || tab.answering) return;
+    const menu = terminalMenu(tab);
+    if (menu) {
+      tab.missingInput = false;
+      tab.inputFallback = "";
+      if (JSON.stringify(menu) !== JSON.stringify(tab.menu ?? null)) {
+        tab.menu = menu;
+        renderComposer(tab);
+        renderSidebar();
+      }
+      return;
+    }
+    if (statusOf(tab) === "needs-input" && attempts++ < 20) {
+      inputPoll = setTimeout(check, 100);
+      return;
+    }
+    if (statusOf(tab) === "needs-input" && !terminalDialog(tab)) {
+      tab.missingInput = true;
+      tab.inputFallback = screenLines(tab).filter((line) => line.trim()).slice(-12).join("\n");
+      renderComposer(tab);
+    }
+  };
+  check();
+}
+
 const ARROW_DOWN = "\x1b[B";
 const ARROW_UP = "\x1b[A";
 const SHIFT_TAB = "\x1b[Z";
@@ -399,14 +433,33 @@ function questionTabs(tab) {
 const multiSelect = (menu) => menu.options.some((o) => /^\[[ ✔]\]/.test(o.head));
 const ticked = (o) => /^\[✔\]/.test(o.head) || /\s✔$/.test(o.head);
 
+const inputCard = (html) => `<div class="input-card">${html}</div>`;
+/** Places the popup just above the composer, whatever height the composer has now. */
+function placeApproval() {
+  if (approval.hidden) return;
+  const top = composer.getBoundingClientRect().top;
+  approval.style.setProperty("--approval-bottom", `${Math.max(8, innerHeight - top + 10)}px`);
+  approval.style.setProperty("--approval-max", `${Math.max(160, top - 24)}px`);
+}
+
 /** claude heads a permission menu with what it wants to run, such as "Bash command", then a
  * description and its own tips, the command in a dashed box, and the question last, such as "Do you
  * want to proceed?". A question's options each have a description under them; T3 Code shows it
  * with its header, a 1-9 hint or a check per option, and the tab it is on out of all. */
 function renderApproval(tab) {
   const menu = !tab?.answering && tab?.menu;
-  approval.hidden = !menu;
-  if (!menu) return (approval.dataset.key = "");
+  const missing = !menu && !!tab?.missingInput && statusOf(tab) === "needs-input";
+  approval.hidden = !menu && !missing;
+  approval.setAttribute("role", "dialog");
+  approval.setAttribute("aria-modal", "false");
+  if (approval.hidden) return (approval.dataset.key = "");
+  placeApproval();
+  if (missing) {
+    const key = JSON.stringify([tab.key, "missing", tab.view.message ?? ""]);
+    if (approval.dataset.key === key) return;
+    approval.dataset.key = key;
+    return renderMissingInput(tab);
+  }
   const kind = menuKind(menu);
   const tabs = kind === "question" ? questionTabs(tab) : null;
   const t = threadOf(tab);
@@ -421,9 +474,21 @@ function renderApproval(tab) {
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
   if (permission) return renderPermission(menu, lines, label);
   const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
-  approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+  approval.innerHTML = inputCard(`${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
       <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`);
+}
+
+/** The hook says this thread needs input but the terminal's question could not be read. */
+function renderMissingInput(tab) {
+  approval.dataset.kind = "input";
+  delete approval.dataset.collapsed;
+  const screen = tab.inputFallback;
+  approval.innerHTML = inputCard(`${icon("message-circle-question", "lead")}<div class="body"><p class="kind">Input needed</p>
+      <p class="what">${esc(tab.view.message || "Claude is waiting for your answer in the terminal.")}</p>
+      ${screen ? `<pre tabindex="0">${esc(screen)}</pre>` : ""}
+      <p class="about">pinned could not read the question's options. Retry, or answer in the terminal.</p></div>
+    <div class="actions"><button type="button" data-retry-input class="outline">Retry</button><button type="button" data-show-terminal class="outline">Terminal</button></div>`);
 }
 
 /** T3 Code's answers to a permission, each one the option of claude's menu that means it: Approve
@@ -443,10 +508,10 @@ function renderPermission(menu, lines, label) {
   const detail = menu.box || middle.join("\n");
   const about = menu.box ? middle.join("\n") : "";
   const { accept, decline } = approvalChoices(menu);
-  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+  approval.innerHTML = inputCard(`${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
       ${detail ? `<pre tabindex="0">${esc(detail)}</pre>` : ""}${about ? `<p class="about">${esc(about)}</p>` : ""}${/^Do you want to proceed\?$/.test(question) ? "" : `<p class="about">${esc(question)}</p>`}</div>
     <div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
-      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`;
+      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`);
 }
 function approvalMore(tab, anchor) {
   const menu = tab.menu;
@@ -462,6 +527,7 @@ function approvalMore(tab, anchor) {
 }
 function cancelMenu(tab) {
   tab.menu = null;
+  tab.missingInput = false;
   renderComposer(tab);
   return writeTo(tab, "\x1b");
 }
@@ -480,11 +546,11 @@ function renderQuestion(tab, menu, tabs, lines) {
     const label = o.head.replace(/^\[[ ✔]\]\s*/, "").replace(/\s✔$/, "");
     return `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${on ? " data-picked" : ""}${o.n <= 9 && !on ? ` data-key="${o.n}"` : ""}><span class="label">${esc(label)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}${on ? icon("check", "tick") : ""}</button>`;
   });
-  approval.innerHTML = `${icon("message-circle-question", "lead")}<div class="body">
+  approval.innerHTML = inputCard(`${icon("message-circle-question", "lead")}<div class="body">
       <div class="q-head" data-toggle role="button" tabindex="0" aria-expanded="${!collapsed}"><span class="q-header">${esc(header)}</span>${collapsed ? `<span class="q-text">${esc(question.split("\n")[0])}</span>` : ""}
         <span class="spacer"></span>${count}${icon("chevron-down", "q-chev")}<button type="button" data-dismiss class="icon" aria-label="Dismiss question without answering" title="Dismiss question without answering">${icon("x")}</button></div>
       <div class="q-body"><p class="what">${esc(question)}</p>${multi ? `<p class="q-multi">Select one or more options.</p>` : ""}<div class="options choices">${options.join("")}</div></div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`);
 }
 
 /** Picks option `n` the way T3 Code does: a multi-select option toggles; a single one shows its
@@ -519,6 +585,12 @@ approval.addEventListener("click", (e) => {
     return chooseOption(tab, Number(option.dataset.option), tab.menu.options[option.dataset.option - 1]?.label);
   }
   if (e.target.closest("[data-dismiss]") && tab.menu) return cancelMenu(tab);
+  if (e.target.closest("[data-retry-input]")) {
+    tab.missingInput = false;
+    tab.inputFallback = "";
+    renderComposer(tab);
+    return syncInputPopup(tab);
+  }
   if (e.target.closest("[data-toggle]")) {
     const t = threadOf(tab);
     const header = approval.querySelector(".q-header")?.textContent;
@@ -625,7 +697,7 @@ async function implementInNewThread(tab) {
 /** T3 Code's notices over the composer: the front one attached to it, the rest behind a cap that
  * shows them on hover or a tap. */
 const composerBanners = Object.assign(document.createElement("div"), { id: "composer-banners", hidden: true });
-approval.before(composerBanners);
+composer.prepend(composerBanners);
 const bannerDismissed = new Set();
 let bannersOpen = false;
 let restoringBranch = null;
@@ -731,7 +803,7 @@ function confirmRestore(branch) {
  * or until every step is done, its current step and progress, and the whole list when opened. */
 const composerDock = Object.assign(document.createElement("div"), { id: "composer-dock" });
 const tasksTab = Object.assign(document.createElement("div"), { id: "composer-tasks", hidden: true });
-approval.after(composerDock);
+document.getElementById("composer-footer").before(composerDock);
 composerDock.append(tasksTab, document.getElementById("stash"));
 let tasksOpen = false;
 function tasksOf(tab) {
@@ -1342,6 +1414,7 @@ function renderModels(tab) {
   markModelJumps(list);
 }
 document.getElementById("model-button").onclick = (e) => (composerMenu.hidden || composerMenu.dataset.kind !== "models" ? openModels(e.currentTarget) : (composerMenu.hidden = true));
+addEventListener("resize", () => active && renderApproval(active));
 onGuiKey("m", () => document.getElementById("model-button").click(), { shift: true });
 
 /** Claude's effort marks by its prompt box, such as "◐ medium · ultracode · /effort", and
