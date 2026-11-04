@@ -21,9 +21,22 @@ const terminalMode = (tab) => modeOn(screenLines(tab));
 function menuOn(lines) {
   let end = lines.length - 1;
   while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
-  let cursor = end;
-  while (cursor >= Math.max(0, end - 16) && !CURSOR.test(lines[cursor])) cursor--;
-  if (cursor < Math.max(0, end - 16)) return null;
+  // A question can run past the last sixteen lines. Widen the search only for a menu with the
+  // rule Claude draws above it, since a typed prompt also starts with a cursor.
+  const near = menuSearch(lines, end, 16, false);
+  return near ?? menuSearch(lines, end, lines.length, true);
+}
+
+function menuSearch(lines, end, reach, require_rule) {
+  for (let cursor = end; cursor >= Math.max(0, end - reach); cursor--) {
+    if (!CURSOR.test(lines[cursor])) continue;
+    const menu = menuAt(lines, cursor, end, require_rule);
+    if (menu) return menu;
+  }
+  return null;
+}
+
+function menuAt(lines, cursor, end, require_rule) {
   const at = lines[cursor].search(CURSOR) + 2;
   const option = (l) => l.length > at && !l.slice(0, at).replace(CURSOR, "").trim() && l[at] !== " ";
   const continued = (l) => l.length > at && !l.slice(0, at + 1).trim();
@@ -31,7 +44,8 @@ function menuOn(lines) {
   const rule = (l) => numbered && /^\s*[─━]{8,}\s*$/.test(l);
   let first = cursor;
   while (first > 0 && (option(lines[first - 1]) || continued(lines[first - 1]) || (rule(lines[first - 1]) && first - 1 > 0 && option(lines[first - 2])))) first--;
-  while (!option(lines[first])) first++;
+  while (first < lines.length && !option(lines[first])) first++;
+  if (first >= lines.length) return null;
   const options = [];
   for (let k = first; k <= end; k++) {
     const text = lines[k].slice(at).trim();
@@ -47,6 +61,7 @@ function menuOn(lines) {
   }
   if (options.length < 2) return null;
   const top = lines.slice(0, first).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
+  if (require_rule && top < 0) return null;
   const above = lines.slice(top + 1, first).map((l) => l.trim()).filter(Boolean);
   const dashed = (l) => /^[─━╌┄┈═-]+$/.test(l);
   const boxStart = above.findIndex(dashed);
