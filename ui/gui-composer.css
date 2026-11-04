@@ -175,6 +175,15 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #composer .controls .block { display: flex; align-items: center; gap: 4px; }
 #composer .controls .block[hidden] { display: none; }
 #composer .controls .sep { width: 1px; height: 16px; margin: 0 2px; background: var(--g-border); flex: none; }
+/* Dictation: the mic pulses red while a session runs, and the prompt tints while
+ * provisional (unconfirmed) text trails it. Sending or tapping the mic again is
+ * the only way a session ends — pauses never stop it. */
+#composer-dictate[data-active="true"] { color: var(--g-error); }
+#composer-dictate[data-active="true"] .i { animation: dictate-pulse 1.6s ease-in-out infinite; }
+@keyframes dictate-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+#composer[data-dictating="true"] #prompt { border-color: rgb(var(--g-error-rgb) / 0.4); }
+#composer[data-provisional="true"] #prompt { caret-color: var(--g-error); }
+@media (prefers-reduced-motion: reduce) { #composer-dictate[data-active="true"] .i { animation: none; } }
 #composer .controls .pick { margin-left: 0; }
 #composer .pick[aria-pressed="true"] { background: var(--g-accent); color: var(--g-fg); }
 #composer .pick:active:not([aria-haspopup]) { transform: scale(0.97); }

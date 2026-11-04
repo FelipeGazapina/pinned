@@ -257,6 +257,7 @@ document.getElementById("limit-note").onclick = (e) => {
 function switchDraft(tab) {
   composer.dataset.tab = tab?.key ?? "";
   prompt.value = (tab && drafts[threadKey(tab)]) ?? "";
+  if (typeof dictationRetarget === "function") dictationRetarget();
   if (tab) threadOf(tab).recall = null;
   if (tab?.view.running) fetchList(tab, "commands");
   composerMenu.hidden = true;
@@ -887,6 +888,8 @@ function waitsOnMenu(tab) {
 async function send() {
   const tab = active;
   if (!tab) return toggleProjects();
+  // Sending ends a dictation session and keeps everything said so far.
+  if (typeof stopDictation === "function" && dictationActive()) stopDictation();
   if (!tab.view.running) return startTab(tab);
   if (tab.answering || composer.dataset.sending === "true") return;
   const t = threadOf(tab);

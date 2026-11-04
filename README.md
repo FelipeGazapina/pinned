@@ -127,6 +127,12 @@ The app view has three columns:
   `/model`, shows that screen live at the end of the thread. Keys you press on it reach Claude,
   and on a touch screen its buttons send them; Esc or ✕ closes it. Sending a message closes it
   first, so your words reach the prompt rather than the screen.
+  The mic next to the attach button dictates into the prompt: one tap starts a session that
+  only ends when you send or tap the mic again, never on a pause. Interim speech shows as
+  provisional text; each finished phrase confirms into the prompt, and typing confirms what
+  is there. Transcription runs on your Mac (Apple's on-device speech, en-US/pt-BR), and a
+  developer glossary steers spelling — kubectl, useState, async/await, utils.ts — the same
+  ideas as the speech-to-text app, without its LLM rewrite pass.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
