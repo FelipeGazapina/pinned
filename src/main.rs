@@ -502,6 +502,8 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("tauri build failed")
         .run(|app, event| {
+            // Reopen only exists on macOS; other targets must not name it.
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 reveal_main(app);
             }
