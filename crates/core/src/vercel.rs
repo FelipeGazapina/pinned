@@ -44,6 +44,37 @@ pub(crate) fn set_test_content(content: Option<String>) {
     *TEST_CONTENT.lock().unwrap() = content;
 }
 
+/// Asks a chat model for one JSON object, for workflow generation. The answer parses as JSON;
+/// prose around it is trimmed. Tests run it offline through the same canned content as `ask`.
+pub async fn chat_json(key: &str, model: &str, system: &str, user: &str) -> Result<Value, String> {
+    #[cfg(test)]
+    if let Some(content) = TEST_CONTENT.lock().unwrap().clone() {
+        return serde_json::from_str(strip_fence(&content))
+            .map_err(|_| format!("Vercel AI Gateway: {model} sent an answer that is not JSON"));
+    }
+    match kind_of(model).await? {
+        Kind::Decision => return Err(format!("{model} is a decision model: generation needs a chat model")),
+        Kind::Chat => {}
+    }
+    let body = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user },
+        ],
+        "response_format": { "type": "json_object" },
+    });
+    let answer = call(reqwest::Method::POST, "/chat/completions", Some(key), Some(&body)).await?;
+    if let Some(message) = answer["error"]["message"].as_str() {
+        return Err(format!("Vercel AI Gateway: {message}"));
+    }
+    let content = answer["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| format!("Vercel AI Gateway: {model} sent no answer"))?;
+    serde_json::from_str(strip_fence(content))
+        .map_err(|_| format!("Vercel AI Gateway: {model} sent an answer that is not JSON"))
+}
+
 async fn exchange(
     method: reqwest::Method,
     path: &str,

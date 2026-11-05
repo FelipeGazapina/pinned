@@ -50,8 +50,6 @@ const sessionSteps = (c, event) => [["ask", event], ["agent", ""], ["reply", ""]
 const TRIGGERS = {
   "linear-label": {
     text: "A Linear issue gets a label",
-    pitch: "Claude resolves the issue, opens a pull request and moves the issue through your columns.",
-    needs: "linear",
     step: "linear-trigger",
     steps: () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
     subject: "issue",
@@ -63,8 +61,6 @@ const TRIGGERS = {
   },
   "slack-mention": {
     text: "The bot is @mentioned in Slack",
-    pitch: "Claude answers in the thread, and can file a Linear issue and fix the bug.",
-    needs: "slack",
     step: "slack-trigger",
     steps: (c) => sessionSteps(c, "new thread"),
     subject: "thread",
@@ -75,8 +71,6 @@ const TRIGGERS = {
   },
   "slack-message": {
     text: "A Slack message, sorted by a decision model",
-    pitch: "A model on the Vercel AI Gateway puts each new message in a category, and each category pings a group, runs its own workflow or stops.",
-    needs: "slack",
     step: "message-trigger",
     steps: () => [["decide", "new message"]],
     subject: "thread",
@@ -97,8 +91,6 @@ const TRIGGERS = {
   },
   called: {
     text: "Called by another workflow",
-    pitch: "A Slack message workflow hands it the threads of one category, and Claude answers them as it does a mention.",
-    needs: "slack",
     step: "called-trigger",
     steps: (c) => sessionSteps(c, "routed thread"),
     subject: "thread",
@@ -443,17 +435,15 @@ const iconHtml = (step) =>
   `<span class="icon" data-tone="${step.tone}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app}: ${step.title}`)}">${LOGOS[step.tone] ?? step.icon}</span>`;
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
-/** An optional step that moves the Linear issue to a column at `stage`, matching the backend's `Stage`. Off while it names no column. */
-const moveStep = (stage, ghost) => ({
+/** A column the session moves the Linear issue to, matching the backend's `Stage`. The session
+ * defaults panel edits the name; a move-column step in the map moves it hub-side. */
+const moveStep = (stage) => ({
   tone: "linear",
   icon: "⇥",
   app: "Linear",
   title: "Move the issue",
-  ghost,
   optional: true,
   on: (c) => !!c.columns[stage].trim(),
-  remove: (c) => (c.columns[stage] = ""),
-  summary: (c) => (c.columns[stage].trim() ? `to “${c.columns[stage].trim()}”` : "Name a column"),
   fields: (c) => `<label>Column ${input(`columns.${stage}`, c.columns[stage], 'list="linear-columns" placeholder="In Dev"')}</label>
     <p class="hint">Matched by name, ignoring case, within the issue's team.${subject(c) === "thread" ? " A thread has no issue until the session files one, so this applies from then on." : ""}</p>`,
 });
@@ -514,55 +504,12 @@ const STEPS = {
         }</p>`;
     },
   },
-  decide: {
-    tone: "vercel",
-    icon: "◆",
-    app: "Vercel AI Gateway",
-    title: "Decide",
-    summary: (c) => c.trigger.decide.model.trim() || "Name a model",
-    issues: (c) => {
-      const categories = c.trigger.decide.categories;
-      const names = categories.map((cat) => cat.name.trim().toLowerCase());
-      const twice = categories.find((cat, i) => names[i] && names.indexOf(names[i]) !== i);
-      const vague = categories.find((cat) => cat.name.trim() && !cat.description.trim());
-      const removed = categories.find((cat) => cat.workflow && !settings.connectors.some((k) => k.id === cat.workflow));
-      const deaf = categories.find((cat) => !answersThreads(settings.connectors.find((k) => k.id === cat.workflow) ?? { trigger: { kind: "called" } }));
-      const fallback = fallbackOf(c.trigger.decide);
-      return [
-        !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
-        !c.trigger.decide.model.trim() && "Name the decision model.",
-        suggestions.models.some((m) => m.id === c.trigger.decide.model.trim() && m.kind !== "decision") && `${c.trigger.decide.model.trim()} is a chat model: the Decide step needs a decision model.`,
-        categories.length < 2 && "Add at least two categories.",
-        names.some((name) => !name) && "Name every category.",
-        twice && `Two categories are named “${twice.name.trim()}”.`,
-        vague && `Describe the category “${vague.name.trim()}”.`,
-        removed && `The workflow that “${removed.name.trim()}” routes to was deleted.`,
-        deaf && `“${deaf.name.trim()}” routes to a workflow that can't answer a Slack thread.`,
-        fallback?.mention?.trim() && `The fallback can't ping a group, so saving sets it back to “${BEST_GUESS}”.`,
-      ].filter(Boolean);
-    },
-    fields: (c) => decideHtml(c),
-    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i), end: cat.workflow ? undefined : i })),
-    stub: "＋ Add category",
-  },
-  picked: moveStep("picked", "Move the issue when pinned picks it up"),
+  picked: moveStep("picked"),
   agent: {
     tone: "claude",
     icon: "✳",
     app: "Claude Code",
     title: "Run a session",
-    summary: (c) =>
-      [
-        isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) || "no repository" : folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder",
-        (account || isBox(c)) && runOnName(c),
-        connectorAccountName(c),
-        c.model.trim() || "default model",
-        c.effort,
-        PERMISSIONS[c.permissionMode],
-      ]
-        .filter(Boolean)
-        .join(" · "),
-    issues: (c) => (isBox(c) ? boxIssues(c) : [...(c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]), ...codexProjectIssues(c)]),
     fields: (c) => `${account || isBox(c) ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
       ${
         isBox(c)
@@ -589,17 +536,12 @@ const STEPS = {
     icon: "↩",
     app: "Slack",
     title: "Reply in the thread",
-    summary: () => "Follow-ups reach the same session",
-    fields: () => `<p class="hint">The session answers with <code>pinned slack reply</code>, so the bot token stays in pinned. Later messages in the thread are typed into the same tab. If that tab is gone, pinned starts a new session with the whole thread.</p>`,
   },
   bug: {
     tone: "linear",
     icon: "⚑",
     app: "Linear",
     title: "If it reports a bug",
-    summary: (c) => FIXES[c.fix],
-    issues: (c) =>
-      c.fix === "off" ? [] : [!settings.linear && "Connect Linear under Connectors to file issues.", !c.team.trim() && "Name the Linear team issues are filed in."].filter(Boolean),
     fields: (c) => `<label>The session ${select("fix", Object.keys(FIXES), (f) => FIXES[f], c.fix)}</label>
       ${
         c.fix === "off"
@@ -611,36 +553,15 @@ const STEPS = {
              <p class="hint">To fix a bug, the session files one Linear issue in this team with a link to the thread, fixes the bug and opens a pull request.</p>`
       }`,
   },
-  coding: moveStep("coding", "Move the issue when Claude starts changing code"),
-  review: moveStep("review", "Move the issue when the pull request is open"),
+  coding: moveStep("coding"),
+  review: moveStep("review"),
   ask: {
     tone: "vercel",
     icon: "▲",
     app: "Vercel",
     title: "Ask a model",
-    ghost: "Ask a model before the session starts",
     optional: true,
     on: (c) => !!c.ask,
-    add: (c) =>
-      (c.ask = {
-        model: "typesafe-ai/jev",
-        instructions: "Classify the request below for an engineering team. Answer from the text only.",
-        questions: [
-          { name: "kind", ask: "What does it ask for?", choices: ["bug", "question", "critique", "enhancement"], stopOn: [] },
-          { name: "agent", ask: "Can a coding agent handle it on its own, without a person deciding first?", choices: ["yes", "no"], stopOn: ["no"] },
-        ],
-      }),
-    remove: (c) => (c.ask = null),
-    summary: (c) => {
-      const ask = c.ask;
-      if (!ask) return "";
-      const questions = ask.questions ?? [];
-      const n = questions.length;
-      const stops = questions
-        .filter((q) => (q.stopOn ?? []).some((s) => s.trim()))
-        .map((q) => `stops on ${q.name.trim() || "?"} = ${(q.stopOn ?? []).map((s) => s.trim()).filter(Boolean).join(", ")}`);
-      return [`${ask.model.trim() || "no model"} · ${n} question${n === 1 ? "" : "s"}`, ...stops].join(" · ");
-    },
     issues: (c) => {
       const ask = c.ask;
       if (!ask) return [];
@@ -691,13 +612,9 @@ const STEPS = {
     icon: "▶",
     app: "Playwright",
     title: "Prove it works",
-    ghost: "Require a proof video on the pull request",
     optional: true,
     on: (c) => c.proof !== false,
-    add: (c) => (c.proof = true),
-    remove: (c) => (c.proof = false),
     summary: () => "Video posted on the pull request",
-    fields: () => `<p class="hint">The session drives the change in a Playwright script, records a video and posts it as a comment on the pull request. The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>`,
   },
 };
 
@@ -709,89 +626,8 @@ const routesTo = (c) =>
     r.trigger.kind === "slack-message" && c.id ? r.trigger.decide.categories.filter((cat) => cat.workflow === c.id).map((cat) => ({ router: r.name, category: cat.name })) : [],
   );
 
-function branchNodes(category, i) {
-  const mention = (category.mention ?? "").trim().replace(/^@/, "");
-  const nodes = mention ? [{ kind: "mention", category: i, tone: "slack", icon: "@", app: "Slack", title: `Mention @${mention}`, summary: "Pings the group" }] : [];
-  const target = category.workflow && settings.connectors.find((k) => k.id === category.workflow);
-  if (target) {
-    const trigger = TRIGGERS[target.trigger.kind];
-    const { tone, icon } = STEPS[trigger.step];
-    nodes.push({ kind: "route", category: i, tone, icon, app: "Workflow", title: target.name, summary: trigger.text });
-  } else if (category.workflow) {
-    nodes.push({ kind: "route", category: i, tone: "", icon: "?", app: "Workflow", title: "A deleted workflow", summary: "Choose another route" });
-  } else if (!mention) {
-    nodes.push({ kind: "stop", category: i, tone: "", icon: "■", app: "", title: "Stop", summary: "Nothing else happens" });
-  }
-  return nodes;
-}
-
-const NEW_ROUTE = "＋new";
-
-/** A route's target must answer the thread it is handed, as the backend's `Trigger::answers_threads`. */
-const answersThreads = (k) => ["slack-mention", "called"].includes(k.trigger.kind);
-const routeName = (id) => {
-  const target = settings.connectors.find((k) => k.id === id);
-  return target ? `${target.name} (can't answer threads)` : "A deleted workflow";
-};
-
-function decideHtml(c) {
-  const decide = c.trigger.decide;
-  const targets = settings.connectors.filter((k) => k.id !== c.id && answersThreads(k));
-  const row = (cat, i) => {
-    const at = `trigger.decide.categories.${i}`;
-    const routes = Object.fromEntries([
-      ["", "Stop"],
-      ...targets.map((k) => [k.id, k.name]),
-      ...(cat.workflow && !targets.some((k) => k.id === cat.workflow) ? [[cat.workflow, routeName(cat.workflow)]] : []),
-      [NEW_ROUTE, "＋ New workflow for this category"],
-    ]);
-    return `<div class="category" data-category="${i}">
-      <div class="row">${input(`${at}.name`, cat.name, 'class="name" placeholder="Category" aria-label="Category name" spellcheck="false"')}
-        <button class="secondary" data-action="remove-category" title="Remove this category">✕</button></div>
-      <textarea data-bind="${at}.description" rows="2" placeholder="What a message in it looks like" aria-label="Description">${esc(cat.description)}</textarea>
-      <div class="grid">
-        <label>Mention ${input(`${at}.mention`, cat.mention ?? "", 'placeholder="No one" spellcheck="false"')}</label>
-        <label>Then ${select(`${at}.workflow`, Object.keys(routes), (id) => routes[id], cat.workflow ?? "")}</label>
-      </div>
-      <p class="hint mention-hint">Pings only when the model is at least 85% sure, once per thread, and at most once every 30 minutes per channel.</p>
-    </div>`;
-  };
-  return `<label>Model ${input("trigger.decide.model", decide.model, `list="vercel-models" placeholder="${DECISION_MODEL}" spellcheck="false"`)}</label>
-    <label>Instructions <textarea data-bind="trigger.decide.instructions" rows="3">${esc(decide.instructions)}</textarea></label>
-    <div class="categories">${decide.categories.map(row).join("")}</div>
-    <div class="actions start"><button class="secondary" data-action="add-category">＋ Add category</button></div>
-    <label>When the model is less than 60% sure ${fallbackHtml(decide)}</label>
-    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there. When the model is unsure, the fallback category takes the message instead of its guess.</p>`;
-}
-
-const BEST_GUESS = "Use its best guess";
-const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
-
-function fallbackHtml(decide) {
-  const pingsNoOne = (cat) => !cat.mention?.trim();
-  const chosen = (cat) => cat === fallbackOf(decide);
-  const names = decide.categories.filter((cat) => cat.name.trim() && (pingsNoOne(cat) || chosen(cat))).map((cat) => cat.name.trim());
-  return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
-}
-
-function routePanelHtml(c, i) {
-  const category = c.trigger.decide.categories[i];
-  const target = settings.connectors.find((k) => k.id === category?.workflow);
-  if (!target) return "";
-  return `<aside class="node-panel" aria-label="${esc(target.name)}">
-    <div class="node-panel-head">${iconHtml(STEPS[TRIGGERS[target.trigger.kind].step])}<span class="text"><span class="app">Workflow</span><b>${esc(target.name)}</b></span>
-      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
-    <div class="details">
-      <p class="hint">Messages the decision model puts in “${esc(category.name.trim())}” go to this workflow${category.mention?.trim() ? " after the mention" : ""}, which answers in their thread.</p>
-      <div class="actions start"><button class="primary" data-action="open-route" data-id="${esc(target.id)}">Open “${esc(target.name)}”</button></div>
-      <p class="hint">Change the route in the Decide step.</p>
-    </div>
-  </aside>`;
-}
 
 const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
-/** Steps the editor draws as nodes: the ones that run, and an optional one the user just opened to fill in. */
-const shown = (c, id) => isOn(c, id) || (view.name === "edit" && view.open === id);
 
 const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
 const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
@@ -817,24 +653,6 @@ function runOnHtml(c) {
     <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
 }
 
-/** What a box run needs: the hub, which runs boxes, Upstash, and the repository the box clones and pushes with GitHub. */
-function boxIssues(c) {
-  if (!account) return ["Sign in to pinned to run sessions in Upstash Boxes."];
-  return [
-    !settings.upstash && "Connect Upstash Box under Connectors.",
-    !c.repo.trim() && "Name the repository the box clones.",
-    !settings.github && "Connect GitHub under Connectors: the box clones, pushes and opens the pull request with it.",
-  ].filter(Boolean);
-}
-
-/** A run under the project's account fails when that account is Codex, which can't run a workflow. */
-function codexProjectIssues(c) {
-  if (c.account || isBox(c)) return [];
-  const project = suggestions.projects?.find((p) => p.path === c.folder.trim());
-  const account = project && accountOf(folderMachine(c), project.account);
-  return account?.provider === "codex" ? [`${folderName(c.folder)} runs under ${account.name}, a Codex account, which can't run a workflow. Pick a Claude Code account under Account.`] : [];
-}
-
 const connectorAccountName = (c) => !isBox(c) && c.account && accountName(folderMachine(c), c.account);
 
 /** The Claude Code accounts of the connector's machine; Codex can't run a connector, whose prompts rely on Claude Code's hooks. */
@@ -853,23 +671,6 @@ const repoHint = (c) =>
     ? "A machine without the folder can't run this session."
     : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
-async function newRoute(select) {
-  const router = view.draft;
-  const category = router.trigger.decide.categories[Number(select.closest("[data-category]").dataset.category)];
-  const name = category.name.trim() || "a category";
-  const draft = blank("called");
-  draft.name = `${router.name.trim() || TRIGGERS["slack-message"].name}: ${name}`;
-  draft.instructions = routedText(TRIGGERS["slack-mention"].instructions(draft), `A decision model sorted the Slack thread below into “${name}” and routed it here.`);
-  try {
-    const saved = await connectorCall("save_connector", { connector: tidy(draft) });
-    if (!settings.connectors.some((k) => k.id === saved.id)) settings.connectors.push(saved);
-    category.workflow = saved.id;
-    redraw();
-  } catch (err) {
-    redraw();
-    document.getElementById("editor-error").textContent = err;
-  }
-}
 
 async function loadFolders(c) {
   const machine = folderMachine(c);
@@ -910,6 +711,7 @@ function connectorsHtml() {
   return `${intro}
     ${settings.connectors.map(cardHtml).join("")}
     <button class="new-card" data-action="new-connector">＋ New workflow</button>
+    <button class="new-card" data-action="generate-workflow">✳ Generate with AI</button>
     <p class="hint" id="checked">${esc(checkedText())}</p>`;
 }
 
@@ -1020,16 +822,23 @@ function syncWatchFromTrigger(c) {
 
 const OLDER_HUB = "This workflow comes from an older hub; update the hub.";
 
+/** What each node does, in its own words on the canvas picker and at the top of its panel. */
 function graphNodeUi(node) {
   const type = graphNodeKind(node);
-  if (type === "trigger") return STEPS[WATCH_STEP[node.watch?.kind ?? "called"]] ?? STEPS["called-trigger"];
-  if (type === "classify") return { tone: "vercel", icon: "▲", app: "Vercel AI Gateway", title: "Classify" };
-  if (type === "switch") return { tone: "switch", icon: "⇉", app: "Workflow", title: "Switch" };
-  if (type === "talk") return { tone: "claude", icon: "✳", app: "Claude Code", title: "Talk to the session" };
-  if (type === "page") return { tone: "slack", icon: "@", app: "Slack", title: "Page a group" };
-  if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked" };
-  if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow" };
-  if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop" };
+  if (type === "trigger") return { ...(STEPS[WATCH_STEP[node.watch?.kind ?? "called"]] ?? STEPS["called-trigger"]), about: "Starts the run when something happens." };
+  if (type === "classify") return { tone: "vercel", icon: "▲", app: "Vercel AI Gateway", title: "Classify", about: "Asks a model about the trigger, then continues down the matching answer." };
+  if (type === "switch") return { tone: "switch", icon: "⇉", app: "Workflow", title: "Switch", about: "Continues down the first case matching an earlier answer. Asks nothing itself." };
+  if (type === "talk") return { tone: "claude", icon: "✳", app: "Claude Code", title: "Talk to the session", about: "Types text into the run's session, opening it first." };
+  if (type === "session") return { tone: "claude", icon: "✳", app: "Claude Code", title: "Run a session", about: "Opens the run's session with this setup. Later session steps type into it." };
+  if (type === "page") return { tone: "slack", icon: "@", app: "Slack", title: "Page a group", about: "Pings a Slack user group in the run's thread." };
+  if (type === "reply") return { tone: "slack", icon: "↩", app: "Slack", title: "Reply in thread", about: "Posts text in the run's Slack thread, hub-side." };
+  if (type === "file-issue") return { tone: "linear", icon: "⚑", app: "Linear", title: "File an issue", about: "Files a Linear issue for the run's Slack thread, linking back to it." };
+  if (type === "take-issue") return { tone: "linear", icon: "✓", app: "Linear", title: "Work an issue", about: "Works the thread on an existing Linear issue." };
+  if (type === "move-column") return { tone: "linear", icon: "⇥", app: "Linear", title: "Move issue", about: "Moves the run's Linear issue to the named column." };
+  if (type === "proof") return { tone: "proof", icon: "▶", app: "Playwright", title: "Proof video", about: "Requires a proof video on the pull request." };
+  if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked", about: "Moves the issue to the picked column when the session opens." };
+  if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow", about: "Runs another workflow's map with this run's session." };
+  if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop", about: "Ends this branch on purpose." };
   return { tone: "", icon: "?", app: "", title: node.name ?? "Node" };
 }
 
@@ -1039,7 +848,13 @@ function graphNodeSummary(node, c) {
     const step = WATCH_STEP[node.watch?.kind ?? "called"];
     return STEPS[step]?.summary?.({ ...c, trigger: legacyTriggerFromWatch(node.watch) }) ?? node.name;
   }
-  if (type === "classify") return node.model?.trim() || "Name a model";
+  if (type === "classify") {
+    const model = (node.model ?? "").trim();
+    const names = (node.questions ?? []).map((q) => q.name?.trim()).filter(Boolean);
+    if (!model) return "Name a model";
+    const short = model.split("/").pop();
+    return names.length ? `Ask ${short}: ${names.join(", ")}` : `Ask ${short}`;
+  }
   if (type === "switch") {
     const question = node.question?.trim();
     const equals = (node.cases ?? []).map((item) => item.equals?.trim()).filter(Boolean);
@@ -1048,7 +863,22 @@ function graphNodeSummary(node, c) {
     return `${question} is ${equals.join(", ")}`;
   }
   if (type === "talk") return node.prompt?.trim() || "Session opens on the first talk";
+  if (type === "session") return sessionNodeSummary(node, c);
   if (type === "page") return node.group?.trim() ? `@${node.group.trim().replace(/^@/, "")}` : "Name a group";
+  if (type === "reply") {
+    const text = (node.text ?? "").trim();
+    return text ? `Post "${text.length > 40 ? `${text.slice(0, 40)}…"` : `${text}"`} in thread` : "Write the reply";
+  }
+  if (type === "file-issue") {
+    const title = (node.title ?? "").trim();
+    const team = (node.team ?? "").trim();
+    if (!title) return "Name the issue";
+    return team ? `File "${title.length > 32 ? `${title.slice(0, 32)}…"` : `${title}"`} in ${team}` : `File "${title}"`;
+  }
+  if (type === "take-issue") return (node.issue ?? "").trim() ? `Work ${(node.issue ?? "").trim()}` : "The thread's filed issue";
+  if (type === "move-column") return (node.column ?? "").trim() ? `Move to ${(node.column ?? "").trim()}` : "Name a column";
+  if (type === "proof") return "Require proof video";
+  if (type === "stage-picked") return c.columns.picked.trim() ? `Move to ${c.columns.picked.trim()}` : "Move to the picked column";
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
     return target?.name ?? (node.workflow ? "Missing workflow" : "Pick a workflow");
@@ -1057,6 +887,29 @@ function graphNodeSummary(node, c) {
   return node.name ?? "";
 }
 
+/** Whether the draft's graph watches a Slack subject. Only a Linear label trigger cannot feed
+ * thread steps; a called workflow may be called with either subject. */
+function slackRun(c) {
+  const watch = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.watch;
+  const kind = watch?.kind ?? c.trigger?.kind ?? "called";
+  return kind !== "linear-label";
+}
+/** A session step's one-line summary: its prompt, or where and how it opens. Empty fields read
+ * as the connector's own session settings, so the summary falls back to those. */
+function sessionNodeSummary(node, c) {
+  const first = (node.prompt ?? "").trim() || "Session opens here";
+  const where = folderName(((node.folder ?? "").trim() || c.folder).replace(/\.git$/, "")) || "no folder";
+  const model = (node.model ?? "").trim() || c.model.trim() || "default model";
+  const effort = (node.effort ?? "").trim() || c.effort;
+  const permission = PERMISSIONS[(node.permission ?? "").trim() || c.permissionMode] ?? "";
+  return [first, where, model, effort, permission].filter(Boolean).join(" · ");
+}
+/** A session step needs somewhere to open: its own folder or repository, or the connector's. */
+function sessionNodeIssues(node, c) {
+  const folder = ((node.folder ?? "").trim() || c.folder.trim());
+  const repo = ((node.repo ?? "").trim() || c.repo.trim());
+  return [!folder && !repo && "Choose the folder or the repository the session opens in."].filter(Boolean);
+}
 function legacyTriggerFromWatch(watch) {
   if (watch?.kind === "linear-label") return { kind: "linear-label", label: watch.label ?? "" };
   if (watch?.kind === "slack-message") return { kind: "slack-message", channel: watch.channel ?? "", decide: { model: "", instructions: "", categories: [], fallback: null } };
@@ -1076,7 +929,13 @@ function graphNodeIssues(node, c) {
     return problem ? [problem] : [];
   }
   if (type === "talk") return [];
+  if (type === "session") return sessionNodeIssues(node, c);
   if (type === "page") return [!node.group?.trim() && "Name the Slack user group to page."].filter(Boolean);
+  if (type === "reply") return [!slackRun(c) && "A reply step needs a Slack trigger.", !(node.text ?? "").trim() && "Write the reply text."].filter(Boolean);
+  if (type === "file-issue") return [!slackRun(c) && "A file-issue step needs a Slack trigger.", !(node.team ?? "").trim() && "Name the Linear team.", !(node.title ?? "").trim() && "Name the issue title."].filter(Boolean);
+  if (type === "take-issue") return [!slackRun(c) && "A take-issue step needs a Slack trigger."].filter(Boolean);
+  if (type === "move-column") return [!(node.column ?? "").trim() && "Name the column."].filter(Boolean);
+  if (type === "proof") return [];
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
     return [!node.workflow && "Choose a workflow.", node.workflow && !target && "That workflow was deleted."].filter(Boolean);
@@ -1146,17 +1005,20 @@ function graphLayout(c) {
   return { nodes, edges, width: right + PAD, height: bottom + PAD, graph };
 }
 
-function graphPickerHtml(c, anchor) {
+function graphPickerHtml(c, anchor, flowWidth) {
   if (!view.graphPick) return "";
   const api = graphApi();
   const types = api?.PICKER_TYPES ?? ["talk", "stop"];
   const items = types
     .map((type) => {
       const ui = graphNodeUi({ type, watch: { kind: "called" } });
-      return `<button data-action="graph-pick-type" data-type="${type}">${iconHtml(ui)}<span>${esc(type)}</span></button>`;
+      return `<button data-action="graph-pick-type" data-type="${type}">${iconHtml(ui)}<span class="pick-text"><b>${esc(ui.title)}</b>${ui.about ? `<small>${esc(ui.about)}</small>` : ""}</span></button>`;
     })
     .join("");
-  return `<div class="add-menu graph-picker" style="width:${MENU_W}px;left:${anchor.x}px;top:${anchor.y}px">${items}</div>`;
+  // The menu lives inside the flow, so keep it off the panel: shift it left when the
+  // anchor sits too close to the flow's right edge for the whole menu to fit.
+  const x = Math.max(8, Math.min(anchor.x, (flowWidth ?? anchor.x + MENU_W + 8) - MENU_W - 8));
+  return `<div class="add-menu graph-picker" style="width:${MENU_W}px;left:${x}px;top:${anchor.y}px">${items}</div>`;
 }
 
 function flowHtml(c) {
@@ -1179,8 +1041,10 @@ function flowHtml(c) {
       )
     : [];
   const flowWidth = Math.max(width, ...dangling.map((d) => d.x + END), 0) + (dangling.length ? PAD : 0);
-  const picker = view.graphPick ? graphPickerHtml(c, view.graphPick) : "";
+  const picker = view.graphPick ? graphPickerHtml(c, view.graphPick, flowWidth) : "";
+  const boxes = api?.groups ? api.groups(graph).map((g) => `<div class="group" style="left:${g.left}px;top:${g.top}px;width:${g.right - g.left}px;height:${g.bottom - g.top}px"><span>${esc(g.name)}</span></div>`).join("") : "";
   return `<div class="flow graph-flow" data-width="${flowWidth}" data-height="${height}" style="width:${flowWidth}px;height:${height}px">
+    ${boxes}
     ${nodes.map((n) => graphNodeHtml(c, n)).join("")}
     <svg class="edges" width="${flowWidth}" height="${height}" aria-hidden="true">
       <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
@@ -1344,15 +1208,23 @@ function choiceEnders(node) {
 }
 
 function sessionFields(c) {
-  return STEPS.agent.fields(c);
+  return `${STEPS.agent.fields(c)}
+    <h2 class="looks-title">If it reports a bug</h2>${STEPS.bug.fields(c)}
+    <h2 class="looks-title">Issue columns</h2>
+    ${STEPS.picked.fields(c)}${STEPS.coding.fields(c)}${STEPS.review.fields(c)}
+    <h2 class="looks-title">Proof video</h2>
+    ${check("proof", c.proof !== false, "Require a proof video on the pull request")}
+    <p class="meta">${esc(STEPS.proof.summary())}. The session does it through its tools; a proof step in the map requires it the same way.</p>`;
 }
 
+/** The values a step's text fields can fill from the run, n8n's expressions read plainly. */
+const TEMPLATE_HINT = `<p class="hint">Fill values from the run with {{trigger.text}}, {{trigger.title}}, {{trigger.url}}, {{answers.question}}, {{issue.identifier}} and {{issue.url}}. Unknown spans stay as written.</p>`;
 function graphNodePanel(c) {
   if (view.open === "session") {
     return `<aside class="node-panel" aria-label="Session">
-      <div class="node-panel-head">${iconHtml(STEPS.agent)}<span class="text"><span class="app">Claude Code</span><b>Session</b></span>
+      <div class="node-panel-head">${iconHtml(STEPS.agent)}<span class="text"><span class="app">Claude Code</span><b>Session defaults</b></span>
         <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
-      <div class="details">${sessionFields(c)}</div>
+      <div class="details"><p class="hint">New session steps copy these settings. Older apps run the workflow from here. Box and run-on stay here for every step.</p>${sessionFields(c)}</div>
     </aside>`;
   }
   const node = view.draft.graph?.nodes?.find((n) => n.id === view.open);
@@ -1366,20 +1238,67 @@ function graphNodePanel(c) {
   else if (type === "talk") {
     const i = graphNodeIndex(node.id);
     body = `<label>Prompt<textarea data-bind="graph.nodes.${i}.prompt" rows="6">${esc(node.prompt ?? "")}</textarea></label>
+      ${TEMPLATE_HINT}
       <div class="actions start"><button class="secondary" data-action="graph-open-session">Session settings (folder, model, fix…)</button></div>`;
+  } else if (type === "session") {
+    const i = graphNodeIndex(node.id);
+    const b = (field) => `graph.nodes.${i}.${field}`;
+    body = `<label>Prompt<textarea data-bind="${b("prompt")}" rows="4" placeholder="What this step tells the session">${esc(node.prompt ?? "")}</textarea></label>${TEMPLATE_HINT}
+      <p class="hint">The first session step opens the session with this setup; later ones type into it. Empty fields inherit the session defaults below.</p>
+      <label>Folder <span class="row">${input(b("folder"), node.folder ?? "", `placeholder="${esc(c.folder)}" spellcheck="false"`)}</span></label>
+      <label>Repository ${input(b("repo"), node.repo ?? "", `placeholder="${esc(c.repo)}" spellcheck="false"`)}</label>
+      <div class="grid">
+        <label>Model ${input(b("model"), node.model ?? "", `placeholder="${esc(c.model.trim() || "claude's default")}"`)}</label>
+        <label>Effort ${select(b("effort"), ["", ...EFFORTS], (v) => v || c.effort, node.effort ?? "")}</label>
+        <label>Permissions ${select(b("permission"), ["", ...Object.keys(PERMISSIONS)], (v) => (v ? PERMISSIONS[v] : PERMISSIONS[c.permissionMode]), node.permission ?? "")}</label>
+        <label>Account ${input(b("account"), node.account ?? "", `placeholder="Project's account" spellcheck="false"`)}</label>
+      </div>
+      ${check(b("worktree"), node.worktree, `Separate git worktree per ${subject(c)}`)}
+      <label>Instructions sent before the ${subject(c)}
+        <textarea data-bind="${b("instructions")}" rows="4" placeholder="${esc(c.instructions)}">${esc(node.instructions ?? "")}</textarea></label>
+      <div class="actions start"><button class="secondary" data-action="graph-open-session">Session defaults (box, run on…)</button></div>`;
   } else if (type === "page") {
     const i = graphNodeIndex(node.id);
     body = `<label>Group ${input(`graph.nodes.${i}.group`, node.group ?? "", 'placeholder="@oncall" spellcheck="false"')}</label>`;
+  } else if (type === "reply") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Text<textarea data-bind="graph.nodes.${i}.text" rows="4" placeholder="What the workflow posts in the thread">${esc(node.text ?? "")}</textarea></label>
+      ${TEMPLATE_HINT}
+      <p class="hint">Posts in the run's Slack thread, hub-side. If the session posts the same text, the second post is skipped, whichever runs first.</p>`;
+  } else if (type === "file-issue") {
+    const i = graphNodeIndex(node.id);
+    const b = (field) => `graph.nodes.${i}.${field}`;
+    body = `<div class="grid">
+        <label>Team ${input(b("team"), node.team ?? "", 'list="linear-teams" placeholder="Engineering"')}</label>
+        <label>Label ${input(b("label"), node.label ?? "", 'list="linear-labels" placeholder="none"')}</label>
+      </div>
+      <label>Assignee ${input(b("assignee"), node.assignee ?? "", 'placeholder="Nobody" spellcheck="false"')}</label>
+      <label>Title ${input(b("title"), node.title ?? "", 'placeholder="What broke" spellcheck="false"')}</label>
+      <label>Description<textarea data-bind="${b("description")}" rows="4" placeholder="Links back to the thread on its own">${esc(node.description ?? "")}</textarea></label>
+      <p class="hint">Files a Linear issue for the run's Slack thread. An issue the thread already filed is answered, never filed twice.</p>${TEMPLATE_HINT}`;
+  } else if (type === "take-issue") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Issue ${input(`graph.nodes.${i}.issue`, node.issue ?? "", 'placeholder="Filed issue" spellcheck="false"')}</label>
+      <p class="hint">Works the thread on an existing issue. Empty takes the issue the thread already filed.</p>${TEMPLATE_HINT}`;
+  } else if (type === "move-column") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Column ${input(`graph.nodes.${i}.column`, node.column ?? "", 'list="linear-columns" placeholder="In Dev"')}</label>
+      <p class="hint">Moves the run's Linear issue to the named column.</p>`;
+  } else if (type === "proof") {
+    body = `<p class="hint">Requires a proof video on the pull request, like the connector's proof flag. The session drives the change in a Playwright script, records a video and posts it as a comment on the pull request. The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>`;
   } else if (type === "call") {
     const i = graphNodeIndex(node.id);
     const targets = settings.connectors.filter((k) => k.id !== c.id);
     body = `<label>Workflow ${select(`graph.nodes.${i}.workflow`, ["", ...targets.map((k) => k.id)], (id) => targets.find((k) => k.id === id)?.name ?? id, node.workflow ?? "")}</label>`;
   } else if (type === "stage-picked") body = `<p class="hint">Moves the Linear issue to the connector's picked column when the session opens.</p>`;
   const removable = type !== "trigger";
+  const at = view.draft.graph?.nodes?.findIndex((n) => n.id === view.open) ?? -1;
+  const groupRow = at < 0 ? "" : `<label>Group ${input(`graph.nodes.${at}.group_name`, view.draft.graph.nodes[at].group_name ?? "", `list="node-groups" placeholder="Triage" spellcheck="false"`)}<datalist id="node-groups">${options([...new Set(view.draft.graph.nodes.map((n) => (n.group_name ?? "").trim()).filter(Boolean))])}</datalist></label>
+    <p class="meta">Draws a titled box around the steps in this group.</p>`;
   return `<aside class="node-panel" aria-label="${esc(ui.title)}">
     <div class="node-panel-head">${iconHtml(ui)}<span class="text"><span class="app">${ui.app}</span><b>${esc(node.name || ui.title)}</b></span>
       <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
-    <div class="details">${body}${removable ? `<div class="actions start"><button class="secondary danger" data-action="graph-delete-node">Delete node</button></div>` : ""}</div>
+    <div class="details">${ui.about ? `<p class="hint">${esc(ui.about)}</p>` : ""}${body}${groupRow}${removable ? `<div class="actions start"><button class="secondary danger" data-action="graph-delete-node">Delete node</button></div>` : ""}</div>
   </aside>`;
 }
 
@@ -1393,6 +1312,12 @@ function applyGraphPick(type) {
   if (!api || !view.graphPick) return;
   const upstreamId = view.graphPick.mode === "splice" ? view.draft.graph.edges[view.graphPick.edgeIndex]?.from : view.graphPick.from;
   const fresh = api.newNode(type, view.draft.graph, upstreamId);
+  if (fresh.type === "session") {
+    // A new session step starts as a copy of the connector's own setup, so it runs
+    // standalone and stays readable once the defaults change.
+    const c = view.draft;
+    Object.assign(fresh, { folder: c.folder ?? "", repo: c.repo ?? "", model: c.model ?? "", effort: c.effort ?? "", permission: c.permissionMode ?? "", account: c.account ?? "", worktree: !!c.worktree, instructions: c.instructions ?? "" });
+  }
   if (view.graphPick.mode === "splice") {
     const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
     view.draft.graph = api.splice(view.draft.graph, edge, fresh);
@@ -1458,8 +1383,7 @@ function refresh() {
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
   if (repo) repo.innerHTML = repoHint(c);
-  const fallback = settingsPage.querySelector('.node-panel [data-bind="trigger.decide.fallback"]');
-  if (fallback && fallback !== document.activeElement) fallback.outerHTML = fallbackHtml(c.trigger.decide);
+
   const save = document.getElementById("save-connector");
   save.disabled = !!c.id && !changed();
   save.textContent = !c.id ? "Create" : changed() ? "Save" : "Saved";
@@ -1627,14 +1551,6 @@ function showStep(id, focus) {
   if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
-const stepOf = (button) => button.dataset.step ?? button.closest(".step").dataset.step;
-
-function focusCategory(category, field) {
-  showStep("decide");
-  const input = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${field}"]`);
-  input?.scrollIntoView({ block: "nearest" });
-  input?.focus();
-}
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
@@ -1753,6 +1669,44 @@ const actions = {
     view = { name: "pick" };
     redraw();
   },
+  "generate-workflow"() {
+    const chats = suggestions.models.filter((m) => m.kind !== "decision");
+    showDialog(`<div class="dialog-head"><h2><span>Generate workflow</span></h2>
+      <p class="muted">Describe the automation. A chat model drafts the map; review it before saving, as AI can make mistakes.</p></div>
+      <div class="dialog-body generate-body">
+        <label>Model <select id="generate-model">${chats.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("") || `<option value="">Connect the Vercel AI Gateway first</option>`}</select></label>
+        <label>What should the workflow do?<textarea id="generate-text" rows="5" placeholder="When the bot is mentioned in #support, sort the message; fix bugs in a session and reply when done"></textarea></label>
+        <p class="error" id="generate-error"></p>
+      </div>
+      <div class="dialog-foot"><span class="muted"></span><span class="buttons"><button type="button" class="primary" data-generate>Generate</button></span></div>`);
+    shellDialog.dataset.kind = "generate";
+    shellDialog.querySelector("[data-generate]").onclick = async (e) => {
+      const button = e.target.closest("[data-generate]");
+      const error = document.getElementById("generate-error");
+      const description = document.getElementById("generate-text").value;
+      error.textContent = "";
+      if (!description.trim()) {
+        error.textContent = "Describe the workflow first.";
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "Generating…";
+      try {
+        const graph = await connectorCall("generate_workflow", { model: document.getElementById("generate-model").value, description });
+        const watch = graph.nodes.find((n) => (n.type ?? n.kind) === "trigger")?.watch;
+        const kind = watch?.kind === "linear-label" ? "linear-label" : watch?.kind === "slack-mention" ? "slack-mention" : watch?.kind === "slack-message" ? "slack-message" : "called";
+        const draft = blank(kind);
+        draft.graph = graph;
+        closeDialog();
+        edit(-1, draft, graph.nodes[0]?.id ?? null);
+        redraw();
+      } catch (err) {
+        error.textContent = String(err?.message ?? err);
+        button.disabled = false;
+        button.textContent = "Generate";
+      }
+    };
+  },
   "pick-trigger"(button) {
     const draft = blank(button.dataset.kind);
     if (graphApi()) draft.graph = graphApi().startingGraph(draft);
@@ -1768,10 +1722,7 @@ const actions = {
     view = { name: "list" };
     redraw();
   },
-  "toggle-step"(button) {
-    const id = stepOf(button);
-    showStep(view.open === id ? null : id);
-  },
+
   "graph-open-node"(button) {
     const id = button.dataset.node;
     showStep(view.open === id ? null : id);
@@ -1854,30 +1805,12 @@ const actions = {
     view.draft.graph = api.append(graph, from, port, stop);
     redraw();
   },
-  "add-step"(button) {
-    const id = stepOf(button);
-    STEPS[id].add?.(view.draft);
-    showStep(id, true);
-  },
+
   "close-step": () => showStep(null),
-  "add-category"() {
-    const categories = view.draft.trigger.decide.categories;
-    categories.push({ name: "", description: "", workflow: null, mention: null });
-    showStep("decide");
-    settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${categories.length - 1}.name"]`)?.focus();
-  },
-  "remove-category"(button) {
-    const decide = view.draft.trigger.decide;
-    const [removed] = decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
-    if (removed.name.trim() === decide.fallback) decide.fallback = null;
-    showStep("decide");
-  },
-  "open-branch"(button) {
-    const { branch, category } = button.closest(".branch").dataset;
-    if (branch === "route") return showStep(`route:${category}`);
-    focusCategory(category, branch === "mention" ? "mention" : "workflow");
-  },
-  "choose-route": (button) => focusCategory(button.dataset.category, "workflow"),
+
+
+
+
   "open-add-menu"() {
     view.menu = !view.menu;
     refresh();
@@ -1889,15 +1822,8 @@ const actions = {
     view.pan = [0, 0];
     applyZoom();
   },
-  "open-route"(button) {
-    if ((!view.draft.id || changed()) && !armed(button, "Discard changes and open?")) return;
-    edit(settings.connectors.findIndex((k) => k.id === button.dataset.id));
-    redraw();
-  },
-  "remove-step"() {
-    STEPS[view.open].remove(view.draft);
-    showStep(null);
-  },
+
+
   async "pick-folder"() {
     const picked = await invoke("pick_folder", { start: view.draft.folder });
     if (!picked) return;
@@ -1912,8 +1838,7 @@ const actions = {
       return;
     }
     syncWatchFromTrigger(view.draft);
-    const decide = view.draft.trigger.decide;
-    if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
+
     const c = tidy(view.draft);
     syncWatchFromTrigger(c);
     if (!c.name) {
@@ -2104,9 +2029,7 @@ settingsPage.addEventListener("change", (e) => {
 settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
-  if (e.target.tagName === "SELECT" && e.target.value === NEW_ROUTE) return newRoute(e.target);
-  const decide = view.draft.trigger.decide;
-  const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
+
   const listed = "list" in e.target.dataset;
   let value = e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value;
   if (path.includes(".choices") && path.startsWith("graph.nodes")) {
@@ -2127,7 +2050,6 @@ settingsPage.addEventListener("input", (e) => {
   }
   if (path === "trigger.label" || path === "trigger.channel") syncWatchFromTrigger(view.draft);
   if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
-  if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });
 

@@ -4010,6 +4010,27 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "generate_workflow"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "model",
+                  "description"
+                ]
+              },
+              {
                 "description": "`Vec<MachineView>`.",
                 "type": "object",
                 "properties": {
@@ -4989,7 +5010,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -5007,12 +5028,21 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
               "id",
               "name",
-              "position"
+              "position",
+              "group_name"
             ],
             "oneOf": [
               {
@@ -5078,6 +5108,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -5101,6 +5145,111 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "assignee",
+                  "title",
+                  "description"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "issue"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "column"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -5425,6 +5574,68 @@
               "classify",
               "question",
               "cases"
+            ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "prompt",
+              "folder",
+              "repo",
+              "model",
+              "effort",
+              "permission",
+              "account",
+              "worktree",
+              "instructions"
             ]
           },
           "Edge": {
@@ -9436,6 +9647,27 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "generate_workflow"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "model",
+                  "description"
+                ]
+              },
+              {
                 "description": "`Vec<MachineView>`.",
                 "type": "object",
                 "properties": {
@@ -10382,7 +10614,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -10400,6 +10632,14 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -10471,6 +10711,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -10494,6 +10748,103 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -10814,6 +11165,57 @@
               "question",
               "cases"
             ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Edge": {
             "type": "object",
@@ -12081,6 +12483,27 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "generate_workflow"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "model",
+                  "description"
+                ]
+              },
+              {
                 "description": "`Vec<MachineView>`.",
                 "type": "object",
                 "properties": {
@@ -13060,7 +13483,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -13078,12 +13501,21 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
               "id",
               "name",
-              "position"
+              "position",
+              "group_name"
             ],
             "oneOf": [
               {
@@ -13149,6 +13581,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -13172,6 +13618,111 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "assignee",
+                  "title",
+                  "description"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "issue"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "column"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -13496,6 +14047,68 @@
               "classify",
               "question",
               "cases"
+            ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "prompt",
+              "folder",
+              "repo",
+              "model",
+              "effort",
+              "permission",
+              "account",
+              "worktree",
+              "instructions"
             ]
           },
           "Edge": {
@@ -14726,6 +15339,27 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "generate_workflow"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "model",
+                  "description"
+                ]
+              },
+              {
                 "description": "`Vec<MachineView>`.",
                 "type": "object",
                 "properties": {
@@ -15672,7 +16306,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -15690,6 +16324,14 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -15761,6 +16403,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -15784,6 +16440,103 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -16104,6 +16857,57 @@
               "question",
               "cases"
             ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Edge": {
             "type": "object",
@@ -16893,7 +17697,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -16911,12 +17715,21 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
               "id",
               "name",
-              "position"
+              "position",
+              "group_name"
             ],
             "oneOf": [
               {
@@ -16982,6 +17795,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -17005,6 +17832,111 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "assignee",
+                  "title",
+                  "description"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "issue"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "column"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -17329,6 +18261,68 @@
               "classify",
               "question",
               "cases"
+            ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "prompt",
+              "folder",
+              "repo",
+              "model",
+              "effort",
+              "permission",
+              "account",
+              "worktree",
+              "instructions"
             ]
           },
           "Edge": {
@@ -17878,7 +18872,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -17896,6 +18890,14 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -17967,6 +18969,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -17990,6 +19006,103 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -18310,6 +19423,57 @@
               "question",
               "cases"
             ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Edge": {
             "type": "object",
@@ -20524,7 +21688,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -20542,12 +21706,21 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
               "id",
               "name",
-              "position"
+              "position",
+              "group_name"
             ],
             "oneOf": [
               {
@@ -20613,6 +21786,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -20636,6 +21823,111 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "assignee",
+                  "title",
+                  "description"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "issue"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "column"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -20960,6 +22252,68 @@
               "classify",
               "question",
               "cases"
+            ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "prompt",
+              "folder",
+              "repo",
+              "model",
+              "effort",
+              "permission",
+              "account",
+              "worktree",
+              "instructions"
             ]
           },
           "Edge": {
@@ -21849,7 +23203,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -21867,6 +23221,14 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -21938,6 +23300,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -21961,6 +23337,103 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -22281,6 +23754,57 @@
               "question",
               "cases"
             ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Edge": {
             "type": "object",
@@ -24858,7 +26382,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -24876,12 +26400,21 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
               "id",
               "name",
-              "position"
+              "position",
+              "group_name"
             ],
             "oneOf": [
               {
@@ -24947,6 +26480,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -24970,6 +26517,111 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "assignee",
+                  "title",
+                  "description"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "issue"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "column"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -25294,6 +26946,68 @@
               "classify",
               "question",
               "cases"
+            ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "prompt",
+              "folder",
+              "repo",
+              "model",
+              "effort",
+              "permission",
+              "account",
+              "worktree",
+              "instructions"
             ]
           },
           "Edge": {
@@ -26973,7 +28687,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Everything a node can be. The session can also do most of these through `pinned` callbacks;\nwhen both a node and the session post the same reply or file the same issue, the second write\nis skipped, whichever runs first. Coding and review moves named in the connector's `columns`\nstay implicit prompt instructions, alongside any `move-column` step.\n\nSlack follow-ups in the thread are not a node. While the run's session is open, new thread\nmessages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -26991,6 +28705,14 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              },
+              "group_name": {
+                "description": "The named group box the editor draws this node in. The runner ignores it.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -27062,6 +28784,20 @@
                 ]
               },
               {
+                "description": "Opens the run's session with this step's own setup, then works like `talk`: the first\n`session` of a run opens it, every later one types into it. Empty text fields inherit the\nsession owner's settings, so a bare node behaves exactly like `talk`.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "session"
+                  }
+                },
+                "$ref": "#/$defs/SessionSetup",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Pings a Slack user group, by handle or id, in the run's thread.",
                 "type": "object",
                 "properties": {
@@ -27085,6 +28821,103 @@
                   "type": {
                     "type": "string",
                     "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the\nsame run is skipped, whether the node or the session posts first.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "text": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.\nAn issue the thread already filed is answered, never filed twice.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "file-issue"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "assignee": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "title": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "description": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Works the run's Slack thread on an existing issue: the named identifier, or the issue\nthe thread already filed when empty.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "take-issue"
+                  },
+                  "issue": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Moves the run's Linear issue to the named column.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "move-column"
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Requires a proof video on the pull request: like the connector's proof flag, it appends\nthe proof instructions to the session's opening prompt. The session still records the video.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "proof"
                   }
                 },
                 "required": [
@@ -27405,6 +29238,57 @@
               "question",
               "cases"
             ]
+          },
+          "SessionSetup": {
+            "description": "The session setup a `session` step carries. Empty text fields inherit the session owner's\nown session settings; `worktree` set here opens a separate worktree even when the owner would\nshare the checkout.",
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "description": "What this step tells the session, appended to the owner's opening prompt on open.",
+                "type": "string",
+                "default": ""
+              },
+              "folder": {
+                "description": "The folder the session opens in; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "repo": {
+                "description": "The repository a machine without the folder clones; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              },
+              "model": {
+                "description": "Passed to `claude --model`; empty keeps the owner's model.",
+                "type": "string",
+                "default": ""
+              },
+              "effort": {
+                "description": "low, medium, high, xhigh or max; empty inherits the owner's effort.",
+                "type": "string",
+                "default": ""
+              },
+              "permission": {
+                "description": "manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.",
+                "type": "string",
+                "default": ""
+              },
+              "account": {
+                "description": "The account id its session runs under; empty runs the project's account.",
+                "type": "string",
+                "default": ""
+              },
+              "worktree": {
+                "description": "Whether the session gets its own git worktree.",
+                "type": "boolean",
+                "default": false
+              },
+              "instructions": {
+                "description": "Instructions sent before the subject; empty inherits the owner's.",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Edge": {
             "type": "object",

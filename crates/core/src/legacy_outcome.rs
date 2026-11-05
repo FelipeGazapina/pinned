@@ -617,7 +617,8 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
                         }
                         Supplied::Done
                     }
-                    Effect::Open { owner, prompt, seeded } => {
+                    Effect::Reply { .. } | Effect::FileIssue { .. } | Effect::TakeIssue { .. } | Effect::MoveColumn { .. } => Supplied::Done,
+                    Effect::Open { owner, prompt, seeded, .. } => {
                         if opened.is_none() {
                             opened = Some(open_observation(connectors, owner, &run, &library, prompt, *seeded));
                         }
@@ -628,7 +629,7 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
                 };
                 supply(&mut run, supplied, GRAPH_AT);
             }
-            Drive::Park => push(&mut run, Wake::TurnEnded { claude: Some("ses_1".into()) }, GRAPH_AT),
+            Drive::Park => push(&mut run, Wake::TurnEnded { claude: Some("ses_1".into()), failed: false, error_to: Vec::new() }, GRAPH_AT),
             Drive::Done => {
                 if let runner::Status::Failed { why } = &run.status {
                     panic!("{why}");

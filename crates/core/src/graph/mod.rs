@@ -26,6 +26,8 @@ pub struct PortId(pub String);
 impl PortId {
     /// The one output of every node that does not branch.
     pub const OUT: &'static str = "out";
+    /// A talk or session node's port when its turn fails. Edges here run instead of `out`.
+    pub const ERROR: &'static str = "error";
     /// A classify node's port for an answer the model is unsure about, when `Fallback::Extra`.
     pub const FALLBACK: &'static str = "fallback";
     /// A `Gate::Decide` node's port when no choice may take the message.
@@ -50,6 +52,9 @@ pub struct Node {
     pub name: String,
     /// Canvas pixels of the node's center. The editor owns them.
     pub position: [i32; 2],
+    /// The named group box the editor draws this node in. The runner ignores it.
+    #[serde(default)]
+    pub group_name: Option<String>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -61,12 +66,13 @@ pub struct Edge {
     pub to: NodeId,
 }
 
-/// Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the
-/// proof video are not nodes: the session does them through `pinned` callbacks, and the connector's
-/// `columns`, `fix` and `proof` still describe them, so nothing else writes the same state.
+/// Everything a node can be. The session can also do most of these through `pinned` callbacks;
+/// when both a node and the session post the same reply or file the same issue, the second write
+/// is skipped, whichever runs first. Coding and review moves named in the connector's `columns`
+/// stay implicit prompt instructions, alongside any `move-column` step.
 ///
-/// Slack follow-ups in the thread are not a node either. While the run's session is open, new
-/// thread messages are typed into it, as today.
+/// Slack follow-ups in the thread are not a node. While the run's session is open, new thread
+/// messages are typed into it, as today.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum NodeKind {
@@ -79,14 +85,87 @@ pub enum NodeKind {
     /// Tells the run's one Claude session something. The first `talk` of a run opens the session
     /// with the session owner's settings; every later one, on any branch, types into it.
     Talk { prompt: String },
+    /// Opens the run's session with this step's own setup, then works like `talk`: the first
+    /// `session` of a run opens it, every later one types into it. Empty text fields inherit the
+    /// session owner's settings, so a bare node behaves exactly like `talk`.
+    Session(SessionSetup),
     /// Pings a Slack user group, by handle or id, in the run's thread.
     Page { group: String },
     /// Moves the Linear issue to the connector's `picked` column, as opening a session does today.
     StagePicked,
+    /// Posts `text` in the run's Slack thread, hub-side. A second post of the same text in the
+    /// same run is skipped, whether the node or the session posts first.
+    Reply {
+        #[serde(default)]
+        text: String,
+    },
+    /// Files a Linear issue for the run's Slack thread, hub-side, linking back to the thread.
+    /// An issue the thread already filed is answered, never filed twice.
+    FileIssue {
+        #[serde(default)]
+        team: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        assignee: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        description: String,
+    },
+    /// Works the run's Slack thread on an existing issue: the named identifier, or the issue
+    /// the thread already filed when empty.
+    TakeIssue {
+        #[serde(default)]
+        issue: String,
+    },
+    /// Moves the run's Linear issue to the named column.
+    MoveColumn {
+        #[serde(default)]
+        column: String,
+    },
+    /// Requires a proof video on the pull request: like the connector's proof flag, it appends
+    /// the proof instructions to the session's opening prompt. The session still records the video.
+    Proof,
     /// Walks another connector's graph inside this run, with this run's session.
     Call { workflow: String },
     /// Ends this branch on purpose. A port with no edge also ends its branch.
     Stop,
+}
+
+/// The session setup a `session` step carries. Empty text fields inherit the session owner's
+/// own session settings; `worktree` set here opens a separate worktree even when the owner would
+/// share the checkout.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetup {
+    /// What this step tells the session, appended to the owner's opening prompt on open.
+    #[serde(default)]
+    pub prompt: String,
+    /// The folder the session opens in; empty inherits the owner's.
+    #[serde(default)]
+    pub folder: String,
+    /// The repository a machine without the folder clones; empty inherits the owner's.
+    #[serde(default)]
+    pub repo: String,
+    /// Passed to `claude --model`; empty keeps the owner's model.
+    #[serde(default)]
+    pub model: String,
+    /// low, medium, high, xhigh or max; empty inherits the owner's effort.
+    #[serde(default)]
+    pub effort: String,
+    /// manual, acceptEdits, auto, dontAsk, bypassPermissions or plan; empty inherits.
+    #[serde(default)]
+    pub permission: String,
+    /// The account id its session runs under; empty runs the project's account.
+    #[serde(default)]
+    pub account: String,
+    /// Whether the session gets its own git worktree.
+    #[serde(default)]
+    pub worktree: bool,
+    /// Instructions sent before the subject; empty inherits the owner's.
+    #[serde(default)]
+    pub instructions: String,
 }
 
 /// The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.
@@ -214,8 +293,19 @@ impl NodeKind {
     /// The node's output ports, in drawing order. Derived, never stored.
     pub fn ports(&self) -> Vec<Port> {
         match self {
-            NodeKind::Trigger { .. } | NodeKind::Talk { .. } | NodeKind::Page { .. } | NodeKind::StagePicked | NodeKind::Call { .. } => {
+            NodeKind::Trigger { .. }
+            | NodeKind::Page { .. }
+            | NodeKind::StagePicked
+            | NodeKind::Reply { .. }
+            | NodeKind::FileIssue { .. }
+            | NodeKind::TakeIssue { .. }
+            | NodeKind::MoveColumn { .. }
+            | NodeKind::Proof
+            | NodeKind::Call { .. } => {
                 vec![out_port()]
+            }
+            NodeKind::Talk { .. } | NodeKind::Session { .. } => {
+                vec![out_port(), Port { id: PortId(PortId::ERROR.into()), label: "error".into() }]
             }
             NodeKind::Stop => Vec::new(),
             NodeKind::Classify(classify) => classify_ports(classify),
@@ -334,7 +424,7 @@ mod tests {
     use super::*;
 
     fn node(id: &str, name: &str, kind: NodeKind) -> Node {
-        Node { id: NodeId(id.into()), name: name.into(), position: [0, 0], kind }
+        Node { id: NodeId(id.into()), name: name.into(), position: [0, 0], group_name: None, kind }
     }
 
     fn edge(from: &str, port: &str, to: &str) -> Edge {
@@ -358,8 +448,11 @@ mod tests {
 
     #[test]
     fn ports_follow_the_node() {
-        assert_eq!(NodeKind::Talk { prompt: String::new() }.ports(), vec![Port { id: PortId("out".into()), label: "out".into() }]);
-        assert_eq!(NodeKind::StagePicked.ports(), vec![Port { id: PortId("out".into()), label: "out".into() }]);
+        let error = || Port { id: PortId("error".into()), label: "error".into() };
+        let out = || Port { id: PortId("out".into()), label: "out".into() };
+        assert_eq!(NodeKind::Talk { prompt: String::new() }.ports(), vec![out(), error()], "a talk continues out, or error when its turn fails");
+        assert_eq!(NodeKind::Session(SessionSetup::default()).ports(), vec![out(), error()]);
+        assert_eq!(NodeKind::StagePicked.ports(), vec![out()]);
         assert_eq!(NodeKind::Stop.ports(), vec![]);
         assert_eq!(
             classify(None, &[("bug", "Bug")], Gate::Decide { unsure_below: 0.6, page_at: 0.85 }, Fallback::Extra).ports(),

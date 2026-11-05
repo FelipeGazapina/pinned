@@ -6,7 +6,7 @@
 //! is gone the run resumes the same Claude conversation, and when that conversation is gone too it
 //! opens a new one seeded with the run's history, so the new session knows everything so far.
 
-use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId, Switch};
+use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId, SessionSetup, Switch};
 use crate::agent::Subject;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -152,12 +152,38 @@ pub enum Effect {
     StagePicked {
         connector: String,
     },
-    /// Open the session with `owner`'s settings. `prompt` is the owner's usual opening prompt plus
-    /// the talk's text, and, when `seeded`, the run's history.
+    /// Post `text` in the run's Slack thread.
+    Reply {
+        connector: String,
+        text: String,
+    },
+    /// File a Linear issue for the run's Slack thread.
+    FileIssue {
+        connector: String,
+        team: String,
+        label: String,
+        assignee: String,
+        title: String,
+        description: String,
+    },
+    /// Work the run's Slack thread on an existing issue.
+    TakeIssue {
+        connector: String,
+        issue: String,
+    },
+    /// Move the run's Linear issue to the named column.
+    MoveColumn {
+        connector: String,
+        column: String,
+    },
+    /// Open the session with `owner`'s settings overlaid with `session`: the first session step's
+    /// own setup. `prompt` is the owner's usual opening prompt plus the step's text, and, when
+    /// `seeded`, the run's history.
     Open {
         owner: String,
         prompt: String,
         seeded: bool,
+        session: SessionSetup,
     },
     /// Reopen the tab on `claude --resume <claude>`, then type `text`.
     Resume {
@@ -192,6 +218,10 @@ pub enum Wake {
     /// The tab's status went done or failed. `claude` is the id a hook reported, if any.
     TurnEnded {
         claude: Option<String>,
+        /// The turn failed. `error_to` carries the waited talk or session node's error-port
+        /// targets, resolved where the library is at hand, so the walk takes them instead of `out`.
+        failed: bool,
+        error_to: Vec<NodeId>,
     },
     TabGone,
 }
@@ -209,6 +239,11 @@ impl Run {
     /// What the classify node `node` answered in this run, with the decision model's pick.
     pub fn answers(&self, node: &NodeId) -> Option<&Answers> {
         self.classified.get(node)
+    }
+
+    /// Every classify answer in walk order, flattened to question names, for templates.
+    pub fn classified_answers(&self) -> Vec<(String, String)> {
+        self.classified.values().flat_map(|answers| answers.answers.clone()).collect()
     }
 }
 
@@ -317,7 +352,7 @@ pub fn push(run: &mut Run, wake: Wake, at: &str) {
     }
     match wake {
         Wake::TabGone => detach(run, at),
-        Wake::TurnEnded { claude } => turn_ended(run, claude),
+        Wake::TurnEnded { claude, failed, error_to } => turn_ended(run, claude, failed, error_to),
     }
 }
 
@@ -383,7 +418,30 @@ fn step(run: &mut Run, library: &Library) -> Next {
         }
         NodeKind::Page { group } => Next::Act(Effect::Page { connector, group }),
         NodeKind::StagePicked => Next::Act(Effect::StagePicked { connector }),
-        NodeKind::Talk { prompt } => match talk_effect(run, &connector, &prompt) {
+        NodeKind::Reply { text } => Next::Act(Effect::Reply { connector, text }),
+        NodeKind::FileIssue { team, label, assignee, title, description } => Next::Act(Effect::FileIssue {
+            connector,
+            team,
+            label,
+            assignee,
+            title,
+            description,
+        }),
+        NodeKind::TakeIssue { issue } => Next::Act(Effect::TakeIssue { connector, issue }),
+        NodeKind::MoveColumn { column } => Next::Act(Effect::MoveColumn { connector, column }),
+        NodeKind::Proof => {
+            let at = stamped(run);
+            record(run, &connector, &node_id, json!({ "proof": true }), &at);
+            if let Some(frame) = run.stack.last_mut() {
+                frame.phase = Phase::Follow(out_port());
+            }
+            Next::Cont
+        }
+        NodeKind::Talk { prompt } => match talk_effect(run, &connector, &prompt, &SessionSetup::default()) {
+            Ok(effect) => Next::Act(effect),
+            Err(why) => Next::Fail(why),
+        },
+        NodeKind::Session(setup) => match talk_effect(run, &connector, &setup.prompt, &setup) {
             Ok(effect) => Next::Act(effect),
             Err(why) => Next::Fail(why),
         },
@@ -459,7 +517,7 @@ fn enter_call(
     Next::Cont
 }
 
-fn talk_effect(run: &mut Run, connector: &str, prompt: &str) -> Result<Effect, String> {
+fn talk_effect(run: &mut Run, connector: &str, prompt: &str, session: &SessionSetup) -> Result<Effect, String> {
     if run.session_owner.is_none() {
         run.session_owner = Some(connector.to_owned());
     }
@@ -476,6 +534,7 @@ fn talk_effect(run: &mut Run, connector: &str, prompt: &str) -> Result<Effect, S
             owner,
             prompt: prompt.to_owned(),
             seeded: false,
+            session: session.clone(),
         },
         Session::Live { .. } => Effect::Type {
             text: prompt.to_owned(),
@@ -489,6 +548,7 @@ fn talk_effect(run: &mut Run, connector: &str, prompt: &str) -> Result<Effect, S
             owner,
             prompt: seeded_prompt(run, prompt),
             seeded: true,
+            session: session.clone(),
         },
     };
     Ok(effect)
@@ -531,6 +591,30 @@ fn apply(
         (Effect::StagePicked { connector }, Supplied::Done) => {
             let node = front_node(run)?;
             record(run, &connector, &node, json!({ "stage": "picked" }), at);
+            follow_out(run);
+            Ok(())
+        }
+        (Effect::Reply { connector, text }, Supplied::Done) => {
+            let node = front_node(run)?;
+            record(run, &connector, &node, json!({ "reply": text }), at);
+            follow_out(run);
+            Ok(())
+        }
+        (Effect::FileIssue { connector, title, .. }, Supplied::Done) => {
+            let node = front_node(run)?;
+            record(run, &connector, &node, json!({ "file-issue": title }), at);
+            follow_out(run);
+            Ok(())
+        }
+        (Effect::TakeIssue { connector, issue }, Supplied::Done) => {
+            let node = front_node(run)?;
+            record(run, &connector, &node, json!({ "take-issue": issue }), at);
+            follow_out(run);
+            Ok(())
+        }
+        (Effect::MoveColumn { connector, column }, Supplied::Done) => {
+            let node = front_node(run)?;
+            record(run, &connector, &node, json!({ "move": column }), at);
             follow_out(run);
             Ok(())
         }
@@ -883,8 +967,16 @@ fn path_pages(
         };
         match &node.kind {
             NodeKind::Page { .. } => return true,
-            NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop => return false,
-            NodeKind::Trigger { .. } | NodeKind::StagePicked | NodeKind::Classify(_) | NodeKind::Switch(_) => node
+            NodeKind::Talk { .. } | NodeKind::Session { .. } | NodeKind::Call { .. } | NodeKind::Stop => return false,
+            NodeKind::Trigger { .. }
+            | NodeKind::StagePicked
+            | NodeKind::Reply { .. }
+            | NodeKind::FileIssue { .. }
+            | NodeKind::TakeIssue { .. }
+            | NodeKind::MoveColumn { .. }
+            | NodeKind::Proof
+            | NodeKind::Classify(_)
+            | NodeKind::Switch(_) => node
                 .kind
                 .ports()
                 .iter()
@@ -979,7 +1071,7 @@ fn detach(run: &mut Run, at: &str) {
     }
 }
 
-fn turn_ended(run: &mut Run, claude: Option<String>) {
+fn turn_ended(run: &mut Run, claude: Option<String>, failed: bool, error_to: Vec<NodeId>) {
     if let Session::Live { claude: slot, .. } = &mut run.session {
         if claude.is_some() {
             *slot = claude;
@@ -989,11 +1081,58 @@ fn turn_ended(run: &mut Run, claude: Option<String>) {
         return;
     }
     run.status = Status::Running;
+    let waiting = matches!(run.stack.last(), Some(frame) if frame.phase == Phase::WaitTurn);
+    if !waiting {
+        return;
+    }
+    if failed && !error_to.is_empty() {
+        let at = stamped(run);
+        let (connector, node) = {
+            let frame = run.stack.last().expect("waiting frame");
+            (frame.connector.clone(), frame.queue.first().cloned())
+        };
+        if let Some(node) = node {
+            record(run, &connector, &node, json!({ "turn-failed": true }), &at);
+        }
+        if let Some(frame) = run.stack.last_mut() {
+            let mut queue = error_to;
+            queue.extend(frame.queue.iter().skip(1).cloned());
+            frame.queue = queue;
+            frame.phase = Phase::Enter;
+        }
+        return;
+    }
     if let Some(frame) = run.stack.last_mut() {
         if frame.phase == Phase::WaitTurn {
             frame.phase = Phase::Follow(out_port());
         }
     }
+}
+
+/// The error-port targets of the talk or session node a Waiting run parked on, so a failed
+/// turn takes them instead of `out`. Empty when the run is not waiting or the node wires none.
+pub fn wait_error_targets(run: &Run, library: &Library) -> Vec<NodeId> {
+    if run.status != Status::Waiting {
+        return Vec::new();
+    }
+    let Some(frame) = run.stack.last() else {
+        return Vec::new();
+    };
+    if frame.phase != Phase::WaitTurn {
+        return Vec::new();
+    }
+    let Some(node) = frame.queue.first() else {
+        return Vec::new();
+    };
+    let Some(graph) = library.get(&frame.connector) else {
+        return Vec::new();
+    };
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == *node && edge.port.0 == PortId::ERROR)
+        .map(|edge| edge.to.clone())
+        .collect()
 }
 
 fn front(run: &Run) -> Result<(String, NodeId), String> {
@@ -1067,7 +1206,11 @@ fn own_prompt(run: &Run, effect: &Effect) -> String {
         Effect::Claim { .. }
         | Effect::Classify { .. }
         | Effect::Page { .. }
-        | Effect::StagePicked { .. } => String::new(),
+        | Effect::StagePicked { .. }
+        | Effect::Reply { .. }
+        | Effect::FileIssue { .. }
+        | Effect::TakeIssue { .. }
+        | Effect::MoveColumn { .. } => String::new(),
     }
 }
 
@@ -1077,6 +1220,10 @@ fn effect_name(effect: &Effect) -> &'static str {
         Effect::Classify { .. } => "classify",
         Effect::Page { .. } => "page",
         Effect::StagePicked { .. } => "stage-picked",
+        Effect::Reply { .. } => "reply",
+        Effect::FileIssue { .. } => "file-issue",
+        Effect::TakeIssue { .. } => "take-issue",
+        Effect::MoveColumn { .. } => "move-column",
         Effect::Open { .. } => "open",
         Effect::Resume { .. } => "resume",
         Effect::Type { .. } => "type",
@@ -1123,7 +1270,7 @@ fn fail(run: &mut Run, why: String) -> Drive {
 mod tests {
     use super::super::{
         Answers, Case, Choice, ChosenOn, Classify, Edge, Fallback, Gate, Graph, Node, NodeId,
-        NodeKind, PortId, Question, Switch, Watch,
+        NodeKind, PortId, Question, SessionSetup, Switch, Watch,
     };
     use super::{
         drive, history, port_for, push, start, supply, Drive, Effect, Entry, Library, Session,
@@ -1149,6 +1296,7 @@ mod tests {
             id: nid(id),
             name: name.into(),
             position: [0, 0],
+            group_name: None,
             kind,
         }
     }
@@ -1248,6 +1396,10 @@ mod tests {
                         Effect::Claim { .. }
                         | Effect::Page { .. }
                         | Effect::StagePicked { .. }
+                        | Effect::Reply { .. }
+                        | Effect::FileIssue { .. }
+                        | Effect::TakeIssue { .. }
+                        | Effect::MoveColumn { .. }
                         | Effect::Type { .. } => Supplied::Done,
                     };
                     seen.push(effect);
@@ -1257,7 +1409,9 @@ mod tests {
                     run,
                     Wake::TurnEnded {
                         claude: Some(CLAUDE.into()),
-                    },
+                        failed: false,
+                        error_to: Vec::new(),
+                        },
                     AT,
                 ),
                 Drive::Done => {
@@ -1298,6 +1452,127 @@ mod tests {
                 .collect(),
             edges,
         )
+    }
+
+    fn session(prompt: &str, setup: SessionSetup) -> NodeKind {
+        NodeKind::Session(SessionSetup { prompt: prompt.into(), ..setup })
+    }
+
+    #[test]
+    fn a_session_step_carries_its_setup_into_the_open() {
+        let lib = library(vec![(
+            "c1",
+            chain(vec![
+                ("t", "Trigger", trigger()),
+                ("s", "Session", session("go", SessionSetup { folder: "/work".into(), model: "sonnet".into(), ..Default::default() })),
+            ]),
+        )]);
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        assert_eq!(
+            act(&mut run, &lib),
+            Effect::Claim { connector: "c1".into(), key: "uuid".into() }
+        );
+        supply(&mut run, Supplied::Done, AT);
+        match act(&mut run, &lib) {
+            Effect::Open { owner, prompt, seeded, session } => {
+                assert_eq!(owner, "c1");
+                assert_eq!(prompt, "go");
+                assert!(!seeded);
+                assert_eq!(session.folder, "/work");
+                assert_eq!(session.model, "sonnet");
+            }
+            other => panic!("session open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_steps_emit_hub_effects_in_walk_order() {
+        let lib = library(vec![(
+            "c1",
+            chain(vec![
+                ("t", "Trigger", trigger()),
+                ("r", "Reply", NodeKind::Reply { text: "on it".into() }),
+                ("f", "File", NodeKind::FileIssue { team: "ENG".into(), label: "".into(), assignee: "".into(), title: "Bug".into(), description: "".into() }),
+                ("k", "Take", NodeKind::TakeIssue { issue: "ENG-1".into() }),
+                ("m", "Move", NodeKind::MoveColumn { column: "Review".into() }),
+                ("p", "Proof", NodeKind::Proof),
+                ("s", "Stop", NodeKind::Stop),
+            ]),
+        )]);
+        let run = run_effects(
+            &lib,
+            "c1",
+            slack(),
+            "export 500s",
+            answers(&[], None),
+            vec![
+                Effect::Reply { connector: "c1".into(), text: "on it".into() },
+                Effect::FileIssue { connector: "c1".into(), team: "ENG".into(), label: "".into(), assignee: "".into(), title: "Bug".into(), description: "".into() },
+                Effect::TakeIssue { connector: "c1".into(), issue: "ENG-1".into() },
+                Effect::MoveColumn { connector: "c1".into(), column: "Review".into() },
+                // No session step opens a session, so the run claims the subject when it ends.
+                Effect::Claim { connector: "c1".into(), key: THREAD.into() },
+            ],
+        );
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "reply": "on it" })));
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "file-issue": "Bug" })));
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "take-issue": "ENG-1" })));
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "move": "Review" })));
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "proof": true })));
+    }
+
+    #[test]
+    fn templates_read_trigger_answers_and_filed_issue() {
+        let lib = library(vec![("c1", chain(vec![("t", "Trigger", trigger()), ("s", "Stop", NodeKind::Stop)]))]);
+        let mut run = start(&lib, "c1", linear(), json!({"kind": "issue", "identifier": "ENG-7", "title": "Broken button", "description": "It broke.", "url": "https://linear.app/ENG-7", "id": "uuid"}), AT);
+        run.classified.insert(nid("ask"), Answers { answers: vec![("kind".into(), "bug".into())], chosen: None });
+        run.context["issue"] = json!({ "id": "uuid-2", "identifier": "ENG-8", "url": "https://linear.app/ENG-8" });
+        let render = |text: &str| crate::connectors::render_template(text, &run);
+        assert_eq!(render("no spans"), "no spans");
+        assert_eq!(render("{{trigger.title}}"), "Broken button");
+        assert_eq!(render("{{trigger.url}}"), "https://linear.app/ENG-7");
+        assert_eq!(render("{{answers.kind}}!"), "bug!");
+        assert_eq!(render("{{issue.identifier}} is {{issue.url}}"), "ENG-8 is https://linear.app/ENG-8");
+        assert_eq!(render("{{bogus}} and {{trigger.bogus}} stay"), "{{bogus}} and {{trigger.bogus}} stay");
+        assert_eq!(render("unclosed {{trigger.title"), "unclosed {{trigger.title");
+    }
+
+    fn error_branch_lib() -> Library {
+        let mut lib_graph = chain(vec![
+            ("t", "Trigger", trigger()),
+            ("s", "Session", session("go", SessionSetup::default())),
+            ("ok", "Reply", NodeKind::Reply { text: "done".into() }),
+        ]);
+        lib_graph.nodes.push(node("err", "Failed", NodeKind::Reply { text: "failed".into() }));
+        lib_graph.edges.push(edge("s", "error", "err"));
+        library(vec![("c1", lib_graph)])
+    }
+
+    fn park_session(run: &mut super::Run, lib: &Library) {
+        assert_eq!(act(run, lib), Effect::Claim { connector: "c1".into(), key: THREAD.into() });
+        supply(run, Supplied::Done, AT);
+        assert!(matches!(act(run, lib), Effect::Open { .. }));
+        supply(run, opened(), AT);
+        assert_eq!(drive(run, lib), Drive::Park);
+    }
+
+    #[test]
+    fn a_failed_turn_takes_the_session_error_branch() {
+        let lib = error_branch_lib();
+        let mut run = start(&lib, "c1", slack(), json!("export 500s"), AT);
+        park_session(&mut run, &lib);
+        push(&mut run, Wake::TurnEnded { claude: Some(CLAUDE.into()), failed: true, error_to: vec![nid("err")] }, AT);
+        assert_eq!(act(&mut run, &lib), Effect::Reply { connector: "c1".into(), text: "failed".into() });
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "turn-failed": true })));
+    }
+
+    #[test]
+    fn a_failed_turn_without_an_error_branch_continues_out() {
+        let lib = error_branch_lib();
+        let mut run = start(&lib, "c1", slack(), json!("export 500s"), AT);
+        park_session(&mut run, &lib);
+        push(&mut run, Wake::TurnEnded { claude: Some(CLAUDE.into()), failed: true, error_to: Vec::new() }, AT);
+        assert_eq!(act(&mut run, &lib), Effect::Reply { connector: "c1".into(), text: "done".into() });
     }
 
     #[test]
@@ -1348,6 +1623,7 @@ mod tests {
                     owner: "c1".into(),
                     prompt: "Fix the button".into(),
                     seeded: false,
+                    session: SessionSetup::default(),
                 },
             ],
         );
@@ -1396,6 +1672,7 @@ mod tests {
                     owner: "c1".into(),
                     prompt: "one".into(),
                     seeded: false,
+                    session: SessionSetup::default(),
                 },
                 Effect::Type { text: "two".into() },
                 Effect::Type {
@@ -1463,6 +1740,7 @@ mod tests {
                         owner: "c1".into(),
                         prompt: first.into(),
                         seeded: false,
+                        session: SessionSetup::default(),
                     },
                     Effect::Type {
                         text: second.into(),
@@ -1541,6 +1819,7 @@ mod tests {
                     owner: "c1".into(),
                     prompt: "use fallback".into(),
                     seeded: false,
+                    session: SessionSetup::default(),
                 },
             ],
         );
@@ -1592,6 +1871,7 @@ mod tests {
                     owner: "c1".into(),
                     prompt: "onward".into(),
                     seeded: false,
+                    session: SessionSetup::default(),
                 },
             ],
         );
@@ -1660,6 +1940,7 @@ mod tests {
             owner: "c1".into(),
             prompt: prompt.into(),
             seeded: false,
+            session: SessionSetup::default(),
         };
         run_effects(
             &switched(vec![case("no", "no"), case("later", "later")], "no"),
@@ -1773,7 +2054,8 @@ mod tests {
             Effect::Open {
                 owner: "c1".into(),
                 prompt: "stopped".into(),
-                seeded: false
+                seeded: false,
+                session: SessionSetup::default(),
             }
         );
     }
@@ -1790,6 +2072,7 @@ mod tests {
             owner: connector.into(),
             prompt: prompt.into(),
             seeded: false,
+            session: SessionSetup::default(),
         };
         let claim = |connector: &str| Effect::Claim {
             connector: connector.into(),
@@ -1952,6 +2235,7 @@ mod tests {
                     owner: "c1".into(),
                     prompt: "open".into(),
                     seeded: false,
+                    session: SessionSetup::default(),
                 },
                 Effect::Type {
                     text: "inside".into(),
@@ -2059,7 +2343,8 @@ mod tests {
             Effect::Open {
                 owner: "c1".into(),
                 prompt: "first".into(),
-                seeded: false
+                seeded: false,
+                session: SessionSetup::default(),
             }
         );
         supply(&mut run, opened(), AT);
@@ -2068,7 +2353,9 @@ mod tests {
             &mut run,
             Wake::TurnEnded {
                 claude: Some("ses_1".into()),
-            },
+                failed: false,
+                error_to: Vec::new(),
+                },
             AT,
         );
         push(&mut run, Wake::TabGone, AT);
@@ -2088,6 +2375,7 @@ mod tests {
                 owner,
                 prompt,
                 seeded,
+                ..
             } => {
                 assert_eq!((owner, seeded), ("c1".into(), true));
                 assert!(prompt.contains("This session continues a run that already happened."));
@@ -2112,6 +2400,7 @@ mod tests {
                 owner,
                 prompt,
                 seeded,
+                ..
             } => {
                 assert_eq!((owner, seeded), ("c1".into(), true));
                 assert!(prompt.contains("This session continues a run that already happened."));
@@ -2166,7 +2455,8 @@ mod tests {
             Effect::Open {
                 owner: "c1".into(),
                 prompt: "first".into(),
-                seeded: false
+                seeded: false,
+                session: SessionSetup::default(),
             }
         );
         supply(&mut restored, opened(), AT);
@@ -2179,7 +2469,9 @@ mod tests {
             &mut again,
             Wake::TurnEnded {
                 claude: Some("ses_9".into()),
-            },
+                failed: false,
+                error_to: Vec::new(),
+                },
             AT,
         );
         assert_eq!(
@@ -2219,7 +2511,9 @@ mod tests {
             &mut run,
             Wake::TurnEnded {
                 claude: Some("ses_1".into()),
-            },
+                failed: false,
+                error_to: Vec::new(),
+                },
             AT,
         );
         push(&mut run, Wake::TabGone, AT);
@@ -2248,7 +2542,9 @@ mod tests {
             &mut run,
             Wake::TurnEnded {
                 claude: Some("ses_1".into()),
-            },
+                failed: false,
+                error_to: Vec::new(),
+                },
             AT,
         );
         assert_eq!(
@@ -2453,7 +2749,8 @@ mod tests {
             Effect::Open {
                 owner: "c1".into(),
                 prompt: prompt.into(),
-                seeded: false
+                seeded: false,
+                session: SessionSetup::default(),
             }
         );
         supply(run, opened(), AT);

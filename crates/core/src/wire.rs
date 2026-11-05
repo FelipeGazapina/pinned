@@ -757,6 +757,8 @@ pub enum HubCall {
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
+    /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
+    GenerateWorkflow { model: String, description: String },
     /// `Vec<MachineView>`.
     Machines,
     RenameMachine { id: MachineId, name: String },

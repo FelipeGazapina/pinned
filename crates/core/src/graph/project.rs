@@ -14,7 +14,7 @@ pub struct Projected {
 }
 
 /// Lossy once the graph is more than what `migrate` builds. It keeps the trigger, the first
-/// direct classify before the first talk, and that classify's switch cases as `stop_on`.
+/// direct classify before the first talk or session, and that classify's switch cases as `stop_on`.
 pub fn project(graph: &Graph) -> Projected {
     let trigger = graph.trigger();
     let NodeKind::Trigger { watch } = &trigger.kind else { unreachable!("trigger() returns the trigger") };
@@ -36,7 +36,7 @@ fn empty_decide() -> Decide {
     Decide { model: String::new(), instructions: String::new(), categories: Vec::new(), fallback: None }
 }
 
-/// Direct classifies on the spine, in walk order, stopping at the first talk or decide.
+/// Direct classifies on the spine, in walk order, stopping at the first talk, session or decide.
 fn direct_asks<'a>(graph: &'a Graph, trigger: &'a Node) -> Vec<&'a Node> {
     let mut asks = Vec::new();
     let mut current = trigger;
@@ -47,7 +47,7 @@ fn direct_asks<'a>(graph: &'a Graph, trigger: &'a Node) -> Vec<&'a Node> {
                 asks.push(next);
                 current = next;
             }
-            NodeKind::Talk { .. } | NodeKind::Stop => break,
+            NodeKind::Talk { .. } | NodeKind::Session { .. } | NodeKind::Stop => break,
             _ => current = next,
         }
     }

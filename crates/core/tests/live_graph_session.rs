@@ -319,6 +319,7 @@ fn two_talks() -> Graph {
         id: NodeId(id.into()),
         name: id.into(),
         position: [x, 0],
+        group_name: None,
         kind: NodeKind::Talk { prompt: prompt.into() },
     };
     Graph {
@@ -327,6 +328,7 @@ fn two_talks() -> Graph {
                 id: NodeId("t".into()),
                 name: "Trigger".into(),
                 position: [0, 0],
+                group_name: None,
                 kind: NodeKind::Trigger { watch: Watch::LinearLabel { label: "claude".into() } },
             },
             talk("talk-0", "Reply with exactly ALPHA and nothing else.", 1),

@@ -8,6 +8,7 @@ export const TEXT_H = 56;
 /** Old canvas row. One pitch is the tile plus its label, with a gap so the boxes do not touch. */
 export const ROW = 150;
 export const OUT = "out";
+export const ERROR = "error";
 export const FALLBACK = "fallback";
 export const NOWHERE = "nowhere";
 
@@ -68,10 +69,12 @@ function findEdgeIndex(graph, edge) {
   return graph.edges.findIndex((e) => edgeKey(e) === key);
 }
 
-/** Output ports for a node, in draw order. */
+/** Output ports for a node, in draw order. Talk and session steps also wire `error`,
+ * which runs when their turn fails instead of `out`. */
 export function ports(node) {
   const type = nodeKind(node);
   if (type === "stop") return [];
+  if (type === "talk" || type === "session") return [{ id: OUT, label: "" }, { id: ERROR, label: "error" }];
   if (type === "switch") {
     const list = (node.cases ?? []).map((item) => ({ id: String(item.id), label: item.equals ?? "" }));
     list.push({ id: OUT, label: "otherwise" });
@@ -174,6 +177,18 @@ export function newNode(type, graph, upstreamId) {
     }
     case "talk":
       return { ...base, type: "talk", prompt: "" };
+    case "reply":
+      return { ...base, type: "reply", text: "" };
+    case "file-issue":
+      return { ...base, type: "file-issue", team: "", label: "", assignee: "", title: "", description: "" };
+    case "take-issue":
+      return { ...base, type: "take-issue", issue: "" };
+    case "move-column":
+      return { ...base, type: "move-column", column: "" };
+    case "proof":
+      return { ...base, type: "proof" };
+    case "session":
+      return { ...base, type: "session", prompt: "", folder: "", repo: "", model: "", effort: "", permission: "", account: "", worktree: false, instructions: "" };
     case "page":
       return { ...base, type: "page", group: "" };
     case "stage-picked":
@@ -209,6 +224,29 @@ function intersects(a, b) {
 /** Boxes in graph coordinates. `bottom` includes the label under the tile. */
 export function layout(graph) {
   return graph.nodes.map(nodeBox);
+}
+
+/** One titled box per named group, around its member nodes, n8n's group boxes. */
+export function groups(graph) {
+  const boxes = layout(graph);
+  const byId = new Map(boxes.map((box) => [box.id, box]));
+  const members = new Map();
+  for (const node of graph.nodes) {
+    const name = (node.group_name ?? "").trim();
+    if (!name) continue;
+    const box = byId.get(node.id);
+    if (!box) continue;
+    if (!members.has(name)) members.set(name, []);
+    members.get(name).push(box);
+  }
+  const PAD = 24;
+  return [...members].map(([name, boxes]) => ({
+    name,
+    left: Math.min(...boxes.map((b) => b.left)) - PAD,
+    right: Math.max(...boxes.map((b) => b.right)) + PAD,
+    top: Math.min(...boxes.map((b) => b.top)) - PAD - 20,
+    bottom: Math.max(...boxes.map((b) => b.bottom)) + PAD,
+  }));
 }
 
 /** Pairs of node ids whose boxes intersect, labels included. */
@@ -301,8 +339,9 @@ export function remove(graph, nodeId) {
   const outgoing = graph.edges.filter((e) => e.from === nodeId);
   let edges = graph.edges.filter((e) => e.from !== nodeId && e.to !== nodeId);
 
-  if (outPorts.length === 1 && outPorts[0].id === OUT && outgoing.length) {
-    const outTargets = outgoing.filter((e) => e.port === OUT);
+  // Deleting a node bridges its out chain; error edges end with it.
+  const outTargets = outPorts.some((p) => p.id === OUT) ? outgoing.filter((e) => e.port === OUT) : [];
+  if (outTargets.length) {
     for (const inn of incoming) {
       for (const out of outTargets) edges.push({ from: inn.from, port: inn.port, to: out.to });
     }
@@ -404,18 +443,19 @@ function watchOf(trigger) {
   return { kind: "called" };
 }
 
-/** One trigger of the chosen kind and one talk. A connector without `graph` is not guessed into this. */
+/** One trigger of the chosen kind and one session. A connector without `graph` is not guessed into this. */
 export function startingGraph(connector) {
   resetIds(0);
   const tid = newId("trigger");
-  const talkId = newId("talk");
+  const sessionId = newId("session");
+  const setup = connector ? { prompt: "", folder: connector.folder ?? "", repo: connector.repo ?? "", model: connector.model ?? "", effort: connector.effort ?? "", permission: connector.permissionMode ?? "", account: connector.account ?? "", worktree: !!connector.worktree, instructions: connector.instructions ?? "" } : null;
   return {
     nodes: [
       { id: tid, name: "Trigger", position: [0, 0], type: "trigger", watch: watchOf(connector?.trigger) },
-      { id: talkId, name: "Run session", position: [COL, 0], type: "talk", prompt: "" },
+      { id: sessionId, name: "Run session", position: [COL, 0], type: "session", ...(setup ?? { prompt: "", folder: "", repo: "", model: "", effort: "", permission: "", account: "", worktree: false, instructions: "" }) },
     ],
-    edges: [{ from: tid, port: OUT, to: talkId }],
+    edges: [{ from: tid, port: OUT, to: sessionId }],
   };
 }
 
-export const PICKER_TYPES = ["classify", "switch", "talk", "page", "stage-picked", "call", "stop"];
+export const PICKER_TYPES = ["classify", "switch", "session", "reply", "file-issue", "take-issue", "move-column", "proof", "page", "call", "stop"];

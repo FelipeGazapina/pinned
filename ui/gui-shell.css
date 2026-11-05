@@ -154,6 +154,9 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 #shell-dialog .dialog-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--g-border); font-size: 12px; }
 #shell-dialog .dialog-foot .spacer { flex: 1; }
 #shell-dialog .error { margin: 0; color: var(--g-error); font-size: 12px; }
+#shell-dialog .generate-body { gap: 16px; }
+#shell-dialog .generate-body label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+#shell-dialog .generate-body textarea { min-height: 110px; }
 @media (pointer: coarse) {
   #shell-dialog .close, #shell-dialog table.prices .icon { width: 40px; height: 40px; }
   #shell-dialog table.prices input { height: 40px; }

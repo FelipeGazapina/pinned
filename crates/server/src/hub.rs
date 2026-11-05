@@ -361,6 +361,7 @@ impl Hub {
             HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
+            HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
             HubCall::Import { store, linear_key, slack_key, github_key, vercel_key } => {
                 let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key })?;
                 (json(imported), imported)

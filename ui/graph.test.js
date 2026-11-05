@@ -5,6 +5,8 @@ import {
   collisions,
   connect,
   disconnect,
+  ERROR,
+  groups,
   layout,
   move,
   newNode,
@@ -393,8 +395,10 @@ test("newNode skips an id the graph already uses", () => {
   assert.equal(newNode("talk", graph).id, "talk-2");
 });
 
-test("starting graph is a trigger and a talk, with no migrated classify", () => {
+test("starting graph is a trigger and a session, with no migrated classify", () => {
   const graph = startingGraph({
+    folder: "/repo",
+    model: "sonnet",
     trigger: {
       kind: "slack-message",
       channel: "ops",
@@ -403,8 +407,33 @@ test("starting graph is a trigger and a talk, with no migrated classify", () => 
   });
   assert.deepEqual(
     graph.nodes.map((n) => n.type),
-    ["trigger", "talk"],
+    ["trigger", "session"],
   );
   assert.deepEqual(graph.nodes[0].watch, { kind: "slack-message", channel: "ops" });
-  assert.deepEqual(graph.edges, [{ from: "trigger-1", port: OUT, to: "talk-2" }]);
+  assert.deepEqual(graph.edges, [{ from: "trigger-1", port: OUT, to: "session-2" }]);
+  assert.equal(graph.nodes[1].folder, "/repo");
+  assert.equal(graph.nodes[1].model, "sonnet");
+});
+
+test("talk and session steps wire an error port", () => {
+  assert.deepEqual(ports({ type: "talk", prompt: "" }), [{ id: OUT, label: "" }, { id: ERROR, label: "error" }]);
+  assert.deepEqual(ports({ type: "session" }).map((p) => p.id), [OUT, ERROR]);
+  assert.deepEqual(ports({ type: "reply", text: "" }).map((p) => p.id), [OUT]);
+});
+
+test("groups box the named steps", () => {
+  resetIds(0);
+  const graph = {
+    nodes: [
+      { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "called" } },
+      { id: "session-2", name: "Run", position: [COL, 0], type: "session", group_name: "Triage" },
+      { id: "reply-3", name: "Reply", position: [COL * 2, 0], type: "reply", group_name: "Triage" },
+      { id: "stop-4", name: "Stop", position: [COL * 3, 0], type: "stop", group_name: "" },
+    ],
+    edges: [],
+  };
+  const [box] = groups(graph);
+  assert.equal(box.name, "Triage");
+  assert.ok(box.left <= COL - 99 && box.right > COL * 2 && box.top < 0, JSON.stringify(box));
+  assert.deepEqual(groups({ nodes: [], edges: [] }), []);
 });

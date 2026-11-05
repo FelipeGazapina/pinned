@@ -110,6 +110,11 @@ pub fn delete_connector(connectors: State<Connectors>, id: String) -> Result<(),
 }
 
 #[tauri::command]
+pub async fn generate_workflow(connectors: State<'_, Connectors>, model: String, description: String) -> Result<pinned_core::graph::Graph, String> {
+    connectors.generate_workflow(&model, &description).await
+}
+
+#[tauri::command]
 pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String> {
     let mut dialog = app.dialog().file();
     if let Some(start) = start.filter(|s| !s.is_empty()) {

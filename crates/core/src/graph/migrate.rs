@@ -1,6 +1,6 @@
 //! The graph a fixed-pipeline connector already is.
 
-use super::{Case, Choice, Classify, Edge, Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Question, Switch, Watch};
+use super::{Case, Choice, Classify, Edge, Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Question, SessionSetup, Switch, Watch};
 use crate::connectors::{self, Ask, Category, Connector, Decide, Question as LegacyQuestion, Trigger};
 use std::collections::BTreeMap;
 
@@ -23,7 +23,7 @@ struct Built {
 impl Built {
     fn add(&mut self, id: &str, name: &str, column: i32, row: i32, kind: NodeKind) -> NodeId {
         let id = NodeId(id.into());
-        self.nodes.push(Node { id: id.clone(), name: name.into(), position: [column * COLUMN, row * ROW], kind });
+        self.nodes.push(Node { id: id.clone(), name: name.into(), position: [column * COLUMN, row * ROW], group_name: None, kind });
         let next = self.rows.entry(column).or_insert(0);
         *next = (*next).max(row + 1);
         id
@@ -79,8 +79,8 @@ pub fn migrate(connector: &Connector) -> Graph {
         column += 1;
     }
     if !tails.is_empty() {
-        let talk = built.add("talk", "Talk", column, 0, NodeKind::Talk { prompt: String::new() });
-        built.link(&tails, &talk);
+        let session = built.add("session", "Session", column, 0, NodeKind::Session(SessionSetup::default()));
+        built.link(&tails, &session);
     }
     built.finish()
 }
@@ -283,7 +283,7 @@ mod tests {
     }
 
     fn node(id: &str, name: &str, at: [i32; 2], kind: NodeKind) -> Node {
-        Node { id: NodeId(id.into()), name: name.into(), position: at, kind }
+        Node { id: NodeId(id.into()), name: name.into(), position: at, group_name: None, kind }
     }
 
     fn edge(from: &str, port: &str, to: &str) -> Edge {
@@ -315,7 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn a_linear_label_with_a_picked_column_is_trigger_stage_talk() {
+    fn a_linear_label_with_a_picked_column_is_trigger_stage_session() {
+
         let connector = workflow(Trigger::LinearLabel { label: "claude".into() }, None, "Analyzing");
         let graph = migrate(&connector);
         assert_eq!(
@@ -324,9 +325,9 @@ mod tests {
                 nodes: vec![
                     node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::LinearLabel { label: "claude".into() } }),
                     node("stage", "Picked", at(1, 0), NodeKind::StagePicked),
-                    node("talk", "Talk", at(2, 0), NodeKind::Talk { prompt: String::new() }),
+                    node("session", "Session", at(2, 0), NodeKind::Session(SessionSetup::default())),
                 ],
-                edges: vec![edge("trigger", "out", "stage"), edge("stage", "out", "talk")],
+                edges: vec![edge("trigger", "out", "stage"), edge("stage", "out", "session")],
             }
         );
         round_trip(&connector);
@@ -336,16 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn a_mention_and_a_called_workflow_are_a_trigger_then_a_talk() {
+    fn a_mention_and_a_called_workflow_are_a_trigger_then_a_session() {
         let mention = workflow(Trigger::SlackMention { channel: "#support".into() }, None, "");
         assert_eq!(
             migrate(&mention),
             Graph {
                 nodes: vec![
                     node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::SlackMention { channel: "#support".into() } }),
-                    node("talk", "Talk", at(1, 0), NodeKind::Talk { prompt: String::new() }),
+                    node("session", "Session", at(1, 0), NodeKind::Session(SessionSetup::default())),
                 ],
-                edges: vec![edge("trigger", "out", "talk")],
+                edges: vec![edge("trigger", "out", "session")],
             }
         );
         round_trip(&mention);
@@ -353,6 +354,7 @@ mod tests {
         assert!(matches!(migrate(&called).trigger().kind, NodeKind::Trigger { watch: Watch::Called }));
         assert_eq!(migrate(&called).nodes.iter().find_map(|node| match &node.kind {
             NodeKind::Talk { prompt } => Some(prompt.as_str()),
+            NodeKind::Session(setup) => Some(setup.prompt.as_str()),
             _ => None,
         }), Some(""));
         round_trip(&called);
@@ -409,7 +411,7 @@ mod tests {
                     switched("switch-1", "Stops on agent", 3, "agent", &[("No", "No"), ("maybe", "maybe")]),
                     node("stop-1-0", "No", at(4, 1), NodeKind::Stop),
                     node("stop-1-1", "maybe", at(4, 2), NodeKind::Stop),
-                    node("talk", "Talk", at(4, 0), NodeKind::Talk { prompt: String::new() }),
+                    node("session", "Session", at(4, 0), NodeKind::Session(SessionSetup::default())),
                 ],
                 edges: vec![
                     edge("trigger", "out", "ask"),
@@ -418,7 +420,7 @@ mod tests {
                     edge("switch-0", "out", "switch-1"),
                     edge("switch-1", "No", "stop-1-0"),
                     edge("switch-1", "maybe", "stop-1-1"),
-                    edge("switch-1", "out", "talk"),
+                    edge("switch-1", "out", "session"),
                 ],
             }
         );
@@ -446,9 +448,9 @@ mod tests {
                 ask,
                 switched("switch-1", "Stops on agent", 2, "agent", &[("No", "No")]),
                 node("stop-1-0", "renamed", at(3, 1), NodeKind::Stop),
-                node("talk", "Talk", at(3, 0), NodeKind::Talk { prompt: String::new() }),
+                node("session", "Session", at(3, 0), NodeKind::Session(SessionSetup::default())),
             ],
-            edges: vec![edge("trigger", "out", "ask"), edge("ask", "out", "switch-1"), edge("switch-1", "No", "stop-1-0"), edge("switch-1", "out", "talk")],
+            edges: vec![edge("trigger", "out", "ask"), edge("ask", "out", "switch-1"), edge("switch-1", "No", "stop-1-0"), edge("switch-1", "out", "session")],
         };
         let projected = project(&graph);
         let questions = projected.ask.expect("ask").questions;
