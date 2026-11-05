@@ -44,6 +44,29 @@ enum View {
     Pill,
 }
 
+/// Brings the main window back: unminimize, show, and focus. The tray icon, the Dock icon
+/// and Cmd-Tab all land here, so a window buried under other apps is never lost.
+fn reveal_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Shows or hides the app in the Dock and the Cmd-Tab switcher (macOS). The window is an
+/// always-on-top panel with no Dock presence by default; when Always on top is off the app
+/// becomes a regular app so a buried window can be brought back from the Dock.
+#[tauri::command]
+fn set_dock_shown(app: AppHandle, shown: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(if shown { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory })
+        .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, shown);
+    Ok(())
+}
+
 /// Sync commands run one at a time on the main thread, which keeps keystrokes in order.
 #[tauri::command]
 fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
@@ -304,6 +327,11 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&Menu::with_items(app, &[&opacity, &quit])?)
+        .on_tray_icon_event(|tray, event| {
+            if matches!(event, tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. }) {
+                reveal_main(tray.app_handle());
+            }
+        })
         .on_menu_event(move |app, e| {
             if e.id() == "quit" {
                 app.state::<Arc<Machine>>().quit();
@@ -356,6 +384,7 @@ fn main() {
             set_view,
             focus_panel,
             close_tab,
+            set_dock_shown,
             awake::get_keep_awake,
             awake::set_keep_awake,
             fonts::font_families,
@@ -382,6 +411,7 @@ fn main() {
             commands::clone_repo,
             commands::save_connector,
             commands::delete_connector,
+            commands::generate_workflow,
             commands::pick_folder,
             account::account,
             account::sign_in,
@@ -472,6 +502,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("tauri build failed")
         .run(|app, event| {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                reveal_main(app);
+            }
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 app.state::<Arc<Machine>>().quit();
             }

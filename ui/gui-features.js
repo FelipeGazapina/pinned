@@ -5,13 +5,21 @@ try {
 } catch {}
 const saveFeatures = () => save("gui-features", JSON.stringify(guiFeatures));
 
-/** Aplica o always on top na janela atual. Sem efeito no navegador, que não tem janela nativa. */
+/** Aplica o always on top na janela atual, e mostra o app no Dock quando ele sai de cima das
+ * outras janelas, para a janela nunca se perder. Sem efeito no navegador, que não tem janela nativa. */
 async function applyAlwaysOnTop() {
   if (!TAURI?.window) return;
+  const on = !!guiFeatures.alwaysOnTop;
   try {
-    await TAURI.window.getCurrentWindow().setAlwaysOnTop(!!guiFeatures.alwaysOnTop);
+    await TAURI.window.getCurrentWindow().setAlwaysOnTop(on);
   } catch (e) {
     console.warn("always on top", e);
+    return;
+  }
+  try {
+    await invoke("set_dock_shown", { shown: !on });
+  } catch (e) {
+    console.warn("dock", e);
   }
 }
 applyAlwaysOnTop();
@@ -25,7 +33,7 @@ async function featuresSettingsHtml() {
   const toggle = (key, on, title, about, extra = "") => row(key, title, about, `<label class="switch"><input type="checkbox" id="feature-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`, extra);
   return `<section id="features-settings"><h2 class="looks-title">Optional features</h2>
     ${toggle("keepAwake", awake, `Keep this ${COMPUTER} awake`, `While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.`, `<p class="error" id="awake-error"></p>`)}
-    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", "Keep the pinned window above other apps, even in their fullscreen spaces.")}</section>`;
+    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", "Keep the pinned window above other apps, even in their fullscreen spaces. When off, pinned shows in the Dock so you can bring it back.")}</section>`;
 }
 function bindFeaturesSettings() {
   const awake = document.getElementById("feature-keepAwake");
@@ -53,5 +61,10 @@ function bindFeaturesSettings() {
     }
     guiFeatures.alwaysOnTop = on;
     saveFeatures();
+    try {
+      await invoke("set_dock_shown", { shown: !on });
+    } catch (e) {
+      console.warn("dock", e);
+    }
   };
 }
