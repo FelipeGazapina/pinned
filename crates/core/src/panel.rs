@@ -28,6 +28,11 @@ pub struct PageMeta {
     /// The file name, when the address answers a file a browser downloads instead of showing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// The rule in the page's response that keeps a frame from showing it, such as
+    /// `X-Frame-Options: SAMEORIGIN`. The app shows a page in a webview, which no such rule blocks;
+    /// the web app has only a frame, so it says what the rule is instead of drawing an empty frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_blocked: Option<String>,
 }
 
 /// Why a fetch got no page: the address can't be reached, named as Chromium names it, or some other failure.
@@ -57,20 +62,21 @@ fn shows_inline(kind: &str) -> bool {
         || kind.ends_with("+xml")
 }
 
-/// The title and icon of the page at `url`, fetched from this machine.
-pub fn page_meta(url: &str) -> Result<PageMeta, String> {
+/// The title and icon of the page at `url`, fetched from this machine, and the rule that keeps a
+/// frame on the page at origin `frame_by` from showing it.
+pub fn page_meta(url: &str, frame_by: Option<&str>) -> Result<PageMeta, String> {
     let url = reqwest::Url::parse(url).map_err(|e| format!("not an address: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("not a web address: {url}"));
     }
-    let (base, kind, page) = match fetch(url, PAGE_LIMIT) {
+    let Fetched { at: base, kind, body: page, frame_blocked } = match fetch(url, frame_by, PAGE_LIMIT) {
         Ok(got) => got,
         Err(FetchError::Unreachable(code)) => return Ok(PageMeta { failure: Some(code.into()), ..PageMeta::default() }),
         Err(FetchError::Failed(e)) => return Err(e),
     };
     if !kind.contains("html") {
         let name = base.path_segments().and_then(|mut s| s.next_back()).filter(|n| !n.is_empty()).unwrap_or("download");
-        return Ok(PageMeta { file: (!shows_inline(&kind)).then(|| name.to_owned()), ..PageMeta::default() });
+        return Ok(PageMeta { file: (!shows_inline(&kind)).then(|| name.to_owned()), frame_blocked, ..PageMeta::default() });
     }
     let html = String::from_utf8_lossy(&page);
     let title = element_text(&html, "title").map(|t| unescape(t.trim())).unwrap_or_default();
@@ -83,15 +89,77 @@ pub fn page_meta(url: &str) -> Result<PageMeta, String> {
         if at.scheme() == "data" {
             return Some(at.to_string());
         }
-        let (_, kind, bytes) = fetch(at, ICON_LIMIT).ok()?;
+        let Fetched { kind, body: bytes, .. } = fetch(at, None, ICON_LIMIT).ok()?;
         kind.starts_with("image/").then(|| format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
     });
-    Ok(PageMeta { title, icon, ..PageMeta::default() })
+    Ok(PageMeta { title, icon, frame_blocked, ..PageMeta::default() })
 }
 
-/// The final address, content type and first `limit` bytes of what `url` answers, after redirects.
-/// A dev server answers plain HTTP, which this reads over a socket; reqwest takes https.
-fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>), FetchError> {
+/// Where a frame would show a page, and where the page itself is. A rule that names the framing
+/// origin, or allows the page's own, lets that frame through.
+struct Framing<'a> {
+    by: Option<&'a str>,
+    page: &'a str,
+}
+
+impl Framing<'_> {
+    /// Whether the framing page is the page's own origin, which `SAMEORIGIN` and `'self'` allow.
+    fn same_origin(&self) -> bool {
+        self.by.is_some_and(|by| by.trim_end_matches('/').eq_ignore_ascii_case(self.page))
+    }
+
+    /// Whether a `frame-ancestors` source lets this frame through. A scheme or a wildcard host may
+    /// allow it, and an empty frame is the better screen to risk than one on a page that would show.
+    fn allows(&self, source: &str) -> bool {
+        source == "*"
+            || (source == "'self'" && self.same_origin())
+            || self.by.is_some_and(|by| source.eq_ignore_ascii_case(by.trim_end_matches('/')))
+            || source.contains('*')
+            || source.ends_with(':')
+    }
+}
+
+/// The sources of a policy's `frame-ancestors` directive, when it has one a browser would read.
+fn frame_ancestors(policy: &str) -> Option<&str> {
+    policy.split(';').map(str::trim).find_map(|part| {
+        let (name, sources) = part.split_once(char::is_whitespace).unwrap_or((part, ""));
+        let sources = sources.trim();
+        (name.eq_ignore_ascii_case("frame-ancestors") && !sources.is_empty()).then_some(sources)
+    })
+}
+
+/// The rule in a response that keeps a frame from showing the page, if it has one. A browser reads
+/// `frame-ancestors` and ignores `X-Frame-Options` beside it, so only one of them bounds the answer.
+/// `X-Frame-Options` refuses another origin's frame with `DENY` and `SAMEORIGIN`; `frame-ancestors`
+/// refuses every origin but the ones it names, and `*` names every origin. Anything else a browser
+/// ignores.
+fn frame_blocked(x_frame_options: Option<&str>, policies: &[&str], framing: &Framing) -> Option<String> {
+    let directives: Vec<&str> = policies.iter().flat_map(|policy| policy.split(',')).filter_map(frame_ancestors).collect();
+    let refusing = directives.iter().find(|sources| !sources.split_whitespace().any(|source| framing.allows(source)));
+    if let Some(sources) = refusing {
+        return Some(format!("Content-Security-Policy: frame-ancestors {sources}"));
+    }
+    if !directives.is_empty() {
+        return None;
+    }
+    let said = x_frame_options.into_iter().flat_map(|value| value.split(',')).map(str::trim).find(|said| {
+        said.eq_ignore_ascii_case("deny") || (said.eq_ignore_ascii_case("sameorigin") && !framing.same_origin())
+    })?;
+    Some(format!("X-Frame-Options: {said}"))
+}
+
+/// What a page answered after its redirects.
+struct Fetched {
+    at: reqwest::Url,
+    kind: String,
+    body: Vec<u8>,
+    /// The rule in the response that keeps a frame from showing it, when there is one.
+    frame_blocked: Option<String>,
+}
+
+/// The final address, content type, first `limit` bytes and framing rule of what `url` answers, after
+/// redirects. A dev server answers plain HTTP, which this reads over a socket; reqwest takes https.
+fn fetch(url: reqwest::Url, frame_by: Option<&str>, limit: u64) -> Result<Fetched, FetchError> {
     if url.scheme() == "https" {
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(4)).build().map_err(|e| e.to_string())?;
         let got = client.get(url).send().map_err(|e| {
@@ -106,9 +174,13 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
         })?;
         let got = got.error_for_status().map_err(|e| e.to_string())?;
         let (at, kind) = (got.url().clone(), got.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned());
+        let policies: Vec<&str> = got.headers().get_all("content-security-policy").iter().filter_map(|v| v.to_str().ok()).collect();
+        let page_origin = at.origin().ascii_serialization();
+        let framing = Framing { by: frame_by, page: &page_origin };
+        let blocked = frame_blocked(got.headers().get("x-frame-options").and_then(|v| v.to_str().ok()), &policies, &framing);
         let mut body = vec![];
         got.take(limit).read_to_end(&mut body).map_err(|e| e.to_string())?;
-        return Ok((at, kind.split(';').next().unwrap_or("").trim().to_owned(), body));
+        return Ok(Fetched { at, kind: kind.split(';').next().unwrap_or("").trim().to_owned(), body, frame_blocked: blocked });
     }
     let mut at = url;
     for _ in 0..5 {
@@ -138,7 +210,11 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
             return Err(format!("the page answered {status}").into());
         }
         let kind = header("content-type").unwrap_or_default();
-        return Ok((at, kind.split(';').next().unwrap_or("").trim().to_owned(), body));
+        let policies: Vec<&str> = head.lines().filter_map(|l| l.split_once(':')).filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-security-policy")).map(|(_, v)| v.trim()).collect();
+        let page_origin = at.origin().ascii_serialization();
+        let framing = Framing { by: frame_by, page: &page_origin };
+        let blocked = frame_blocked(header("x-frame-options").as_deref(), &policies, &framing);
+        return Ok(Fetched { at, kind: kind.split(';').next().unwrap_or("").trim().to_owned(), body, frame_blocked: blocked });
     }
     Err(FetchError::Unreachable("ERR_TOO_MANY_REDIRECTS"))
 }
@@ -1412,9 +1488,9 @@ mod tests {
                 let _ = stream.write_all(body);
             }
         });
-        let meta = page_meta(&format!("http://localhost:{port}/")).unwrap();
+        let meta = page_meta(&format!("http://localhost:{port}/"), None).unwrap();
         assert_eq!(meta, PageMeta { title: "Dev server".into(), icon: Some("data:image/png;base64,UE5HIQ==".into()), ..PageMeta::default() });
-        assert!(page_meta("file:///etc/passwd").unwrap_err().contains("not a web address"));
+        assert!(page_meta("file:///etc/passwd", None).unwrap_err().contains("not a web address"));
     }
 
     #[test]
@@ -1422,8 +1498,8 @@ mod tests {
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = closed.local_addr().unwrap().port();
         drop(closed);
-        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/")).unwrap().failure.as_deref(), Some("ERR_CONNECTION_REFUSED"));
-        assert_eq!(page_meta("http://no-such-host.invalid/").unwrap().failure.as_deref(), Some("ERR_NAME_NOT_RESOLVED"));
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/"), None).unwrap().failure.as_deref(), Some("ERR_CONNECTION_REFUSED"));
+        assert_eq!(page_meta("http://no-such-host.invalid/", None).unwrap().failure.as_deref(), Some("ERR_NAME_NOT_RESOLVED"));
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -1441,9 +1517,74 @@ mod tests {
                 let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nPK").as_bytes());
             }
         });
-        let zip = page_meta(&format!("http://127.0.0.1:{port}/report.zip")).unwrap();
+        let zip = page_meta(&format!("http://127.0.0.1:{port}/report.zip"), None).unwrap();
         assert_eq!((zip.file.as_deref(), zip.failure), (Some("report.zip"), None));
-        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/manifest.webmanifest")).unwrap(), PageMeta::default());
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/manifest.webmanifest"), None).unwrap(), PageMeta::default());
+    }
+
+    #[test]
+    fn frame_blocked_names_the_rule_that_refuses_the_frame() {
+        let hub = Some("https://hub.example");
+        let page = "https://page.example";
+        let framed = |by| Framing { by, page };
+        let refused = |rule: &str| Some(rule.to_owned());
+        assert_eq!(frame_blocked(Some("DENY"), &[], &framed(None)), refused("X-Frame-Options: DENY"));
+        assert_eq!(frame_blocked(Some(" sameorigin "), &[], &framed(hub)), refused("X-Frame-Options: sameorigin"));
+        assert_eq!(frame_blocked(Some("ALLOWALL, SAMEORIGIN"), &[], &framed(None)), refused("X-Frame-Options: SAMEORIGIN"));
+        assert_eq!(frame_blocked(Some("ALLOWALL"), &[], &framed(None)), None);
+        assert_eq!(frame_blocked(Some("SAMEORIGIN"), &[], &framed(Some(page))), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors 'self'"], &framed(None)), refused("Content-Security-Policy: frame-ancestors 'self'"));
+        assert_eq!(frame_blocked(None, &["frame-ancestors 'self'"], &framed(Some(page))), None);
+        assert_eq!(frame_blocked(None, &["default-src 'self'; FRAME-ANCESTORS 'self' https://other.example;"], &framed(hub)), refused("Content-Security-Policy: frame-ancestors 'self' https://other.example"));
+        assert_eq!(frame_blocked(None, &["frame-ancestors *"], &framed(None)), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors https://hub.example"], &framed(hub)), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors 'self' HTTPS://HUB.example"], &framed(hub)), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors https://hub.example"], &framed(None)), refused("Content-Security-Policy: frame-ancestors https://hub.example"));
+        assert_eq!(frame_blocked(None, &["frame-ancestors https://*.example"], &framed(None)), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors https:"], &framed(None)), None);
+        assert_eq!(frame_blocked(None, &["frame-ancestors"], &framed(None)), None);
+        assert_eq!(frame_blocked(Some("DENY"), &["frame-ancestors"], &framed(None)), refused("X-Frame-Options: DENY"));
+        assert_eq!(frame_blocked(None, &["default-src 'self'; script-src *"], &framed(None)), None);
+        assert_eq!(frame_blocked(None, &["default-src *", "frame-ancestors *", "frame-ancestors 'none'"], &framed(None)), refused("Content-Security-Policy: frame-ancestors 'none'"));
+        assert_eq!(frame_blocked(Some("DENY"), &["frame-ancestors 'none'"], &framed(None)), refused("Content-Security-Policy: frame-ancestors 'none'"));
+        assert_eq!(frame_blocked(Some("SAMEORIGIN"), &["frame-ancestors *"], &framed(None)), None);
+        assert_eq!(frame_blocked(None, &["default-src *, frame-ancestors 'none'"], &framed(None)), refused("Content-Security-Policy: frame-ancestors 'none'"));
+        assert_eq!(frame_blocked(None, &[], &framed(None)), None);
+    }
+
+    #[test]
+    fn page_meta_reports_the_rule_that_keeps_a_page_out_of_a_frame() {
+        let serve = |rules: &'static str| {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for mut stream in server.incoming().flatten() {
+                    let mut ask = vec![];
+                    let mut chunk = [0; 1024];
+                    while !ask.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => ask.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let answer = if String::from_utf8_lossy(&ask).starts_with("GET /moved") {
+                        "HTTP/1.1 302 Found\r\nLocation: /\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n".to_owned()
+                    } else {
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{rules}Content-Length: 19\r\nConnection: close\r\n\r\n<title>Page</title>")
+                    };
+                    let _ = stream.write_all(answer.as_bytes());
+                }
+            });
+            port
+        };
+        let refusing = serve("X-Frame-Options: SAMEORIGIN\r\n");
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{refusing}/"), None).unwrap().frame_blocked.as_deref(), Some("X-Frame-Options: SAMEORIGIN"));
+        let open = serve("");
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{open}/"), None).unwrap().frame_blocked, None);
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{open}/moved"), None).unwrap().frame_blocked, None);
+        let repeated = serve("Content-Security-Policy: default-src *\r\nContent-Security-Policy: frame-ancestors https://hub.example\r\n");
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{repeated}/"), None).unwrap().frame_blocked.as_deref(), Some("Content-Security-Policy: frame-ancestors https://hub.example"));
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{repeated}/"), Some("https://hub.example")).unwrap().frame_blocked, None);
     }
 
     #[test]

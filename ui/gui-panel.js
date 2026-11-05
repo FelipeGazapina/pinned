@@ -1780,7 +1780,7 @@ async function fetchPageMeta(tab, s) {
   const url = s.url;
   if (!url || metaFetched.get(s.id) === url) return;
   metaFetched.set(s.id, url);
-  const meta = await callOn(tab.machine, { cmd: "page_meta", url }).catch(() => null);
+  const meta = await callOn(tab.machine, { cmd: "page_meta", url, frame_by: location.origin }).catch(() => null);
   if (meta && s.url === url) setPageMeta(tab, s, meta);
   if (s.url === url) pageMetaFailure(s, url, meta);
 }

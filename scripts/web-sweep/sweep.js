@@ -2771,6 +2771,25 @@ async function sweep(profileName) {
     return title;
   });
 
+  await step("app view: a page that refuses a frame says so in place of a blank frame, and the next page shows in a frame", async () => {
+    const port = readLog("serve.port").trim();
+    await tapOrClick("#toggle-panel");
+    await fromPlus("Browser");
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/unframeable`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    const refusal = page.locator("#panel-body .page-failure");
+    await waitFor("the page's refusal", async () => (await refusal.count()) > 0 && /This site can’t be shown here/.test(await refusal.textContent()), 10000);
+    const rule = await text("#panel-body .page-failure .code");
+    check(/x-frame-options: SAMEORIGIN/i.test(rule), `the screen names the rule as ${rule}`);
+    check((await page.locator("#panel-body iframe").count()) === 0, "a frame is still mounted under the refusal");
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/a`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    const frame = page.frameLocator("#panel-body iframe");
+    await waitFor("page A back in a frame", async () => /page a/.test((await frame.locator("body").textContent({ timeout: 1000 }).catch(() => "")) ?? ""), 10000);
+    await tapOrClick("#toggle-panel");
+    return rule;
+  });
+
   const panelOpen = () => page.locator("#panel").isVisible();
   const openPanelTo = async (kind, label) => {
     if (!(await panelOpen())) await tapOrClick("#toggle-panel");

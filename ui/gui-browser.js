@@ -543,9 +543,9 @@ const PAGE_ERRORS = {
 };
 const PAGE_ERROR_ICON = `<svg class="error-icon" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M16 12 L48 12 L48 52 L16 52 Z"/><path d="M22 22 L42 22 M22 30 L36 30 M22 38 L40 38" stroke-linecap="round"/><path d="M52 8 L12 56" stroke-linecap="round"/></svg>`;
 
-/** `s.failure`: the page that couldn't be reached, `{ kind: "unreachable", url, description, code }`,
- * or a file it answered instead of a page, `{ kind: "file", url, name, path }`. Either stands in for
- * the page until the tab goes somewhere. */
+/** `s.failure` is the page that couldn't be reached, `{ kind: "unreachable", url, description, code }`,
+ * a file it answered instead of a page, `{ kind: "file", url, name, path }`, or a page that refuses a
+ * frame, `{ kind: "unframed", url, rule }`. Any of them stands in for the page until the tab goes somewhere. */
 function failureHtml(s) {
   const f = s.failure;
   const host = hostOf(f.url) || f.url;
@@ -554,6 +554,12 @@ function failureHtml(s) {
     return `<div class="page-failure"><div class="inner">${PAGE_ERROR_ICON}<h1>This file can’t be shown here</h1>
       <p><b>${esc(f.name)}</b> from ${esc(host)} was downloaded instead.</p>
       <div class="actions"><span class="spacer"></span>${action("open", "Open in browser")}${f.path ? action("reveal", IS_MAC ? "Show in Finder" : "Show in folder", true) : `<a class="button primary" href="${esc(f.url)}" download="${esc(f.name)}">Download</a>`}</div></div></div>`;
+  }
+  if (f.kind === "unframed") {
+    return `<div class="page-failure"><div class="inner">${PAGE_ERROR_ICON}<h1>This site can’t be shown here</h1>
+      <p><b>${esc(host)}</b> doesn’t allow another page to frame it, which is how the web app shows a page. The desktop app and a browser tab can show it.</p>
+      <p class="code">${esc(f.rule)}</p>
+      <div class="actions"><span class="spacer"></span>${action("open", "Open in browser", true)}</div></div></div>`;
   }
   const friendly = PAGE_ERRORS[f.description] ?? (f.description || "Network error");
   return `<div class="page-failure"><div class="inner">${PAGE_ERROR_ICON}<h1>This site can’t be reached</h1>
@@ -569,6 +575,7 @@ function showFailure(s, failure) {
   const tab = browserTab(s);
   if (tab) savePanel(tab);
   if (tab === active && shownSurface(tab) === s) renderBrowser(s);
+  if (tab === active) renderPip(tab);
 }
 
 /** Leaves the failure screen for the page itself, before the tab goes somewhere. */
@@ -598,6 +605,7 @@ panelBody.addEventListener("click", (e) => {
 function pageMetaFailure(s, url, meta) {
   if (meta?.failure) showFailure(s, { kind: "unreachable", url, description: meta.failure, code: 0 });
   else if (meta?.file) showFailure(s, { kind: "file", url, name: meta.file });
+  else if (!NATIVE_PAGES && meta?.frame_blocked) showFailure(s, { kind: "unframed", url, rule: meta.frame_blocked });
 }
 
 if (NATIVE_PAGES) {
@@ -698,7 +706,7 @@ function placePip(tab, s, layout = miniLayout(tab, s)) {
 
 function renderPip(tab) {
   const p = panelOf(tab);
-  const s = guiOn() && p.pip && p.surfaces.find((x) => x.id === p.pip);
+  const s = guiOn() && p.pip && p.surfaces.find((x) => x.id === p.pip && !x.failure);
   pipFrame.hidden = !s;
   if (!s) {
     pipFrame.dataset.id = "";

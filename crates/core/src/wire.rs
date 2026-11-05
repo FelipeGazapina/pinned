@@ -354,7 +354,13 @@ pub enum Call {
     /// `usage::Limits`: the account and plan limits claude's own usage check reports.
     UsageLimits,
     /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
-    PageMeta { url: String },
+    PageMeta {
+        url: String,
+        /// The origin of the page that would frame it, when a web app asks. A policy that names that
+        /// origin lets the page through.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_by: Option<String>,
+    },
     /// `panel::Refs`: the tab's folder's local and remote branches, for picking what to compare with.
     Refs { tab: TabId },
     /// What a step of the header's Git action answers: a commit message, a pull request URL, or
