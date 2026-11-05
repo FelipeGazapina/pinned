@@ -148,31 +148,24 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
 .usage .limit-text .refill-note { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .usage .pace { display: inline-grid; color: var(--g-muted); }
 .usage .pace .i { width: 14px; height: 14px; }
-.usage .pool { container: usage-pool / inline-size; min-width: 0; }
-.usage .segments { display: grid; gap: 4px; }
-.usage .segment { position: relative; height: 20px; min-width: 0; padding: 0; border-radius: 6px; background: var(--usage-track); text-align: left; cursor: pointer; }
-.usage .segment:focus-visible { outline: 2px solid var(--g-primary); outline-offset: 2px; }
-.usage .segment .clip { position: absolute; inset: 0; overflow: hidden; border-radius: 6px; }
-.usage .segment .cut { position: absolute; inset: 0; }
-.usage .segment .fill { position: absolute; inset: 0 auto 0 0; border-radius: 6px; opacity: 0.35; }
-.usage .segment .refill { position: absolute; inset: 0 0 0 auto; opacity: 0.2; background-image: repeating-linear-gradient(135deg, var(--refill) 0 1px, transparent 1px 5px); }
-.usage .segment .tick { position: absolute; top: 2px; bottom: 2px; width: 2px; border-radius: 999px; background: var(--g-fg); transform: translateX(-50%); }
-.usage .segment .index { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: color-mix(in srgb, var(--g-fg) 80%, transparent); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.usage .segment .inside { position: relative; display: none; align-items: center; gap: 6px; height: 100%; padding: 0 8px; overflow: hidden; font-size: 12px; }
-.usage .segment .inside b, .usage .legend-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.usage .segment .inside .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.usage .segment .chip { margin-left: auto; padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--g-bg) 85%, transparent); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.usage .legend-row { display: flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 7px; border-radius: 6px; font-size: 12px; text-align: left; }
-.usage .legend-row:hover { background: var(--g-hover); }
-.usage .legend-row .index-chip { position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 4px; font-size: 10px; font-weight: 600; }
-.usage .legend-row .index-chip span { position: absolute; inset: 0; border-radius: 4px; opacity: 0.35; }
-.usage .legend-row .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.usage .legend-row .chip { margin-left: auto; color: var(--g-muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-@container usage-pool (min-width: 672px) {
-  .usage .segment { height: 32px; }
-  .usage .segment .index, .usage .legend-row { display: none; }
-  .usage .segment .inside { display: flex; }
-}
+.usage .pool { min-width: 0; }
+.usage .accounts { display: flex; flex-direction: column; gap: 4px; }
+.usage .account-row { --provider: #d97757; display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 8px; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+.usage .account-row:hover { background: var(--g-hover); }
+.usage .account-row:focus-visible { outline: 2px solid var(--g-primary); outline-offset: 2px; }
+.usage .account-row .line1 { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.usage .account-row .who { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; }
+.usage .account-row .who .i { width: 14px; height: 14px; flex: none; }
+.usage .account-row .provider-name { white-space: nowrap; }
+.usage .account-row .nick { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); font-weight: 400; }
+.usage .account-row .line1 b { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage .account-row .chip { padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--g-bg) 85%, transparent); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usage .account-row .bar { position: relative; height: 20px; border-radius: 6px; background: var(--usage-track); }
+.usage .account-row .clip { position: absolute; inset: 0; overflow: hidden; border-radius: 6px; }
+.usage .account-row .cut { position: absolute; inset: 0; }
+.usage .account-row .fill { position: absolute; inset: 0 auto 0 0; border-radius: 6px; opacity: 0.35; }
+.usage .account-row .refill { position: absolute; inset: 0 0 0 auto; opacity: 0.2; background-image: repeating-linear-gradient(135deg, var(--refill) 0 1px, transparent 1px 5px); }
+.usage .account-row .tick { position: absolute; top: 2px; bottom: 2px; width: 2px; border-radius: 999px; background: var(--g-fg); transform: translateX(-50%); }
 .usage .account-chip { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 999px; font-size: 9px; font-weight: 600; line-height: 1; }
 .usage .limit-notices { display: flex; gap: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgb(var(--g-warning-rgb) / 0.32); background: rgb(var(--g-warning-rgb) / 0.08); color: var(--g-fg); font-size: 13px; }
 .usage .limit-notices .i { width: 16px; height: 16px; flex: none; color: var(--g-warning-fg); }

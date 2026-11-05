@@ -12,6 +12,10 @@ const USAGE_METRICS = [
   ["limits", "Limits", "l"],
 ];
 const CLAUDE_COLOR = "#d97757";
+/** Each provider fills its own color on the Limits view, so accounts read apart at a glance. */
+const GO_COLOR = "#4c8dff";
+const providerColor = (account) => (account.go ? GO_COLOR : CLAUDE_COLOR);
+const providerName = (account) => (account.go ? "OpenCode Go" : "Claude Code");
 /** `envs` holds each machine's transcripts and `limits` its claude's limits check; `selected` is null for every machine, as T3 Code's environment filter. */
 const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0 };
 try {
@@ -443,8 +447,9 @@ function limitAccounts() {
       const view = account === DEFAULT_ACCOUNT ? null : accountOf(m, account);
       const go = view?.auth === "opencode-go";
       const name = go ? view?.name ?? "OpenCode Go" : undefined;
+      const nicknames = [...new Set([...(held?.nicknames ?? []), ...(view?.name ? [view.name] : [])])];
       const environments = [...(held?.environments ?? []), account === DEFAULT_ACCOUNT ? machineName(m) : `${machineName(m)} · ${accountName(m, account)}`];
-      accounts.set(key, held && held.at >= at ? { ...held, environments, go: held.go || go, name: held.name ?? name, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments, go, name });
+      accounts.set(key, held && held.at >= at ? { ...held, environments, go: held.go || go, name: held.name ?? name, nicknames, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments, go, name, nicknames });
     }
   }
   return [...accounts.values()];
@@ -505,8 +510,19 @@ function accountChip(email) {
   const hue = Math.abs(hash) % 360;
   return `<span class="account-chip" role="img" aria-label="Account ${accountInitials(email)}" style="background:oklch(0.85 0.08 ${hue});color:oklch(0.35 0.1 ${hue})">${accountInitials(email)}</span>`;
 }
-const limitAccountText = (a) => (a.email ? accountInitials(a.email) : a.go ? a.name ?? "OpenCode Go" : "Claude");
-const limitAccountName = (a) => (a.email ? accountChip(a.email) : esc(limitAccountText(a)));
+/** One account's identity line: the provider, then the linked account, then its nicknames. */
+function limitWhoHtml(a) {
+  const parts = [`${icon(a.go ? "opencode" : "claude")}<span class="provider-name">${providerName(a)}</span>`];
+  if (a.email) parts.push(accountChip(a.email));
+  const shown = new Set(a.email ? [] : [a.name]);
+  if (!a.email && a.name) parts.push(`<span class="nick">${esc(a.name)}</span>`);
+  for (const nick of a.nicknames ?? []) {
+    if (!nick || shown.has(nick)) continue;
+    shown.add(nick);
+    parts.push(`<span class="nick">${esc(nick)}</span>`);
+  }
+  return `<span class="who">${parts.join("")}</span>`;
+}
 
 /** T3 Code's segment popover: the account, its plan and machines, then the window's figures. */
 function segmentPopHtml(account, w, reset, now) {
@@ -519,12 +535,13 @@ function segmentPopHtml(account, w, reset, now) {
       timeLeft === null ? "" : row("Even pace", `${timeLeft}% left by now`)}${reset?.restores > 0 ? row("Restores", `+${reset.restores}% of pool`) : ""}</div></div>`;
 }
 function limitCardHtml(pool, now) {
-  const many = pool.columns.length > 1;
   const refill = pool.resets.find((r) => r.restores > 0);
   const [paceIcon, paceLabel] = pool.pace ? PACE[pool.pace] : [];
-  const segments = pool.columns.map((member, i) => {
+  /** One full-width row per account, each in its provider's color, instead of segments side by side. */
+  const rows = pool.columns.map((member) => {
     if (!member.window) return "";
     const w = member.window;
+    const color = providerColor(member.account);
     const left = windowLeft(w);
     const elapsed = windowElapsed(w, now);
     const timeLeft = elapsed === null ? null : Math.round((1 - elapsed) * 100);
@@ -533,18 +550,17 @@ function limitCardHtml(pool, now) {
     const clip = timeLeft === null ? "" : `clip-path:polygon(-1px -1px, calc(${at} - 3px) -1px, calc(${at} - 3px) calc(100% + 1px), calc(${at} + 3px) calc(100% + 1px), calc(${at} + 3px) -1px, calc(100% + 1px) -1px, calc(100% + 1px) calc(100% + 1px), -1px calc(100% + 1px))`;
     const resets = w.resets_at ? resetsInText(w.resets_at, now) : "";
     const pop = popAttr(segmentPopHtml(member.account, w, pool.resets.find((r) => r.member === member), now));
-    const label = `${limitAccountText(member.account)}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
-    return `<button type="button" class="segment" style="grid-column:${i + 1};grid-row:1;${gap}" aria-label="${esc(label)}"${pop}>
-        <span class="clip"><span class="cut" style="${clip}"><span class="fill" style="width:${left}%;background:${CLAUDE_COLOR}"></span>${
-          left < 100 && member.refill > 0 && pool.resets.some((r) => r.member === member) ? `<span class="refill" style="width:${Math.min(100 - left, member.refill)}%;--refill:${CLAUDE_COLOR}"></span>` : ""}</span></span>
-        ${timeLeft === null ? "" : `<span class="tick" style="left:${at}"></span>`}<span class="index">${i + 1}</span>
-        <span class="inside">${many ? `<span class="who">${limitAccountName(member.account)}</span>` : ""}<b>${left}%</b>${resets ? `<span class="chip">${resets.replace("resets in ", "↻ ")}</span>` : ""}</span></button>
-      <button type="button" class="legend-row" style="grid-column:1 / -1;grid-row:${i + 2}"${pop}><span class="index-chip"><span style="background:${CLAUDE_COLOR}"></span>${i + 1}</span><span class="who">${limitAccountName(member.account)}</span><b>${left}%</b><span class="chip">${resets.replace("resets in ", "↻ ")}</span></button>`;
+    const label = `${providerName(member.account)}${member.account.email ? ` ${member.account.email}` : ""}: ${left}% left${resets ? `, ${resets}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}`;
+    return `<button type="button" class="account-row" style="--provider:${color}" aria-label="${esc(label)}"${pop}>
+        <span class="line1">${limitWhoHtml(member.account)}<b>${left}%</b>${resets ? `<span class="chip">${resets.replace("resets in ", "↻ ")}</span>` : ""}</span>
+        <span class="bar" style="${gap}"><span class="clip"><span class="cut" style="${clip}"><span class="fill" style="width:${left}%;background:${color}"></span>${
+          left < 100 && member.refill > 0 && pool.resets.some((r) => r.member === member) ? `<span class="refill" style="width:${Math.min(100 - left, member.refill)}%;--refill:${color}"></span>` : ""}</span></span>
+        ${timeLeft === null ? "" : `<span class="tick" style="left:${at}"></span>`}</span></button>`;
   }).join("");
   return `<div class="limit-card" data-window="${esc(pool.id)}"><div class="limit-text"><span class="label">${esc(pool.label)}</span>
       <span class="figure"><b>${pool.remaining}%</b><span class="muted">left${pool.pace ? ` <span class="pace" role="img" aria-label="${paceLabel}"${popAttr(paceLabel)}>${icon(paceIcon)}</span>` : ""}</span></span>
-      ${refill && many ? `<span class="refill-note">↻ +${refill.restores}%</span>` : ""}</div>
-    <div class="pool"><div class="segments" style="grid-template-columns:repeat(${pool.columns.length}, minmax(0, 1fr))">${segments}</div></div></div>`;
+      ${refill ? `<span class="refill-note">↻ +${refill.restores}%</span>` : ""}</div>
+    <div class="pool"><div class="accounts">${rows}</div></div></div>`;
 }
 function limitsHtml() {
   const now = usageState.limitsNow || Date.now() / 1000;
