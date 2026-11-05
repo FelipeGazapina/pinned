@@ -14,6 +14,11 @@ const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "text/html");
     return res.end(`<!doctype html><title>probe two</title><h1>two</h1>`);
   }
+  if (url.pathname === "/unframeable") {
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Type", "text/html");
+    return res.end(`<!doctype html><title>probe unframeable</title><h1>unframeable</h1>`);
+  }
   if (url.pathname === "/report.zip") {
     res.setHeader("Content-Type", "application/zip");
     return res.end("PK probe");

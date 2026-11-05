@@ -92,6 +92,16 @@
     return [ran && rect.width > 100 && rect.height > 100 && placedPage === page().id && !document.querySelector("#panel iframe") && fills, { ran, width: Math.round(rect.width), height: Math.round(rect.height), placed: placedPage, fills }];
   });
 
+  await step("a native webview shows a page whose X-Frame-Options refuses every frame", async () => {
+    go(page(), `${base}/unframeable`);
+    await until(() => page()?.title === "probe unframeable");
+    const heading = await invoke("browser_eval", { id: page().id, js: `document.querySelector("h1").textContent` });
+    const seen = { title: page().title, heading, failure: page().failure ?? null, placed: placedPage === page().id };
+    go(page(), `${base}/frame`);
+    await until(() => page()?.title === "pinned probe page");
+    return [seen.title === "probe unframeable" && heading === "unframeable" && !seen.failure && seen.placed, seen];
+  });
+
   await step("the browser tab reads the page's title", async () => {
     await until(() => document.querySelector("#panel-tabs .ptab.active")?.textContent.trim() === "pinned probe page");
     return [document.querySelector("#panel-tabs .ptab.active")?.textContent.trim() === "pinned probe page", { tab: document.querySelector("#panel-tabs .ptab.active")?.textContent.trim(), title: page().title }];

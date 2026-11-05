@@ -1558,6 +1558,13 @@
                   },
                   "url": {
                     "type": "string"
+                  },
+                  "frame_by": {
+                    "description": "The origin of the page that would frame it, when a web app asks. A policy that names that\norigin lets the page through.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -7015,6 +7022,13 @@
                   },
                   "url": {
                     "type": "string"
+                  },
+                  "frame_by": {
+                    "description": "The origin of the page that would frame it, when a web app asks. A policy that names that\norigin lets the page through.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -29264,6 +29278,13 @@
                   },
                   "url": {
                     "type": "string"
+                  },
+                  "frame_by": {
+                    "description": "The origin of the page that would frame it, when a web app asks. A policy that names that\norigin lets the page through.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -33014,6 +33035,13 @@
                   },
                   "url": {
                     "type": "string"
+                  },
+                  "frame_by": {
+                    "description": "The origin of the page that would frame it, when a web app asks. A policy that names that\norigin lets the page through.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
