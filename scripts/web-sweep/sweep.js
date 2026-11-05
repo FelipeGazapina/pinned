@@ -805,13 +805,14 @@ async function sweep(profileName) {
     return opened;
   });
 
-  await step("app view: the live card shows thinking and the step it is on, and /compact shows Compacting…", async () => {
+  await step("app view: the live row shows thinking and the step it is on, and /compact shows Compacting…", async () => {
     await sendPrompt("think");
     await waitFor("the live thought", async () => (await text("#thread .live-tool .label")) === "Weighing the options", 6000);
+    check((await page.locator("#thread .live-tool.agent-card").count()) === 0, "the live row looks like a worker card");
     await answered("Done thinking.");
     await sendPrompt("build");
     await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "npm run build", 6000);
-    check((await text("#thread .live-tool.live-agent .live-head .state-label")) === "working", "the live step is not in a worker-style card");
+    check((await page.locator("#thread .live-tool.agent-card").count()) === 0, "the live row looks like a worker card");
     await answered("Built.");
     await sendPrompt("/compact");
     await waitFor("Compacting…", async () => (await text("#thread .work.live .shimmer")) === "Compacting…", 6000);
@@ -1041,7 +1042,7 @@ async function sweep(profileName) {
     await waitFor(name, async () => new RegExp(name).test(await text("#chat-head .crumb")));
   };
 
-  await step("app view: the live card counts whole seconds, shows the thought over the tool, and Thinking between tools", async () => {
+  await step("app view: the live row counts whole seconds, shows the thought over the tool, and Thinking between tools", async () => {
     await toThread("beta");
     await sendPrompt("think");
     await waitFor("the live thought", async () => (await text("#thread .live-tool .thought-line .label")) === "Weighing the options", 6000);

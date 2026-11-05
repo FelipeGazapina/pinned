@@ -73,8 +73,13 @@ says **Orchestrator**.
 The orchestrator has no file-editing tools, but it can still change files with a shell command
 you approve. For each request it starts a worker, an ordinary thread
 marked with a robot that you can open and steer. A worker in a git project gets its own
-worktree. When a worker finishes or needs input, pinned tells the orchestrator, which reviews
-the result and answers you.
+worktree. The orchestrator talks like a session: it explains how it split the work and what it
+asked of each worker, and when a worker finishes or needs input, pinned tells the orchestrator,
+which reports what was done or found and what happens next. The news always reaches home:
+when the orchestrator has no running session yet, it waits in a queue and is typed once the
+session is idle. Any thread in a project can fan out the same way: it keeps its own
+file tools and can still start workers with the delegate tool, and a worker's news goes back
+to the thread that started it while no orchestrator runs.
 
 The orchestrator needs a Claude Code account.
 
@@ -116,11 +121,10 @@ The app view has three columns:
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. A page Claude published with its
   Artifact tool shows as a card; **Open** opens it on claude.ai. Type below and press Enter to send.
-  While Claude works, a card sits under the turn with the agent, its model, how long it has run
-  and the step it is on, the same latest step an orchestrator's worker card shows; click it to
+  While Claude works, the turn shows its latest thought and tool under the fold; click it to
   see the turn's steps. Enter queues your message and the red button stops the turn.
-  Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
-  now and how long it has run; click a card to see its recent steps. While any agent runs after
+  Each agent the orchestrator spawns gets a worker card under the turn with its name, its kind,
+  what it is doing now and how long it has run; click a card to see its recent steps. While any agent runs after
   Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
   send a prompt. The menu under the prompt picks the model.
   A command that opens one of Claude's own screens, such as `/usage`, `/status`, `/mcp` or

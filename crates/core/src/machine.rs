@@ -257,6 +257,9 @@ struct Tab {
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
     made: Option<PathBuf>,
+    /// The tab that spawned this worker with the delegate tool. Its news goes to the project's
+    /// orchestrator while one runs, else back here.
+    spawned_by: Option<TabId>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
@@ -1819,11 +1822,13 @@ impl Machine {
         self.project_of_tab(tab).map(|project| self.memories.recall(&project, prompt)).unwrap_or_default()
     }
 
-    /// The project whose orchestrator `tab` is.
+    /// The project `tab` may fan out to workers in: the orchestrator's project, or any plain
+    /// thread's own project. Workers and delegated children never start more workers.
     fn orchestrated(&self, tab: &str) -> Result<PathBuf, String> {
         match self.tab(tab, |t| role_of(&t.env))? {
+            Some((Role::Worker, _)) => Err("workers cannot start other workers".into()),
             Some((Role::Orchestrator, project)) => Ok(project),
-            _ => Err("only the project's orchestrator has this tool".into()),
+            None => self.project_of_tab(tab),
         }
     }
 
@@ -1860,7 +1865,10 @@ impl Machine {
         let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
         let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
         let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
-        self.tab(&id, |t| t.made = made.clone())?;
+        self.tab(&id, |t| {
+            t.made = made.clone();
+            t.spawned_by = Some(from.to_owned());
+        })?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.close_tab(&id);
             if let Some(made) = made {
@@ -1889,9 +1897,10 @@ impl Machine {
         workers.iter().map(|w| format!("{}: {} ({}) in {}", w.id, w.title.as_deref().unwrap_or("untitled"), state(w), w.cwd)).collect::<Vec<_>>().join("\n")
     }
 
-    /// Types a worker's news into its project's running orchestrator: that it finished, with its
-    /// last message, that it needs input, or that its turn failed. Dropped when no orchestrator runs.
-    fn report_to_orchestrator(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+    /// Types a worker's news into its project's running orchestrator, or back into the tab that
+    /// spawned it when no orchestrator runs: that it finished, with its last message, that it
+    /// needs input, or that its turn failed. Dropped when neither is open.
+    fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
             AgentStatus::Done => {
@@ -1909,16 +1918,30 @@ impl Machine {
             AgentStatus::Failed => format!("stopped on an error: {}", event.message.as_deref().unwrap_or("unknown")),
             AgentStatus::Working => return,
         };
-        let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)) else { return };
+        // The news goes to the project's running orchestrator, else the tab that spawned the
+        // worker. Either may have no running session right now (a tab restored after a restart,
+        // or one the web UI has not started): then the report waits in the queue instead of
+        // dropping, and the delegate pass types it once the tab is idle. A worker always reports
+        // home unless its orchestrator and its spawner are both gone.
+        let spawner = self.tab(worker, |t| t.spawned_by.clone()).ok().flatten().filter(|id| self.tabs.lock().unwrap().contains_key(id));
+        let Some(target) = self.live_tab(&role_env(Role::Orchestrator, project)).or_else(|| self.find_tab(&role_env(Role::Orchestrator, project))).or(spawner) else {
+            eprintln!("pinned: worker {worker} \"{title}\" {what} (no orchestrator or spawner tab takes it)");
+            return;
+        };
         let line = format!("[pinned] Worker {worker} \"{title}\" {what}");
-        let blocked = self.tab(&orchestrator, |t| !t.draft.empty() || t.session.as_ref().is_none_or(|session| !session.raw())).unwrap_or(true);
-        if blocked {
-            let session = self.tab(&orchestrator, |t| t.claude_session.clone()).ok().flatten();
-            self.delegates.queue_report(&orchestrator, session, line);
+        let live = self.tab(&target, |t| t.draft.empty() && t.session.as_ref().is_some_and(|session| session.raw())).unwrap_or(false);
+        if !live {
+            let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
+            self.delegates.queue_report(&target, session, line);
             self.arm_delegate_pass();
             return;
         }
-        let _ = self.type_prompt(&orchestrator, &line);
+        if self.type_prompt(&target, &line).is_err() {
+            eprintln!("pinned: worker {worker} could not type into {target}; its news waits in the queue");
+            let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
+            self.delegates.queue_report(&target, session, line);
+            self.arm_delegate_pass();
+        }
     }
 
     /// The projects this machine syncs: the most recently opened checkout of each git origin.
@@ -2002,6 +2025,16 @@ impl Machine {
         let tabs = self.tabs.lock().unwrap();
         let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
+    }
+
+    /// The newest tab with `env`, whether its session runs or not. A report queues for a tab
+    /// without a running session and is typed once the session is idle.
+    fn find_tab(&self, env: &[(String, String)]) -> Option<TabId> {
+        if env.is_empty() {
+            return None;
+        }
+        let tabs = self.tabs.lock().unwrap();
+        tabs.iter().filter(|(_, t)| env.iter().all(|e| t.env.contains(e))).max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
     }
 
     /// The tab's watched pull requests, after starting or stopping the watch on `pr`.
@@ -2563,7 +2596,7 @@ impl Machine {
             let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
             if let Some((Role::Worker, project)) = role {
-                self.report_to_orchestrator(tab, &project, &event, before);
+                self.report_worker(tab, &project, &event, before);
             }
             self.record_turn(tab, &event);
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
@@ -2603,6 +2636,7 @@ impl Machine {
             held_at_limit: false,
             model: None,
             made: None,
+            spawned_by: None,
             turn: None,
             status: None,
             updated: None,
@@ -6046,8 +6080,8 @@ while True:
         let delegate = r#""name":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
         let worker_of = |reply: &str| reply.strip_prefix("Started worker ").and_then(|r| r.split(' ').next()).unwrap().to_owned();
 
-        assert_eq!(tool(&plain, delegate), Err("only the project's orchestrator has this tool".into()));
-        let reply = tool(&orchestrator, delegate).unwrap();
+        // A plain thread fans out to workers the same way the orchestrator does.
+        let reply = tool(&plain, delegate).unwrap();
         let worker = worker_of(&reply);
         let args = started(&claude, &worker);
         let tree = PathBuf::from(&args[0]);
@@ -6064,7 +6098,7 @@ while True:
         assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
         assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
 
-        assert_eq!(tool(&worker, delegate), Err("only the project's orchestrator has this tool".into()));
+        assert_eq!(tool(&worker, delegate), Err("workers cannot start other workers".into()));
         assert_eq!(
             tool(&orchestrator, r#""name":"agents""#),
             Ok(format!("{worker}: JSON output (starting) in {}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
@@ -6102,7 +6136,7 @@ while True:
         let none = Err("This thread is not in a project, so it has no memory. Memory belongs to a project folder opened in pinned.".into());
         assert_eq!(tool(&scratch, r#""name":"memory_search","query":"pnpm""#), none);
         assert_eq!(tool(&scratch, r#""name":"memory_save","title":"Scratch","text":"x""#), none);
-        assert_eq!(tool(&plain, r#""name":"agents""#), Err("only the project's orchestrator has this tool".into()));
+        assert_eq!(tool(&plain, r#""name":"agents""#), Ok("No workers yet.".into()));
 
         let call = |c: Call| m.call(c);
         assert_eq!(
@@ -6498,6 +6532,62 @@ while True:
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Without a running orchestrator, a worker's news goes back to the plain thread that
+    /// spawned it, so it works the same way there.
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_news_is_typed_into_its_spawner_without_an_orchestrator() {
+        let root = temp("report-spawner");
+        let file = root.join("typed.bin");
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: root.join("hook.sock"), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let spawner = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&spawner, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        m.tab(&worker, |t| {
+            t.title = Some("JSON output".into());
+            t.spawned_by = Some(spawner.clone());
+        })
+        .unwrap();
+        m.record_event(AgentEvent {
+            status: AgentStatus::NeedsInput,
+            message: Some("Claude needs your input".into()),
+            tab: Some(worker.clone()),
+            ..done_event(&worker)
+        });
+        let expected = format!("\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: Claude needs your input\x1b[201~\r");
+        wait_for("the report", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A worker that finishes while its orchestrator has no running session (a tab restored
+    /// after a restart, or one the web UI has not started) still reports home: the news waits
+    /// in the queue instead of dropping.
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_news_is_queued_for_an_orchestrator_without_a_running_session() {
+        let root = temp("report-queued");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let m = Machine::new(launch(), None, Some(root.clone()), |_| {});
+        let project = root.join("app");
+        let orchestrator = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Orchestrator, &project), false, None);
+        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        m.tab(&worker, |t| {
+            t.title = Some("JSON output".into());
+            t.spawned_by = Some(orchestrator.clone());
+        })
+        .unwrap();
+        m.record_event(AgentEvent { status: AgentStatus::Done, tab: Some(worker.clone()), ..done_event(&worker) });
+        assert!(m.delegates.has_pending(), "the finished worker's news was dropped instead of queued");
         let _ = std::fs::remove_dir_all(root);
     }
 

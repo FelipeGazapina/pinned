@@ -356,41 +356,30 @@ test("an agent that starts with no new line shows its card", async () => {
   assert.match(painted().agents, /Look around/);
 });
 
-test("a working turn shows the agent card with its full latest step", async () => {
+test("an agent with no steps yet shows what it was asked from the spawn brief", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "user", at: "t1", text: "fix the login" } });
+  s.append({ item: { kind: "tool", at: "t2", id: "toolu_9", name: "Agent", summary: "Fix the login bug", detail: "Trace the session flow in src/auth.ts and prove it with npm test." } });
+  s.agents = [{ ...runningAgent, id: "a9", tool: "toolu_9", name: "Fix the login bug", steps: [] }];
+  await poll(tab, net);
+  const card = threadView.innerHTML.match(/<div class="agent-card"[\s\S]*?<\/div><\/div>/)?.[0] ?? "";
+  assert.match(card, /Delegated Fix the login bug/);
+  assert.doesNotMatch(card, /Starting/);
+  tab.thread.open.add("agent:a9");
+  await poll(tab, net);
+  assert.match(threadView.innerHTML, /Trace the session flow/);
+});
+
+test("a working turn shows a plain live row with its full latest step", async () => {
   const { tab, s, net } = await opened();
   s.append({ item: { kind: "thinking", at: "t3", text: "Planning the build" } });
   s.append({ item: { kind: "tool", at: "t4", id: "toolu_bash", name: "Bash", summary: "Build the app", detail: "cd app && npm run build" } });
   await poll(tab, net);
-  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
-  assert.match(card, /class="agent-head live-head"/);
-  assert.match(card, />Claude</);
-  assert.match(card, /working/);
-  assert.match(card, /Planning the build[\s\S]*npm run build/);
-  assert.doesNotMatch(card, /Running cd/);
-});
-
-test("a live card waiting for approval shows a waiting state without a spinner", async () => {
-  const { tab, s, net } = await opened();
-  tab.menu = {};
-  s.append({ item: { kind: "tool", at: "t4", id: "toolu_ask", name: "Bash", summary: "Remove the build", detail: "rm -rf build" } });
-  await poll(tab, net);
-  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
-  assert.match(card, /data-state="waiting"/);
-  assert.match(card, />needs approval</);
-  assert.match(card, /data-icon="shield-question"/);
-  assert.doesNotMatch(card, /data-icon="loader-circle"/);
-});
-
-test("a live card waiting for an answer shows a waiting state without a spinner", async () => {
-  const { tab, s, net } = await opened();
-  Object.assign(tab.view, { status: "needs-input", message: "Claude needs your input" });
-  s.append({ item: { kind: "tool", at: "t4", id: "toolu_answer", name: "AskUserQuestion", summary: "Pick a color" } });
-  await poll(tab, net);
-  const card = threadView.innerHTML.match(/<button[^>]*class="live-tool agent-card live-agent"[\s\S]*?<\/button>/)?.[0] ?? "";
-  assert.match(card, /data-state="waiting"/);
-  assert.match(card, />needs input</);
-  assert.match(card, /data-icon="message-circle-question"/);
-  assert.doesNotMatch(card, /data-icon="loader-circle"/);
+  const row = threadView.innerHTML.match(/<button[^>]*class="live-tool"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.doesNotMatch(row, /agent-card|live-agent|live-head/);
+  assert.doesNotMatch(row, />Claude</);
+  assert.match(row, /Planning the build[\s\S]*npm run build/);
+  assert.doesNotMatch(row, /Running cd/);
 });
 
 test("a rewind that rewrites the last line in place repaints it", async () => {

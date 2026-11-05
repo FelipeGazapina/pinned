@@ -210,15 +210,12 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
 }
 
 fn tool_definitions(reminders: bool, role: Option<Role>, child: bool) -> Value {
-    let blocked = delegate::delegate_block(role, child).is_some();
-    let project = project_tools().into_iter().filter(|(orchestrator_only, tool)| {
-        if blocked && tool["name"] == "delegate" {
-            return false;
-        }
-        !orchestrator_only || role == Some(Role::Orchestrator)
-    }).map(|(_, tool)| tool);
+    // A worker or a delegated child never starts more workers. The orchestrator and a plain
+    // thread both fan out to workers the same way, so both get delegate and agents.
+    let spawner = delegate::delegate_block(role, child).is_none();
+    let project = project_tools().into_iter().filter(|(needs_spawner, _)| !needs_spawner || spawner).map(|(_, tool)| tool);
     let mut tools = if reminders { reminder_tools() } else { vec![] };
-    tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || !blocked));
+    tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || spawner));
     tools.extend(project);
     Value::Array(tools)
 }
@@ -332,6 +329,8 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
 /// Every session gets the memory tools; one outside a project is told it has no memory.
+/// Each project tool, and whether it needs a session that may start workers (the orchestrator
+/// or a plain thread): workers and delegated children never get those.
 fn project_tools() -> [(bool, serde_json::Value); 5] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     [
@@ -922,13 +921,14 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
+        // A plain thread fans out to workers the same way the orchestrator does.
         let plain = names(None);
-        assert_eq!(plain, [&reminders[..], &delegation, &memory].concat());
+        assert_eq!(plain, [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
         let worker = names(Some(Role::Worker));
-        assert_eq!(worker, plain.iter().filter(|name| name.as_str() != "delegate_task").cloned().collect::<Vec<_>>());
-        assert_eq!(names(Some(Role::Orchestrator)), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
+        assert_eq!(worker, plain.iter().filter(|name| !["delegate_task", "delegate", "agents"].contains(&name.as_str())).cloned().collect::<Vec<_>>());
+        assert_eq!(names(Some(Role::Orchestrator)), plain);
         let on_a_node = tool_definitions(false, None, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, [&delegation[..], &memory].concat());
+        assert_eq!(on_a_node, [&delegation[..], &["delegate", "agents"], &memory].concat());
         assert_eq!(permissions()[7..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
@@ -966,6 +966,7 @@ fn restore_var(name: &str, value: Option<String>) {
     fn a_worker_and_a_child_are_not_offered_delegate_task() {
         let plain = offered(None, None);
         assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
+        assert!(plain.contains(&"delegate".to_owned()) && plain.contains(&"agents".to_owned()), "{plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
         let orchestrator = offered(Some("orchestrator"), None);

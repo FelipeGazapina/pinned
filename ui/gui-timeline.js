@@ -603,25 +603,19 @@ function workHtml(steps, work, cwd, t, live, change) {
   return out.join("");
 }
 
-/** The running turn's latest work, in the same card an orchestrator's worker gets: the agent, its model,
- * its state, how long it has run and the step it is on, with its last thought above it. */
-function liveHtml(tab, turn, active, cwd) {
+/** The running turn's latest work: its last thought above its last tool, and "Thinking" while no tool runs,
+ * since claude writes a thought to the transcript only once it is done. Only agents the orchestrator
+ * spawns get worker cards; the turn itself stays a normal conversation row. */
+function liveHtml(turn, active, cwd) {
   const thought = active.findLast((s) => s.kind === "thinking");
   const tool = active.findLast((s) => s.kind === "tool");
-  const since = turn.start || Date.now();
-  const phase = phaseOf(tab);
-  const waiting = phase === "asking" || phase === "input";
-  const state = phase === "asking" ? "needs approval" : phase === "input" ? "needs input" : "working";
-  const mark = waiting ? icon(phase === "asking" ? "shield-question" : "message-circle-question", "state") : icon("loader-circle", "state");
-  const model = modelName(tab);
-  const chip = model && model !== "Default" ? `<span class="chip">${esc(model)}</span>` : "";
-  const head = `<span class="agent-head live-head">${icon("bot", "kind")}<span class="name">Claude</span>${chip}<span class="state-label">${state}</span><span class="time ticker" data-since="${since}">${ticking(Math.max(0, Date.now() - since))}</span>${mark}</span>`;
-  const thoughtRow = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
-  const thinking = `<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span>`;
-  const step = tool ? stepLine(tool, cwd) : null;
-  const toolRow = tool ? `<span class="line${tool.result ? " done" : ""}">${icon(step.icon, "kind")}<span class="label" title="${esc(step.label)}">${esc(step.label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span>` : "";
-  const body = !tool || active.at(-1) === thought ? thoughtRow + thinking : thoughtRow + toolRow + (tool.result ? thinking : "");
-  return `<button type="button" class="live-tool agent-card live-agent" data-open-turn="${esc(turn.id)}" data-state="${waiting ? "waiting" : "running"}" title="Open the turn's steps">${head}${body}</button>`;
+  const open = `data-open-turn="${esc(turn.id)}"`;
+  const thinking = (above = "") => `<button type="button" class="live-tool" ${open}>${above}<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span></button>`;
+  const line = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
+  if (!tool || active.at(-1) === thought) return thinking(line);
+  const step = stepLine(tool, cwd);
+  const row = `<button type="button" class="live-tool" ${open}>${line}<span class="line${tool.result ? " done" : ""}">${icon(step.icon, "kind")}<span class="label" title="${esc(step.label)}">${esc(step.label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span></button>`;
+  return tool.result ? row + thinking() : row;
 }
 
 const ANSWER = /"([^"]*)"="([^"]*)"/g;
@@ -893,7 +887,7 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
-      ${!t.open.has(turn.id) && !compacting ? liveHtml(tab, turn, active, cwd) : ""}`;
+      ${!t.open.has(turn.id) && !compacting ? liveHtml(turn, active, cwd) : ""}`;
   } else if (work.length) {
     const end = turn.user?.steer ? turn.end : turn.runEnd;
     const took = end > turn.start ? duration(end - turn.start) : "";
@@ -906,8 +900,11 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn, latest)}
-    ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("")}
+  // A live turn reads top-down while it runs: what claude already said comes before the work in
+  // progress and the agents, so the orchestrator's plan leads instead of trailing the cards.
+  const said = shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("");
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? said : ""}${fold}${agentCardsHtml(tab, turn, latest)}
+    ${live ? "" : said}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
 }

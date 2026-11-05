@@ -73,9 +73,15 @@ function agentCardHtml(tab, agent, depth) {
     : Number.isFinite(ended) ? duration(ended - since) : "";
   const mark = { running: icon("loader-circle", "state"), done: icon("circle-check", "state"), failed: icon("circle-alert", "state"), cancelled: icon("circle-stop", "state"), stopped: icon("circle-stop", "state") }[agent.state] ?? "";
   const chip = [agent.kind, agent.model].filter(Boolean).join(" · ");
-  const line = stepLine(steps.at(-1), cwd);
+  // Until the agent writes its own steps, the card shows what it was asked: the spawn tool use
+  // in the parent thread carries the brief, so the thread reads what it works on from the start.
+  const spawn = steps.length ? null : spawnOf(t, agent);
+  const brief = spawn?.kind === "tool" && (spawn.detail || spawn.summary) ? { icon: "bot", label: `Delegated ${spawn.summary || agent.name || "task"}` } : null;
+  const line = steps.length ? stepLine(steps.at(-1), cwd) : brief ?? stepLine(undefined, cwd);
   const body = open
-    ? `<div class="agent-steps">${steps.map((s) => (s.kind === "text" ? `<div class="narration md">${markdown(s.text)}</div>` : workRowHtml(s, cwd, t.open))).join("")}</div>`
+    ? steps.length
+      ? `<div class="agent-steps">${steps.map((s) => (s.kind === "text" ? `<div class="narration md">${markdown(s.text)}</div>` : workRowHtml(s, cwd, t.open))).join("")}</div>`
+      : spawn?.kind === "tool" && spawn.detail ? `<div class="narration md">${markdown(spawn.detail)}</div>` : ""
     : `<div class="agent-step">${icon(line.icon, "kind")}<span class="label${running ? " shimmer" : ""}">${esc(line.label)}</span></div>`;
   return `<div class="agent-card" data-agent="${esc(agent.id)}" data-state="${esc(agent.state)}" style="--depth:${depth}">
     <button type="button" class="agent-head" data-toggle="${esc(key)}" aria-expanded="${open}" title="${esc(agent.name)}">${icon("bot", "kind")}<span class="name">${esc(agent.name || "Agent")}</span>
