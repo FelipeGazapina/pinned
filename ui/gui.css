@@ -125,7 +125,7 @@ button.outline .i { width: 14px; height: 14px; }
 body[data-sidebar="closed"] #chat-sidebar-toggle { display: grid !important; margin-left: -8px; }
 #chat-head .crumb { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; font-weight: 500; white-space: nowrap; }
 #chat-head .crumb .sep { color: rgb(var(--g-muted-rgb) / 0.6); }
-#chat-head .controls { display: flex; gap: 4px; }
+#chat-head .controls { flex: none; display: flex; gap: 4px; }
 body[data-shell="web"] #gui-minimize { display: none !important; }
 
 #thread { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 48px 200px; overscroll-behavior: contain;
