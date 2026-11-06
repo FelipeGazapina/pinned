@@ -100,6 +100,9 @@ pub struct TabView {
     /// Claude Code's id for the conversation, which outlives the tab's id across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// A turn was running when pinned quit, so the tab has work left to continue.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
@@ -972,6 +975,7 @@ mod tests {
             opened: 3,
             updated: Some(1792400000),
             session: Some("s1".into()),
+            interrupted: false,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             role: None,
         }

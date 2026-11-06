@@ -330,6 +330,7 @@ impl Tab {
             opened: tab_number(id).into(),
             updated: self.updated,
             session: self.claude_session.clone(),
+            interrupted: self.interrupted,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
             role: role_of(&self.env).map(|(role, _)| role),
         }
@@ -3357,6 +3358,27 @@ pub(crate) mod tests {
         m.open_tab(None, false).unwrap();
         m.quit();
         assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_interrupted_tab_reports_work_left() {
+        let root = temp("restore-interrupted");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "s1", "env": [], "bypass": false, "interrupted": true, "resume_at": null}}]"#, app.display()),
+        )
+        .unwrap();
+        let m = accounts_machine(&root);
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        let view = m.view(&tabs[0]).unwrap();
+        assert!(view.interrupted, "the UI prompts continuations from this flag");
+        assert!(!view.running);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

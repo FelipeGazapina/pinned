@@ -958,6 +958,15 @@ function windowOf(t, ids, anchor, scrolled) {
   return { lo, hi, above: Math.round(sum(0, lo)), below: Math.round(sum(hi, ids.length)) };
 }
 
+/** Interrupted tabs dismissed this boot, so the resume banner offers once per tab. */
+const resumeDismissed = new Set();
+/** Whether the thread offers to continue the turn that was running when pinned closed. */
+const resumeOffered = (tab) => !subagentShown() && !!tab?.view.interrupted && !tab?.view.running && !resumeDismissed.has(tab.key);
+/** A banner offering to continue the turn that was running when pinned closed. */
+const resumeHtml = () => `<div class="resume-banner" role="alert">${icon("refresh-cw", "spin")}<div><b>Continue working from where you stopped?</b>
+  <span>This session still had work when pinned closed.</span></div>
+  <button type="button" class="primary" data-resume-tab>Continue</button>
+  <button type="button" class="icon" data-dismiss-resume aria-label="Dismiss">${icon("x")}</button></div>`;
 function renderThread() {
   const tab = active;
   const crumb = document.querySelector("#chat-head .crumb");
@@ -975,12 +984,13 @@ function renderThread() {
 
   const working = !sub && turnLive(tab);
   t.editable = !sub && (working ? "busy" : true);
+  const resume = !sub && resumeOffered(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsOf(t.items);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1009,7 +1019,7 @@ function renderThread() {
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
@@ -1623,6 +1633,14 @@ threadView.addEventListener("click", (e) => {
   if (e.target.closest("[data-new-thread]")) return toggleProjects();
   if (e.target.closest("[data-mode-terminal]")) return setMode("terminal");
   if (!active) return;
+  if (e.target.closest("[data-dismiss-resume]")) {
+    resumeDismissed.add(active.key);
+    return renderThread();
+  }
+  if (e.target.closest("[data-resume-tab]")) {
+    resumeDismissed.add(active.key);
+    return startTab(active);
+  }
   const dialogKey = e.target.closest("[data-dialog-key]");
   if (dialogKey) {
     dialogKey.closest(".dialog-card").focus({ preventScroll: true });

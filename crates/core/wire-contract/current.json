@@ -11679,6 +11679,10 @@
                   "null"
                 ]
               },
+              "interrupted": {
+                "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+                "type": "boolean"
+              },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
                 "anyOf": [
@@ -14553,6 +14557,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "interrupted": {
+                "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+                "type": "boolean"
               },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
@@ -24440,6 +24448,10 @@
               "null"
             ]
           },
+          "interrupted": {
+            "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+            "type": "boolean"
+          },
           "stats": {
             "description": "What the conversation's work came to so far, once its transcript holds any of it.",
             "anyOf": [
@@ -24685,6 +24697,10 @@
               "string",
               "null"
             ]
+          },
+          "interrupted": {
+            "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+            "type": "boolean"
           },
           "stats": {
             "description": "What the conversation's work came to so far, once its transcript holds any of it.",
@@ -25204,6 +25220,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "interrupted": {
+                "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+                "type": "boolean"
               },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
@@ -27555,6 +27575,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "interrupted": {
+                "description": "A turn was running when pinned quit, so the tab has work left to continue.",
+                "type": "boolean"
               },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",

@@ -5578,6 +5578,7 @@ mod tests {
             opened: 1,
             updated: None,
             session: session.map(str::to_owned),
+            interrupted: false,
             stats: None,
             role: None,
         }

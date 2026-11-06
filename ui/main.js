@@ -1435,9 +1435,22 @@ async function bootApp() {
   invoke("get_usage").then((byAccount) => {
     for (const [account, usage] of Object.entries(byAccount)) onMachineEvent(LOCAL, { kind: "usage", usage, account });
   });
-  const restored = await invoke("restore_tabs");
-  await refreshTabs(LOCAL);
-  for (const id of restored) await startTab(tabByKey(keyOf(LOCAL, id)));
+  // One unrestorable tab must not take boot down with it: the hub and the rest still come up.
+  let restored = [];
+  try {
+    restored = await invoke("restore_tabs");
+  } catch (e) {
+    console.warn("restore_tabs", e);
+  }
+  await refreshTabs(LOCAL).catch((e) => console.warn("refreshTabs", e));
+  for (const id of restored) {
+    try {
+      const tab = tabByKey(keyOf(LOCAL, id));
+      if (tab) await startTab(tab);
+    } catch (e) {
+      console.warn("restore", id, e);
+    }
+  }
   if (!machines.get(LOCAL).tabs.length) await openTab(LOCAL, null);
   const signedIn = await invoke("account");
   if (signedIn.signed_in) connectHub(signedIn);
