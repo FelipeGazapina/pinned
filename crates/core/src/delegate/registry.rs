@@ -94,6 +94,12 @@ impl Delegates {
         delegates
     }
 
+    /// How many tasks are still working. The orchestrator's global worker cap counts these
+    /// plus its live worker threads.
+    pub fn active_count(&self) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| task.state == WorkState::Working).count()
+    }
+
     /// The same caller and `clientRequestId` returns the task already started.
     pub fn claim(&self, new: NewTask) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();

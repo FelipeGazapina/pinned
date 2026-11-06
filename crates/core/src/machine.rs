@@ -395,6 +395,8 @@ pub struct Machine {
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
     memories: Arc<memory::Memories>,
+    orchestration: Mutex<crate::orchestration::Orchestration>,
+    orchestration_dir: Option<PathBuf>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -531,6 +533,8 @@ impl Machine {
             agents: Mutex::default(),
             delegates,
             memories,
+            orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
+            orchestration_dir: dir.clone(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1393,6 +1397,9 @@ impl Machine {
                 args.extend(role.disallowed_tools().iter().map(|t| t.to_string()));
             }
             prompt.push(role.prompt().to_owned());
+            if role == Role::Orchestrator {
+                prompt.push(self.orchestration.lock().unwrap().hint());
+            }
         }
         if !prompt.is_empty() {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
@@ -1794,7 +1801,7 @@ impl Machine {
 
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         match tool {
-            ProjectTool::Delegate { task, title } => self.delegate(tab, &self.orchestrated(tab)?, task, title),
+            ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
             ProjectTool::Agents => Ok(self.workers(&self.orchestrated(tab)?)),
             ProjectTool::MemorySearch { query, limit } => {
                 let found = self.memories.search(&self.project_of_tab(tab)?, &query, limit.unwrap_or(SEARCH_LIMIT))?;
@@ -1854,7 +1861,19 @@ impl Machine {
 
     /// Opens a worker tab on the project of the orchestrator `from`, in a new worktree when the
     /// project is a git repository, starts it on `task`, and says which tab it is.
-    fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>) -> Result<String, String> {
+    /// Refuses new workers past the global cap, naming where to raise it.
+    fn check_worker_cap(&self) -> Result<(), String> {
+        let max = self.orchestration.lock().unwrap().max_workers as usize;
+        let running = self.worker_count();
+        if running >= max {
+            return Err(format!("{running} workers are already running, the most this machine starts at once. Raise it under Settings, or wait for one to finish."));
+        }
+        Ok(())
+    }
+
+    fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>, tools: Vec<String>) -> Result<String, String> {
+        self.check_worker_cap()?;
+        let task = crate::delegate::granted_brief(&task, &tools);
         let bypass = self.tab(from, |t| t.bypass)?;
         let account = self.account_for(None, project)?;
         let made = project.join(".git").exists().then(|| branches::new_worktree(project, self.launch.path_env.as_deref())).transpose()?;
@@ -2152,6 +2171,29 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
+    /// How this machine's orchestrator routes and how many workers it may run.
+    pub fn orchestration(&self) -> crate::orchestration::Orchestration {
+        self.orchestration.lock().unwrap().clone()
+    }
+
+    /// Saves new orchestration settings, clamping the worker cap into range.
+    pub fn set_orchestration(&self, style: crate::orchestration::Style, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
+        let mut current = self.orchestration.lock().unwrap();
+        *current = crate::orchestration::Orchestration { style, max_workers };
+        current.clamp();
+        let saved = current.clone();
+        drop(current);
+        saved.save(self.orchestration_dir.as_deref())?;
+        *self.orchestration.lock().unwrap() = saved.clone();
+        Ok(saved)
+    }
+
+    /// Workers running right now: live worker threads plus active delegate tasks.
+    fn worker_count(&self) -> usize {
+        let threads = self.tabs.lock().unwrap().values().filter(|t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker)).count();
+        threads + self.delegates.active_count()
+    }
+
     fn record_usage(&self, account: accounts::AccountId, report: Usage) {
         let usage = {
             let mut all = self.usage.lock().unwrap();
@@ -2310,6 +2352,7 @@ impl Machine {
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
+        self.check_worker_cap()?;
         let child = caller.task.is_some();
         let role = caller.tab.as_deref().and_then(|id| self.tab(id, |t| role_of(&t.env)).ok().flatten().map(|(role, _)| role));
         if let Some(error) = crate::delegate::delegate_block(role, child) {
@@ -2403,10 +2446,11 @@ impl Machine {
         if self.startup_stopped(&task.id, None) {
             return self.delegates.started_json(&task.id).map(|value| value.to_string());
         }
+        let brief = crate::delegate::granted_brief(&request.task, &request.tools);
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
-                task: &request.task,
+                task: &brief,
                 model: model.as_deref(),
                 effort: effort.as_deref(),
                 access,
@@ -2561,7 +2605,13 @@ impl Machine {
                 if !found {
                     constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
                 }
-                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, models, constraints }
+                let limited = self.usage.lock().unwrap().get(&account.id).is_some_and(|usage| {
+                    [usage.five_hour, usage.seven_day, usage.monthly].iter().flatten().any(|window| window.used_percentage >= 99.0)
+                });
+                if limited {
+                    constraints.push("a usage limit stopped this account".into());
+                }
+                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, models, constraints }
             })
             .collect::<Vec<_>>();
         let search = (!search.is_empty()).then_some(search);
@@ -5142,6 +5192,27 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
+    fn workers_stop_at_the_global_cap() {
+        let dir = temp("worker-cap");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::new(), ..launch() }, Some(config.clone()), None, |_| {});
+        assert_eq!(m.orchestration().max_workers, 100);
+        m.set_orchestration(crate::orchestration::Style::Economical, 1).unwrap();
+        assert_eq!(m.orchestration().style, crate::orchestration::Style::Economical);
+        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(config.join("orchestration.json")).unwrap()).is_ok());
+        m.check_worker_cap().unwrap();
+        let worker = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &dir), false, None);
+        assert_eq!(m.worker_count(), 1);
+        let err = m.check_worker_cap().unwrap_err();
+        assert!(err.contains("1 workers are already running"), "{err}");
+        assert!(err.contains("Settings"), "{err}");
+        m.close_tab(&worker);
+        m.check_worker_cap().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_delegated_task_keeps_the_budget_it_asked_for() {
         let root = temp("budget");
@@ -6008,8 +6079,8 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt());
-        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
+        let prompt = format!("{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false });
@@ -6056,7 +6127,8 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", Role::Orchestrator.prompt()]);
+        let prompt = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }

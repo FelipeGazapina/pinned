@@ -278,6 +278,7 @@ fn delegation_tools() -> Vec<Value> {
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["inherit", "full-access", "auto"], "description": "How wide the child may act. inherit, or omitting it, keeps this session's mode. Anything wider than this session is rejected. A bypassed session can hand the child auto." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
+                    "tools": { "type": "array", "items": { "type": "string" }, "description": "The tools the child may use, such as Bash, Grep and Glob. The child sees them as its grant. Omit it to grant what the task needs. A child that needs more says NEEDS followed by the tools, and this session answers with a wider grant." },
                     "clientRequestId": { "type": "string", "description": "The same caller and clientRequestId returns the task already started. If that task has finished, the answer is its status, including summary and error. A new attempt uses a new id." },
                 },
                 "required": ["task"],
@@ -681,6 +682,7 @@ mod tests {
                 "task".into(),
                 "timeoutMs".into(),
                 "title".into(),
+                "tools".into(),
             ]
         );
         assert!(

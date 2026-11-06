@@ -192,6 +192,17 @@ fn get_usage(machine: State<Arc<Machine>>) -> std::collections::BTreeMap<String,
     machine.usage()
 }
 
+#[tauri::command]
+fn get_orchestration(machine: State<Arc<Machine>>) -> pinned_core::orchestration::Orchestration {
+    machine.orchestration()
+}
+
+#[tauri::command]
+fn set_orchestration(machine: State<Arc<Machine>>, style: String, max_workers: u32) -> Result<pinned_core::orchestration::Orchestration, String> {
+    let style = pinned_core::orchestration::Style::parse(&style).ok_or_else(|| "style is economical, balanced or quality".to_string())?;
+    machine.set_orchestration(style, max_workers)
+}
+
 fn opacity_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|c| c.join("opacity"))
 }
@@ -392,6 +403,8 @@ fn main() {
             install_update,
             get_opacity,
             get_usage,
+            get_orchestration,
+            set_orchestration,
             commands::get_settings,
             commands::open_linear_keys,
             commands::connect_linear,

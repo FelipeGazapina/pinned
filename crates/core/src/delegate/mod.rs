@@ -87,6 +87,16 @@ impl Access {
     }
 }
 
+/// The grant line a delegation brief carries when the orchestrator names tools. Empty grants
+/// name nothing: the child uses what the task needs, and says NEEDS followed by tools when it
+/// needs more.
+pub fn granted_brief(task: &str, tools: &[String]) -> String {
+    if tools.is_empty() {
+        return task.to_owned();
+    }
+    format!("Granted tools: {}.\n\n{task}", tools.join(", "))
+}
+
 /// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
 /// An explicit `auto`, and an omitted mode, narrow to read-only under that ceiling. `full-access` does not.
 pub fn resolve_access(ceiling: Access, request: &Request) -> Result<Access, String> {
@@ -190,6 +200,11 @@ pub struct Request {
     pub runtime: Option<RuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Tools the child may use. The child sees them as its grant; empty grants what the task
+    /// needs. A child that needs more says NEEDS followed by the tools, and the parent answers
+    /// with a wider grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
 }
@@ -571,6 +586,15 @@ mod tests {
     }
 
     #[test]
+    fn a_request_grants_tools() {
+        let granted = parse_request(&json!({ "task": "look", "tools": ["Bash", " Grep ", "", 7] })).unwrap();
+        assert_eq!(granted.tools, ["Bash", "Grep"]);
+        assert_eq!(parse_request(&json!({ "task": "look" })).unwrap().tools, Vec::<String>::new());
+        assert_eq!(granted_brief("look", &granted.tools), "Granted tools: Bash, Grep.\n\nlook");
+        assert_eq!(granted_brief("look", &[]), "look");
+    }
+
+    #[test]
     fn a_request_accepts_t3_argument_names() {
         let inherit = parse_request(&json!({ "task": "look", "runtimeMode": "inherit" })).unwrap();
         assert_eq!(inherit.runtime, None, "inherit is the same as leaving runtimeMode out");
@@ -606,6 +630,7 @@ mod tests {
                 interaction: Interaction::Plan,
                 runtime: None,
                 role: None,
+                tools: vec![],
                 client_request_id: None,
             }
         );
@@ -652,6 +677,7 @@ mod tests {
                 interaction: Interaction::Inherit,
                 runtime: None,
                 role: None,
+                tools: vec![],
                 client_request_id: None,
             }
         );
@@ -713,12 +739,14 @@ grok-4.7-high - Grok 4.7  High
                 ModelChoice {
                     id: "composer-2.5".into(),
                     label: "Composer 2.5".into(),
-                    efforts: vec!["fast".into()]
+                    efforts: vec!["fast".into()],
+                    cost: Cost::Mid,
                 },
                 ModelChoice {
                     id: "grok-4.7".into(),
                     label: "Grok 4.7".into(),
-                    efforts: vec!["low".into(), "high".into()]
+                    efforts: vec!["low".into(), "high".into()],
+                    cost: Cost::Mid,
                 },
             ]
         );
@@ -733,6 +761,7 @@ grok-4.7-high - Grok 4.7  High
                 name: "Claude Code".into(),
                 signed_in: true,
                 bin_found: true,
+                limited: false,
                 models: provider_models(Provider::Claude),
                 constraints: vec![],
             },
@@ -742,6 +771,7 @@ grok-4.7-high - Grok 4.7  High
                 name: "Codex".into(),
                 signed_in: false,
                 bin_found: false,
+                limited: false,
                 models: vec![],
                 constraints: codex_constraints(),
             },
@@ -751,6 +781,7 @@ grok-4.7-high - Grok 4.7  High
                 name: "Cursor".into(),
                 signed_in: true,
                 bin_found: true,
+                limited: true,
                 models: cursor_models(
                     "grok-4.7-high - Grok 4.7  High\ncomposer-2.5 - Composer 2.5\n",
                 ),
@@ -788,8 +819,10 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(value["providers"][1]["models"], json!([]));
         assert_eq!(
             value["providers"][2]["models"][0],
-            json!({"id": "grok-4.7", "label": "Grok 4.7", "options": [{"id": "effort", "values": ["high"], "default": null}]})
+            json!({"id": "grok-4.7", "label": "Grok 4.7", "cost": "mid", "options": [{"id": "effort", "values": ["high"], "default": null}]})
         );
+        assert_eq!(value["providers"][2]["limited"], true);
+        assert_eq!(value["providers"][0]["models"][3]["cost"], "low");
         assert_eq!(value["providers"][2]["canRunCrossProviderChildTask"], false);
         assert_eq!(
             value["providers"][2]["constraints"][0],

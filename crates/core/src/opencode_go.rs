@@ -90,6 +90,7 @@ pub fn models() -> Vec<ModelChoice> {
                 .filter(|effort| SUPPORTED_EFFORTS.contains(effort))
                 .map(|effort| (*effort).into())
                 .collect(),
+            cost: crate::delegate::cost_of(id),
         })
         .collect()
 }

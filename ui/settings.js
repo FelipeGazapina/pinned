@@ -2078,6 +2078,7 @@ document.querySelector("#settings-nav .links").addEventListener("click", (e) => 
 });
 settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
   { title: "Keep this Mac awake", terms: ["sleep display power"] },
+  { title: "Orchestration", terms: ["cost style economical balanced quality max workers orchestrator"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },

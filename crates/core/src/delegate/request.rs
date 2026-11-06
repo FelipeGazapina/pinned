@@ -88,6 +88,11 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         }
     };
     let role = optional_str(&args["role"]);
+    let tools = args
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| tools.iter().filter_map(Value::as_str).map(str::trim).filter(|tool| !tool.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default();
     let client_request_id = optional_str(&args["clientRequestId"]);
     Ok(Request {
         task,
@@ -106,6 +111,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         interaction,
         runtime,
         role,
+        tools,
         client_request_id,
     })
 }

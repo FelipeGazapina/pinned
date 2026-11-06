@@ -1,29 +1,53 @@
 use super::*;
 
 const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const CLAUDE_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-5-5", "Opus 5.5"),
-    ("claude-sonnet-5-5", "Sonnet 5.5"),
-    ("claude-fable-5-1", "Fable 5.1"),
-    ("claude-haiku-5-5", "Haiku 5.5"),
+const CLAUDE_MODELS: &[(&str, &str, Cost)] = &[
+    ("claude-opus-5-5", "Opus 5.5", Cost::High),
+    ("claude-sonnet-5-5", "Sonnet 5.5", Cost::Mid),
+    ("claude-fable-5-1", "Fable 5.1", Cost::Mid),
+    ("claude-haiku-5-5", "Haiku 5.5", Cost::Low),
 ];
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
+
+/// What a model costs to run, coarsely: routing by tier beats stale per-token prices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cost {
+    /// Haiku and flash models: sweeps, translations, first drafts.
+    Low,
+    /// The middle default when nothing is known.
+    #[default]
+    Mid,
+    /// Opus and max efforts: architecture and hairy bugs.
+    High,
+}
+
+impl Cost {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cost::Low => "low",
+            Cost::Mid => "mid",
+            Cost::High => "high",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelChoice {
     pub id: String,
     pub label: String,
     pub efforts: Vec<String>,
+    pub cost: Cost,
 }
 
 pub fn provider_models(provider: Provider) -> Vec<ModelChoice> {
     match provider {
         Provider::Claude => CLAUDE_MODELS
             .iter()
-            .map(|(id, label)| ModelChoice {
+            .map(|(id, label, cost)| ModelChoice {
                 id: (*id).into(),
                 label: (*label).into(),
                 efforts: CLAUDE_EFFORT.iter().map(|e| (*e).into()).collect(),
+                cost: *cost,
             })
             .collect(),
         Provider::Codex => vec![],
@@ -71,9 +95,21 @@ pub fn cursor_models(list: &str) -> Vec<ModelChoice> {
                     .position(|known| known == effort)
                     .unwrap_or(CURSOR_EFFORTS.len())
             });
-            ModelChoice { id, label, efforts }
+            ModelChoice { id: id.clone(), label, efforts, cost: cost_of(&id) }
         })
         .collect()
+}
+
+/// A rough cost tier from the model id, for routing when no price list covers it.
+pub fn cost_of(id: &str) -> Cost {
+    let id = id.to_ascii_lowercase();
+    if ["haiku", "flash", "mini", "fast", "nano", "lite"].iter().any(|hint| id.contains(hint)) {
+        Cost::Low
+    } else if ["opus", "max", "pro", "ultra", "thinking"].iter().any(|hint| id.contains(hint)) {
+        Cost::High
+    } else {
+        Cost::Mid
+    }
 }
 
 pub(crate) fn parse_model_list(text: &str) -> Vec<(String, String)> {
@@ -140,6 +176,8 @@ pub struct ListedAccount {
     pub name: String,
     pub signed_in: bool,
     pub bin_found: bool,
+    /// A usage limit stopped this account; route around it unless nothing else can run.
+    pub limited: bool,
     pub models: Vec<ModelChoice>,
     pub constraints: Vec<String>,
 }
@@ -205,6 +243,7 @@ fn account_json(account: &ListedAccount, needle: Option<&str>) -> Option<Value> 
         "runtimeModes": ["auto", "full-access"],
         "canRunChildTask": ready,
         "canRunCrossProviderChildTask": ready && account.provider != Provider::Cursor,
+        "limited": account.limited,
         "constraints": account.constraints,
     }))
 }
@@ -215,7 +254,7 @@ fn model_json(model: &ModelChoice) -> Value {
     } else {
         vec![json!({"id": "effort", "values": model.efforts, "default": null})]
     };
-    json!({"id": model.id, "label": model.label, "options": options})
+    json!({"id": model.id, "label": model.label, "cost": model.cost.name(), "options": options})
 }
 
 pub fn codex_constraints() -> Vec<String> {
