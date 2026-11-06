@@ -57,7 +57,7 @@ const TRIGGERS = {
     defaults: { worktree: true, columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" } },
     trigger: () => ({ kind: "linear-label", label: "claude" }),
     instructions: () => DEFAULT_INSTRUCTIONS,
-    sentence: (c, where) => `When an issue gets the label “${c.trigger.label}”, ${who(c)} picks it up${where}.`,
+    sentence: (c, where) => `When an issue gets the label “${c.trigger.label ?? ""}”, ${who(c)} picks it up${where}.`,
   },
   "slack-mention": {
     text: "The bot is @mentioned in Slack",
@@ -67,7 +67,7 @@ const TRIGGERS = {
     name: "Triage Slack mentions",
     trigger: (was) => ({ kind: "slack-mention", channel: was?.channel ?? "" }),
     instructions: (c) => (c.fix === "off" ? SLACK_INSTRUCTIONS : SLACK_FIX_INSTRUCTIONS),
-    sentence: (c, where, then) => `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, ${who(c)} ${then}${where}.`,
+    sentence: (c, where, then) => `When the bot is mentioned in #${(c.trigger.channel ?? "").replace(/^#/, "")}, ${who(c)} ${then}${where}.`,
   },
   "slack-message": {
     text: "A Slack message, sorted by a decision model",
@@ -87,7 +87,7 @@ const TRIGGERS = {
     }),
     instructions: (c) => TRIGGERS["slack-mention"].instructions(c),
     sentence: (c) =>
-      `When someone posts in #${c.trigger.channel.replace(/^#/, "")}, a decision model sorts the message into ${orList(c.trigger.decide.categories.map((cat) => cat.name))}.`,
+      `When someone posts in #${(c.trigger.channel ?? "").replace(/^#/, "")}, a decision model sorts the message into ${orList((c.trigger.decide?.categories ?? []).map((cat) => cat.name))}.`,
   },
   called: {
     text: "Called by another workflow",
@@ -406,7 +406,7 @@ function slackCardHtml() {
 let view = { name: "list" };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const subject = (c) => TRIGGERS[c.trigger.kind].subject;
+const subject = (c) => TRIGGERS[c.trigger?.kind]?.subject ?? "thread";
 const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "";
 
 const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${esc(value)}" ${attrs}>`;
@@ -431,8 +431,8 @@ const LOGOS = {
   claude: `<svg viewBox="0 0 24 24"><path d="${CLAUDE_RAYS}"/></svg>`,
   github: `<svg viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1 .9 2.2v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>`,
 };
-const iconHtml = (step) =>
-  `<span class="icon" data-tone="${step.tone}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app}: ${step.title}`)}">${LOGOS[step.tone] ?? step.icon}</span>`;
+const iconHtml = (step = {}) =>
+  `<span class="icon" data-tone="${step.tone ?? ""}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app ?? "Step"}: ${step.title ?? "Unknown step"}`)}">${LOGOS[step.tone] ?? step.icon ?? "?"}</span>`;
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
 /** A column the session moves the Linear issue to, matching the backend's `Stage`. The session
@@ -607,6 +607,25 @@ const STEPS = {
         <div class="actions start"><button class="secondary" data-action="add-question">Add question</button></div>`;
     },
   },
+  decide: {
+    tone: "vercel",
+    icon: "▲",
+    app: "Vercel",
+    title: "Sort message",
+    on: () => true,
+    summary: (c) => {
+      const names = (c.trigger?.decide?.categories ?? []).map((cat) => cat.name?.trim()).filter(Boolean);
+      return names.length ? `Sort into ${orList(names)}` : "Name the categories";
+    },
+    issues: (c) => {
+      const decide = c.trigger?.decide ?? {};
+      return [
+        !settings.vercel && "Connect Vercel AI Gateway under Connectors.",
+        !(decide.model ?? "").trim() && "Name the decision model.",
+        !(decide.categories ?? []).length && "Name the categories.",
+      ].filter(Boolean);
+    },
+  },
   proof: {
     tone: "proof",
     icon: "▶",
@@ -619,15 +638,20 @@ const STEPS = {
 };
 
 /** A connector's steps in run order, each with the event that leads into it. */
-const flowOf = (c) => [[TRIGGERS[c.trigger.kind].step], ...TRIGGERS[c.trigger.kind].steps(c)];
+const flowOf = (c) => {
+  // One workflow with a trigger this app doesn't know must not blank the whole page.
+  const known = TRIGGERS[c.trigger?.kind];
+  if (!known) return [];
+  return [[known.step], ...known.steps(c)];
+};
 
 const routesTo = (c) =>
   settings.connectors.flatMap((r) =>
-    r.trigger.kind === "slack-message" && c.id ? r.trigger.decide.categories.filter((cat) => cat.workflow === c.id).map((cat) => ({ router: r.name, category: cat.name })) : [],
+    r.trigger?.kind === "slack-message" && c.id ? (r.trigger.decide?.categories ?? []).filter((cat) => cat.workflow === c.id).map((cat) => ({ router: r.name, category: cat.name })) : [],
   );
 
 
-const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
+const isOn = (c, id) => !STEPS[id]?.optional || !!STEPS[id]?.on?.(c);
 
 const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
 const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
@@ -730,9 +754,11 @@ function cardHtml(c, i) {
 const who = (c) => (c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude");
 
 function sentence(c) {
+  // An unknown trigger still gets a card, so the workflow can be opened and fixed.
+  if (!TRIGGERS[c.trigger?.kind]) return "Open this workflow to repair its trigger.";
   const machine = (account || isBox(c)) && c.machine ? ` on ${isBox(c) ? "a fresh Upstash Box" : runOnName(c)}` : "";
   const as = connectorAccountName(c) ? ` with the ${connectorAccountName(c)} account` : "";
-  const folder = isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) : folderName(c.folder);
+  const folder = isBox(c) ? folderName((c.repo ?? "").replace(/\.git$/, "")) : folderName(c.folder ?? "");
   const where = (folder ? ` in ${folder}${machine}` : machine) + as;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
   return TRIGGERS[c.trigger.kind].sentence(c, where, then);
@@ -1232,7 +1258,7 @@ function graphNodePanel(c) {
   const ui = graphNodeUi(node);
   const type = graphNodeKind(node);
   let body = "";
-  if (type === "trigger") body = STEPS[WATCH_STEP[c.trigger?.kind] ?? WATCH_STEP[node.watch?.kind ?? "called"]].fields(c);
+  if (type === "trigger") body = (STEPS[WATCH_STEP[c.trigger?.kind] ?? WATCH_STEP[node.watch?.kind ?? "called"]] ?? STEPS["called-trigger"]).fields(c);
   else if (type === "classify") body = classifyFields(node, c);
   else if (type === "switch") body = switchFields(node, c);
   else if (type === "talk") {
