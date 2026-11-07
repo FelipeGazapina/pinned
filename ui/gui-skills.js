@@ -1,5 +1,3 @@
-/** The Skills page: every skill folder on every online machine, grouped by scope and name, with the
- * File panel's editor, a "Save to" checklist of the copies, and what each save reached. */
 const skillsUi = { byMachine: new Map(), filter: "", open: null, loading: false };
 
 const UPDATE_REQUIRED = /can't answer that/;
@@ -37,7 +35,6 @@ function skillRows() {
 
 const baseName = (path) => String(path).split(/[\\/]/).filter(Boolean).pop() ?? path;
 const readerNames = (c, provider) => [...new Set(c.readers.filter((r) => r.provider === provider).map((r) => r.account))].join(", ");
-/** Where a copy lives, as the page names it: every place that reaches its folder. */
 function placeLabel(c) {
   return [...new Set([c.place, ...(c.also ?? [])].map((p) => onePlaceLabel(c, p)))].join(" + ");
 }
@@ -115,9 +112,6 @@ const openRow = () => skillRows().find((r) => r.id === skillsUi.open?.row);
 const editText = (o) => o.draft ?? o.got?.text ?? "";
 const skillDirty = (o) => o?.got != null && o.draft != null && o.draft !== o.got.text;
 
-/** The Save to checklist. `o.since` holds each copy's tree as the page saw it when the skill
- * opened, or when its diff was last opened. A save sends that tree, so it never writes over a
- * change nobody looked at. */
 function openChecks(o, row) {
   o.since = new Map(row.copies.map((c) => [copyId(c), c.tree]));
   o.since.set(copyId(o.copy), o.got.tree);
@@ -125,7 +119,6 @@ function openChecks(o, row) {
   o.changed = new Set();
 }
 
-/** After a refresh: a copy whose tree moved since the page saw it is unchecked until its diff is opened again. */
 function refreshChecks(o, row) {
   for (const c of row.copies) {
     const id = copyId(c);
@@ -139,15 +132,12 @@ function refreshChecks(o, row) {
   }
 }
 
-/** The diff of `c` was opened: it may be checked, and a save sends the tree that diff showed. */
 function sawCopy(o, c, got) {
   o.compared.set(copyId(c), got);
   if (got.tree) o.since.set(copyId(c), got.tree);
   o.changed.delete(copyId(c));
 }
 
-/** Why a save writes `c` though it is not checked: sync carries the save to it, or it is the cache
- * copy that follows a checked plugin source. */
 function writtenAnyway(o, row, c) {
   if (o.checked.has(copyId(c))) return "";
   const checked = row.copies.filter((x) => o.checked.has(copyId(x)));
@@ -157,10 +147,8 @@ function writtenAnyway(o, row, c) {
   return "";
 }
 
-/** A copy differs from the open one, or changed since the page saw it, and its diff is not open yet. */
 const copyUnseen = (o, c) => !o.compared.has(copyId(c)) && (o.changed.has(copyId(c)) || (copyId(c) !== copyId(o.copy) && c.tree !== o.got.tree));
 
-/** What the checklist shows for `c`. A disabled box is never checked. */
 function copyCheck(o, row, c) {
   const id = copyId(c);
   const fixed = c.edit === "no";
@@ -177,10 +165,8 @@ function copyCheck(o, row, c) {
   return { checked: !disabled && o.checked.has(id), disabled, compare: hidden || o.compared.has(id), why };
 }
 
-/** The first copy the save would write unseen: it stays blocked until that diff is opened. */
 const saveBlocker = (o, row) => row.copies.find((c) => c.edit !== "no" && writtenAnyway(o, row, c) && copyUnseen(o, c));
 
-/** One list of `{ dir, since }` per machine, for the checked copies. */
 function saveTargets(o, row) {
   const byMachine = new Map();
   for (const c of row.copies) {
@@ -190,7 +176,6 @@ function saveTargets(o, row) {
   return byMachine;
 }
 
-/** Another machine's save or a sync pull changed skills there: list those machines again. */
 function skillsChanged(machine) {
   if (document.body.dataset.page !== "skills" || !machines.get(machine)?.view.online) return;
   (skillsChanged.machines ??= new Set()).add(machine);
@@ -250,7 +235,6 @@ function checklistHtml(row, o) {
   return `<section class="save-to"><h3>Save to</h3><ul>${items.join("")}</ul></section>`;
 }
 
-/** "Saved 6 copies on 3 machines. Reloaded 4 sessions, 2 reload after their turn, 1 Codex session needs a restart". */
 function reportHtml(report) {
   const copies = report.flatMap((r) => (r.copies ?? []).map((c) => ({ machine: r.machine, ...c })));
   const sessions = report.flatMap((r) => (r.sessions ?? []).map((s) => ({ machine: r.machine, ...s })));
@@ -348,7 +332,6 @@ function renderSkillsPage() {
   }
 }
 
-/** ⌘S. One `save_skill` per machine, each copy with the tree the page last saw it at. */
 async function saveSkill() {
   const o = skillsUi.open;
   const row = openRow();

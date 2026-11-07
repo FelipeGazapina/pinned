@@ -50,7 +50,6 @@ struct Shared {
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
-    /// Set by `Machine::wake_sync`. Ends the sync loop's wait.
     sync_now: AtomicBool,
 }
 

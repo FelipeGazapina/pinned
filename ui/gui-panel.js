@@ -1251,8 +1251,6 @@ function codeHtml(tab, s, text, locked = false) {
   const reviewing = !s.editAnyway && (ui.selection?.key === key || ui.commentAt?.key === key || reviewComments(tab, key).get(s.path)?.size > 0);
   return editorHtml(s.path, text, { locked, rows: codeRows(tab, s, text, reviewing), cls: reviewing ? " reviewing" : "", attrs: ` data-comments data-key="${esc(key)}"` });
 }
-/** The highlighted source under a transparent textarea that takes edits, with no thread behind it.
- * `rows` replaces the plain numbered lines, as the File panel's review rows do. */
 function editorHtml(path, text, { locked = false, rows = plainRows(path, text), cls = "", attrs = "" } = {}) {
   const digits = String(text.split("\n").length).length;
   return `<div class="code-view${ui.fileWrap ? " wrap" : ""}${cls}"${attrs}><div class="file" data-path="${esc(path)}" style="--digits:${digits}"><div class="code-lines">${rows}</div>

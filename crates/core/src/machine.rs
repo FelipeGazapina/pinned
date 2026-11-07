@@ -272,7 +272,6 @@ struct Tab {
     turn_pending: Option<Instant>,
     /// The terminal's input line. Done does not clear it.
     draft: Draft,
-    /// A skill the session loads changed. `/reload-skills` goes in once the tab is idle.
     reload: bool,
     /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
     permission_mode: Option<String>,
@@ -363,7 +362,6 @@ impl Tab {
         self.session.as_mut().is_some_and(|s| s.raw() && s.write(&paste(command)).is_ok())
     }
 
-    /// Types `/reload-skills` when the tab owes it and is idle. True when it typed.
     fn reload_if_idle(&mut self) -> bool {
         let typed = self.reload && self.notice_idle() && self.type_command("/reload-skills");
         if typed {
@@ -421,7 +419,6 @@ pub struct Machine {
     next_listener: AtomicU64,
     me: Weak<Machine>,
     gate: Mutex<Gate>,
-    /// Runs the hub link's next sync cycle now. Set once a link starts.
     sync_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
@@ -2052,7 +2049,6 @@ impl Machine {
         homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
     }
 
-    /// Where skills can be on this machine. A test binary sees only homes inside its config dir.
     fn places(&self) -> skills::Places {
         let config = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf);
         let accounts = self.accounts.list();
@@ -2076,9 +2072,6 @@ impl Machine {
         }
     }
 
-    /// The one entry point for "these places changed", from a save or a sync pull. Every running
-    /// tab that loads one of them owes `/reload-skills`: an idle one gets it now, a busy one after
-    /// its turn, from the delegate pass. Codex and Cursor see the change when they start again.
     pub(crate) fn skills_changed(&self, touched: &[skills::Place]) -> Vec<skills::Nudged> {
         if touched.is_empty() {
             return vec![];
@@ -2117,7 +2110,6 @@ impl Machine {
         nudged
     }
 
-    /// Runs the hub link's next sync cycle now. Without a link it does nothing.
     fn wake_sync(&self) {
         let waker = self.sync_waker.lock().unwrap().clone();
         if let Some(wake) = waker {

@@ -1,5 +1,3 @@
-//! Every folder on this machine that holds skills, and the one way to change a skill in one.
-
 use crate::accounts::{AccountId, Provider};
 use crate::commands::{enabled_plugins, front_matter};
 use serde::{Deserialize, Serialize};
@@ -7,28 +5,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
-/// What the machine knows about where skills can be. Built fresh per call, so a new account or
-/// project shows at once.
 pub struct Places {
-    /// `$HOME`, for `~/.agents/skills` and `~/.cursor`.
     pub home: PathBuf,
-    /// Each Claude account and its home.
     pub claude_homes: Vec<(AccountId, PathBuf)>,
-    /// Each Codex account and its `CODEX_HOME`.
     pub codex_homes: Vec<(AccountId, PathBuf)>,
-    /// The Cursor account. Cursor has one home.
     pub cursor: Option<AccountId>,
-    /// Known project folders and tab folders, canonical.
     pub projects: Vec<PathBuf>,
-    /// `<config>/synced-plugins`, which holds the plugins synced from other machines.
     pub synced_plugins: Option<PathBuf>,
-    /// The plugin compiled into pinned, written per process.
     pub pinned_plugin: PathBuf,
-    /// Plugin files as installed, kept before pinned's first edit.
     pub originals: PathBuf,
 }
 
-/// Where a copy lives. Editability is the variant.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Place {
@@ -36,11 +23,10 @@ pub enum Place {
     Fixed(Fixed),
 }
 
-/// Places pinned may write. `write_copy` takes only these.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Writable {
-    /// `<home>/skills`, synced across homes and machines as `user-skills/<dir>`.
+    /// `<home>/skills`.
     ClaudePersonal { home: PathBuf },
     /// `<checkout>/.claude/skills`.
     ClaudeProject { checkout: PathBuf },
@@ -60,15 +46,12 @@ pub enum Writable {
     Agents,
 }
 
-/// Places someone else owns. Listed and readable, never written.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Fixed {
     /// What claude.ai syncs into `<home>/skills/synced` and `<home>/plugins/synced`.
     ClaudeAccountSynced { home: PathBuf },
-    /// `<config>/synced-plugins/plugins/<plugin>`, which sync rewrites from the machine that enables it.
     SyncedPlugin { plugin: String },
-    /// Compiled into pinned.
     Pinned,
     /// `<CODEX_HOME>/skills/.system`.
     CodexSystem { home: PathBuf },
@@ -88,18 +71,14 @@ impl Fixed {
     }
 }
 
-/// What the page may offer for a copy.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "edit", rename_all = "kebab-case")]
 pub enum Edit {
     Yes,
-    /// Editable, but the next plugin update replaces it.
     LostOnUpdate,
     No { why: String },
 }
 
-/// The rows of the page: copies group by scope and key, so a personal `deploy` and a project
-/// `deploy` are two rows, and `use-railway` in four agents' folders is one.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Scope {
@@ -129,22 +108,17 @@ impl Place {
         }
     }
 
-    /// The sync group whose copies follow each other across homes and machines.
     fn linked(&self, dir_name: &str) -> Option<String> {
         matches!(self, Place::Writable(Writable::ClaudePersonal { .. })).then(|| format!("user-skills/{dir_name}"))
     }
 }
 
-/// A folder holding skills as `<dir>/<skill>/SKILL.md`. `dir` is canonical, so two routes to one
-/// folder (a symlinked home) compare equal, and `inventory` makes their skills one copy.
 struct Root {
     dir: PathBuf,
     place: Place,
-    /// `<plugin name>:` inside a plugin, else empty.
     prefix: String,
 }
 
-/// A Claude folder laid out as `commands/` and `skills/`, or a bare skills folder.
 pub(crate) struct ClaudeRoot {
     pub base: PathBuf,
     pub skills_only: bool,
@@ -161,14 +135,13 @@ impl ClaudeRoot {
         }
     }
 
-    /// Whether a session on this home reads it. The cache copy of a directory-marketplace plugin is not.
     pub fn loaded(&self) -> bool {
         !matches!(self.place, Place::Writable(Writable::PluginCache { loaded: false, .. }))
     }
 }
 
 /// The Claude folders a session on `home` loads, in Claude's merge order, plus the unloaded cache
-/// copies of directory-marketplace plugins. `commands::list` and `roots` both read this.
+/// copies of directory-marketplace plugins.
 pub(crate) fn claude_roots(home: &Path, project: Option<&Path>, plugin_dirs: &[PathBuf]) -> Vec<ClaudeRoot> {
     let root = |base: PathBuf, prefix: String, place| ClaudeRoot { base, skills_only: false, prefix, place };
     let mut out = vec![root(home.to_path_buf(), String::new(), Place::Writable(Writable::ClaudePersonal { home: home.to_path_buf() }))];
@@ -201,7 +174,6 @@ pub(crate) fn claude_roots(home: &Path, project: Option<&Path>, plugin_dirs: &[P
     out
 }
 
-/// The marketplace and source folder of an enabled plugin whose marketplace is a local directory.
 fn directory_source(home: &Path, id: &str) -> Option<(String, PathBuf)> {
     let (name, marketplace) = id.split_once('@')?;
     let known = read_json(&home.join("plugins/known_marketplaces.json"));
@@ -220,7 +192,6 @@ fn read_json(file: &Path) -> Value {
     std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
-/// The table of skill folders on a machine. Adding a place means adding a row here.
 fn roots(places: &Places) -> Vec<Root> {
     let mut rows: Vec<(PathBuf, Place, String)> = vec![];
     for (_, home) in &places.claude_homes {
@@ -261,7 +232,6 @@ fn children(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Folders under Cursor's plugin folder that hold a `skills` folder, `depth` levels down at most.
 fn cursor_plugins(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = vec![];
     for child in children(dir) {
@@ -281,17 +251,12 @@ fn plugin_name(dir: &Path) -> String {
         .unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
 }
 
-/// One skill folder and every place it is in. `P` is `Place` after listing, `Writable` once
-/// parsed for a write.
 #[derive(Clone)]
 struct SkillCopy<P> {
-    /// Canonical skill folder.
     dir: PathBuf,
     key: String,
     description: String,
-    /// The first place the table lists it in, which names its row.
     place: P,
-    /// The other places that reach the same folder through a symlink.
     also: Vec<Place>,
 }
 
@@ -308,7 +273,6 @@ impl From<Writable> for Place {
 }
 
 impl SkillCopy<Place> {
-    /// The only way to get a `SkillCopy<Writable>`. Every place of the folder must be writable.
     fn writable(self) -> Result<SkillCopy<Writable>, Fixed> {
         let SkillCopy { dir, key, description, place, also } = self;
         if let Some(Place::Fixed(fixed)) = also.iter().find(|p| matches!(p, Place::Fixed(_))) {
@@ -320,7 +284,6 @@ impl SkillCopy<Place> {
         }
     }
 
-    /// Read-only when any place is, else lost on update when any place is.
     fn edit(&self) -> Edit {
         let edits: Vec<Edit> = self.places().iter().map(Place::edit).collect();
         let worst = edits.iter().find(|e| matches!(e, Edit::No { .. })).or_else(|| edits.iter().find(|e| **e == Edit::LostOnUpdate));
@@ -328,8 +291,6 @@ impl SkillCopy<Place> {
     }
 }
 
-/// Every copy on the machine, one per canonical folder, and the skill folders with no SKILL.md
-/// under writable places.
 fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
     let (mut copies, mut hollow): (Vec<SkillCopy<Place>>, Vec<PathBuf>) = (vec![], vec![]);
     for root in roots(places) {
@@ -367,8 +328,6 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
     (copies, hollow)
 }
 
-/// SHA-256 over the sorted relative path and content hash of every regular file in `dir`,
-/// leaving out symlinks and the names sync leaves out.
 fn tree(dir: &Path) -> String {
     let mut hasher = Sha256::new();
     for (rel, path) in files(dir) {
@@ -378,7 +337,6 @@ fn tree(dir: &Path) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Regular files under `dir` by their relative path, sorted.
 fn files(dir: &Path) -> Vec<(String, PathBuf)> {
     fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -401,8 +359,6 @@ fn files(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// A file inside a skill folder, as the client names it: relative, plain components only, and
-/// no name sync leaves out, so every file a save can write is part of the folder's `tree`.
 pub struct SkillFile(PathBuf);
 
 impl SkillFile {
@@ -415,7 +371,6 @@ impl SkillFile {
         Ok(SkillFile(path.to_path_buf()))
     }
 
-    /// The file under `dir`, refused when any part of the way is a symlink.
     fn in_dir(&self, dir: &Path) -> Result<PathBuf, String> {
         let mut path = dir.to_path_buf();
         for part in self.0.components() {
@@ -428,7 +383,6 @@ impl SkillFile {
     }
 }
 
-/// `Call::Skills`.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Listing {
     pub copies: Vec<CopyView>,
@@ -462,7 +416,6 @@ pub struct Reader {
     pub account: AccountId,
 }
 
-/// `Call::ReadSkill`.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct SkillText {
     pub text: String,
@@ -520,7 +473,6 @@ pub enum Delivery {
     NextStart,
 }
 
-/// `Call::SaveSkill`.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct SaveReport {
     pub copies: Vec<CopyOutcome>,
@@ -545,7 +497,6 @@ pub fn list(places: &Places) -> Listing {
     Listing { copies, hollow: hollow.iter().map(|d| d.display().to_string()).collect() }
 }
 
-/// One session per account, standing for any the account could run, to name who reads a copy.
 struct AccountSession {
     provider: Provider,
     home: PathBuf,
@@ -577,7 +528,6 @@ fn account_sessions(places: &Places) -> Vec<(Reader, AccountSession)> {
     out
 }
 
-/// The listed copy at `dir`, whatever route the client named it by.
 fn find(copies: &[SkillCopy<Place>], dir: &str) -> Option<SkillCopy<Place>> {
     let dir = dunce::canonicalize(dir).ok()?;
     copies.iter().find(|c| c.dir == dir).cloned()
@@ -597,15 +547,12 @@ fn is_text(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|bytes| std::str::from_utf8(&bytes).is_ok() && !bytes[..bytes.len().min(8192)].contains(&0))
 }
 
-/// The kept bytes of a plugin file pinned edited, by the file's path.
 fn original(originals: &Path, file: &Path) -> Option<String> {
     std::fs::read_to_string(originals.join(crate::sync::sha(file.to_string_lossy().as_bytes()))).ok()
 }
 
-/// What `save` did, before the machine nudges sessions.
 pub struct Written {
     pub copies: Vec<CopyOutcome>,
-    /// Places of copies whose bytes changed. Empty when every copy already held the text.
     pub touched: Vec<Place>,
 }
 
@@ -644,9 +591,6 @@ pub fn save(places: &Places, file: &str, text: &str, targets: &[Target]) -> Resu
     Ok(written)
 }
 
-/// The cache copies of a directory-marketplace plugin's skill, which follow its source copy.
-/// Sessions load the source, and plugin sync publishes the cache, so an edit to the source reaches
-/// other machines only through them.
 fn followers(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<SkillCopy<Place>> {
     let sources: Vec<(String, PathBuf)> = source
         .places()
@@ -660,9 +604,6 @@ fn followers(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<S
     copies.iter().filter(|c| c.dir != source.dir && c.dir.file_name() == source.dir.file_name() && c.places().iter().any(follows)).cloned().collect()
 }
 
-/// Writes `text` to `file` in `copy` unless the folder's tree is no longer `since`. A follower
-/// has no `since`. The tree is taken under `fsx::hold`, so a sync pull cannot land between the
-/// check and the write. Keeps the installed bytes first when the place is replaced on update.
 fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: Option<&str>, originals: &Path, touched: &mut Vec<Place>) -> Outcome {
     let path = match file.in_dir(&copy.dir) {
         Ok(path) => path,
@@ -692,7 +633,6 @@ fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: O
     }
 }
 
-/// What a session needs after a place it loads changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nudge {
     /// Claude Code reloads personal, project and plugin skills with `/reload-skills`.
@@ -700,19 +640,13 @@ pub enum Nudge {
     NextStart,
 }
 
-/// The facts of one running session that decide what it loads.
 pub struct Session<'a> {
     pub provider: Provider,
-    /// The account's CLI home.
     pub home: &'a Path,
-    /// Canonical.
     pub cwd: &'a Path,
-    /// The `--plugin-dir`s a Claude tab launched with.
     pub plugin_dirs: &'a [PathBuf],
 }
 
-/// Whether `session` loads `place`, and what it needs to see a change there. One function, so
-/// the page's readers and the tabs nudged after a save never disagree.
 pub fn reach(place: &Place, session: &Session) -> Option<Nudge> {
     use Place::{Fixed as F, Writable as W};
     let same_home = |home: &Path| home == session.home;
@@ -736,7 +670,6 @@ pub fn reach(place: &Place, session: &Session) -> Option<Nudge> {
     reached.then_some(if session.provider == Provider::Claude { Nudge::ReloadSkills } else { Nudge::NextStart })
 }
 
-/// Places a plugin-sync cycle changed, from the hub paths it pulled.
 pub fn pulled_by_plugin_sync(share: &crate::sync::PluginShare, pulled: &[String]) -> Vec<Place> {
     let mut out: Vec<Place> = vec![];
     for path in pulled {
@@ -754,7 +687,6 @@ pub fn pulled_by_plugin_sync(share: &crate::sync::PluginShare, pulled: &[String]
     out
 }
 
-/// The project's skills folder, when a project sync pulled into it.
 pub fn pulled_by_project_sync(checkout: &crate::sync::Checkout, pulled: &[String]) -> Vec<Place> {
     let path = dunce::canonicalize(&checkout.path).unwrap_or_else(|_| checkout.path.clone());
     let touched = pulled.iter().any(|p| p.starts_with("skills/"));
@@ -787,7 +719,6 @@ mod tests {
         }
     }
 
-    /// A machine with a copy in every place, under a temp folder standing in for `$HOME`.
     fn fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(temp.path()).unwrap();

@@ -367,7 +367,6 @@ fn exchange(
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
             let _held = crate::fsx::hold();
-            // A skill save that wrote the file after this cycle hashed it wins. The next cycle shares it.
             if state.hash(&target).map(|(sha, _)| sha) != local.get(&file.entry.path).map(|(sha, _)| sha.clone()) {
                 continue;
             }
@@ -1568,7 +1567,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Runs `during` once, between a cycle's choice to pull and the pull's write.
     struct WriteDuringPull<'a> {
         hub: &'a MemHub,
         during: RefCell<Option<Box<dyn FnOnce() + 'a>>>,

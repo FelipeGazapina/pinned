@@ -1,11 +1,7 @@
-//! The one way pinned replaces a file another process may be reading.
-
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-/// Prefix of the file `replace` writes beside its target. `sync::blocked` skips it, so a sync
-/// cycle that runs mid-write neither pushes it nor deletes it on other machines.
 pub const TEMP_PREFIX: &str = ".pinned-tmp-";
 
 /// Held by a sync pull and by a skill save from the check that a file is still what they last
@@ -39,7 +35,6 @@ pub fn replace(target: &Path, bytes: &[u8], modified: Option<u64>, executable: O
     Ok(())
 }
 
-/// The file a write to `path` lands in: the end of its chain of symlinks, which need not exist yet.
 fn through_links(path: &Path) -> std::path::PathBuf {
     let mut path = path.to_path_buf();
     for _ in 0..40 {
