@@ -1376,6 +1376,7 @@ function connectHub(signedIn) {
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
+      showAgentConsent();
     },
     machines: (list, tabs) => showMachines(list, tabs),
     // This Mac's own events come over Tauri, not back through the hub.

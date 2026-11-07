@@ -250,6 +250,7 @@ function integrationsHtml() {
        <p class="error" id="linear-error"></p>`;
   return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
+    ${agentConsentHtml()}
     <div class="card">
       <div class="card-head"><span class="logo" data-tone="linear" data-logo="linear">${LOGOS.linear}</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
@@ -258,7 +259,8 @@ function integrationsHtml() {
     ${slackCardHtml()}
     ${githubCardHtml()}
     ${vercelCardHtml()}
-    ${upstashCardHtml()}`;
+    ${upstashCardHtml()}
+    ${externalAgentsCardHtml()}`;
 }
 
 function upstashCardHtml() {
@@ -2117,7 +2119,8 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => (settingsPage.innerHTML = integrationsHtml()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents()), search: [
+  { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },

@@ -53,6 +53,7 @@ test("a hub hello sends the current watch again", () => {
   sandbox.showMachines = () => sandbox.publishThreadWatch();
   sandbox.hub = { hub: () => Promise.resolve() };
   sandbox.onHubSettings = () => {};
+  sandbox.showAgentConsent = () => {};
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const start = main.indexOf("    hello(frame) {");
   const end = main.indexOf("    machines:", start);

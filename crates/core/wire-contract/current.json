@@ -12,7 +12,18 @@
     "GET /ws/machine",
     "GET /install.sh",
     "GET /download/{file}",
-    "GET /new"
+    "GET /new",
+    "GET /.well-known/oauth-protected-resource",
+    "GET /.well-known/oauth-protected-resource/mcp",
+    "GET /.well-known/oauth-authorization-server",
+    "POST /oauth/register",
+    "GET /oauth/authorize",
+    "POST /oauth/token",
+    "POST /oauth/revoke",
+    "GET /connect-agent",
+    "POST /mcp",
+    "GET /mcp",
+    "DELETE /mcp"
   ],
   "inbound": {
     "ClientFrame": {
@@ -4382,6 +4393,101 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "external_agents"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_request"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: lets the agent of the pending `request` in with `scopes` on `projects`, and\nanswers where the browser goes next, the agent's redirect with a one-use code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "approve_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/AgentProject"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request",
+                  "scopes",
+                  "projects"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: refuses the pending `request`, and answers the agent's redirect with `access_denied`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deny_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`null`. Ends the agent's access at once: its tokens stop working.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_agent"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
               }
             ]
           },
@@ -5775,6 +5881,27 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "name"
             ]
           },
           "Target": {
@@ -10113,6 +10240,101 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "external_agents"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_request"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: lets the agent of the pending `request` in with `scopes` on `projects`, and\nanswers where the browser goes next, the agent's redirect with a one-use code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "approve_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/AgentProject"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request",
+                  "scopes",
+                  "projects"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: refuses the pending `request`, and answers the agent's redirect with `access_denied`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deny_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`null`. Ends the agent's access at once: its tokens stop working.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_agent"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
               }
             ]
           },
@@ -11453,6 +11675,26 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path"
             ]
           },
           "Target": {
@@ -13026,6 +13268,101 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "external_agents"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_request"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: lets the agent of the pending `request` in with `scopes` on `projects`, and\nanswers where the browser goes next, the agent's redirect with a one-use code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "approve_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/AgentProject"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request",
+                  "scopes",
+                  "projects"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: refuses the pending `request`, and answers the agent's redirect with `access_denied`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deny_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`null`. Ends the agent's access at once: its tokens stop working.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_agent"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
               }
             ]
           },
@@ -14419,6 +14756,27 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "name"
             ]
           }
         }
@@ -15948,6 +16306,101 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "external_agents"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_request"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: lets the agent of the pending `request` in with `scopes` on `projects`, and\nanswers where the browser goes next, the agent's redirect with a one-use code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "approve_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/AgentProject"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request",
+                  "scopes",
+                  "projects"
+                ]
+              },
+              {
+                "description": "`AgentRedirect`: refuses the pending `request`, and answers the agent's redirect with `access_denied`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deny_agent"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request"
+                ]
+              },
+              {
+                "description": "`null`. Ends the agent's access at once: its tokens stop working.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_agent"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
               }
             ]
           },
@@ -17289,6 +17742,26 @@
                 "const": "review"
               }
             ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path"
+            ]
           }
         }
       }
@@ -17488,6 +17961,110 @@
         "required": [
           "id",
           "email"
+        ]
+      }
+    },
+    "AgentRedirect": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentRedirect",
+        "type": "object",
+        "properties": {
+          "redirect": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentRedirect",
+        "type": "object",
+        "properties": {
+          "redirect": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect"
+        ]
+      }
+    },
+    "AgentRequest": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentRequest",
+        "description": "A pending authorization, for the consent card.",
+        "type": "object",
+        "properties": {
+          "request": {
+            "type": "string"
+          },
+          "client": {
+            "description": "The name the client registered with, which it chose itself.",
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "scopes": {
+            "description": "What the client asked for. The user picks what it gets.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "request",
+          "client",
+          "redirect_uri",
+          "scopes",
+          "expires_at"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AgentRequest",
+        "description": "A pending authorization, for the consent card.",
+        "type": "object",
+        "properties": {
+          "request": {
+            "type": "string"
+          },
+          "client": {
+            "description": "The name the client registered with, which it chose itself.",
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "scopes": {
+            "description": "What the client asked for. The user picks what it gets.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "request",
+          "client",
+          "redirect_uri",
+          "scopes",
+          "expires_at"
         ]
       }
     },
@@ -19834,6 +20411,193 @@
               "from",
               "port",
               "to"
+            ]
+          }
+        }
+      }
+    },
+    "ExternalAgents": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ExternalAgents",
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "description": "The URL an MCP client adds as a server.",
+            "type": "string"
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AgentView"
+            }
+          }
+        },
+        "required": [
+          "endpoint",
+          "agents"
+        ],
+        "$defs": {
+          "AgentView": {
+            "description": "An external agent the account let in through OAuth, as the Connectors page lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "redirect": {
+                "description": "Where the agent's OAuth redirect points, which names who runs it.",
+                "type": "string"
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AgentProject"
+                }
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "last_used": {
+                "description": "Unix seconds of its last call, absent until it made one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "redirect",
+              "scopes",
+              "projects",
+              "created_at"
+            ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "name"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ExternalAgents",
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "description": "The URL an MCP client adds as a server.",
+            "type": "string"
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/AgentView"
+            }
+          }
+        },
+        "required": [
+          "endpoint",
+          "agents"
+        ],
+        "$defs": {
+          "AgentView": {
+            "description": "An external agent the account let in through OAuth, as the Connectors page lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "redirect": {
+                "description": "Where the agent's OAuth redirect points, which names who runs it.",
+                "type": "string"
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AgentProject"
+                }
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "last_used": {
+                "description": "Unix seconds of its last call, absent until it made one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "redirect",
+              "scopes",
+              "projects",
+              "created_at"
+            ]
+          },
+          "AgentProject": {
+            "description": "A project an external agent may work in: one folder on one machine.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path"
             ]
           }
         }

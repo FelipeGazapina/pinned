@@ -77,6 +77,8 @@ pub struct Hub {
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
     sockets: AtomicU64,
+    /// Serializes external agents' work on one project's orchestrator.
+    agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 pub struct Account {
@@ -146,7 +148,14 @@ impl Hub {
     pub fn new(db: Db, public_url: String, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1) })
+        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
+    }
+
+    /// The lock for `key`. Locks nobody holds are dropped as others are taken, so the map stays small.
+    pub fn agent_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.agent_locks.lock().unwrap();
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks.entry(key.to_owned()).or_default().clone()
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -454,6 +463,14 @@ impl Hub {
             HubCall::LinearTake { connector, channel, thread, issue } => {
                 (json(c().await?.linear_take(&connector, &channel, &thread, &issue).await?), true)
             }
+            HubCall::ExternalAgents => return json(crate::oauth::agents(self, account).await?),
+            HubCall::AgentRequest { request } => return json(crate::oauth::request(self, &request).await?),
+            HubCall::ApproveAgent { request, scopes, projects } => return json(crate::oauth::approve(self, account, &request, scopes, projects).await?),
+            HubCall::DenyAgent { request } => return json(crate::oauth::deny(self, &request).await?),
+            HubCall::RevokeAgent { id } => {
+                crate::oauth::revoke_grant(self, account, &id).await?;
+                return Ok(Value::Null);
+            }
         };
         if changed {
             self.watch(account).await?;
@@ -514,9 +531,8 @@ impl Account {
             return false;
         }
         let Some(gone) = live.machines.remove(machine) else { return false };
-        for (_, waiting) in gone.pending {
-            let _ = waiting.answer.send(Err(format!("{} went offline", gone.name)));
-        }
+        // Dropped unanswered, so each caller sees `Unanswered::Lost`: the call was sent and may have acted.
+        drop(gone.pending);
         for client in live.clients.values_mut() {
             client.attached.retain(|t| t.machine != machine);
         }
@@ -965,6 +981,17 @@ mod tests {
             frames.push(serde_json::from_str::<Value>(&text).unwrap());
         }
         assert_eq!(frames, vec![serde_json::json!({ "type": "watch_threads", "viewer": "client-1", "tabs": ["tab-1"] })], "the watch of client 1, which never saw the machine leave, and none for client 2, which unwatched it");
+    }
+
+    #[test]
+    fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() };
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
+        let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
+        assert!(account.went_offline("m", Some(1)));
+        // `Hub::answer` reads a closed channel as `Unanswered::Lost`, and an answer sent into it as `Refused`.
+        assert_eq!(answered.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed));
     }
 
     #[test]
