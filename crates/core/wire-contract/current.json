@@ -108,7 +108,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target",
+            "$ref": "#/$defs/Target2",
             "required": [
               "type"
             ]
@@ -121,7 +121,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target",
+            "$ref": "#/$defs/Target2",
             "required": [
               "type"
             ]
@@ -1309,6 +1309,70 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`skills::Listing`: every skill folder on the machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "skills"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`skills::SkillText` of `file` in the listed skill folder at `dir`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_skill"
+                  },
+                  "dir": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "dir",
+                  "file"
+                ]
+              },
+              {
+                "description": "`skills::SaveReport`. Writes `text` to `file` in each listed, writable copy that is\nunchanged since its `since`, then reloads the sessions that load them.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_skill"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "copies": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Target"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "file",
+                  "text",
+                  "copies"
                 ]
               },
               {
@@ -2803,6 +2867,22 @@
                 "type": "string",
                 "const": "base"
               }
+            ]
+          },
+          "Target": {
+            "description": "One copy a save should write, with the tree the client read it at.",
+            "type": "object",
+            "properties": {
+              "dir": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "dir",
+              "since"
             ]
           },
           "ListState": {
@@ -5905,7 +5985,7 @@
               "name"
             ]
           },
-          "Target": {
+          "Target2": {
             "type": "object",
             "properties": {
               "machine": {
@@ -6002,7 +6082,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target",
+            "$ref": "#/$defs/Target2",
             "required": [
               "type"
             ]
@@ -6015,7 +6095,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target",
+            "$ref": "#/$defs/Target2",
             "required": [
               "type"
             ]
@@ -7200,6 +7280,68 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`skills::Listing`: every skill folder on the machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "skills"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`skills::SkillText` of `file` in the listed skill folder at `dir`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_skill"
+                  },
+                  "dir": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "dir"
+                ]
+              },
+              {
+                "description": "`skills::SaveReport`. Writes `text` to `file` in each listed, writable copy that is\nunchanged since its `since`, then reloads the sessions that load them.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_skill"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "copies": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Target"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "copies"
                 ]
               },
               {
@@ -8675,6 +8817,22 @@
                 "type": "string",
                 "const": "base"
               }
+            ]
+          },
+          "Target": {
+            "description": "One copy a save should write, with the tree the client read it at.",
+            "type": "object",
+            "properties": {
+              "dir": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "dir",
+              "since"
             ]
           },
           "ListState": {
@@ -11698,7 +11856,7 @@
               "path"
             ]
           },
-          "Target": {
+          "Target2": {
             "type": "object",
             "properties": {
               "machine": {
@@ -12140,6 +12298,26 @@
                 "required": [
                   "kind",
                   "status"
+                ]
+              },
+              {
+                "description": "Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skills-changed"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Scope"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scopes"
                 ]
               }
             ]
@@ -12625,6 +12803,66 @@
                 "required": [
                   "state",
                   "reason"
+                ]
+              }
+            ]
+          },
+          "Scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "personal"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "checkout": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkout"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "plugin"
+                  },
+                  "plugin": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "plugin"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "builtin"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -15204,6 +15442,26 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skills-changed"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Scope"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scopes"
+                ]
               }
             ]
           },
@@ -15669,6 +15927,66 @@
                 "required": [
                   "state",
                   "reason"
+                ]
+              }
+            ]
+          },
+          "Scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "personal"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "checkout": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkout"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "plugin"
+                  },
+                  "plugin": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "plugin"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "builtin"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -26764,6 +27082,26 @@
                   "kind",
                   "status"
                 ]
+              },
+              {
+                "description": "Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skills-changed"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Scope"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scopes"
+                ]
               }
             ]
           },
@@ -26913,6 +27251,66 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "personal"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "checkout": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkout"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "plugin"
+                  },
+                  "plugin": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "plugin"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "builtin"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
             ]
           },
           "Settings": {
@@ -29110,6 +29508,26 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skills-changed"
+                  },
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Scope"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "scopes"
+                ]
               }
             ]
           },
@@ -29249,6 +29667,66 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "personal"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "checkout": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "checkout"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "plugin"
+                  },
+                  "plugin": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "plugin"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "builtin"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
             ]
           },
           "Settings": {
@@ -32149,6 +32627,70 @@
                 ]
               },
               {
+                "description": "`skills::Listing`: every skill folder on the machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "skills"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`skills::SkillText` of `file` in the listed skill folder at `dir`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_skill"
+                  },
+                  "dir": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "dir",
+                  "file"
+                ]
+              },
+              {
+                "description": "`skills::SaveReport`. Writes `text` to `file` in each listed, writable copy that is\nunchanged since its `since`, then reloads the sessions that load them.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_skill"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "copies": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Target"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "file",
+                  "text",
+                  "copies"
+                ]
+              },
+              {
                 "description": "`branches::Branches` of the tab's folder.",
                 "type": "object",
                 "properties": {
@@ -33640,6 +34182,22 @@
                 "type": "string",
                 "const": "base"
               }
+            ]
+          },
+          "Target": {
+            "description": "One copy a save should write, with the tree the client read it at.",
+            "type": "object",
+            "properties": {
+              "dir": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "dir",
+              "since"
             ]
           },
           "ListState": {
@@ -35938,6 +36496,68 @@
                 ]
               },
               {
+                "description": "`skills::Listing`: every skill folder on the machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "skills"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`skills::SkillText` of `file` in the listed skill folder at `dir`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_skill"
+                  },
+                  "dir": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "dir"
+                ]
+              },
+              {
+                "description": "`skills::SaveReport`. Writes `text` to `file` in each listed, writable copy that is\nunchanged since its `since`, then reloads the sessions that load them.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_skill"
+                  },
+                  "file": {
+                    "type": "string",
+                    "default": "SKILL.md"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "copies": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Target"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "copies"
+                ]
+              },
+              {
                 "description": "`branches::Branches` of the tab's folder.",
                 "type": "object",
                 "properties": {
@@ -37410,6 +38030,22 @@
                 "type": "string",
                 "const": "base"
               }
+            ]
+          },
+          "Target": {
+            "description": "One copy a save should write, with the tree the client read it at.",
+            "type": "object",
+            "properties": {
+              "dir": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "dir",
+              "since"
             ]
           },
           "ListState": {
