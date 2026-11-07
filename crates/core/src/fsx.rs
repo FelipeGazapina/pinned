@@ -27,6 +27,8 @@ pub fn replace(target: &Path, bytes: &[u8], modified: Option<u64>, executable: O
     }
     flush(temp.as_file()).map_err(failed)?;
     temp.persist(target).map_err(|e| failed(e.error))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir).and_then(|dir| flush(&dir)).map_err(failed)?;
     Ok(())
 }
 
