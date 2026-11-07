@@ -13,6 +13,9 @@ async function fetchSkills(only = onlineMachines()) {
   const got = await Promise.allSettled(only.map((m) => callOn(m, { cmd: "skills" })));
   only.forEach((m, i) => skillsUi.byMachine.set(m, got[i].status === "fulfilled" ? got[i].value : { error: String(got[i].reason) }));
   for (const m of skillsUi.byMachine.keys()) if (!machines.get(m)?.view.online) skillsUi.byMachine.delete(m);
+  const o = skillsUi.open;
+  const row = o?.got && openRow();
+  if (row) refreshChecks(o, row);
   skillsUi.loading = false;
   renderSkillsPage();
 }
@@ -110,10 +113,99 @@ const diffHtml = (path, before, after) =>
 
 const openRow = () => skillRows().find((r) => r.id === skillsUi.open?.row);
 const editText = (o) => o.draft ?? o.got?.text ?? "";
+const skillDirty = (o) => o?.got != null && o.draft != null && o.draft !== o.got.text;
 
-/** Opens `copy`: reads it, and checks every editable copy with the same tree, plus the copies sync keeps linked to a checked one. */
+/** The Save to checklist. `o.since` holds each copy's tree as the page saw it when the skill
+ * opened, or when its diff was last opened. A save sends that tree, so it never writes over a
+ * change nobody looked at. */
+function openChecks(o, row) {
+  o.since = new Map(row.copies.map((c) => [copyId(c), c.tree]));
+  o.since.set(copyId(o.copy), o.got.tree);
+  o.checked = new Set(row.copies.filter((c) => c.edit !== "no" && o.since.get(copyId(c)) === o.got.tree).map(copyId));
+  o.changed = new Set();
+}
+
+/** After a refresh: a copy whose tree moved since the page saw it is unchecked until its diff is opened again. */
+function refreshChecks(o, row) {
+  for (const c of row.copies) {
+    const id = copyId(c);
+    if (!o.since.has(id)) o.since.set(id, c.tree);
+    else if (o.since.get(id) !== c.tree) {
+      o.checked.delete(id);
+      o.compared.delete(id);
+      o.changed.add(id);
+      o.since.set(id, c.tree);
+    }
+  }
+}
+
+/** The diff of `c` was opened: it may be checked, and a save sends the tree that diff showed. */
+function sawCopy(o, c, got) {
+  o.compared.set(copyId(c), got);
+  if (got.tree) o.since.set(copyId(c), got.tree);
+  o.changed.delete(copyId(c));
+}
+
+/** Why a save writes `c` though it is not checked: sync carries the save to it, or it is the cache
+ * copy that follows a checked plugin source. */
+function writtenAnyway(o, row, c) {
+  if (o.checked.has(copyId(c))) return "";
+  const checked = row.copies.filter((x) => o.checked.has(copyId(x)));
+  if (c.linked && checked.some((x) => x.linked === c.linked)) return "Sync replaces this copy with this save, checked or not.";
+  const follows = (x) => x.machine === c.machine && x.place.kind === "plugin-source" && x.place.plugin === c.place.plugin && x.place.home === c.place.home && baseName(x.dir) === baseName(c.dir);
+  if (c.place.kind === "plugin-cache" && !c.place.loaded && checked.some(follows)) return "Saving the plugin's source copy writes this copy too.";
+  return "";
+}
+
+/** A copy differs from the open one, or changed since the page saw it, and its diff is not open yet. */
+const copyUnseen = (o, c) => !o.compared.has(copyId(c)) && (o.changed.has(copyId(c)) || (copyId(c) !== copyId(o.copy) && c.tree !== o.got.tree));
+
+/** What the checklist shows for `c`. A disabled box is never checked. */
+function copyCheck(o, row, c) {
+  const id = copyId(c);
+  const fixed = c.edit === "no";
+  const hidden = !fixed && copyUnseen(o, c);
+  const disabled = fixed || hidden;
+  const anyway = writtenAnyway(o, row, c);
+  const why = fixed
+    ? c.why
+    : o.changed.has(id) && hidden
+      ? "Changed since you opened it. Compare it first."
+      : hidden
+        ? "Differs from the copy you opened. Compare it first."
+        : anyway || (c.edit === "lost-on-update" ? "Lost on the next plugin update." : "");
+  return { checked: !disabled && o.checked.has(id), disabled, compare: hidden || o.compared.has(id), why };
+}
+
+/** The first copy the save would write unseen: it stays blocked until that diff is opened. */
+const saveBlocker = (o, row) => row.copies.find((c) => c.edit !== "no" && writtenAnyway(o, row, c) && copyUnseen(o, c));
+
+/** One list of `{ dir, since }` per machine, for the checked copies. */
+function saveTargets(o, row) {
+  const byMachine = new Map();
+  for (const c of row.copies) {
+    if (!copyCheck(o, row, c).checked) continue;
+    byMachine.set(c.machine, [...(byMachine.get(c.machine) ?? []), { dir: c.dir, since: o.since.get(copyId(c)) }]);
+  }
+  return byMachine;
+}
+
+/** Another machine's save or a sync pull changed skills there: list those machines again. */
+function skillsChanged(machine) {
+  if (document.body.dataset.page !== "skills" || !machines.get(machine)?.view.online) return;
+  (skillsChanged.machines ??= new Set()).add(machine);
+  clearTimeout(skillsChanged.timer);
+  skillsChanged.timer = setTimeout(() => {
+    const changed = [...skillsChanged.machines];
+    skillsChanged.machines.clear();
+    fetchSkills(changed);
+  }, 300);
+}
+
+/** Opens `copy`: reads it, and checks every editable copy whose tree is the one read. */
 async function openSkill(row, copy, file = "SKILL.md") {
-  skillsUi.open = { row: row.id, copy, file, got: null, draft: null, view: "edit", checked: new Set(), compared: new Map(), report: null, saving: false };
+  skillsUi.opened = (skillsUi.opened ?? 0) + 1;
+  skillsUi.open = { id: skillsUi.opened, row: row.id, copy, file, got: null, draft: null, view: "edit", checked: new Set(), since: new Map(), changed: new Set(), compared: new Map(), report: null, saving: false, leaving: null };
   renderSkillsPage();
   const o = skillsUi.open;
   try {
@@ -122,19 +214,22 @@ async function openSkill(row, copy, file = "SKILL.md") {
     o.error = String(e);
     return renderSkillsPage();
   }
-  const editable = row.copies.filter((c) => c.edit !== "no");
-  for (const c of editable) if (c.tree === o.got.tree) o.checked.add(copyId(c));
-  const linked = new Set(editable.filter((c) => o.checked.has(copyId(c)) && c.linked).map((c) => `${c.machine}\n${c.linked}`));
-  for (const c of editable) if (c.linked && linked.has(`${c.machine}\n${c.linked}`)) o.checked.add(copyId(c));
+  openChecks(o, openRow() ?? row);
   if (skillsUi.open === o) renderSkillsPage();
 }
 
-/** A copy whose tree differs from the open one shows its diff before it can be checked. */
+/** Runs `go` now, or once the user agrees to drop the unsaved draft. */
+function leaveThen(go) {
+  const o = skillsUi.open;
+  if (!skillDirty(o)) return go();
+  o.leaving = go;
+  renderSkillsPage();
+}
+
 async function compareCopy(c) {
   const o = skillsUi.open;
   try {
-    const got = await callOn(c.machine, { cmd: "read_skill", dir: c.dir, file: o.file });
-    o.compared.set(copyId(c), got);
+    sawCopy(o, c, await callOn(c.machine, { cmd: "read_skill", dir: c.dir, file: o.file }));
   } catch (e) {
     o.compared.set(copyId(c), { error: String(e) });
   }
@@ -145,15 +240,12 @@ async function compareCopy(c) {
 function checklistHtml(row, o) {
   const items = row.copies.map((c) => {
     const id = copyId(c);
-    const fixed = c.edit === "no";
-    const differs = !fixed && c.tree !== o.got.tree && copyId(o.copy) !== id;
-    const seen = o.compared.has(id);
-    const why = fixed ? c.why : differs && !seen ? "Differs from the copy you opened. Compare it first." : c.edit === "lost-on-update" ? "Lost on the next plugin update." : "";
+    const state = copyCheck(o, row, c);
     const note = c.place.kind === "plugin-cache" && !c.place.loaded ? " Sessions here load the plugin's source copy. A save to the source writes this copy too, and plugin sync sends it to your other machines." : "";
-    return `<li class="${fixed ? "fixed" : ""}"><label><input type="checkbox" data-skill-check="${esc(id)}"${o.checked.has(id) ? " checked" : ""}${fixed || (differs && !seen) ? " disabled" : ""}>
+    return `<li class="${c.edit === "no" ? "fixed" : ""}"><label><input type="checkbox" data-skill-check="${esc(id)}"${state.checked ? " checked" : ""}${state.disabled ? " disabled" : ""}>
       <span class="where">${esc(whereLabel(c))}</span>${copyId(o.copy) === id ? `<span class="tag">open</span>` : ""}${c.edited ? `<span class="tag warn">edited</span>` : ""}</label>
-      ${differs ? `<button type="button" class="link" data-skill-compare="${esc(id)}">Compare</button>` : ""}
-      <span class="why">${esc(why + note)}</span><span class="dir" title="${esc(c.dir)}">${esc(c.dir)}</span></li>`;
+      ${state.compare ? `<button type="button" class="link" data-skill-compare="${esc(id)}">Compare</button>` : ""}
+      <span class="why">${esc(state.why + note)}</span><span class="dir" title="${esc(c.dir)}">${esc(c.dir)}</span></li>`;
   });
   return `<section class="save-to"><h3>Save to</h3><ul>${items.join("")}</ul></section>`;
 }
@@ -183,12 +275,13 @@ function reportHtml(report) {
   return `<div class="skills-report" role="status"><p>${esc(parts.join(" "))}</p>${buttons ? `<p class="buttons">${buttons}</p>` : ""}${problems.length ? `<ul>${problems.join("")}</ul>` : ""}</div>`;
 }
 
-function editorPaneHtml(row, o) {
-  if (!row) return `<p class="muted note">This skill is no longer listed.</p>`;
+/** The editor pane in three parts, so a refresh can redraw the parts around an open editor and leave
+ * the textarea, with its undo history and caret, alone. */
+function editorParts(row, o) {
   const head = `<div class="skill-head"><h2>${esc(row.key)}</h2><span class="muted">${esc(whereLabel(o.copy))}</span><span class="spacer"></span>
     ${o.got?.files?.length > 1 ? `<select data-skill-file aria-label="File">${o.got.files.map((f) => `<option${f === o.file ? " selected" : ""}>${esc(f)}</option>`).join("")}</select>` : ""}</div>`;
-  if (o.error) return `${head}<p class="skills-note error">${esc(o.error)}</p>`;
-  if (!o.got) return `${head}<div class="file-loading" role="status" aria-label="Loading skill"><span class="spinner"></span></div>`;
+  if (o.error) return { top: `${head}<p class="skills-note error">${esc(o.error)}</p>`, body: null, bottom: "" };
+  if (!o.got) return { top: `${head}<div class="file-loading" role="status" aria-label="Loading skill"><span class="spinner"></span></div>`, body: null, bottom: "" };
   const locked = o.copy.edit === "no";
   const text = editText(o);
   const compare = o.view.startsWith("compare:") ? o.compared.get(o.view.slice(8)) : null;
@@ -200,29 +293,49 @@ function editorPaneHtml(row, o) {
   else if (o.view === "original") body = diffHtml(o.file, o.got.original, text);
   else if (compare?.error) body = `<p class="skills-note error">${esc(compare.error)}</p>`;
   else if (compare) body = `<p class="muted">That copy's ${esc(o.file)} against the text you are saving.</p>${diffHtml(o.file, compare.text, text)}`;
-  else body = editorHtml(o.file, text, { locked });
-  const checkedRows = row.copies.filter((c) => o.checked.has(copyId(c)));
+  else body = editorHtml(o.file, text, { locked, attrs: ` data-skill-editor="${o.id}"` });
+  const targets = [...saveTargets(o, row).values()].flat().length;
+  const checkedRows = row.copies.filter((c) => copyCheck(o, row, c).checked);
   const lost = checkedRows.some((c) => c.edit === "lost-on-update") && !checkedRows.some((c) => c.place.kind === "plugin-source");
+  const blocker = locked ? null : saveBlocker(o, row);
   const notes = [
+    o.leaving ? `<p class="skills-note warn">${esc(o.file)} has changes you have not saved. <button type="button" class="link" data-skill-leave="discard">Discard them</button> <button type="button" class="link" data-skill-leave="stay">Keep editing</button></p>` : "",
     locked ? `<p class="skills-note">${esc(o.copy.why)}</p>` : "",
     lost ? `<p class="skills-note warn">A checked plugin cache copy is replaced on the next plugin update, and this edit with it.</p>` : "",
+    blocker ? `<p class="skills-note warn">This save also replaces ${esc(whereLabel(blocker))}, which differs from the copy you opened. Compare it before you save.</p>` : "",
   ].join("");
-  const pending = o.draft != null && o.draft !== o.got.text;
-  const save = locked ? "" : `<button type="button" class="primary" data-skill-save${!pending || !checkedRows.length || o.saving ? " disabled" : ""} title="Save (${MOD}S)">${o.saving ? "Saving..." : `Save to ${checkedRows.length} ${checkedRows.length === 1 ? "copy" : "copies"}`}</button>`;
-  return `${head}${bar}${notes}<div class="skill-body">${body}</div><div class="skill-actions">${save}</div>${o.report ? reportHtml(o.report) : ""}${checklistHtml(row, o)}`;
+  const save = locked ? "" : `<button type="button" class="primary" data-skill-save${!skillDirty(o) || !targets || o.saving || blocker ? " disabled" : ""} title="Save (${MOD}S)">${o.saving ? "Saving..." : `Save to ${targets} ${targets === 1 ? "copy" : "copies"}`}</button>`;
+  return { top: `${head}${bar}${notes}`, body, bottom: `<div class="skill-actions">${save}</div>${o.report ? reportHtml(o.report) : ""}${checklistHtml(row, o)}` };
+}
+
+function editorPaneHtml(row, o) {
+  if (!row) return `<p class="muted note">This skill is no longer listed.</p>`;
+  const { top, body, bottom } = editorParts(row, o);
+  return `<div class="skill-top">${top}</div>${body == null ? "" : `<div class="skill-body">${body}</div>`}<div class="skill-bottom">${bottom}</div>`;
 }
 
 function renderSkillsPage() {
   if (document.body.dataset.page !== "skills") return;
   const rows = skillRows();
   const o = skillsUi.open;
+  const row = o && rows.find((r) => r.id === o.row);
+  const shown = pageView.querySelector(".skills-editor [data-skill-editor]");
+  const parts = row && editorParts(row, o);
+  if (shown && parts?.body?.includes(`data-skill-editor="${o.id}"`) && shown.dataset.skillEditor === String(o.id)) {
+    pageView.querySelector(".skills-notes").innerHTML = machineNotesHtml();
+    pageView.querySelector(".skills-rows").innerHTML = listHtml(rows);
+    pageView.querySelector(".skill-top").innerHTML = parts.top;
+    pageView.querySelector(".skill-bottom").innerHTML = parts.bottom;
+    pageView.querySelector("[data-skills-refresh]")?.classList.toggle("spinning", skillsUi.loading);
+    return;
+  }
   const editing = document.activeElement?.matches?.("#page-view .code-edit") && [document.activeElement.selectionStart, document.activeElement.selectionEnd];
   const filtering = document.activeElement?.matches?.("[data-skills-filter]") && document.activeElement.selectionStart;
   const refresh = `<button type="button" class="icon refresh${skillsUi.loading ? " spinning" : ""}" data-skills-refresh aria-label="Refresh skills">${icon("refresh-cw")}</button>`;
   setPage(`${headHtml("Skills", `<span class="spacer"></span>${refresh}`)}
-    <div class="page-body"><div class="page-wrap skills${o ? " with-editor" : ""}">${machineNotesHtml()}
-      <div class="skills-split"><div class="skills-list"><input type="search" class="skills-filter" data-skills-filter placeholder="Filter skills" value="${esc(skillsUi.filter)}" aria-label="Filter skills">${listHtml(rows)}</div>
-      ${o ? `<div class="skills-editor">${editorPaneHtml(rows.find((r) => r.id === o.row), o)}</div>` : ""}</div></div></div>`);
+    <div class="page-body"><div class="page-wrap skills${o ? " with-editor" : ""}"><div class="skills-notes">${machineNotesHtml()}</div>
+      <div class="skills-split"><div class="skills-list"><input type="search" class="skills-filter" data-skills-filter placeholder="Filter skills" value="${esc(skillsUi.filter)}" aria-label="Filter skills"><div class="skills-rows">${listHtml(rows)}</div></div>
+      ${o ? `<div class="skills-editor">${editorPaneHtml(row, o)}</div>` : ""}</div></div></div>`);
   if (editing) {
     const area = pageView.querySelector(".code-edit");
     area?.focus();
@@ -235,16 +348,12 @@ function renderSkillsPage() {
   }
 }
 
-/** ⌘S. One `save_skill` per machine, each copy with the tree it was listed or read at. */
+/** ⌘S. One `save_skill` per machine, each copy with the tree the page last saw it at. */
 async function saveSkill() {
   const o = skillsUi.open;
   const row = openRow();
-  if (!o?.got || o.draft == null || o.saving || !row) return;
-  const byMachine = new Map();
-  for (const c of row.copies.filter((c) => o.checked.has(copyId(c)))) {
-    const since = copyId(c) === copyId(o.copy) ? o.got.tree : c.tree;
-    byMachine.set(c.machine, [...(byMachine.get(c.machine) ?? []), { dir: c.dir, since }]);
-  }
+  if (!skillDirty(o) || o.saving || !row || saveBlocker(o, row)) return;
+  const byMachine = saveTargets(o, row);
   if (!byMachine.size) return;
   o.saving = true;
   renderSkillsPage();
@@ -253,30 +362,29 @@ async function saveSkill() {
   const got = await Promise.allSettled(ms.map((m) => callOn(m, { cmd: "save_skill", file: o.file, text, copies: byMachine.get(m) })));
   o.report = ms.map((m, i) => ({ machine: m, ...(got[i].status === "fulfilled" ? got[i].value : { error: String(got[i].reason) }) }));
   o.saving = false;
+  for (const r of o.report) for (const c of r.copies ?? []) if (c.outcome === "saved") o.since.set(`${r.machine}\n${c.dir}`, c.tree);
   const mine = o.report.find((r) => r.machine === o.copy.machine)?.copies?.find((c) => c.dir === o.copy.dir);
   if (mine?.outcome === "saved") {
     o.got = { ...o.got, text, tree: mine.tree };
-    o.draft = null;
+    if (o.draft === text) o.draft = null;
   }
   await fetchSkills();
 }
 
-/** Another machine's save or a sync pull changed skills there: list that machine again. */
-function skillsChanged(machine) {
-  if (document.body.dataset.page !== "skills" || !machines.get(machine)?.view.online) return;
-  clearTimeout(skillsChanged.timer);
-  skillsChanged.timer = setTimeout(() => fetchSkills([machine]), 300);
-}
-
 pageView.addEventListener("click", (e) => {
   if (document.body.dataset.page !== "skills") return;
-  const t = e.target.closest("[data-skill-row], [data-skill-view], [data-skill-save], [data-skill-compare], [data-skill-restart], [data-skills-refresh]");
+  const t = e.target.closest("[data-skill-row], [data-skill-view], [data-skill-save], [data-skill-compare], [data-skill-leave], [data-skill-restart], [data-skills-refresh]");
   if (!t) return;
   const o = skillsUi.open;
   if (t.dataset.skillRow != null) {
     const row = skillRows().find((r) => r.id === t.dataset.skillRow);
     const pick = row.copies.find((c) => c.machine === LOCAL && c.edit === "yes") ?? row.copies.find((c) => c.edit !== "no") ?? row.copies[0];
-    return openSkill(row, pick);
+    return leaveThen(() => openSkill(row, pick));
+  }
+  if (t.dataset.skillLeave != null) {
+    const go = o.leaving;
+    o.leaving = null;
+    return t.dataset.skillLeave === "discard" ? go() : renderSkillsPage();
   }
   if (t.dataset.skillView != null) return (o.view = t.dataset.skillView), renderSkillsPage();
   if (t.dataset.skillSave != null) return saveSkill();
@@ -295,7 +403,10 @@ pageView.addEventListener("change", (e) => {
     else o.checked.delete(e.target.dataset.skillCheck);
     return renderSkillsPage();
   }
-  if (e.target.matches("[data-skill-file]")) return openSkill(openRow(), o.copy, e.target.value);
+  if (e.target.matches("[data-skill-file]")) {
+    const file = e.target.value;
+    return leaveThen(() => openSkill(openRow(), o.copy, file));
+  }
 });
 let skillDraftTimer = null;
 pageView.addEventListener("input", (e) => {
@@ -303,9 +414,9 @@ pageView.addEventListener("input", (e) => {
   if (e.target.matches("[data-skills-filter]")) return (skillsUi.filter = e.target.value), renderSkillsPage();
   if (!e.target.matches(".code-edit")) return;
   const o = skillsUi.open;
-  const was = o.draft != null && o.draft !== o.got.text;
+  const was = skillDirty(o);
   o.draft = e.target.value;
-  if (was !== (o.draft !== o.got.text)) return renderSkillsPage();
+  if (was !== skillDirty(o)) return renderSkillsPage();
   clearTimeout(skillDraftTimer);
   skillDraftTimer = setTimeout(() => {
     const lines = pageView.querySelector(".skills-editor .code-lines");

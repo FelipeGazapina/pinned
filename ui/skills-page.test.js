@@ -49,3 +49,108 @@ test("a folder two places reach is one copy named by both", () => {
   const copy = { machine: "mac", readers, place: { kind: "claude-personal" }, also: [{ kind: "claude-personal" }, { kind: "agents" }] };
   assert.equal(whereLabel(copy), "Claude (claude, work) + ~/.agents");
 });
+
+function checklist() {
+  const skills = source("./gui-skills.js");
+  const fetched = [];
+  const timers = [];
+  const sandbox = {
+    skillsUi: { byMachine: new Map() },
+    LOCAL: "mac",
+    machineName: (m) => m,
+    document: { body: { dataset: { page: "skills" } } },
+    machines: new Map(["mac", "mini"].map((m) => [m, { view: { online: true } }])),
+    fetchSkills: (only) => fetched.push(only),
+    setTimeout: (run) => timers.push(run),
+    clearTimeout: () => {},
+    renderSkillsPage: () => {},
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(`${between(skills, "const copyId", "async function fetchSkills")}
+    ${between(skills, "const baseName", "function machineNotesHtml")}
+    ${between(skills, "const openRow", "/** Opens `copy`")}
+    ${between(skills, "/** Runs `go` now", "async function compareCopy")}
+    this.api = { openChecks, refreshChecks, sawCopy, copyCheck, saveBlocker, saveTargets, skillsChanged, leaveThen };`, sandbox);
+  return { ...sandbox.api, fetched, timers, ui: sandbox.skillsUi };
+}
+
+const skillCopy = (machine, dir, tree, place = { kind: "agents" }, more = {}) => ({ machine, dir, tree, place, edit: "yes", readers: [], linked: null, ...more });
+const opened = (copy, tree) => ({ copy, got: { text: "body", tree }, draft: null, compared: new Map(), checked: new Set(), since: new Map(), changed: new Set() });
+const plain = (value) => JSON.parse(JSON.stringify(value));
+const boxes = (api, o, row) => row.copies.map((c) => {
+  const s = api.copyCheck(o, row, c);
+  return [`${c.machine}:${c.dir}`, s.checked, s.disabled, s.why];
+});
+
+test("a copy that changes after the skill opened is unchecked, and a save sends the tree the page showed", () => {
+  const api = checklist();
+  const [a, b, c] = [skillCopy("mac", "/a", "t1"), skillCopy("mac", "/b", "t1"), skillCopy("mac", "/c", "t2")];
+  const o = opened(a, "t1");
+  api.openChecks(o, { copies: [a, b, c] });
+  const later = { copies: [a, { ...b, tree: "t3" }, c] };
+  api.refreshChecks(o, later);
+  assert.deepEqual(boxes(api, o, later), [
+    ["mac:/a", true, false, ""],
+    ["mac:/b", false, true, "Changed since you opened it. Compare it first."],
+    ["mac:/c", false, true, "Differs from the copy you opened. Compare it first."],
+  ]);
+  assert.deepEqual(plain([...api.saveTargets(o, later)]), [["mac", [{ dir: "/a", since: "t1" }]]]);
+  api.sawCopy(o, later.copies[1], { text: "theirs", tree: "t3" });
+  o.checked.add("mac\n/b");
+  assert.deepEqual(plain([...api.saveTargets(o, later)]), [["mac", [{ dir: "/a", since: "t1" }, { dir: "/b", since: "t3" }]]]);
+});
+
+test("a linked copy on another machine with another tree blocks the save until its diff was opened", () => {
+  const api = checklist();
+  const personal = { kind: "claude-personal" };
+  const open = skillCopy("mac", "/h/.claude/skills/x", "t1", personal, { linked: "user-skills/x" });
+  const same = skillCopy("mini", "/m/.claude/skills/x", "t1", personal, { linked: "user-skills/x" });
+  const other = skillCopy("mini", "/m/bloom/skills/x", "t2", personal, { linked: "user-skills/x" });
+  const row = { copies: [open, same, other] };
+  const o = opened(open, "t1");
+  api.openChecks(o, row);
+  assert.deepEqual(boxes(api, o, row), [
+    ["mac:/h/.claude/skills/x", true, false, ""],
+    ["mini:/m/.claude/skills/x", true, false, ""],
+    ["mini:/m/bloom/skills/x", false, true, "Differs from the copy you opened. Compare it first."],
+  ]);
+  assert.equal(api.saveBlocker(o, row), other);
+  api.sawCopy(o, other, { text: "older", tree: "t2" });
+  assert.equal(api.saveBlocker(o, row), undefined);
+  assert.deepEqual(boxes(api, o, row)[2], ["mini:/m/bloom/skills/x", false, false, "Sync replaces this copy with this save, checked or not."]);
+  o.checked.delete("mini\n/m/.claude/skills/x");
+  assert.deepEqual(boxes(api, o, row)[1], ["mini:/m/.claude/skills/x", false, false, "Sync replaces this copy with this save, checked or not."]);
+});
+
+test("the cache copy of a checked plugin source says the save writes it too", () => {
+  const api = checklist();
+  const source = skillCopy("mac", "/mods/mods/skills/tidy", "t1", { kind: "plugin-source", plugin: "mods@local-mods", home: "/h/.claude" });
+  const cache = skillCopy("mac", "/h/.claude/plugins/cache/local-mods/mods/0.1.0/skills/tidy", "t1", { kind: "plugin-cache", plugin: "mods@local-mods", home: "/h/.claude", loaded: false }, { edit: "lost-on-update" });
+  const row = { copies: [source, cache] };
+  const o = opened(source, "t1");
+  api.openChecks(o, row);
+  o.checked.delete(`mac\n${cache.dir}`);
+  assert.deepEqual(boxes(api, o, row)[1].slice(1), [false, false, "Saving the plugin's source copy writes this copy too."]);
+});
+
+test("skills changing on two machines at once lists both again", () => {
+  const api = checklist();
+  api.skillsChanged("mac");
+  api.skillsChanged("mini");
+  api.skillsChanged("mac");
+  api.timers.at(-1)();
+  assert.deepEqual(plain(api.fetched), [["mac", "mini"]]);
+});
+
+test("opening another skill over unsaved edits waits for the user's answer", () => {
+  const api = checklist();
+  const went = [];
+  const o = opened(skillCopy("mac", "/a", "t1"), "t1");
+  api.ui.open = o;
+  o.draft = "edited";
+  api.leaveThen(() => went.push("other"));
+  assert.deepEqual([went, typeof o.leaving], [[], "function"]);
+  o.draft = "body";
+  api.leaveThen(() => went.push("clean"));
+  assert.deepEqual(went, ["clean"]);
+});

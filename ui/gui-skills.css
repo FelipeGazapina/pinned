@@ -5,6 +5,7 @@
 .skills-note.warn { background: color-mix(in srgb, var(--g-canvas) 85%, var(--g-yellow, #d4a72c)); }
 .skills-note.error { background: color-mix(in srgb, var(--g-canvas) 85%, var(--g-red, #e5534b)); }
 .skills-note summary { cursor: pointer; }
+.skills-note .link { padding: 0 4px; border: 0; background: none; color: var(--g-blue); font: inherit; cursor: pointer; }
 .skills-note ul { margin: 6px 0 0; padding-left: 18px; font: 12px/18px var(--g-mono); }
 
 .skills-split { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
@@ -58,3 +59,4 @@
 .save-to .why { grid-column: 1 / -1; color: var(--g-muted); font-size: 12px; }
 .save-to .why:empty { display: none; }
 .save-to .dir { grid-column: 1 / -1; color: rgb(var(--g-muted-rgb) / 0.7); font: 11px/16px var(--g-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-top, .skill-bottom, .skills-rows, .skills-notes { display: contents; }
