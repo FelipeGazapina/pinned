@@ -26,8 +26,11 @@ function menuOn(screen) {
 /** `previewRow` is the row of the menu's first option when a preview box was drawn beside it. */
 function readMenu(lines, previewRow) {
   const preview = previewRow >= 0;
+  const hint = (k) => k >= 0 && /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[k]);
+  // In a narrow terminal claude wraps its hint line itself, and the rest starts at the left edge.
+  const hintTail = (k) => /^\S/.test(lines[k]) && hint(k - 1);
   let end = lines.length - 1;
-  while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
+  while (end >= 0 && (!lines[end].trim() || hint(end) || hintTail(end)) && !CURSOR.test(lines[end])) end--;
   let cursor = end;
   while (cursor >= Math.max(0, end - 16) && !CURSOR.test(lines[cursor])) cursor--;
   if (cursor < Math.max(0, end - 16)) return null;

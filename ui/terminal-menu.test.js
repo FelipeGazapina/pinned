@@ -116,3 +116,28 @@ test("a numbered line with a box beside it in earlier output is not a preview fo
   const model = menuOn([output, RULE, " Select model", "", " ❯ Default", "   Opus", "   Sonnet", "", " Enter to confirm · Esc to exit"]);
   assert.deepEqual(model.options.map((o) => o.head), ["Default", "Opus", "Sonnet"]);
 });
+
+test("a question in a narrow terminal reads as a menu when claude wraps its hint line", () => {
+  const rule = "─".repeat(43);
+  const screen = [
+    "❯ check the sweep",
+    "",
+    "  Thought for 3s, ran 1 shell command",
+    rule,
+    " ☐ Direction",
+    "",
+    "Which way should the sweep go?",
+    "",
+    "❯ 1. North route",
+    "     Walk the north side first.",
+    "  2. South route",
+    "     Walk the south side first.",
+    "  3. Type something.",
+    rule,
+    "  4. Chat about this",
+    "",
+    "Enter to select · ↑/↓ to navigate · Esc to",
+    "cancel",
+  ];
+  assert.deepEqual(menuOn(screen).options.map((o) => o.head), ["North route", "South route", "Type something.", "Chat about this"]);
+});
