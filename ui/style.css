@@ -521,8 +521,9 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
   #actions-toggle { width: 40px; height: 40px; font-size: 18px; }
   #projects button, #actions-menu button { justify-content: center; }
   .switch input { inset: -12px -8px; }
-  /* Safari zooms into a field whose text is under 16px when it takes focus. */
-  #settings input:not([type="checkbox"]), #settings select, #settings textarea, #projects .type-path input { font-size: 16px; }
+  /* Safari zooms into a field whose text is under 16px when it takes focus, so every field gets
+     16px here, over the smaller sizes the views set. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]), select, textarea { font-size: 16px !important; }
 }
 @media (pointer: coarse), (max-width: 600px) {
   body[data-tabs] #workspace { flex-direction: column; }
