@@ -54,11 +54,20 @@ pub fn load(file: &Path) -> Vec<Saved> {
     std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-pub fn save(file: &Path, saved: &[Saved]) {
+/// Writes the sessions file, returning what failed. The bytes go to a sibling file first and
+/// only replace the last save on success, so a failed write (a full disk, a lost drive) keeps
+/// the previous save instead of leaving a truncated file that restores nothing.
+pub fn save(file: &Path, saved: &[Saved]) -> std::io::Result<()> {
     if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    let _ = std::fs::write(file, serde_json::to_vec_pretty(saved).unwrap());
+    let bytes = serde_json::to_vec_pretty(saved).expect("sessions serialize");
+    let tmp = file.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, file)
 }
 
 /// The worktree a `claude --worktree` session in `folder` works in, given a cwd its hooks
@@ -99,6 +108,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_failed_save_keeps_the_previous_sessions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pinned-sessions-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sessions.json");
+        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None };
+        save(&file, &[kept("s1")]).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(save(&file, &[kept("s2")]).is_err(), "a read-only drive fails the write");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(load(&file), vec![kept("s1")], "the failed write kept the last good save");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn saved_sessions_survive_a_round_trip() {
         let file = std::env::temp_dir().join(format!("pinned-sessions-test-{}.json", std::process::id()));
         let saved = vec![Saved {
@@ -113,8 +138,9 @@ mod tests {
             model: Some("claude-opus-4-8".into()),
             permission_mode: Some("plan".into()),
         }];
-        save(&file, &saved);
+        save(&file, &saved).unwrap();
         assert_eq!(load(&file), saved);
+        assert!(!file.with_extension("json.tmp").exists(), "no sibling file is left behind");
         let _ = std::fs::remove_file(file);
         assert_eq!(load(Path::new("/nonexistent/sessions.json")), vec![]);
     }

@@ -895,7 +895,7 @@ mod tests {
                 permission_mode: None,
             }
         };
-        pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>());
+        pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>()).unwrap();
         let before = machine.restore_tabs();
         for tab in &before {
             machine.start_claude(tab, 80, 24).unwrap();

@@ -2224,7 +2224,8 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             model: None,
             permission_mode: None,
         }],
-    );
+    )
+    .unwrap();
     let tabs = node.machine.restore_tabs();
     assert_eq!(tabs.len(), 1, "the saved session did not reopen");
     let tab = tabs[0].clone();

@@ -2736,7 +2736,9 @@ impl Machine {
             open.sort_by_key(|(n, _)| *n);
             open.into_iter().map(|(_, s)| s).collect()
         };
-        sessions::save(file, &saved);
+        if let Err(e) = sessions::save(file, &saved) {
+            eprintln!("pinned: sessions did not save: {e}");
+        }
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
@@ -5501,7 +5503,8 @@ echo '{"type":"result","result":"ok"}'
                 model: None,
                 permission_mode: Some("plan".into()),
             }],
-        );
+        )
+        .unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
         let tab = m.restore_tabs().pop().expect("the plan session restored");
         let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
