@@ -16,6 +16,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const EVENT_RESULT: &str = "dictation://result";
 const EVENT_STATUS: &str = "dictation://status";
 const EVENT_NOTICE: &str = "dictation://notice";
+/// Bounds on the expected-words list the webview hands the helper.
+const VOCABULARY_WORDS: usize = 200;
+const VOCABULARY_WORD_CHARS: usize = 64;
 
 #[derive(Clone, serde::Serialize)]
 struct DictationResult {
@@ -74,7 +77,7 @@ impl Dictation {
         self.running.lock().unwrap().is_some()
     }
 
-    pub fn start(&self, locale: Option<String>) -> Result<(), String> {
+    pub fn start(&self, locale: Option<String>, vocabulary: &[String]) -> Result<(), String> {
         if self.running() {
             return Ok(());
         }
@@ -92,7 +95,12 @@ impl Dictation {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("could not start dictation: {e}"))?;
-        let stdin = child.stdin.take().ok_or("could not pipe to dictation")?;
+        let mut stdin = child.stdin.take().ok_or("could not pipe to dictation")?;
+        if let Err(e) = stdin.write_all(config_line(vocabulary).as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("could not configure dictation: {e}"));
+        }
         let stdout = child.stdout.take().ok_or("could not read dictation")?;
         let app = self.app.clone();
         std::thread::spawn(move || pump(&app, stdout));
@@ -123,6 +131,17 @@ fn valid_locale(locale: &str) -> bool {
     !locale.is_empty()
         && locale.len() <= 20
         && locale.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The helper's first stdin line: `{"vocabulary":[...]}`, cut to the bounds above.
+fn config_line(vocabulary: &[String]) -> String {
+    let words: Vec<&str> = vocabulary
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty() && w.chars().count() <= VOCABULARY_WORD_CHARS && !w.chars().any(char::is_control))
+        .take(VOCABULARY_WORDS)
+        .collect();
+    format!("{}\n", serde_json::json!({ "vocabulary": words }))
 }
 
 fn pump(app: &AppHandle, stdout: std::process::ChildStdout) {
@@ -158,8 +177,8 @@ fn emit_status(app: &AppHandle, running: bool, error: Option<String>) {
 }
 
 #[tauri::command]
-pub fn dictation_start(dictation: State<Arc<Dictation>>, locale: Option<String>) -> Result<(), String> {
-    dictation.start(locale)
+pub fn dictation_start(dictation: State<Arc<Dictation>>, locale: Option<String>, vocabulary: Option<Vec<String>>) -> Result<(), String> {
+    dictation.start(locale, &vocabulary.unwrap_or_default())
 }
 
 #[tauri::command]
@@ -170,4 +189,30 @@ pub fn dictation_stop(dictation: State<Arc<Dictation>>) -> Result<(), String> {
 #[tauri::command]
 pub fn dictation_status(dictation: State<Arc<Dictation>>) -> bool {
     dictation.running()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_config_line_carries_the_vocabulary_trimmed() {
+        let words = vec![" commit ".to_string(), "pull request".into()];
+        assert_eq!(config_line(&words), "{\"vocabulary\":[\"commit\",\"pull request\"]}\n");
+    }
+
+    #[test]
+    fn the_config_line_drops_blank_long_and_control_words() {
+        let words = vec!["".to_string(), "x".repeat(65), "two\nlines".into(), "ok".into(), "y".repeat(64)];
+        assert_eq!(config_line(&words), format!("{{\"vocabulary\":[\"ok\",\"{}\"]}}\n", "y".repeat(64)));
+    }
+
+    #[test]
+    fn the_config_line_keeps_at_most_the_bound() {
+        let words: Vec<String> = (0..500).map(|i| format!("w{i}")).collect();
+        let line = config_line(&words);
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["vocabulary"].as_array().unwrap().len(), 200);
+        assert_eq!(value["vocabulary"][199], "w199");
+    }
 }

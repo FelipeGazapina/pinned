@@ -10,6 +10,7 @@
 //   {"type":"result","text":"...","isFinal":true}  — confirmed phrase
 //   {"type":"error","message":"..."}       — fatal; the host should stop us
 // Commands (stdin, one JSON object per line):
+//   {"vocabulary":["commit","PR",...]} — first line only: words the recognizer should expect
 //   {"cmd":"stop"} — finish cleanly (exit 0)
 //
 // Engines: on macOS 26+ SpeechAnalyzer + SpeechTranscriber, which runs Portuguese
@@ -37,6 +38,12 @@ func fail(_ message: String) -> Never {
 }
 
 let localeId = CommandLine.arguments.dropFirst().first ?? "en-US"
+let vocabulary: [String] = {
+    guard let line = readLine(strippingNewline: true) else { return [] }
+    let config = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+    if config?["cmd"] as? String == "stop" { exit(0) }
+    return config?["vocabulary"] as? [String] ?? []
+}()
 let english = Locale(identifier: "en")
 let languageName = english.localizedString(forLanguageCode: localeId) ?? localeId
 let localeName = english.localizedString(forIdentifier: localeId) ?? localeId
@@ -150,6 +157,11 @@ func runAnalyzer() async {
     }
 
     do {
+        if !vocabulary.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings[.general] = vocabulary
+            try await analyzer.setContext(context)
+        }
         try await analyzer.prepareToAnalyze(in: analyzerFormat)
         try await analyzer.start(inputSequence: audio)
     } catch {
@@ -171,6 +183,7 @@ func runRecognizer() {
         if stopping { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        request.contextualStrings = vocabulary
         // Prefer the downloaded on-device model: free, offline, nothing leaves the Mac.
         if #available(macOS 13, *) {
             request.requiresOnDeviceRecognition = true

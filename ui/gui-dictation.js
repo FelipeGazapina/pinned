@@ -113,6 +113,15 @@ const DICTATION_TERMS = {
   "middleware": "middleware",
   "schema": "schema",
 };
+// The words the on-device recognizer is told to expect, so it writes "commit" where it would
+// hear "comet": every written form the cleanup produces, plus the trade's everyday words.
+const DICTATION_VOCABULARY = [...new Set([
+  ...DICTATION_GLOSSARY.map(([written]) => written),
+  ...Object.values(DICTATION_TERMS),
+  "comment", "comments", "commit", "commits", "PR", "pull request", "merge", "rebase", "branch", "worktree",
+  "deploy", "refactor", "endpoint", "subagent", "hub", "pinned", "Claude", "Cursor", "Railway", "Postgres",
+  "Tauri", "Rust", "Swift", "lint", "diff", "repo", "stash", "cherry-pick",
+])];
 // What the recognizer hears on silence or noise. Dropped only when it is the
 // entire confirmed phrase, exactly like the speech-to-text app.
 const DICTATION_HALLUCINATIONS = new Set([
@@ -318,7 +327,7 @@ async function startDictation() {
         else if (!running && dictationState.want && dictationState.engine === "native") startDictationEngine();
       }));
       dictationState.unlisten.push(await listen("dictation://notice", ({ message }) => dictationState.want && dictationNotice(message)));
-      await invoke("dictation_start", { locale: dictationState.locale });
+      await startNativeDictation(dictationState.locale);
       dictationState.engine = "native";
       renderDictationButton();
       return;
@@ -337,7 +346,11 @@ async function startDictation() {
 /** The session the helper dropped (it never ends one itself); reopen it while wanted. */
 function startDictationEngine() {
   if (!dictationState.want || dictationState.engine !== "native") return;
-  invoke("dictation_start", { locale: dictationState.locale }).catch((err) => onDictationError(String(err)));
+  startNativeDictation(dictationState.locale).catch((err) => onDictationError(String(err)));
+}
+
+function startNativeDictation(locale) {
+  return invoke("dictation_start", { locale, vocabulary: DICTATION_VOCABULARY });
 }
 
 function stopDictation() {
@@ -381,7 +394,7 @@ async function switchDictationLanguage() {
   // the new locale, and whichever lands second finds the helper running.
   try {
     await invoke("dictation_stop");
-    if (dictationState.want && dictationState.engine === "native") await invoke("dictation_start", { locale });
+    if (dictationState.want && dictationState.engine === "native") await startNativeDictation(locale);
   } catch (err) {
     onDictationError(String(err));
   }
