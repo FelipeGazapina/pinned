@@ -1578,6 +1578,14 @@ function showStep(id, focus) {
 }
 
 
+/** Backend generation errors, translated into what to change before trying again. */
+function generateErrorHint(err) {
+  const raw = String(err?.message ?? err);
+  if (raw.includes("has no usable trigger")) return `${raw} Name where it listens, e.g. "when mentioned in #support", then generate again.`;
+  if (raw.includes("did not answer with a workflow map")) return `${raw} Simplify the description into short steps and try again.`;
+  if (raw.includes("which is no step")) return `${raw} Ask for fewer, simply linked steps and try again.`;
+  return raw;
+}
 const actions = {
   "go-integrations": () => showPage("integrations"),
   "open-linear-keys": () => (TAURI ? invoke("open_linear_keys") : window.open(LINEAR_KEYS, "_blank", "noopener")),
@@ -1695,14 +1703,6 @@ const actions = {
     view = { name: "pick" };
     redraw();
   },
-/** Backend generation errors, translated into what to change before trying again. */
-function generateErrorHint(err) {
-  const raw = String(err?.message ?? err);
-  if (raw.includes("has no usable trigger")) return `${raw} Name where it listens, e.g. "when mentioned in #support", then generate again.`;
-  if (raw.includes("did not answer with a workflow map")) return `${raw} Simplify the description into short steps and try again.`;
-  if (raw.includes("which is no step")) return `${raw} Ask for fewer, simply linked steps and try again.`;
-  return raw;
-}
   "generate-workflow"() {
     const chats = suggestions.models.filter((m) => m.kind !== "decision");
     showDialog(`<div class="dialog-head"><h2><span>Generate workflow</span></h2>

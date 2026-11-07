@@ -56,7 +56,7 @@ test("an unknown trigger still renders a card instead of blanking the page", () 
 
 test("generation errors tell what to change before retrying", () => {
   const start = src.indexOf("/** Backend generation errors");
-  const end = src.indexOf('"generate-workflow"()');
+  const end = src.indexOf("const actions = {");
   const context = { console };
   vm.createContext(context);
   vm.runInContext(src.slice(start, end), context);
