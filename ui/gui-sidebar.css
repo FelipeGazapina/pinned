@@ -21,6 +21,8 @@
 #chat-head .crumb button.title { flex: 0 1 auto; max-width: 100%; }
 #chat-head .crumb .title .chev { width: 14px; height: 14px; flex: none; color: var(--g-muted); opacity: 0; transition: opacity 0.15s; }
 #chat-head .crumb .title:hover .chev, #chat-head .crumb .title:focus-visible .chev { opacity: 1; }
+#chat-head .crumb.pulling .title .chev { opacity: var(--pull); transition: transform 0.15s, color 0.15s; }
+#chat-head .crumb.armed .title .chev { opacity: 1; transform: rotate(180deg); color: var(--g-fg); }
 @media (max-width: 639px) { #chat-head .crumb { gap: 8px; } }
 #chat-head .crumb :is(.monogram, .favicon) { width: 14px; height: 14px; }
 #chat-head .crumb .stats { flex: none; margin-left: -4px; font-size: 12px; font-weight: 400; color: var(--g-muted); font-variant-numeric: tabular-nums; }

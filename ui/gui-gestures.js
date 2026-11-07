@@ -1,10 +1,13 @@
-/** On a phone a swipe does what a tap in the header does: right opens the sidebar and left closes it. The
- * UI follows the finger; letting go past the gesture's reach or with a flick runs the same toggle a tap
- * does, and the inline styles go once it settles so the CSS owns the final state. */
-const SWIPE = { lock: 10, flick: 0.4, flickWindow: 100, settle: 200 };
+/** On a phone a swipe does what a tap in the header does: right opens the sidebar and left closes it, and
+ * a pull from the top opens the thread's menu. The UI follows the finger; letting go past the gesture's
+ * reach or with a flick runs the same toggle a tap does, and the inline styles go once it settles so the
+ * CSS owns the final state. */
+const SWIPE = { lock: 10, flick: 0.4, flickWindow: 100, settle: 200, pull: 56 };
 /** A touch starting in any of these belongs to it: typing, the terminal, the side panel, a menu. */
 const SWIPE_SKIP = "input, textarea, select, [contenteditable], .xterm, #terms, #drawer-resize, #panel, #side-menu, #panel-menu, #panel-submenu, #header-menu, #composer-menu, #composer-dialog, #details-card, #image-zoom, .popup, dialog";
 const swipeMs = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : SWIPE.settle);
+/** A rubber band: the first pixels move almost 1:1, then it stiffens toward 24px. */
+const rubber = (d) => 24 * (1 - Math.exp(-d / 64));
 
 /** The sidebar at `shown` of its width, the scrim dimmed by the same share. */
 function slideSidebar(shown, ms = 0) {
@@ -26,6 +29,18 @@ function landSidebar(open) {
   return ms;
 }
 
+const titleButton = () => crumbEl.querySelector("button.title");
+function pullTitle(d, ms = 0) {
+  crumbEl.classList.toggle("pulling", d > 0);
+  crumbEl.classList.toggle("armed", d >= SWIPE.pull);
+  crumbEl.style.setProperty("--pull", Math.min(1, d / SWIPE.pull));
+  Object.assign(crumbEl.style, { transition: ms ? `transform ${ms}ms ease-out` : "none", transform: d ? `translateY(${rubber(d)}px)` : "" });
+}
+function clearTitlePull() {
+  crumbEl.classList.remove("pulling", "armed");
+  for (const p of ["--pull", "transition", "transform"]) crumbEl.style.removeProperty(p);
+}
+
 /** Every swipe the page answers. `reach` is how far, in pixels along `direction`, a release commits;
  * `commit` and `cancel` return how long they animate before `clear` drops the inline styles. */
 const gestures = [
@@ -35,6 +50,9 @@ const gestures = [
   { name: "close sidebar", direction: "left", accepts: (start) => ui.sidebarOpen && (start.target === workspace || !!start.target.closest("#sidebar")),
     reach: () => sidebarEl.offsetWidth * 0.4, track: (d) => slideSidebar(Math.max(0, 1 - d / sidebarEl.offsetWidth)),
     commit: () => landSidebar(false), cancel: () => landSidebar(true), clear: clearSidebarSlide },
+  { name: "title menu", direction: "down", accepts: (start) => !!active && !!titleButton() && !!start.target.closest("#chat-head, #thread"),
+    reach: () => SWIPE.pull, track: (d) => pullTitle(d),
+    commit: () => (clearTitlePull(), titleButton()?.click(), 0), cancel: () => (pullTitle(0, swipeMs()), swipeMs()), clear: clearTitlePull },
 ];
 
 /** The nearest box between `target` and the workspace that can still scroll the way the finger moves,
