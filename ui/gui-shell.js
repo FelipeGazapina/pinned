@@ -477,7 +477,16 @@ const selectable = () => palette.shown.flatMap((item, i) => (item.disabled ? [] 
 function renderPalette() {
   const { view, query } = paletteView();
   const spec = specFor(view, query);
-  const groups = spec.groups(query);
+  // A view that throws must say so in the frame, never leave it blank and mute.
+  let groups = null;
+  try {
+    groups = spec.groups(query);
+  } catch (e) {
+    console.warn("palette", view, e);
+    palette.shown = [];
+    paletteResults.innerHTML = `<p class="empty">This panel hit a snag: ${esc(e?.message ?? e)}</p>`;
+    return;
+  }
   palette.shown = groups.flatMap((g) => g.items);
   if (palette.hi >= 0 && !selectable().includes(palette.hi)) palette.hi = spec.unhighlighted ? -1 : selectable()[0] ?? -1;
   const nested = palette.views.length > 1;

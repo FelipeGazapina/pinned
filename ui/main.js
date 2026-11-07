@@ -300,15 +300,25 @@ async function showProjects({ machine, tab = null } = {}) {
   picker.querySelector(".bypass").onclick = () => setBypassNext(!bypassNext);
   for (const b of picker.querySelectorAll(".machine")) b.onclick = () => showProjects({ machine: b.dataset.machine, tab });
   setBypassNext(false);
+  // Local projects paint at once; shared ones join when the hub answers, so one slow
+  // call never leaves the picker hanging on "Loading projects…".
   let projects = [];
-  let shared = [];
   try {
-    [projects, shared] = await Promise.all([callOn(machine, { cmd: "list_projects" }), hub ? hub.hub({ cmd: "shared_projects" }).catch(() => []) : []]);
+    projects = await callOn(machine, { cmd: "list_projects" });
   } catch (e) {
     console.warn("list_projects", e);
   }
-  const here = new Set(projects.map((p) => p.repo).filter(Boolean));
   if (picking.machine !== machine || !pickerOpen()) return;
+  paintProjects(machine, tab, projects, []);
+  if (hub) {
+    hub.hub({ cmd: "shared_projects" }).catch(() => []).then((shared) => {
+      if (picking.machine !== machine || !pickerOpen()) return;
+      paintProjects(machine, tab, projects, shared ?? []);
+    });
+  }
+}
+function paintProjects(machine, tab, projects, shared) {
+  const here = new Set(projects.map((p) => p.repo).filter(Boolean));
   const local = machine === LOCAL;
   const directory = machineDirectory();
   choices = [
