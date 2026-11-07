@@ -145,7 +145,18 @@ async function goThread(o) {
   } catch (e) {
     // WebKit's stack holds only the frames, not the message.
     result.failures.push(`${e}\n${e?.stack ?? ""}`.trim());
-    result.view = tab && { account: tab.view.account, running: tab.view.running, status: tab.view.status, message: tab.view.message };
+    result.view = tab && {
+      account: tab.view.account,
+      running: tab.view.running,
+      status: tab.view.status,
+      message: tab.view.message,
+      phase: phaseOf(tab),
+      menu: tab.menu?.question ?? null,
+      answering: !!tab.answering,
+      waitingForIdle: threadOf(tab).onIdle?.length ?? 0,
+      note: document.querySelector("#composer-note")?.textContent ?? null,
+      screen: screenLines(tab).filter((l) => l.trim()).slice(-12),
+    };
   }
   result.ok = result.failures.length === 0;
   return result;
