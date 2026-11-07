@@ -254,7 +254,7 @@ fn roots(places: &Places) -> Vec<Root> {
 
     let mut out: Vec<Root> = vec![];
     for (dir, place, prefix) in rows {
-        let Ok(dir) = std::fs::canonicalize(&dir) else { continue };
+        let Ok(dir) = dunce::canonicalize(&dir) else { continue };
         if !dir.is_dir() {
             continue;
         }
@@ -329,7 +329,7 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
             if name.starts_with('.') || (personal && name == "synced") {
                 continue;
             }
-            let Ok(dir) = std::fs::canonicalize(&dir) else { continue };
+            let Ok(dir) = dunce::canonicalize(&dir) else { continue };
             let skill = dir.join("SKILL.md");
             if !skill.is_file() {
                 if matches!(root.place, Place::Writable(_)) {
@@ -559,7 +559,7 @@ fn account_sessions(places: &Places) -> Vec<(Reader, AccountSession)> {
 
 /// The listed copy at `dir`, whatever route the client named it by.
 fn find(copies: &[SkillCopy<Place>], dir: &str) -> Option<SkillCopy<Place>> {
-    let dir = std::fs::canonicalize(dir).ok()?;
+    let dir = dunce::canonicalize(dir).ok()?;
     copies.iter().find(|c| c.dir == dir).cloned()
 }
 
@@ -714,7 +714,7 @@ pub fn pulled_by_plugin_sync(share: &crate::sync::PluginShare, pulled: &[String]
 
 /// The project's skills folder, when a project sync pulled into it.
 pub fn pulled_by_project_sync(checkout: &crate::sync::Checkout, pulled: &[String]) -> Vec<Place> {
-    let path = std::fs::canonicalize(&checkout.path).unwrap_or_else(|_| checkout.path.clone());
+    let path = dunce::canonicalize(&checkout.path).unwrap_or_else(|_| checkout.path.clone());
     let touched = pulled.iter().any(|p| p.starts_with("skills/"));
     touched.then_some(Place::Writable(Writable::ClaudeProject { checkout: path })).into_iter().collect()
 }
@@ -748,7 +748,7 @@ mod tests {
     /// A machine with a copy in every place, under a temp folder standing in for `$HOME`.
     fn fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let (home, claude, bloom) = (root.join("home"), root.join("home/.claude"), root.join("config/accounts/bloom"));
         skill(&claude.join("skills/unslop"), "unslop");
         std::fs::create_dir_all(claude.join("skills/emptied/references")).unwrap();

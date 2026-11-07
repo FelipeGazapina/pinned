@@ -3,7 +3,7 @@ use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Messa
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -272,6 +272,8 @@ struct Tab {
     turn_pending: Option<Instant>,
     /// The terminal's input line. Done does not clear it.
     draft: Draft,
+    /// A skill the session loads changed. `/reload-skills` goes in once the tab is idle.
+    reload: bool,
     /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
     permission_mode: Option<String>,
     /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
@@ -354,6 +356,12 @@ impl Tab {
     fn note_submit(&mut self) {
         self.turn_pending = Some(Instant::now());
     }
+
+    /// Types a local slash command. Unlike a prompt it leaves `turn_pending` alone: a local
+    /// command fires no Stop hook, so nothing would ever clear it (probed on Claude Code 2.1.319).
+    fn type_command(&mut self, command: &str) -> bool {
+        self.session.as_mut().is_some_and(|s| s.raw() && s.write(&paste(command)).is_ok())
+    }
 }
 
 pub struct Machine {
@@ -404,6 +412,8 @@ pub struct Machine {
     next_listener: AtomicU64,
     me: Weak<Machine>,
     gate: Mutex<Gate>,
+    /// Runs the hub link's next sync cycle now. Set while a link runs.
+    sync_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 pub trait SelfUpdate: Send + Sync {
@@ -541,6 +551,7 @@ impl Machine {
             next_listener: AtomicU64::new(1),
             me: me.clone(),
             gate: Mutex::new(Gate::default()),
+            sync_waker: Mutex::new(None),
         })
     }
 
@@ -913,6 +924,16 @@ impl Machine {
                 Ok(Value::Null)
             }
             Call::UpdateSelf => json(self.update_self()),
+            Call::Skills => json(skills::list(&self.places())),
+            Call::ReadSkill { dir, file } => json(skills::read(&self.places(), &dir, &file)?),
+            Call::SaveSkill { file, text, copies } => {
+                let written = skills::save(&self.places(), &file, &text, &copies)?;
+                let sessions = self.skills_changed(&written.touched);
+                if !written.touched.is_empty() {
+                    self.wake_sync();
+                }
+                json(written.report(sessions))
+            }
         }
     }
 
@@ -2016,11 +2037,97 @@ impl Machine {
         }
         homes.sort();
         homes.dedup();
-        let test_bin = std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"));
-        if test_bin {
+        if test_binary() {
             homes.retain(|path| path.starts_with(&config));
         }
         homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
+    }
+
+    /// Where skills can be on this machine. A test binary sees only homes inside its config dir.
+    fn places(&self) -> skills::Places {
+        let config = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf);
+        let accounts = self.accounts.list();
+        let inside = |path: &Path| !test_binary() || config.as_ref().is_some_and(|c| path.starts_with(c));
+        let homes = |provider| accounts.iter().filter(|a| a.provider == provider).map(|a| (a.id.clone(), self.accounts.home(a))).filter(|(_, home)| inside(home)).collect();
+        let mut projects: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
+        projects.extend(self.tabs.lock().unwrap().values().map(|t| t.cwd.clone()));
+        let mut projects: Vec<PathBuf> = projects.iter().filter_map(|p| dunce::canonicalize(p).ok()).collect();
+        projects.sort();
+        projects.dedup();
+        let home = if test_binary() { config.clone().unwrap_or_default().join("home") } else { home() };
+        skills::Places {
+            home,
+            claude_homes: homes(Provider::Claude),
+            codex_homes: homes(Provider::Codex),
+            cursor: accounts.iter().find(|a| a.provider == Provider::Cursor).map(|a| a.id.clone()),
+            projects,
+            synced_plugins: config.as_ref().map(|c| c.join("synced-plugins")),
+            pinned_plugin: self.launch.plugin_dir.clone(),
+            originals: config.unwrap_or_else(std::env::temp_dir).join("skill-originals"),
+        }
+    }
+
+    /// The one entry point for "these places changed", from a save or a sync pull. Every running
+    /// tab that loads one of them owes `/reload-skills`: an idle one gets it now, a busy one after
+    /// its turn, from the delegate pass. Codex and Cursor see the change when they start again.
+    pub(crate) fn skills_changed(&self, touched: &[skills::Place]) -> Vec<skills::Nudged> {
+        if touched.is_empty() {
+            return vec![];
+        }
+        let mut scopes: Vec<skills::Scope> = touched.iter().map(skills::Place::scope).collect();
+        scopes.sort();
+        scopes.dedup();
+        self.emit(Event::SkillsChanged { scopes });
+        let running: Vec<(TabId, Account, PathBuf, Option<String>)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter(|(_, t)| t.session.is_some() && t.program == Program::Agent).map(|(id, t)| (id.clone(), t.account.clone(), t.cwd.clone(), t.title.clone())).collect()
+        };
+        let mut nudged = vec![];
+        for (tab, account, cwd, title) in running {
+            let (home, cwd, plugin_dirs) = (self.accounts.home(&account), dunce::canonicalize(&cwd).unwrap_or(cwd), self.shared_plugin_dirs(&account));
+            let session = skills::Session { provider: account.provider, home: &home, cwd: &cwd, plugin_dirs: &plugin_dirs };
+            let Some(nudge) = touched.iter().find_map(|place| skills::reach(place, &session)) else { continue };
+            let delivery = match nudge {
+                skills::Nudge::NextStart => skills::Delivery::NextStart,
+                skills::Nudge::ReloadSkills => {
+                    let _ = self.tab(&tab, |t| t.reload = true);
+                    if self.maybe_reload(&tab) {
+                        skills::Delivery::Reloaded
+                    } else {
+                        self.arm_delegate_pass();
+                        skills::Delivery::AfterTurn
+                    }
+                }
+            };
+            nudged.push(skills::Nudged { tab, title, nudge: delivery });
+        }
+        nudged.sort_by_key(|n| tab_number(&n.tab));
+        nudged
+    }
+
+    /// Types `/reload-skills` into a tab that owes it, once it is idle. True when it typed, so the
+    /// delegate pass leaves the tab's notices for its next tick.
+    fn maybe_reload(&self, tab: &str) -> bool {
+        self.tab(tab, |t| {
+            let typed = t.reload && t.notice_idle() && t.type_command("/reload-skills");
+            if typed {
+                t.reload = false;
+            }
+            typed
+        })
+        .unwrap_or(false)
+    }
+
+    /// Runs the hub link's next sync cycle now. Without a link it does nothing.
+    pub(crate) fn wake_sync(&self) {
+        let waker = self.sync_waker.lock().unwrap().clone();
+        if let Some(wake) = waker {
+            wake();
+        }
+    }
+
+    pub(crate) fn set_sync_waker(&self, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.sync_waker.lock().unwrap() = wake;
     }
 
     fn shared_plugin_dirs(&self, account: &Account) -> Vec<PathBuf> {
@@ -2561,7 +2668,9 @@ impl Machine {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
-                    machine.maybe_deliver(&tab);
+                    if !machine.maybe_reload(&tab) {
+                        machine.maybe_deliver(&tab);
+                    }
                 }
             }));
         });
@@ -2697,6 +2806,7 @@ impl Machine {
             held: vec![],
             turn_pending: None,
             draft: Draft::default(),
+            reload: false,
             permission_mode: None,
             permission_unknown: false,
             screen: Arc::default(),
@@ -3004,6 +3114,10 @@ const HOME_ENV: &str = "HOME";
 // Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
 #[cfg(windows)]
 const HOME_ENV: &str = "USERPROFILE";
+
+fn test_binary() -> bool {
+    std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
+}
 
 pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
@@ -5684,6 +5798,120 @@ exec sleep 30
     #[cfg(unix)]
     fn read_pty(file: &Path) -> String {
         String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).into_owned()
+    }
+
+    #[cfg(unix)]
+    fn reload_machine(name: &str) -> (Arc<Machine>, PathBuf, Arc<Mutex<Vec<MachineEvent>>>) {
+        let root = temp(name);
+        let events = Arc::new(Mutex::new(vec![]));
+        let heard = events.clone();
+        let m = Machine::new(launch(), Some(root.join("config")), Some(root.clone()), move |e| heard.lock().unwrap().push(e));
+        (m, root, events)
+    }
+
+    #[cfg(unix)]
+    fn typing_tab(m: &Machine, account: Account, file: &Path) -> TabId {
+        let tab = m.add_tab("/repo".into(), account, vec![], vec![], false, None);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, format!("viewer-{tab}"), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        tab
+    }
+
+    fn personal_skills(m: &Machine, account: &Account) -> skills::Place {
+        skills::Place::Writable(skills::Writable::ClaudePersonal { home: m.accounts.home(account) })
+    }
+
+    fn skills_changed_events(events: &Mutex<Vec<MachineEvent>>) -> Vec<Vec<skills::Scope>> {
+        events.lock().unwrap().iter().filter_map(|e| if let MachineEvent::SkillsChanged { scopes } = e { Some(scopes.clone()) } else { None }).collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_idle_claude_tab_reloads_its_skills_at_once_and_stays_idle() {
+        let (m, root, events) = reload_machine("reload-idle");
+        let claude = Account::builtin(Provider::Claude);
+        let tab = typing_tab(&m, claude.clone(), &root.join("typed.bin"));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let nudged = m.skills_changed(&[personal_skills(&m, &claude)]);
+        assert_eq!(nudged, [skills::Nudged { tab: tab.clone(), title: None, nudge: skills::Delivery::Reloaded }]);
+        wait_for("the reload command", || read_pty(&root.join("typed.bin")).contains("/reload-skills"));
+        assert_eq!(m.tab(&tab, |t| (t.reload, t.turn_pending.is_none(), t.notice_idle())).unwrap(), (false, true, true));
+        assert_eq!(skills_changed_events(&events), [vec![skills::Scope::Personal]]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_busy_tab_reloads_right_after_its_turn_ends() {
+        let (m, root, _) = reload_machine("reload-busy");
+        let claude = Account::builtin(Provider::Claude);
+        let file = root.join("typed.bin");
+        let tab = typing_tab(&m, claude.clone(), &file);
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        let nudged = m.skills_changed(&[personal_skills(&m, &claude)]);
+        assert_eq!(nudged[0].nudge, skills::Delivery::AfterTurn);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!read_pty(&file).contains("/reload-skills"), "the reload interrupted a turn: {}", read_pty(&file));
+        m.record_event(done_event(&tab));
+        wait_for("the reload after Done", || read_pty(&file).contains("/reload-skills"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_holds_the_reload_until_it_is_cleared() {
+        let (m, root, _) = reload_machine("reload-draft");
+        let claude = Account::builtin(Provider::Claude);
+        let file = root.join("typed.bin");
+        let tab = typing_tab(&m, claude.clone(), &file);
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        assert_eq!(m.skills_changed(&[personal_skills(&m, &claude)])[0].nudge, skills::Delivery::AfterTurn);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!read_pty(&file).contains("/reload-skills"), "the reload was typed over the draft: {}", read_pty(&file));
+        m.write_input(&tab, b"\x7f\x7f\x7f").unwrap();
+        wait_for("the reload once the draft is gone", || read_pty(&file).contains("/reload-skills"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn codex_and_cursor_tabs_see_a_change_at_their_next_start() {
+        let (m, root, _) = reload_machine("reload-next-start");
+        let codex = typing_tab(&m, Account::builtin(Provider::Codex), &root.join("codex.bin"));
+        let cursor = typing_tab(&m, Account::builtin(Provider::Cursor), &root.join("cursor.bin"));
+        for tab in [&codex, &cursor] {
+            m.tab(tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        }
+        let nudged = m.skills_changed(&[skills::Place::Writable(skills::Writable::Agents)]);
+        let got: Vec<(TabId, skills::Delivery)> = nudged.into_iter().map(|n| (n.tab, n.nudge)).collect();
+        assert_eq!(got, [(codex.clone(), skills::Delivery::NextStart), (cursor.clone(), skills::Delivery::NextStart)]);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(read_pty(&root.join("codex.bin")) + &read_pty(&root.join("cursor.bin")), "");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_sync_pull_of_user_skills_reloads_only_that_homes_tabs() {
+        let (m, root, events) = reload_machine("reload-pull");
+        let claude = Account::builtin(Provider::Claude);
+        let bloom = Account { id: "bloom".into(), provider: Provider::Claude, name: "Bloom".into(), auth: Auth::Login };
+        let (mine, other) = (typing_tab(&m, claude.clone(), &root.join("claude.bin")), typing_tab(&m, bloom, &root.join("bloom.bin")));
+        for tab in [&mine, &other] {
+            m.tab(tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        }
+        let share = sync::PluginShare { claude_home: m.accounts.home(&claude), dir: root.join("config/synced-plugins") };
+        let touched = skills::pulled_by_plugin_sync(&share, &["user-skills/notes/SKILL.md".into(), "user-skills/notes/references/x.md".into()]);
+        let nudged = m.skills_changed(&touched);
+        assert_eq!(nudged.iter().map(|n| n.tab.clone()).collect::<Vec<_>>(), [mine]);
+        wait_for("the reload in the pulled home's tab", || read_pty(&root.join("claude.bin")).contains("/reload-skills"));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(read_pty(&root.join("bloom.bin")), "");
+        assert_eq!(skills_changed_events(&events), [vec![skills::Scope::Personal]]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
