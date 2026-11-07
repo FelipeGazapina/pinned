@@ -4,7 +4,9 @@
 //! A project is named by its git origin, since each machine keeps it in a folder of its own. Every
 //! machine compares its files with the hub's and with what both held at its last sync, so a file
 //! changed on one side only travels that way, a file deleted on one side is deleted on the other,
-//! and a file changed on both keeps the newer copy; the history keeps the turns of both.
+//! and a file changed on both keeps the newer copy; the history keeps the turns of both. Skills are
+//! the exception: a skill file missing on one side is copied back from the other, because a missing
+//! file does not prove the user deleted it, and the other copies may be the only ones left.
 
 use crate::process;
 use base64::Engine;
@@ -284,6 +286,12 @@ fn exchange(
                     agreed.remove(path);
                 }
             };
+        } else if skill_file(key, path) && (mine.is_none() || theirs.is_none()) {
+            if mine.is_none() {
+                pull.push(path.clone());
+            } else {
+                push.push(path.clone());
+            }
         } else if mine == before {
             pull.push(path.clone());
         } else if theirs == before {
@@ -388,6 +396,10 @@ fn exchange(
         fetch(wanted, &mut agreed, &mut synced, state)?;
     }
     Ok(synced)
+}
+
+fn skill_file(key: &str, path: &str) -> bool {
+    path.starts_with(if key == PLUGINS_KEY { "user-skills/" } else { "skills/" })
 }
 
 /// The folders a checkout shares, and how their files are named on the hub.
@@ -540,7 +552,7 @@ fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTr
     let on_hub: BTreeMap<&str, &str> = remote.iter().map(|entry| (entry.path.as_str(), entry.sha.as_str())).collect();
     local
         .iter()
-        .filter(|(path, (sha, _))| path.starts_with("user-skills/") && !agreed.contains_key(path.as_str()) && on_hub.get(path.as_str()).is_some_and(|hub_sha| *hub_sha != sha.as_str()))
+        .filter(|(path, (sha, _))| path.starts_with("user-skills/") && !agreed.contains_key(path.as_str()) && on_hub.get(path.as_str()).is_some_and(|hub_sha| !hub_sha.is_empty() && *hub_sha != sha.as_str()))
         .map(|(path, _)| (*path).clone())
         .collect()
 }
@@ -1500,15 +1512,83 @@ mod tests {
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v2");
         std::fs::remove_file(mac_home.join(".claude/skills/notes/SKILL.md")).unwrap();
-        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
-        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
-        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
-        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
-        assert!(!mac_home.join(".claude/skills/notes/SKILL.md").exists(), "a skill mac deleted came back from mini");
         std::fs::remove_file(mac_home.join(".claude/skills/ship/SKILL.md")).unwrap();
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
-        assert!(!mini_home.join(".claude/skills/ship/SKILL.md").exists(), "a skill mini did not write is removed when mac deletes it");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v2");
+        assert_eq!(std::fs::read_to_string(mac_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mac", "the hub's copy comes back");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_home_that_loses_its_skills_gets_them_back_and_deletes_nothing_elsewhere() {
+        let root = root("lost-skills");
+        let hub = MemHub::default();
+        let dir = root.join("mac/synced-plugins");
+        let (claude, bloom) = (PluginShare { claude_home: root.join("mac/.claude"), dir: dir.clone() }, PluginShare { claude_home: root.join("mac/accounts/bloom"), dir });
+        let mini = PluginShare { claude_home: root.join("mini/.claude"), dir: root.join("mini/synced-plugins") };
+        let (mut mac_state, mut mini_state) = (State::default(), State::default());
+        let files = ["notes/SKILL.md", "notes/references/a.md"];
+        for file in files {
+            put(&claude.claude_home.join("skills").join(file), file);
+        }
+        let mut round = || {
+            for share in [&claude, &bloom] {
+                sync_plugins(&hub, &mut mac_state, share, SystemTime::now()).unwrap();
+            }
+            sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        };
+        round();
+        for file in files {
+            std::fs::remove_file(bloom.claude_home.join("skills").join(file)).unwrap();
+        }
+        assert!(bloom.claude_home.join("skills/notes/references").is_dir(), "the folders stay, as on 2026-11-04");
+        round();
+        round();
+        let mut tombstone = hub.0.borrow()["user-skills/notes/SKILL.md"].clone();
+        (tombstone.entry.sha, tombstone.entry.modified, tombstone.data) = (String::new(), millis(SystemTime::now()) + 60_000, None);
+        hub.push(PLUGINS_KEY, vec![tombstone]).unwrap();
+        round();
+        for share in [&claude, &bloom, &mini] {
+            for file in files {
+                assert_eq!(std::fs::read_to_string(share.claude_home.join("skills").join(file)).ok().as_deref(), Some(file), "{} keeps {file}", share.claude_home.display());
+            }
+        }
+        assert_eq!(texts(&hub), BTreeMap::from(files.map(|file| (format!("user-skills/{file}"), file.to_owned()))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_checkout_that_loses_its_skills_gets_them_back_and_deletes_nothing_elsewhere() {
+        let root = root("lost-project-skills");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.checkout.path.join(".claude/skills/release/SKILL.md"), "release");
+        mac.sync(&hub);
+        mini.sync(&hub);
+        std::fs::remove_dir_all(mac.checkout.path.join(".claude/skills")).unwrap();
+        mac.sync(&hub);
+        mini.sync(&hub);
+        for side in [&mac, &mini] {
+            assert_eq!(std::fs::read_to_string(side.checkout.path.join(".claude/skills/release/SKILL.md")).ok().as_deref(), Some("release"));
+        }
+        assert_eq!(texts(&hub)["skills/release/SKILL.md"], "release");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_skill_written_again_after_the_hub_lost_it_is_shared() {
+        let root = root("rewritten-skill");
+        let hub = MemHub::default();
+        let gone = File { entry: Entry { path: "user-skills/use-railway/SKILL.md".into(), sha: String::new(), modified: 1, size: 0, executable: None }, data: None };
+        hub.push(PLUGINS_KEY, vec![gone]).unwrap();
+        let mac = PluginShare { claude_home: root.join("mac/.claude"), dir: root.join("mac/synced-plugins") };
+        let mini = PluginShare { claude_home: root.join("mini/.claude"), dir: root.join("mini/synced-plugins") };
+        put(&mac.claude_home.join("skills/use-railway/SKILL.md"), "railway");
+        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        sync_plugins(&hub, &mut State::default(), &mini, SystemTime::now()).unwrap();
+        assert_eq!(std::fs::read_to_string(mini.claude_home.join("skills/use-railway/SKILL.md")).ok().as_deref(), Some("railway"));
         let _ = std::fs::remove_dir_all(root);
     }
 
