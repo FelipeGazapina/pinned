@@ -2110,7 +2110,7 @@ document.getElementById("stash").onclick = (e) => {
 };
 
 /** Whether the thread's workspace can still change, as in T3 Code: until its first prompt goes out. */
-const workspaceOpen = (tab) => tab.view.running && !tab.view.connector && !threadOf(tab).items.some((i) => i.kind === "user") && !tab.menu && phaseOf(tab) !== "working";
+const workspaceOpen = (tab) => tab.view.running && (!tab.view.connector || tab.view.connector === "session") && !threadOf(tab).items.some((i) => i.kind === "user") && !tab.menu && phaseOf(tab) !== "working";
 /** The most recently active other thread of the project that works in a worktree, which T3 Code
  * offers as "Previous worktree". */
 function previousWorktree(tab) {

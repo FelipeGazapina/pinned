@@ -789,7 +789,7 @@ function changesHtml(change, open) {
 /** A prompt pinned typed rather than the user: a workflow's opening task, a Slack reply it relayed, or
  * the nudge that carries on after a usage limit lifts. */
 function sentBy(tab, user, first) {
-  if (first && tab.view.connector) return "automation";
+  if (first && tab.view.connector && tab.view.connector !== "session") return "automation";
   return user.text === "Continue from where you left off." || user.text.startsWith("[Slack reply from ") ? "pinned" : null;
 }
 

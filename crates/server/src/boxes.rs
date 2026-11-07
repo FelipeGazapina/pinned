@@ -7,7 +7,7 @@
 use crate::hub::{Account, Hub, RUN_WAIT};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
-use pinned_core::agent::Subject;
+use pinned_core::agent::{session_env, Subject};
 use pinned_core::connectors::{BoxPermission, BoxSize, BoxStep, FixedClaim, Placement, Run};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{BoxStatus, Call, RunSpec, BOX_USD_PER_HOUR};
@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const DIR: &str = "/workspace/home/.pinned";
+/// The connector interactive box sessions run under. The hub sees their tabs through it, and the
+/// app treats their first prompt as the user's own rather than automation's.
+pub const INTERACTIVE_CONNECTOR: &str = "session";
 const BOOTSTRAP: &str = include_str!("box-bootstrap.sh");
 const START: &str = include_str!("box-start.sh");
 /// The bootstrap output a failure quotes, from its end.
@@ -432,14 +435,15 @@ impl Boxes {
         let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
         let id = new_row_id();
         let machine = Uuid::new_v4();
-        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), name], env: vec![], token: None, account: None, budget_usd };
+        let subject = Subject::LinearIssue { issue: format!("box {id}") };
+        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), name], env: session_env(INTERACTIVE_CONNECTOR, &subject), token: None, account: None, budget_usd };
         let fresh = BoxRow {
             id: id.clone(),
             account: account.id,
             machine,
             upstash: None,
-            connector: "session".into(),
-            subject: Subject::LinearIssue { issue: format!("box {id}") },
+            connector: INTERACTIVE_CONNECTOR.into(),
+            subject,
             spec,
             size,
             phase: Phase::Creating,
@@ -915,6 +919,12 @@ impl Boxes {
                         } else if over_budget {
                             Some(End::Expired)
                         } else {
+                            // An interactive session is quiet while its human thinks; only its
+                            // budget, its closed or exited tab, or going missing ends it.
+                            let seen = match (row.connector.as_str(), seen) {
+                                (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
+                                _ => seen,
+                            };
                             let verdict = verdict(row.age, seen, slot, now, &self.policy);
                             if gone { Some(End::Vanished) } else { verdict }
                         }
