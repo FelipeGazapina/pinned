@@ -55,13 +55,28 @@ pub fn image(dir: &Path, path: &str) -> Result<String, String> {
     if !real.starts_with(dunce::canonicalize(dir).map_err(|e| e.to_string())?) {
         return Err(format!("{path} is not an upload"));
     }
-    let ext = real.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let (_, mime) = IMAGES.iter().find(|(e, _)| *e == ext).ok_or_else(|| format!("{path} is not a picture"))?;
-    let size = std::fs::metadata(&real).map_err(|e| format!("could not read {path}: {e}"))?.len();
-    if size > IMAGE_LIMIT {
-        return Err(format!("{path} is over {} MB", IMAGE_LIMIT / 1_000_000));
+    picture(&real)
+}
+
+/// The picture a reply names at `path`, absolute or under `home` as `~/`, as a `data:` URL.
+pub fn named(path: &str, home: &Path) -> Result<String, String> {
+    let path = path.trim();
+    if !(path.starts_with('/') || path.starts_with("~/")) {
+        return Err(format!("{path} is not an absolute path"));
     }
-    let bytes = std::fs::read(&real).map_err(|e| format!("could not read {path}: {e}"))?;
+    let path = crate::projects::expand(path, home);
+    picture(&dunce::canonicalize(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?)
+}
+
+/// The picture file at `path` as a `data:` URL. Refused for a file that isn't a picture and past `IMAGE_LIMIT`.
+fn picture(path: &Path) -> Result<String, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let (_, mime) = IMAGES.iter().find(|(e, _)| *e == ext).ok_or_else(|| format!("{} is not a picture", path.display()))?;
+    let size = std::fs::metadata(path).map_err(|e| format!("could not read {}: {e}", path.display()))?.len();
+    if size > IMAGE_LIMIT {
+        return Err(format!("{} is over {} MB", path.display(), IMAGE_LIMIT / 1_000_000));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
     Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
@@ -169,5 +184,19 @@ mod tests {
         assert!(image(&dir, &dir.join("missing.png").display().to_string()).unwrap_err().contains("could not read"));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn a_named_picture_reads_wherever_it_sits_by_absolute_or_home_path() {
+        let home = temp("named");
+        std::fs::create_dir_all(home.join("shots")).unwrap();
+        let png = home.join("shots/app.png");
+        std::fs::write(&png, b"\x89PNG").unwrap();
+        std::fs::write(home.join("notes.txt"), b"hi").unwrap();
+        assert_eq!(named(&png.display().to_string(), Path::new("/nowhere")).unwrap(), "data:image/png;base64,iVBORw==");
+        assert_eq!(named("~/shots/app.png", &home).unwrap(), "data:image/png;base64,iVBORw==");
+        assert!(named("shots/app.png", &home).unwrap_err().contains("not an absolute path"));
+        assert!(named("~/notes.txt", &home).unwrap_err().contains("not a picture"));
+        let _ = std::fs::remove_dir_all(home);
     }
 }

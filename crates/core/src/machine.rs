@@ -709,6 +709,7 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::image(dir, &path)?)
             }
+            Call::ReadImage { path } => json(uploads::named(&path, &home())?),
             Call::ListAccounts => json(self.list_accounts()),
             Call::AddAccount { provider, name, auth, key } => {
                 let auth = auth.unwrap_or(Auth::Login);
