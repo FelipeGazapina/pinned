@@ -2591,3 +2591,455 @@ fn an_online_upstash_box_is_not_asked_to_update() {
         json!({ "state": "cannot", "reason": "an Upstash box is replaced by the hub" }),
     );
 }
+
+// External MCP agents: OAuth through the hub, then the MCP endpoint, against a real hub, Postgres and node.
+
+/// A browser and an MCP client in one: it follows no redirect, so each step's answer is visible.
+fn agent_http() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
+}
+
+fn with_query(base: &str, params: &[(&str, &str)]) -> String {
+    url::Url::parse_with_params(base, params).unwrap().to_string()
+}
+
+fn pkce() -> (String, String) {
+    use sha2::Digest;
+    let verifier = format!("verifier-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()).repeat(3);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+const AGENT_REDIRECT: &str = "https://agent.example/oauth/callback";
+
+fn register_agent(url: &str, http: &reqwest::blocking::Client) -> String {
+    let registered = http.post(format!("{url}/oauth/register")).json(&json!({ "redirect_uris": [AGENT_REDIRECT], "client_name": "Grok test agent" })).send().unwrap();
+    assert_eq!(registered.status(), 201);
+    let body: Value = registered.json().unwrap();
+    assert_eq!(body["token_endpoint_auth_method"], "none");
+    body["client_id"].as_str().unwrap().to_owned()
+}
+
+/// Starts an authorization as the client's redirect of the browser would, and answers the pending request's id.
+fn authorize(url: &str, http: &reqwest::blocking::Client, client_id: &str, challenge: &str, state: &str) -> String {
+    let response = http
+        .get(with_query(&format!("{url}/oauth/authorize"), &[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", AGENT_REDIRECT),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+            ("state", state),
+            ("scope", "sessions orchestrator"),
+            ("resource", &format!("{url}/mcp")),
+        ]))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    location.strip_prefix("/connect-agent?request=").unwrap_or_else(|| panic!("{location}")).to_owned()
+}
+
+fn query_of(redirect: &str) -> HashMap<String, String> {
+    let at = redirect.find('?').unwrap();
+    redirect[at + 1..].split('&').map(|pair| {
+        let (k, v) = pair.split_once('=').unwrap();
+        (k.to_owned(), v.replace('+', " ").replace("%3A", ":").replace("%2F", "/"))
+    }).collect()
+}
+
+fn exchange(url: &str, http: &reqwest::blocking::Client, form: &[(&str, &str)]) -> (u16, Value) {
+    let body = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form).finish();
+    let response = http.post(format!("{url}/oauth/token")).header("content-type", "application/x-www-form-urlencoded").body(body).send().unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let status = response.status().as_u16();
+    (status, response.json().unwrap())
+}
+
+/// Lets the client in for `scopes` on `projects` and trades the code for tokens: (access, refresh).
+fn connect_agent(url: &str, http: &reqwest::blocking::Client, client: &mut Client, client_id: &str, scopes: &[&str], projects: Value) -> (String, String) {
+    let (verifier, challenge) = pkce();
+    let request = authorize(url, http, client_id, &challenge, "st-1");
+    let approved = client.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": scopes, "projects": projects })).unwrap();
+    let back = query_of(approved["redirect"].as_str().unwrap());
+    assert_eq!((back["state"].as_str(), back["iss"].as_str()), ("st-1", url));
+    let (status, tokens) = exchange(url, http, &[("grant_type", "authorization_code"), ("client_id", client_id), ("code", &back["code"]), ("code_verifier", &verifier), ("redirect_uri", AGENT_REDIRECT)]);
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["token_type"], "Bearer");
+    (tokens["access_token"].as_str().unwrap().to_owned(), tokens["refresh_token"].as_str().unwrap().to_owned())
+}
+
+fn mcp(url: &str, http: &reqwest::blocking::Client, token: &str, method: &str, params: Value) -> (u16, Value) {
+    let response = http
+        .post(format!("{url}/mcp"))
+        .bearer_auth(token)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }))
+        .send()
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().unwrap_or(Value::Null))
+}
+
+/// A tool's structured answer, or the error text it returned.
+fn tool(url: &str, http: &reqwest::blocking::Client, token: &str, name: &str, args: Value) -> Result<Value, String> {
+    let (status, body) = mcp(url, http, token, "tools/call", json!({ "name": name, "arguments": args }));
+    assert_eq!(status, 200, "{body}");
+    let result = &body["result"];
+    match result["isError"].as_bool() {
+        Some(true) => Err(result["content"][0]["text"].as_str().unwrap().to_owned()),
+        _ => Ok(result["structuredContent"].clone()),
+    }
+}
+
+/// Sends a hook event to the node's socket, as claude's hooks do.
+fn hook(dir: &Path, event: Value) {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{event}").unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+}
+
+fn tabs_with(machine: &Machine, connector: &str) -> Vec<pinned_core::wire::TabView> {
+    machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(connector)).collect()
+}
+
+use std::collections::HashMap;
+
+#[test]
+fn an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in() {
+    let hub = TestHub::start("agent_e2e");
+    let url = hub.url.clone();
+    let http = agent_http();
+
+    // Discovery: an unauthenticated call is told where the protected resource's metadata is.
+    let (status, _) = mcp(&url, &http, "", "initialize", json!({}));
+    assert_eq!(status, 401);
+    let denied = http.post(format!("{url}/mcp")).json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).send().unwrap();
+    assert_eq!(denied.status(), 401);
+    let challenge = denied.headers()["www-authenticate"].to_str().unwrap().to_owned();
+    assert!(challenge.contains(&format!("resource_metadata=\"{url}/.well-known/oauth-protected-resource/mcp\"")), "{challenge}");
+    let bad = http.post(format!("{url}/mcp")).bearer_auth("not-a-token").json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).send().unwrap();
+    assert_eq!(bad.status(), 401);
+    assert!(bad.headers()["www-authenticate"].to_str().unwrap().contains("error=\"invalid_token\""));
+    let resource: Value = http.get(format!("{url}/.well-known/oauth-protected-resource/mcp")).send().unwrap().json().unwrap();
+    assert_eq!((resource["resource"].clone(), resource["authorization_servers"].clone()), (json!(format!("{url}/mcp")), json!([url])));
+    let server: Value = http.get(format!("{url}/.well-known/oauth-authorization-server")).send().unwrap().json().unwrap();
+    assert_eq!(server["code_challenge_methods_supported"], json!(["S256"]));
+    assert_eq!(server["registration_endpoint"], format!("{url}/oauth/register"));
+
+    // Registration refuses a redirect a code could leak through.
+    let refused = http.post(format!("{url}/oauth/register")).json(&json!({ "redirect_uris": ["http://evil.example/cb"] })).send().unwrap();
+    assert_eq!(refused.status(), 400);
+    let client_id = register_agent(&url, &http);
+
+    // An authorization with an unregistered redirect never redirects; one without PKCE goes back with an error.
+    let unregistered = http.get(with_query(&format!("{url}/oauth/authorize"), &[("response_type", "code"), ("client_id", client_id.as_str()), ("redirect_uri", "https://evil.example/cb"), ("code_challenge", &pkce().1), ("code_challenge_method", "S256")])).send().unwrap();
+    assert_eq!(unregistered.status(), 400);
+    assert!(unregistered.headers().get("location").is_none());
+    let plain = http.get(with_query(&format!("{url}/oauth/authorize"), &[("response_type", "code"), ("client_id", client_id.as_str()), ("redirect_uri", AGENT_REDIRECT), ("state", "s")])).send().unwrap();
+    let back = plain.headers()["location"].to_str().unwrap().to_owned();
+    assert!(back.starts_with(AGENT_REDIRECT) && back.contains("error=invalid_request") && back.contains("state=s"), "{back}");
+
+    // The account, its node and a project on it.
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("agent-node");
+    let creds = pair(&url, &mut client, "mac", &dir);
+    let node = Node::start(&dir, creds.clone());
+    // Like claude's TUI, it reads keys raw, so the node types prompts into it rather than holding them.
+    std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo 2>/dev/null\nexec cat\n").unwrap();
+    client.wait_machines(&[("mac", true)]);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let project = dir.join("app");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = node.machine.open_project(project).display().to_string();
+    let elsewhere = dir.join("other");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let m = creds.machine_id.as_str();
+
+    // The consent card reads the pending request; the approval checks every project against its machine.
+    let (verifier, challenge) = pkce();
+    let request = authorize(&url, &http, &client_id, &challenge, "xyz");
+    let shown = client.hub(json!({ "cmd": "agent_request", "request": request })).unwrap();
+    assert_eq!((shown["client"].as_str(), shown["redirect_uri"].as_str()), (Some("Grok test agent"), Some(AGENT_REDIRECT)));
+    let approve = |client: &mut Client, projects: Value, scopes: Value| client.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": scopes, "projects": projects }));
+    let stranger = uuid::Uuid::new_v4().to_string();
+    assert!(approve(&mut client, json!([{ "machine": stranger, "path": project }]), json!(["sessions"])).unwrap_err().contains("this account has no machine"));
+    assert!(approve(&mut client, json!([{ "machine": m, "path": elsewhere.display().to_string() }]), json!(["sessions"])).unwrap_err().contains("is not a project on mac"));
+    assert!(approve(&mut client, json!([{ "machine": m, "path": project }]), json!(["root"])).unwrap_err().contains("Pick what the agent may do"));
+    let approved = approve(&mut client, json!([{ "machine": m, "path": project }]), json!(["sessions", "orchestrator"])).unwrap();
+    assert!(approve(&mut client, json!([{ "machine": m, "path": project }]), json!(["sessions"])).unwrap_err().contains("expired or was already answered"), "a request is approved once");
+    let back = query_of(approved["redirect"].as_str().unwrap());
+    assert_eq!(back["state"], "xyz");
+    let code = back["code"].clone();
+    let (status, err) = exchange(&url, &http, &[("grant_type", "authorization_code"), ("client_id", "pinned-agent-other"), ("code", &code), ("code_verifier", &verifier)]);
+    assert_eq!((status, err["error"].as_str()), (400, Some("invalid_grant")), "a code is only its own client's");
+    // That first use spent the code, so a second exchange is a replay, which ends the grant.
+    let (status, err) = exchange(&url, &http, &[("grant_type", "authorization_code"), ("client_id", &client_id), ("code", &code), ("code_verifier", &verifier)]);
+    assert_eq!((status, err["error"].as_str()), (400, Some("invalid_grant")));
+    assert_eq!(client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"], json!([]), "a replayed code ended its grant");
+
+    let (access, refresh) = connect_agent(&url, &http, &mut client, &client_id, &["sessions", "orchestrator"], json!([{ "machine": m, "path": project }]));
+    let listed = client.hub(json!({ "cmd": "external_agents" })).unwrap();
+    assert_eq!(listed["endpoint"], format!("{url}/mcp"));
+    assert_eq!(listed["agents"][0]["name"], "Grok test agent");
+    assert_eq!(listed["agents"][0]["projects"], json!([{ "machine": m, "path": project, "name": "app" }]));
+
+    // MCP: initialize, the tools its scopes reach, and the one project it was let into.
+    let (status, init) = mcp(&url, &http, &access, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }));
+    assert_eq!((status, init["result"]["protocolVersion"].as_str()), (200, Some("2025-06-18")));
+    let notified = http.post(format!("{url}/mcp")).bearer_auth(&access).json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).send().unwrap();
+    assert_eq!(notified.status(), 202);
+    let foreign = http.post(format!("{url}/mcp")).bearer_auth(&access).header("origin", "https://evil.example").json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })).send().unwrap();
+    assert_eq!(foreign.status(), 403, "a page on another origin can't call the endpoint");
+    let (_, listed) = mcp(&url, &http, &access, "tools/list", json!({}));
+    let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["list_projects", "start_session", "send_message", "read_session", "list_sessions", "message_orchestrator", "read_orchestrator"]);
+    let projects = tool(&url, &http, &access, "list_projects", json!({})).unwrap();
+    assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
+    assert_eq!((projects["projects"][0]["name"].as_str(), projects["projects"][0]["machine"].as_str(), projects["projects"][0]["online"].as_bool()), (Some("app"), Some("mac"), Some(true)));
+    let pid = projects["projects"][0]["id"].as_str().unwrap().to_owned();
+
+    // A session starts once per request_id, without skipping permissions.
+    let started = tool(&url, &http, &access, "start_session", json!({ "project": pid, "task": "Run the tests", "title": "--dangerously-skip-permissions", "request_id": "start-1" })).unwrap();
+    assert_eq!(started["state"], "starting");
+    let session = started["session_id"].as_str().unwrap().to_owned();
+    let connector = format!("mcp:{session}");
+    let opened = tabs_with(&node.machine, &connector);
+    assert_eq!(opened.len(), 1);
+    assert!(opened[0].running && !opened[0].bypass, "{:?}", opened[0]);
+    assert_eq!(opened[0].cwd, project);
+    let again = tool(&url, &http, &access, "start_session", json!({ "project": pid, "task": "Run the tests", "title": "--dangerously-skip-permissions", "request_id": "start-1" })).unwrap();
+    assert_eq!((again["session_id"].as_str(), again["replayed"].as_bool()), (Some(session.as_str()), Some(true)));
+    assert_eq!(tabs_with(&node.machine, &connector).len(), 1, "a retry never starts a second session");
+    assert!(tool(&url, &http, &access, "start_session", json!({ "project": pid, "task": "Something else", "request_id": "start-1" })).unwrap_err().contains("already used for another request"));
+
+    let read = tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap();
+    assert_eq!(read["state"], "starting");
+    assert!(read["conversation"]["items"].is_array(), "{read}");
+
+    // Nothing is typed before the session reports it is at its prompt: it may show a startup dialog.
+    let tab = opened[0].id.clone();
+    let early = tool(&url, &http, &access, "send_message", json!({ "session_id": session, "message": "also lint", "request_id": "msg-1" })).unwrap_err();
+    assert!(early.contains("the session is starting"), "{early}");
+    hook(&dir, json!({ "kind": "agent", "status": "needs-input", "tab": tab, "message": "Claude is waiting for your input" }));
+    wait_for("the idle notice", || tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap()["state"] == "done");
+
+    // A message goes in once, and the session's screen shows it; claude here is `cat`.
+    let sent = tool(&url, &http, &access, "send_message", json!({ "session_id": session, "message": "also lint", "request_id": "msg-1" })).unwrap();
+    assert_eq!(sent["delivered"], true);
+    let replay = tool(&url, &http, &access, "send_message", json!({ "session_id": session, "message": "also lint", "request_id": "msg-1" })).unwrap();
+    assert_eq!(replay["replayed"], true);
+    client.send(json!({ "type": "attach", "machine": m, "tab": &tab }));
+    let screen = client.wait_output(m, &tab, "also lint");
+    assert_eq!(screen.matches("also lint").count(), 1, "the retry typed nothing: {screen:?}");
+
+    // A permission prompt is the user's: the agent sees it and can't type into it.
+    hook(&dir, json!({ "kind": "agent", "status": "needs-input", "tab": tab, "message": "Claude needs your permission to use Bash" }));
+    wait_for("the permission prompt", || tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap()["state"] == "needs_permission");
+    let read = tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap();
+    assert_eq!(read["question"], "Claude needs your permission to use Bash");
+    let refused = tool(&url, &http, &access, "send_message", json!({ "session_id": session, "message": "yes", "request_id": "msg-2" })).unwrap_err();
+    assert!(refused.contains("needs_permission"), "{refused}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!client.output(m, &tab).contains("yes"), "nothing was typed into the prompt");
+    hook(&dir, json!({ "kind": "agent", "status": "done", "tab": tab }));
+    wait_for("the finished turn", || tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap()["state"] == "done");
+    assert_eq!(tool(&url, &http, &access, "send_message", json!({ "session_id": session, "message": "now ship", "request_id": "msg-2" })).unwrap()["delivered"], true, "a refused key may try again once the session is free");
+    let sessions = tool(&url, &http, &access, "list_sessions", json!({})).unwrap();
+    assert_eq!((sessions["sessions"][0]["session_id"].as_str(), sessions["sessions"][0]["project"].as_str()), (Some(session.as_str()), Some(pid.as_str())));
+
+    // The orchestrator: the first message starts it and types nothing; once it is idle, the same key delivers once.
+    assert_eq!(tool(&url, &http, &access, "read_orchestrator", json!({ "project": pid })).unwrap()["state"], "not_started");
+    let orchestrate = json!({ "project": pid, "message": "plan the release", "request_id": "orch-1" });
+    let told = tool(&url, &http, &access, "message_orchestrator", orchestrate.clone()).unwrap();
+    assert_eq!((told["delivered"].as_bool(), told["started"].as_bool(), told["state"].as_str()), (Some(false), Some(true), Some("starting")));
+    let orchestrators: Vec<_> = node.machine.tabs().into_iter().filter(|t| t.role == Some(pinned_core::agent::Role::Orchestrator)).collect();
+    assert_eq!(orchestrators.len(), 1);
+    assert!(orchestrators[0].running && !orchestrators[0].bypass);
+    let orchestrator = orchestrators[0].id.clone();
+    assert_eq!(tool(&url, &http, &access, "read_orchestrator", json!({ "project": pid })).unwrap()["state"], "starting");
+    assert!(tool(&url, &http, &access, "message_orchestrator", orchestrate.clone()).unwrap_err().contains("the orchestrator is starting"));
+    client.send(json!({ "type": "attach", "machine": m, "tab": &orchestrator }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!client.output(m, &orchestrator).contains("plan the release"), "nothing was typed while it started");
+    hook(&dir, json!({ "kind": "agent", "status": "needs-input", "tab": orchestrator, "message": "Claude is waiting for your input" }));
+    wait_for("the orchestrator's idle notice", || tool(&url, &http, &access, "read_orchestrator", json!({ "project": pid })).unwrap()["state"] == "done");
+    assert_eq!(tool(&url, &http, &access, "message_orchestrator", orchestrate.clone()).unwrap()["delivered"], true);
+    assert_eq!(tool(&url, &http, &access, "message_orchestrator", orchestrate).unwrap()["replayed"], true);
+    assert_eq!(client.wait_output(m, &orchestrator, "plan the release").matches("plan the release").count(), 1);
+    assert_eq!(node.machine.tabs().into_iter().filter(|t| t.role == Some(pinned_core::agent::Role::Orchestrator)).count(), 1, "one orchestrator, the project's own");
+
+    // Another account's agent reaches none of this.
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut bob = Client::connect(&url, &bob_token);
+    bob.wait("hello", |f| f["type"] == "hello");
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-box", "linux").unwrap();
+    let _raw = RawMachine::start(&url, &bob_machine_token, |call| match call["cmd"].as_str() {
+        Some("list_projects") => RawReply::Ok(json!([{ "path": "/w/bob", "name": "bob", "account": "claude" }])),
+        _ => RawReply::Ok(json!([])),
+    });
+    bob.wait_machines(&[("bob-box", true)]);
+    assert!(bob.hub(json!({ "cmd": "approve_agent", "request": authorize(&url, &http, &client_id, &pkce().1, "b"), "scopes": ["sessions"], "projects": [{ "machine": m, "path": project }] })).unwrap_err().contains("this account has no machine"), "bob can't grant ana's machine");
+    let (bob_access, _) = connect_agent(&url, &http, &mut bob, &client_id, &["sessions"], json!([{ "machine": bob_machine.id, "path": "/w/bob" }]));
+    assert!(tool(&url, &http, &bob_access, "read_session", json!({ "session_id": session })).unwrap_err().contains("no session"));
+    assert!(tool(&url, &http, &bob_access, "send_message", json!({ "session_id": session, "message": "hi", "request_id": "b1" })).unwrap_err().contains("no session"));
+    assert!(tool(&url, &http, &bob_access, "start_session", json!({ "project": pid, "task": "t", "request_id": "b2" })).unwrap_err().contains("no project"));
+    assert!(tool(&url, &http, &bob_access, "message_orchestrator", json!({ "project": pid, "message": "m", "request_id": "b3" })).unwrap_err().contains("needs the orchestrator scope"));
+    assert_eq!(tool(&url, &http, &bob_access, "list_sessions", json!({})).unwrap()["sessions"], json!([]));
+
+    // Refresh rotates; the old refresh token coming back ends the grant.
+    let (status, fresh) = exchange(&url, &http, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", &refresh)]);
+    assert_eq!(status, 200, "{fresh}");
+    let access = fresh["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(tool(&url, &http, &access, "list_projects", json!({})).unwrap()["projects"][0]["id"], pid);
+    let (status, err) = exchange(&url, &http, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", &refresh)]);
+    assert_eq!((status, err["error"].as_str()), (400, Some("invalid_grant")));
+    assert_eq!(mcp(&url, &http, &access, "tools/list", json!({})).0, 401, "a replayed refresh token ended the grant's access");
+
+    // Revoking from the Connectors page ends access at once.
+    let (access, _) = connect_agent(&url, &http, &mut client, &client_id, &["orchestrator"], json!([{ "machine": m, "path": project }]));
+    let (_, listed) = mcp(&url, &http, &access, "tools/list", json!({}));
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 3, "an orchestrator-only grant lists no session tools");
+    assert!(tool(&url, &http, &access, "start_session", json!({ "project": pid, "task": "t", "request_id": "x" })).unwrap_err().contains("needs the sessions scope"));
+    let id = client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"][0]["id"].as_str().unwrap().to_owned();
+    assert!(bob.hub(json!({ "cmd": "revoke_agent", "id": id })).unwrap_err().contains("this account has no agent"), "bob can't revoke ana's agent");
+    client.hub(json!({ "cmd": "revoke_agent", "id": id })).unwrap();
+    assert_eq!(mcp(&url, &http, &access, "tools/list", json!({})).0, 401);
+    drop(node);
+}
+
+enum RawReply {
+    Ok(Value),
+    /// Reads the call, then drops the connection without answering, as a machine that crashed mid-call.
+    Hangup,
+}
+
+/// A machine socket the test scripts, which reconnects after a hangup and logs every call it got.
+struct RawMachine {
+    calls: Arc<Mutex<Vec<Value>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RawMachine {
+    fn start(url: &str, token: &str, answer: impl Fn(&Value) -> RawReply + Send + 'static) -> RawMachine {
+        let (calls, stop) = (Arc::new(Mutex::new(vec![])), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (log, stopped, url, token) = (calls.clone(), stop.clone(), url.to_owned(), token.to_owned());
+        std::thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
+                if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+                    stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+                }
+                ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+                loop {
+                    if stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let frame: Value = match ws.read() {
+                        Ok(Message::Text(text)) => serde_json::from_str(&text).unwrap(),
+                        Ok(Message::Ping(payload)) => {
+                            let _ = ws.send(Message::Pong(payload));
+                            continue;
+                        }
+                        Ok(_) => continue,
+                        Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                        Err(_) => break,
+                    };
+                    if frame["type"] != "call" {
+                        continue;
+                    }
+                    log.lock().unwrap().push(frame["call"].clone());
+                    match answer(&frame["call"]) {
+                        RawReply::Ok(value) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "ok": value }).to_string())).unwrap(),
+                        RawReply::Hangup => {
+                            if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+                                let _ = stream.shutdown(Shutdown::Both);
+                            }
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        RawMachine { calls, stop }
+    }
+
+    fn calls(&self, cmd: &str) -> usize {
+        self.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).count()
+    }
+}
+
+impl Drop for RawMachine {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_lost_answer_is_reported_as_unknown_and_never_acted_on_twice() {
+    let hub = TestHub::start("agent_lost");
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let (machine, machine_token) = account::register_machine(&url, &token, "flaky", "linux").unwrap();
+    // The session's tab shows up only after the test says so, as a machine that started it but whose answer was lost.
+    let tab_visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let session_env = Arc::new(Mutex::new(String::new()));
+    let (visible, env) = (tab_visible.clone(), session_env.clone());
+    let raw = RawMachine::start(&url, &machine_token, move |call| match call["cmd"].as_str() {
+        Some("list_projects") => RawReply::Ok(json!([{ "path": "/w/app", "name": "app", "account": "claude" }])),
+        Some("run") => {
+            let connector = call["run"]["env"].as_array().unwrap().iter().find(|pair| pair[0] == "PINNED_CONNECTOR").unwrap()[1].as_str().unwrap().to_owned();
+            *env.lock().unwrap() = connector;
+            RawReply::Hangup
+        }
+        Some("prompt") => RawReply::Hangup,
+        Some("tabs") => {
+            let connector = env.lock().unwrap().clone();
+            match visible.load(Ordering::SeqCst) {
+                true => RawReply::Ok(json!([{ "id": "tab-1-1", "cwd": "/w/app", "bypass": false, "running": true, "status": "done", "title": null, "message": null, "resume_at": null, "connector": connector, "opened": 1 }])),
+                false => RawReply::Ok(json!([])),
+            }
+        }
+        _ => RawReply::Ok(Value::Null),
+    });
+    client.wait_machines(&[("flaky", true)]);
+    let client_id = register_agent(&url, &http);
+    let (access, _) = connect_agent(&url, &http, &mut client, &client_id, &["sessions"], json!([{ "machine": machine.id, "path": "/w/app" }]));
+    let pid = tool(&url, &http, &access, "list_projects", json!({})).unwrap()["projects"][0]["id"].as_str().unwrap().to_owned();
+
+    let start = json!({ "project": pid, "task": "Run the tests", "request_id": "start-1" });
+    let lost = tool(&url, &http, &access, "start_session", start.clone()).unwrap();
+    assert_eq!(lost["state"], "unknown", "{lost}");
+    let session = lost["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(raw.calls("run"), 1);
+    let back_online = || wait_for("the machine back online", || tool(&url, &http, &access, "list_projects", json!({})).unwrap()["projects"][0]["online"] == true);
+    back_online();
+
+    // Retries with the same key look for the session instead of starting another.
+    let again = tool(&url, &http, &access, "start_session", start.clone()).unwrap();
+    assert_eq!((again["state"].as_str(), again["session_id"].as_str()), (Some("unknown"), Some(session.as_str())));
+    assert_eq!(raw.calls("run"), 1, "a retry after a lost answer never sends the run again");
+    back_online();
+    assert_eq!(tool(&url, &http, &access, "list_sessions", json!({})).unwrap()["sessions"][0]["state"], "not_found");
+    tab_visible.store(true, Ordering::SeqCst);
+    let found = tool(&url, &http, &access, "start_session", start.clone()).unwrap();
+    assert_eq!((found["state"].as_str(), found["session_id"].as_str()), (Some("starting"), Some(session.as_str())), "the tab that appeared settles it");
+    assert_eq!(tool(&url, &http, &access, "start_session", start).unwrap()["replayed"], true);
+    assert_eq!(raw.calls("run"), 1);
+    assert_eq!(tool(&url, &http, &access, "read_session", json!({ "session_id": session })).unwrap()["state"], "done");
+
+    // A message whose answer is lost is unknown, and its retry types nothing.
+    let message = json!({ "session_id": session, "message": "also lint", "request_id": "msg-1" });
+    let unknown = tool(&url, &http, &access, "send_message", message.clone()).unwrap();
+    assert_eq!(unknown["delivered"], "unknown", "{unknown}");
+    back_online();
+    assert_eq!(tool(&url, &http, &access, "send_message", message).unwrap()["delivered"], "unknown");
+    assert_eq!(raw.calls("prompt"), 1, "the retry did not type the message again");
+}

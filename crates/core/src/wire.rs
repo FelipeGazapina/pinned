@@ -839,6 +839,67 @@ pub enum HubCall {
         assignee: String,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
+    /// `ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.
+    ExternalAgents,
+    /// `AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.
+    AgentRequest { request: String },
+    /// `AgentRedirect`: lets the agent of the pending `request` in with `scopes` on `projects`, and
+    /// answers where the browser goes next, the agent's redirect with a one-use code.
+    ApproveAgent { request: String, scopes: Vec<String>, projects: Vec<AgentProject> },
+    /// `AgentRedirect`: refuses the pending `request`, and answers the agent's redirect with `access_denied`.
+    DenyAgent { request: String },
+    /// `null`. Ends the agent's access at once: its tokens stop working.
+    RevokeAgent { id: String },
+}
+
+/// A project an external agent may work in: one folder on one machine.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct AgentProject {
+    pub machine: MachineId,
+    pub path: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// An external agent the account let in through OAuth, as the Connectors page lists it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct AgentView {
+    pub id: String,
+    pub name: String,
+    /// Where the agent's OAuth redirect points, which names who runs it.
+    pub redirect: String,
+    pub scopes: Vec<String>,
+    pub projects: Vec<AgentProject>,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds of its last call, absent until it made one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct ExternalAgents {
+    /// The URL an MCP client adds as a server.
+    pub endpoint: String,
+    pub agents: Vec<AgentView>,
+}
+
+/// A pending authorization, for the consent card.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct AgentRequest {
+    pub request: String,
+    /// The name the client registered with, which it chose itself.
+    pub client: String,
+    pub redirect_uri: String,
+    /// What the client asked for. The user picks what it gets.
+    pub scopes: Vec<String>,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct AgentRedirect {
+    pub redirect: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]

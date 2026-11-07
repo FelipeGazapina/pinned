@@ -3397,10 +3397,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tokio",
  "tokio-postgres",
  "tower-http",
  "tungstenite 0.28.0",
+ "url",
  "uuid",
 ]
 

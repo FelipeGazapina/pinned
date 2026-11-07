@@ -1,0 +1,855 @@
+[
+  {
+    "note": "unauthenticated: 401 with resource metadata",
+    "request": {
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "evidence",
+          "version": "1"
+        }
+      }
+    },
+    "status": 401,
+    "www_authenticate": "Bearer resource_metadata=\"http://127.0.0.1:8791/.well-known/oauth-protected-resource/mcp\", scope=\"sessions orchestrator\"",
+    "response": {
+      "error": "unauthorized",
+      "error_description": "connect this agent to Pinned first"
+    }
+  },
+  {
+    "note": "discovery",
+    "protected_resource": {
+      "resource": "http://127.0.0.1:8791/mcp",
+      "authorization_servers": [
+        "http://127.0.0.1:8791"
+      ],
+      "scopes_supported": [
+        "sessions",
+        "orchestrator"
+      ],
+      "bearer_methods_supported": [
+        "header"
+      ],
+      "resource_name": "Pinned"
+    },
+    "authorization_server": {
+      "issuer": "http://127.0.0.1:8791",
+      "authorization_endpoint": "http://127.0.0.1:8791/oauth/authorize",
+      "token_endpoint": "http://127.0.0.1:8791/oauth/token",
+      "registration_endpoint": "http://127.0.0.1:8791/oauth/register",
+      "revocation_endpoint": "http://127.0.0.1:8791/oauth/revoke",
+      "response_types_supported": [
+        "code"
+      ],
+      "grant_types_supported": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "code_challenge_methods_supported": [
+        "S256"
+      ],
+      "token_endpoint_auth_methods_supported": [
+        "none"
+      ],
+      "revocation_endpoint_auth_methods_supported": [
+        "none"
+      ],
+      "scopes_supported": [
+        "sessions",
+        "orchestrator"
+      ],
+      "authorization_response_iss_parameter_supported": true
+    }
+  },
+  {
+    "note": "dynamic client registration",
+    "status": 201,
+    "response": {
+      "client_id": "pinned-agent-o_M4hXquqP2eNa7i0uUOZ8Ho3H1YbzPmzs5DlbXmjis",
+      "client_name": "Evidence test agent",
+      "redirect_uris": [
+        "http://127.0.0.1:62033/callback"
+      ],
+      "grant_types": [
+        "authorization_code",
+        "refresh_token"
+      ],
+      "response_types": [
+        "code"
+      ],
+      "token_endpoint_auth_method": "none",
+      "client_id_issued_at": 1794054285
+    }
+  },
+  {
+    "note": "token exchange (PKCE S256)",
+    "status": 200,
+    "response": {
+      "access_token": "[redacted]",
+      "token_type": "Bearer",
+      "expires_in": 3600,
+      "refresh_token": "[redacted]",
+      "scope": "sessions orchestrator"
+    },
+    "callback_params": {
+      "code": "[redacted]",
+      "iss": "http://127.0.0.1:8791",
+      "state": "evidence-state"
+    }
+  },
+  {
+    "note": "initialize",
+    "request": {
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {
+          "name": "evidence",
+          "version": "1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "pinned",
+          "title": "Pinned",
+          "version": "0.17.14"
+        },
+        "instructions": "Pinned runs coding agents on the user's own machines. Call list_projects first: you may only work in the projects listed there. Sessions ask the user before risky actions; when a session reports needs_permission or waiting_for_input, tell the user to answer it in Pinned. Never retry a start or a message with a new request_id unless read_session shows it did not happen."
+      }
+    }
+  },
+  {
+    "note": "tools/list",
+    "request": {
+      "method": "tools/list",
+      "params": {}
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "tools": [
+          {
+            "name": "list_projects",
+            "title": "List projects",
+            "description": "The projects the user let you work in, each with its id, name, machine and whether that machine is online.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "annotations": {
+              "readOnlyHint": true
+            }
+          },
+          {
+            "name": "start_session",
+            "title": "Start a coding session",
+            "description": "Start a new coding agent session in a project with a task. It runs on the user's machine with the user's own permission settings: it asks the user before risky actions and you can't answer those prompts. Returns a session_id for read_session and send_message.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "A project id from list_projects."
+                },
+                "task": {
+                  "type": "string",
+                  "description": "The whole assignment: the goal, the constraints, and how to verify the result."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "A few words naming the session."
+                },
+                "request_id": {
+                  "type": "string",
+                  "description": "A key you make up for this one request, such as a UUID. Sending the same request_id again answers what the first call did and never acts twice. A new request needs a new request_id."
+                }
+              },
+              "required": [
+                "project",
+                "task",
+                "request_id"
+              ]
+            },
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false
+            }
+          },
+          {
+            "name": "send_message",
+            "title": "Message a session",
+            "description": "Send a follow-up message to a session you started. Refused while the session is starting, working or waiting on the user, so it never answers a prompt meant for the user; read_session says when it may take a message (done or failed).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "request_id": {
+                  "type": "string",
+                  "description": "A key you make up for this one request, such as a UUID. Sending the same request_id again answers what the first call did and never acts twice. A new request needs a new request_id."
+                }
+              },
+              "required": [
+                "session_id",
+                "message",
+                "request_id"
+              ]
+            },
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false
+            }
+          },
+          {
+            "name": "read_session",
+            "title": "Read a session",
+            "description": "A session's state and its latest conversation. state is starting, working, done, failed, needs_permission, waiting_for_input, ended, offline or not_found. needs_permission and waiting_for_input mean the user has to answer in Pinned.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "cursor": {
+                  "type": "integer",
+                  "description": "The cursor the last read returned, to get only what came after it."
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "At most this many conversation items, the latest; 20 when left out, 100 at most."
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            },
+            "annotations": {
+              "readOnlyHint": true
+            }
+          },
+          {
+            "name": "list_sessions",
+            "title": "List sessions",
+            "description": "The sessions you started, newest first, with their state.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "annotations": {
+              "readOnlyHint": true
+            }
+          },
+          {
+            "name": "message_orchestrator",
+            "title": "Message the project's orchestrator",
+            "description": "Send a message to the project's orchestrator, the agent that plans the project's work and delegates it to worker sessions. When it isn't running this starts it and delivers nothing yet: send the message again with the same request_id once read_orchestrator says done. Refused while the orchestrator is starting, working or waiting on the user.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "project": {
+                  "type": "string",
+                  "description": "A project id from list_projects."
+                },
+                "message": {
+                  "type": "string"
+                },
+                "request_id": {
+                  "type": "string",
+                  "description": "A key you make up for this one request, such as a UUID. Sending the same request_id again answers what the first call did and never acts twice. A new request needs a new request_id."
+                }
+              },
+              "required": [
+                "project",
+                "message",
+                "request_id"
+              ]
+            },
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false
+            }
+          },
+          {
+            "name": "read_orchestrator",
+            "title": "Read the project's orchestrator",
+            "description": "The orchestrator's state and its latest conversation, with the same states as read_session, plus not_started.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "cursor": {
+                  "type": "integer",
+                  "description": "The cursor the last read returned, to get only what came after it."
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "At most this many conversation items, the latest; 20 when left out, 100 at most."
+                },
+                "project": {
+                  "type": "string",
+                  "description": "A project id from list_projects."
+                }
+              },
+              "required": [
+                "project"
+              ]
+            },
+            "annotations": {
+              "readOnlyHint": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "note": "list_projects",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "list_projects",
+        "arguments": {}
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"projects\":[{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\",\"machine\":\"sweep-node\",\"online\":true}],\"scopes\":[\"sessions\",\"orchestrator\"]}"
+          }
+        ],
+        "structuredContent": {
+          "projects": [
+            {
+              "id": "ad0f4de20f9ab25a",
+              "name": "alpha",
+              "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha",
+              "machine": "sweep-node",
+              "online": true
+            }
+          ],
+          "scopes": [
+            "sessions",
+            "orchestrator"
+          ]
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "start_session",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "start_session",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a",
+          "task": "Look at the README and summarize it.",
+          "title": "Summarize the README",
+          "request_id": "evidence-start-1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"session_id\":\"e0a2add5-472e-4d19-939d-5eec6e3a767a\",\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"},\"state\":\"starting\",\"next\":\"read_session in a while to follow it\"}"
+          }
+        ],
+        "structuredContent": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a",
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          },
+          "state": "starting",
+          "next": "read_session in a while to follow it"
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "start_session retried with the same request_id: replayed, no second session",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "start_session",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a",
+          "task": "Look at the README and summarize it.",
+          "title": "Summarize the README",
+          "request_id": "evidence-start-1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"next\":\"read_session in a while to follow it\",\"state\":\"starting\",\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"},\"session_id\":\"e0a2add5-472e-4d19-939d-5eec6e3a767a\",\"replayed\":true}"
+          }
+        ],
+        "structuredContent": {
+          "next": "read_session in a while to follow it",
+          "state": "starting",
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          },
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a",
+          "replayed": true
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "send_message refused while the session has not reported it is at its prompt",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "send_message",
+        "arguments": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a",
+          "message": "hello from the test agent",
+          "request_id": "evidence-msg-0"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "the session is starting, so it can't take a message now: it is starting, and may be showing the user a startup prompt; read again in a minute"
+          }
+        ],
+        "isError": true
+      }
+    }
+  },
+  {
+    "note": "send_message once the session is idle",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "send_message",
+        "arguments": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a",
+          "message": "hello from the test agent",
+          "request_id": "evidence-msg-1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"delivered\":true,\"next\":\"read it in a while for the reply\",\"session_id\":\"e0a2add5-472e-4d19-939d-5eec6e3a767a\"}"
+          }
+        ],
+        "structuredContent": {
+          "delivered": true,
+          "next": "read it in a while for the reply",
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a"
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "read_session after the reply",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "read_session",
+        "arguments": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 11,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"state\":\"done\",\"next\":\"it may take a message now\",\"title\":\"Summarize the README\",\"conversation\":{\"items\":[{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:49.249Z\",\"text\":\"Look at the README and summarize it.\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:49.250Z\",\"text\":\"echo: Look at the README and summarize it.\"},{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:49.506Z\",\"text\":\"External agent \\\"Evidence test agent\\\" via MCP:\\n\\nhello from the test agent\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:49.506Z\",\"text\":\"echo: External agent \\\"Evidence test agent\\\" via MCP:\\n\\nhello from the test agent\"}],\"cursor\":1527,\"reset\":false},\"session_id\":\"e0a2add5-472e-4d19-939d-5eec6e3a767a\"}"
+          }
+        ],
+        "structuredContent": {
+          "state": "done",
+          "next": "it may take a message now",
+          "title": "Summarize the README",
+          "conversation": {
+            "items": [
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:49.249Z",
+                "text": "Look at the README and summarize it."
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:49.250Z",
+                "text": "echo: Look at the README and summarize it."
+              },
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:49.506Z",
+                "text": "External agent \"Evidence test agent\" via MCP:\n\nhello from the test agent"
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:49.506Z",
+                "text": "echo: External agent \"Evidence test agent\" via MCP:\n\nhello from the test agent"
+              }
+            ],
+            "cursor": 1527,
+            "reset": false
+          },
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a"
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "message_orchestrator: starts the orchestrator and types nothing yet",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "message_orchestrator",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a",
+          "message": "What is planned for alpha?",
+          "request_id": "evidence-orch-1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 12,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"delivered\":false,\"started\":true,\"state\":\"starting\",\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"},\"next\":\"the orchestrator is starting; call read_orchestrator, and once its state is done send this message again with the same request_id\"}"
+          }
+        ],
+        "structuredContent": {
+          "delivered": false,
+          "started": true,
+          "state": "starting",
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          },
+          "next": "the orchestrator is starting; call read_orchestrator, and once its state is done send this message again with the same request_id"
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "read_orchestrator while it starts",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "read_orchestrator",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 13,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"state\":\"starting\",\"next\":\"it is starting, and may be showing the user a startup prompt; read again in a minute\",\"title\":null,\"conversation\":{\"items\":[],\"cursor\":0,\"reset\":false},\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"}}"
+          }
+        ],
+        "structuredContent": {
+          "state": "starting",
+          "next": "it is starting, and may be showing the user a startup prompt; read again in a minute",
+          "title": null,
+          "conversation": {
+            "items": [],
+            "cursor": 0,
+            "reset": false
+          },
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          }
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "message_orchestrator again with the same request_id once it is idle: delivered",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "message_orchestrator",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a",
+          "message": "What is planned for alpha?",
+          "request_id": "evidence-orch-1"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 16,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"delivered\":true,\"next\":\"read it in a while for the reply\",\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"}}"
+          }
+        ],
+        "structuredContent": {
+          "delivered": true,
+          "next": "read it in a while for the reply",
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          }
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "read_orchestrator",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "read_orchestrator",
+        "arguments": {
+          "project": "ad0f4de20f9ab25a"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 17,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"state\":\"done\",\"next\":\"it may take a message now\",\"title\":\"External agent \\\"Evidence test agent\\\" via MCP:\",\"conversation\":{\"items\":[{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:53.045Z\",\"text\":\"Ready.\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:53.047Z\",\"text\":\"echo: Ready.\"},{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:53.302Z\",\"text\":\"External agent \\\"Evidence test agent\\\" via MCP:\\n\\nWhat is planned for alpha?\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:53.302Z\",\"text\":\"echo: External agent \\\"Evidence test agent\\\" via MCP:\\n\\nWhat is planned for alpha?\"}],\"cursor\":1468,\"reset\":false},\"project\":{\"id\":\"ad0f4de20f9ab25a\",\"name\":\"alpha\",\"path\":\"/private/tmp/pinned-external-mcp-sweep/home/work/alpha\"}}"
+          }
+        ],
+        "structuredContent": {
+          "state": "done",
+          "next": "it may take a message now",
+          "title": "External agent \"Evidence test agent\" via MCP:",
+          "conversation": {
+            "items": [
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:53.045Z",
+                "text": "Ready."
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:53.047Z",
+                "text": "echo: Ready."
+              },
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:53.302Z",
+                "text": "External agent \"Evidence test agent\" via MCP:\n\nWhat is planned for alpha?"
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:53.302Z",
+                "text": "echo: External agent \"Evidence test agent\" via MCP:\n\nWhat is planned for alpha?"
+              }
+            ],
+            "cursor": 1468,
+            "reset": false
+          },
+          "project": {
+            "id": "ad0f4de20f9ab25a",
+            "name": "alpha",
+            "path": "/private/tmp/pinned-external-mcp-sweep/home/work/alpha"
+          }
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "read_session while the session asks the user",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "read_session",
+        "arguments": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 20,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"state\":\"needs_permission\",\"next\":\"the user has to answer it in Pinned; tell them, then read again later\",\"title\":\"Summarize the README\",\"question\":\"Claude needs your permission to use Bash\",\"conversation\":{\"items\":[{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:49.249Z\",\"text\":\"Look at the README and summarize it.\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:49.250Z\",\"text\":\"echo: Look at the README and summarize it.\"},{\"kind\":\"user\",\"at\":\"2026-11-07T12:24:49.506Z\",\"text\":\"External agent \\\"Evidence test agent\\\" via MCP:\\n\\nhello from the test agent\"},{\"kind\":\"text\",\"at\":\"2026-11-07T12:24:49.506Z\",\"text\":\"echo: External agent \\\"Evidence test agent\\\" via MCP:\\n\\nhello from the test agent\"},{\"kind\":\"user\",\"at\":\"2026-11-07T12:25:13.310Z\",\"text\":\"/ask\"},{\"kind\":\"tool\",\"at\":\"2026-11-07T12:25:13.310Z\",\"name\":\"Bash\",\"summary\":\"rm -rf build\"}],\"cursor\":1945,\"reset\":false},\"session_id\":\"e0a2add5-472e-4d19-939d-5eec6e3a767a\"}"
+          }
+        ],
+        "structuredContent": {
+          "state": "needs_permission",
+          "next": "the user has to answer it in Pinned; tell them, then read again later",
+          "title": "Summarize the README",
+          "question": "Claude needs your permission to use Bash",
+          "conversation": {
+            "items": [
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:49.249Z",
+                "text": "Look at the README and summarize it."
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:49.250Z",
+                "text": "echo: Look at the README and summarize it."
+              },
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:24:49.506Z",
+                "text": "External agent \"Evidence test agent\" via MCP:\n\nhello from the test agent"
+              },
+              {
+                "kind": "text",
+                "at": "2026-11-07T12:24:49.506Z",
+                "text": "echo: External agent \"Evidence test agent\" via MCP:\n\nhello from the test agent"
+              },
+              {
+                "kind": "user",
+                "at": "2026-11-07T12:25:13.310Z",
+                "text": "/ask"
+              },
+              {
+                "kind": "tool",
+                "at": "2026-11-07T12:25:13.310Z",
+                "name": "Bash",
+                "summary": "rm -rf build"
+              }
+            ],
+            "cursor": 1945,
+            "reset": false
+          },
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a"
+        },
+        "isError": false
+      }
+    }
+  },
+  {
+    "note": "send_message refused while the user is asked for permission",
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "send_message",
+        "arguments": {
+          "session_id": "e0a2add5-472e-4d19-939d-5eec6e3a767a",
+          "message": "yes, go ahead",
+          "request_id": "evidence-msg-2"
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 21,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "the session is needs_permission, so it can't take a message now: the user has to answer it in Pinned; tell them, then read again later"
+          }
+        ],
+        "isError": true
+      }
+    }
+  },
+  {
+    "note": "tools/list after revoke: 401",
+    "request": {
+      "method": "tools/list",
+      "params": {}
+    },
+    "status": 401,
+    "www_authenticate": "Bearer error=\"invalid_token\", error_description=\"the token is unknown, expired or revoked\", resource_metadata=\"http://127.0.0.1:8791/.well-known/oauth-protected-resource/mcp\"",
+    "response": {
+      "error": "unauthorized",
+      "error_description": "connect this agent to Pinned first"
+    }
+  }
+]

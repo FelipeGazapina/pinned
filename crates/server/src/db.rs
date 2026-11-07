@@ -12,7 +12,7 @@ use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::sync;
 use pinned_core::upstash::BoxId;
-use pinned_core::wire::{AccountView, MachineView};
+use pinned_core::wire::{AccountView, AgentProject, AgentView, MachineView};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -45,6 +45,26 @@ create table if not exists boxes (id text primary key, account uuid not null ref
   machine uuid not null, upstash text, connector text not null, subject jsonb not null, spec jsonb not null,
   size text not null, phase text not null, reason text, created_at timestamptz not null default now(),
   unique (account, connector, subject));
+-- External MCP agents. A client registers itself; the user lets it in through a request, which
+-- makes a grant; the grant's codes and tokens are kept as their sha256, as logins are.
+create table if not exists agent_clients (id text primary key, name text not null, redirect_uris jsonb not null,
+  created_at timestamptz not null default now());
+create table if not exists agent_requests (id_hash bytea primary key, client text not null references agent_clients on delete cascade,
+  redirect_uri text not null, state text, code_challenge text not null, scopes jsonb not null, resource text not null,
+  expires_at timestamptz not null);
+create table if not exists agent_grants (id uuid primary key, account uuid not null references accounts on delete cascade,
+  client text not null references agent_clients on delete cascade, scopes jsonb not null, projects jsonb not null,
+  created_at timestamptz not null default now(), last_used timestamptz, revoked boolean not null default false);
+create table if not exists agent_codes (code_hash bytea primary key, grant_id uuid not null references agent_grants on delete cascade,
+  redirect_uri text not null, code_challenge text not null, resource text not null, expires_at timestamptz not null,
+  used boolean not null default false);
+create table if not exists agent_tokens (token_hash bytea primary key, grant_id uuid not null references agent_grants on delete cascade,
+  kind text not null, expires_at timestamptz not null, rotated boolean not null default false);
+create table if not exists agent_sessions (id uuid primary key, grant_id uuid not null references agent_grants on delete cascade,
+  machine uuid not null, project text not null, title text not null, created_at timestamptz not null default now());
+create table if not exists agent_calls (grant_id uuid not null references agent_grants on delete cascade, key text not null,
+  tool text not null, args_hash bytea not null, state text not null, session uuid, result jsonb,
+  created_at timestamptz not null default now(), primary key (grant_id, key));
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -642,6 +662,371 @@ impl Db {
         let sealed: BTreeMap<&String, String> = secrets.iter().map(|(name, value)| (name, self.sealer.seal(value))).collect();
         let sealed = serde_json::to_value(sealed).map_err(|e| e.to_string())?;
         self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, &sealed]).await.map_err(err).map(drop)
+    }
+}
+
+/// How long a pending authorization waits for the user, a code for its exchange, and each token.
+const AGENT_REQUEST_MINUTES: i32 = 10;
+const AGENT_CODE_MINUTES: i32 = 5;
+pub const AGENT_ACCESS_SECS: i64 = 3600;
+const AGENT_REFRESH_DAYS: i32 = 30;
+/// A call still pending this long was cut off, as by a hub restart, so its outcome is unknown.
+const AGENT_CALL_STALE_SECS: i64 = 600;
+
+/// An external agent's client registration.
+pub struct AgentClient {
+    pub id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+}
+
+pub struct AgentRequestRow {
+    pub client: String,
+    pub client_name: String,
+    pub redirect_uri: String,
+    pub state: Option<String>,
+    pub scopes: Vec<String>,
+    pub code_challenge: String,
+    pub resource: String,
+    pub expires_at: i64,
+}
+
+/// What an access token lets its agent do: the account it acts in, the scopes and the projects.
+#[derive(Clone, Debug)]
+pub struct AgentGrant {
+    pub id: Uuid,
+    pub account: Uuid,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub projects: Vec<AgentProject>,
+}
+
+pub struct AgentCode {
+    pub grant: Uuid,
+    pub client: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub resource: String,
+}
+
+/// What spending a one-use secret found.
+pub enum Spent<T> {
+    Fresh(T),
+    /// Spent before, or expired: the secret leaked or was replayed, so its grant should end.
+    Replayed(Uuid),
+    Unknown,
+}
+
+/// A side-effecting tool call, kept so a retry with the same key answers rather than acts twice.
+pub enum Reserved {
+    New,
+    Existing { tool: String, args_hash: Vec<u8>, state: String, session: Option<Uuid>, result: Option<Value>, stale: bool },
+}
+
+pub struct AgentSession {
+    pub id: Uuid,
+    pub machine: Uuid,
+    pub project: String,
+    pub title: String,
+    pub created_at: i64,
+}
+
+fn strings(value: Value) -> Vec<String> {
+    serde_json::from_value(value).unwrap_or_default()
+}
+
+impl Db {
+    pub async fn register_agent_client(&self, name: &str, redirect_uris: &[String]) -> Result<String, String> {
+        let id = format!("pinned-agent-{}", Token::new().text);
+        let uris = serde_json::to_value(redirect_uris).map_err(|e| e.to_string())?;
+        self.client().await?.execute("insert into agent_clients (id, name, redirect_uris) values ($1, $2, $3)", &[&id, &name, &uris]).await.map_err(err)?;
+        Ok(id)
+    }
+
+    pub async fn agent_client(&self, id: &str) -> Result<Option<AgentClient>, String> {
+        let row = self.client().await?.query_opt("select name, redirect_uris from agent_clients where id = $1", &[&id]).await.map_err(err)?;
+        Ok(row.map(|r| AgentClient { id: id.to_owned(), name: r.get(0), redirect_uris: strings(r.get(1)) }))
+    }
+
+    /// A pending authorization for the user to approve, by an id that only its URL carries.
+    pub async fn create_agent_request(&self, client: &str, redirect_uri: &str, state: Option<&str>, code_challenge: &str, scopes: &[String], resource: &str) -> Result<String, String> {
+        let client_db = self.client().await?;
+        client_db.execute("delete from agent_requests where expires_at < now()", &[]).await.map_err(err)?;
+        let id = Token::new();
+        let scopes = serde_json::to_value(scopes).map_err(|e| e.to_string())?;
+        client_db
+            .execute(
+                "insert into agent_requests (id_hash, client, redirect_uri, state, code_challenge, scopes, resource, expires_at) \
+                 values ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(mins => $8))",
+                &[&id.hash, &client, &redirect_uri, &state, &code_challenge, &scopes, &resource, &AGENT_REQUEST_MINUTES],
+            )
+            .await
+            .map_err(err)?;
+        Ok(id.text)
+    }
+
+    fn agent_request_row(r: &tokio_postgres::Row) -> AgentRequestRow {
+        AgentRequestRow {
+            client: r.get(0),
+            client_name: r.get(1),
+            redirect_uri: r.get(2),
+            state: r.get(3),
+            code_challenge: r.get(4),
+            scopes: strings(r.get(5)),
+            resource: r.get(6),
+            expires_at: r.get(7),
+        }
+    }
+
+    pub async fn agent_request(&self, id: &str) -> Result<Option<AgentRequestRow>, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "select r.client, c.name, r.redirect_uri, r.state, r.code_challenge, r.scopes, r.resource, extract(epoch from r.expires_at)::bigint \
+                 from agent_requests r join agent_clients c on c.id = r.client where r.id_hash = $1 and r.expires_at > now()",
+                &[&hash(id)],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.as_ref().map(Self::agent_request_row))
+    }
+
+    /// Spends the pending request, so it is approved or refused once.
+    pub async fn take_agent_request(&self, id: &str) -> Result<Option<AgentRequestRow>, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "with taken as (delete from agent_requests where id_hash = $1 returning *) \
+                 select t.client, c.name, t.redirect_uri, t.state, t.code_challenge, t.scopes, t.resource, extract(epoch from t.expires_at)::bigint \
+                 from taken t join agent_clients c on c.id = t.client where t.expires_at > now()",
+                &[&hash(id)],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.as_ref().map(Self::agent_request_row))
+    }
+
+    /// Lets the client in to the account, and answers the one-use code its redirect carries.
+    pub async fn create_agent_grant(&self, account: Uuid, request: &AgentRequestRow, scopes: &[String], projects: &[AgentProject]) -> Result<String, String> {
+        let client = self.client().await?;
+        let grant = Uuid::new_v4();
+        let (scopes, projects) = (serde_json::to_value(scopes).map_err(|e| e.to_string())?, serde_json::to_value(projects).map_err(|e| e.to_string())?);
+        client
+            .execute("insert into agent_grants (id, account, client, scopes, projects) values ($1, $2, $3, $4, $5)", &[&grant, &account, &request.client, &scopes, &projects])
+            .await
+            .map_err(err)?;
+        let code = Token::new();
+        client
+            .execute(
+                "insert into agent_codes (code_hash, grant_id, redirect_uri, code_challenge, resource, expires_at) \
+                 values ($1, $2, $3, $4, $5, now() + make_interval(mins => $6))",
+                &[&code.hash, &grant, &request.redirect_uri, &request.code_challenge, &request.resource, &AGENT_CODE_MINUTES],
+            )
+            .await
+            .map_err(err)?;
+        Ok(code.text)
+    }
+
+    /// Spends an authorization code. A second use, or a late one, is `Replayed`.
+    pub async fn take_agent_code(&self, code: &str) -> Result<Spent<AgentCode>, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "with old as (select used from agent_codes where code_hash = $1 for update) \
+                 update agent_codes c set used = true from old where c.code_hash = $1 \
+                 returning c.grant_id, c.redirect_uri, c.code_challenge, c.resource, c.expires_at > now(), old.used, \
+                 (select client from agent_grants g where g.id = c.grant_id)",
+                &[&hash(code)],
+            )
+            .await
+            .map_err(err)?;
+        let Some(r) = row else { return Ok(Spent::Unknown) };
+        let (grant, live, used): (Uuid, bool, bool) = (r.get(0), r.get(4), r.get(5));
+        if used || !live {
+            return Ok(Spent::Replayed(grant));
+        }
+        Ok(Spent::Fresh(AgentCode { grant, redirect_uri: r.get(1), code_challenge: r.get(2), resource: r.get(3), client: r.get(6) }))
+    }
+
+    /// A fresh access token and refresh token for the grant, unless it was revoked.
+    pub async fn issue_agent_tokens(&self, grant: Uuid) -> Result<Option<(String, String)>, String> {
+        let client = self.client().await?;
+        let live = client.query_opt("select 1 from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+        if live.is_none() {
+            return Ok(None);
+        }
+        // Expired rows go; a rotated refresh token stays until it expires, so its replay is still caught.
+        client.execute("delete from agent_tokens where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+        client.execute("delete from agent_codes where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+        let (access, refresh) = (Token::new(), Token::new());
+        client
+            .execute(
+                "insert into agent_tokens (token_hash, grant_id, kind, expires_at) values \
+                 ($1, $3, 'access', now() + make_interval(secs => $4)), ($2, $3, 'refresh', now() + make_interval(days => $5))",
+                &[&access.hash, &refresh.hash, &grant, &(AGENT_ACCESS_SECS as f64), &AGENT_REFRESH_DAYS],
+            )
+            .await
+            .map_err(err)?;
+        Ok(Some((access.text, refresh.text)))
+    }
+
+    /// Spends a refresh token: its grant and client. One already rotated is `Replayed`.
+    pub async fn take_agent_refresh(&self, token: &str) -> Result<Spent<(Uuid, String)>, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "with old as (select rotated from agent_tokens where token_hash = $1 and kind = 'refresh' for update) \
+                 update agent_tokens t set rotated = true from old where t.token_hash = $1 and t.kind = 'refresh' \
+                 returning t.grant_id, t.expires_at > now(), old.rotated, (select client from agent_grants g where g.id = t.grant_id)",
+                &[&hash(token)],
+            )
+            .await
+            .map_err(err)?;
+        let Some(r) = row else { return Ok(Spent::Unknown) };
+        let (grant, live, rotated): (Uuid, bool, bool) = (r.get(0), r.get(1), r.get(2));
+        if rotated {
+            return Ok(Spent::Replayed(grant));
+        }
+        if !live {
+            return Ok(Spent::Unknown);
+        }
+        Ok(Spent::Fresh((grant, r.get(3))))
+    }
+
+    /// Ends the grant: its tokens and codes go. With `account`, only that account's grant.
+    pub async fn revoke_agent_grant(&self, grant: Uuid, account: Option<Uuid>) -> Result<bool, String> {
+        let client = self.client().await?;
+        let n = client
+            .execute("update agent_grants set revoked = true where id = $1 and ($2::uuid is null or account = $2)", &[&grant, &account])
+            .await
+            .map_err(err)?;
+        if n == 1 {
+            client.execute("delete from agent_tokens where grant_id = $1", &[&grant]).await.map_err(err)?;
+            client.execute("delete from agent_codes where grant_id = $1", &[&grant]).await.map_err(err)?;
+        }
+        Ok(n == 1)
+    }
+
+    /// The scopes of a grant that still stands.
+    pub async fn agent_grant_scopes(&self, grant: Uuid) -> Result<Option<Vec<String>>, String> {
+        let row = self.client().await?.query_opt("select scopes from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+        Ok(row.map(|r| strings(r.get(0))))
+    }
+
+    /// RFC 7009: forgets one token, of whichever kind. Unknown tokens are no error.
+    pub async fn revoke_agent_token(&self, token: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_tokens where token_hash = $1", &[&hash(token)]).await.map_err(err).map(drop)
+    }
+
+    /// The grant a live access token belongs to, marking it used.
+    pub async fn agent_by_token(&self, token: &str) -> Result<Option<AgentGrant>, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "update agent_grants g set last_used = now() from agent_tokens t, agent_clients c \
+                 where t.token_hash = $1 and t.kind = 'access' and t.expires_at > now() and t.grant_id = g.id and c.id = g.client and not g.revoked \
+                 returning g.id, g.account, c.name, g.scopes, g.projects",
+                &[&hash(token)],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| AgentGrant { id: r.get(0), account: r.get(1), name: r.get(2), scopes: strings(r.get(3)), projects: serde_json::from_value(r.get(4)).unwrap_or_default() }))
+    }
+
+    pub async fn agent_grants(&self, account: Uuid) -> Result<Vec<AgentView>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "select g.id, c.name, c.redirect_uris, g.scopes, g.projects, extract(epoch from g.created_at)::bigint, extract(epoch from g.last_used)::bigint \
+                 from agent_grants g join agent_clients c on c.id = g.client where g.account = $1 and not g.revoked order by g.created_at",
+                &[&account],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows
+            .iter()
+            .map(|r| AgentView {
+                id: r.get::<_, Uuid>(0).to_string(),
+                name: r.get(1),
+                redirect: strings(r.get(2)).into_iter().next().unwrap_or_default(),
+                scopes: strings(r.get(3)),
+                projects: serde_json::from_value(r.get(4)).unwrap_or_default(),
+                created_at: r.get(5),
+                last_used: r.get(6),
+            })
+            .collect())
+    }
+
+    /// Records the call under `key`, or answers what an earlier call with that key did.
+    pub async fn reserve_agent_call(&self, grant: Uuid, key: &str, tool: &str, args_hash: &[u8], session: Option<Uuid>) -> Result<Reserved, String> {
+        let client = self.client().await?;
+        let inserted = client
+            .execute(
+                "insert into agent_calls (grant_id, key, tool, args_hash, state, session) values ($1, $2, $3, $4, 'pending', $5) on conflict do nothing",
+                &[&grant, &key, &tool, &args_hash, &session],
+            )
+            .await
+            .map_err(err)?;
+        if inserted == 1 {
+            return Ok(Reserved::New);
+        }
+        let r = client
+            .query_one(
+                "select tool, args_hash, state, session, result, extract(epoch from now() - created_at)::bigint from agent_calls where grant_id = $1 and key = $2",
+                &[&grant, &key],
+            )
+            .await
+            .map_err(err)?;
+        Ok(Reserved::Existing { tool: r.get(0), args_hash: r.get(1), state: r.get(2), session: r.get(3), result: r.get(4), stale: r.get::<_, i64>(5) > AGENT_CALL_STALE_SECS })
+    }
+
+    pub async fn finish_agent_call(&self, grant: Uuid, key: &str, state: &str, result: &Value) -> Result<(), String> {
+        self.client().await?
+            .execute("update agent_calls set state = $3, result = $4 where grant_id = $1 and key = $2", &[&grant, &key, &state, result])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// Forgets a call that did nothing, so the same key may try again.
+    pub async fn drop_agent_call(&self, grant: Uuid, key: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_calls where grant_id = $1 and key = $2", &[&grant, &key]).await.map_err(err).map(drop)
+    }
+
+    pub async fn add_agent_session(&self, grant: Uuid, id: Uuid, machine: Uuid, project: &str, title: &str) -> Result<(), String> {
+        self.client().await?
+            .execute("insert into agent_sessions (id, grant_id, machine, project, title) values ($1, $2, $3, $4, $5)", &[&id, &grant, &machine, &project, &title])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    pub async fn drop_agent_session(&self, id: Uuid) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_sessions where id = $1", &[&id]).await.map_err(err).map(drop)
+    }
+
+    /// The grant's sessions, newest first, or only `id` when given. Another grant's never.
+    pub async fn agent_sessions(&self, grant: Uuid, id: Option<Uuid>) -> Result<Vec<AgentSession>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "select id, machine, project, title, extract(epoch from created_at)::bigint from agent_sessions \
+                 where grant_id = $1 and ($2::uuid is null or id = $2) order by created_at desc limit 50",
+                &[&grant, &id],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| AgentSession { id: r.get(0), machine: r.get(1), project: r.get(2), title: r.get(3), created_at: r.get(4) }).collect())
+    }
+
+    /// How many sessions the grant started in the last hour.
+    pub async fn agent_recent_starts(&self, grant: Uuid) -> Result<i64, String> {
+        let row = self
+            .client().await?
+            .query_one("select count(*) from agent_sessions where grant_id = $1 and created_at > now() - interval '1 hour'", &[&grant])
+            .await
+            .map_err(err)?;
+        Ok(row.get(0))
     }
 }
 

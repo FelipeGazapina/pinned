@@ -6,8 +6,8 @@ use crate::account::{
 };
 use crate::connectors::{Connector, Settings, Suggestions};
 use crate::wire::{
-    AccountView, ClientFrame, MachineFrame, MachineView, PairCode, ProjectView, TabView, ToClient,
-    ToMachine,
+    AccountView, AgentRedirect, AgentRequest, ClientFrame, ExternalAgents, MachineFrame, MachineView, PairCode, ProjectView, TabView,
+    ToClient, ToMachine,
 };
 use crate::{github, linear, slack, sync, upstash, vercel};
 use schemars::generate::SchemaSettings;
@@ -89,6 +89,9 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("VercelAccount".into(), schemas::<vercel::Account>());
     outbound.insert("VercelModel".into(), schemas::<vercel::Model>());
     outbound.insert("UpstashAccount".into(), schemas::<upstash::Account>());
+    outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());
+    outbound.insert("AgentRequest".into(), schemas::<AgentRequest>());
+    outbound.insert("AgentRedirect".into(), schemas::<AgentRedirect>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),
