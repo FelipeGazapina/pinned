@@ -231,6 +231,13 @@ function submit() {
     line = "";
     return drawSettings();
   }
+  // A local command, as claude 2.1.319 runs it: no UserPromptSubmit, no Stop.
+  if (line === "/reload-skills") {
+    fs.appendFileSync(path.join(process.env.HOME, "claude-reload.log"), `${process.env.PINNED_TAB} ${new Date().toISOString()}\n`);
+    out("Reloaded skills: 4 skills available (none added or removed).\r\n");
+    line = "";
+    return prompt();
+  }
   hook("UserPromptSubmit", { prompt: line });
   // "pictures" stands for a prompt with images, which claude writes as one message below.
   if (line !== "pictures") said(line);
