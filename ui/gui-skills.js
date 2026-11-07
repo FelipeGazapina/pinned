@@ -33,17 +33,19 @@ function skillRows() {
 }
 
 const baseName = (path) => String(path).split(/[\\/]/).filter(Boolean).pop() ?? path;
-const readerNames = (c) => [...new Set(c.readers.map((r) => r.account))].join(", ");
-/** Where a copy lives, as the page names it. */
+const readerNames = (c, provider) => [...new Set(c.readers.filter((r) => r.provider === provider).map((r) => r.account))].join(", ");
+/** Where a copy lives, as the page names it: every place that reaches its folder. */
 function placeLabel(c) {
-  const p = c.place;
-  const who = readerNames(c);
+  return [...new Set([c.place, ...(c.also ?? [])].map((p) => onePlaceLabel(c, p)))].join(" + ");
+}
+function onePlaceLabel(c, p) {
+  const who = (provider) => (readerNames(c, provider) ? ` (${readerNames(c, provider)})` : "");
   return {
-    "claude-personal": `Claude${who ? ` (${who})` : ""}`,
+    "claude-personal": `Claude${who("claude")}`,
     "claude-project": `Project ${baseName(p.checkout)}`,
     "plugin-cache": `Plugin cache ${p.version ? `v${p.version}` : ""}`.trim(),
     "plugin-source": `Plugin source in ${p.marketplace}`,
-    "codex-personal": `Codex${who ? ` (${who})` : ""}`,
+    "codex-personal": `Codex${who("codex")}`,
     "cursor-personal": "Cursor",
     "cursor-plugin": `Cursor plugin ${p.plugin}`,
     agents: "~/.agents",

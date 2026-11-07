@@ -8,13 +8,13 @@ const between = (src, from, to) => src.slice(src.indexOf(from), src.indexOf(to))
 
 function page(byMachine) {
   const skills = source("./gui-skills.js");
-  const sandbox = { skillsUi: { byMachine: new Map(Object.entries(byMachine)) } };
+  const sandbox = { skillsUi: { byMachine: new Map(Object.entries(byMachine)) }, LOCAL: "mac", machineName: (m) => m };
   vm.createContext(sandbox);
   vm.runInContext(`${between(source("./diff.js"), "function parseDiff", "/** What `git diff -w`")}
     ${between(skills, "const copyId", "async function fetchSkills")}
-    ${between(skills, "/** One row per scope", "const baseName")}
+    ${between(skills, "/** One row per scope", "function machineNotesHtml")}
     ${between(skills, "/** A unified patch", "const diffHtml")}
-    this.api = { parseDiff, textPatch, skillRows };`, sandbox);
+    this.api = { parseDiff, textPatch, skillRows, whereLabel };`, sandbox);
   return sandbox.api;
 }
 
@@ -41,4 +41,11 @@ test("copies group by scope and name, across machines, and agree only with one t
     ["deploy", "project", "mac", true],
     ["pstack:unslop", "plugin", "mac,mini", false],
   ]);
+});
+
+test("a folder two places reach is one copy named by both", () => {
+  const { whereLabel } = page({ mac: { copies: [] } });
+  const readers = [{ provider: "claude", account: "claude" }, { provider: "claude", account: "work" }, { provider: "codex", account: "codex" }];
+  const copy = { machine: "mac", readers, place: { kind: "claude-personal" }, also: [{ kind: "claude-personal" }, { kind: "agents" }] };
+  assert.equal(whereLabel(copy), "Claude (claude, work) + ~/.agents");
 });

@@ -48,8 +48,8 @@ pub enum Writable {
     /// for a plugin from a directory marketplace: Claude Code reads its source folder instead, and
     /// this copy only feeds plugin sync.
     PluginCache { home: PathBuf, plugin: String, version: String, loaded: bool },
-    /// A directory marketplace's plugin folder, which the Claude homes in `homes` load. Survives updates.
-    PluginSource { marketplace: String, plugin: String, homes: Vec<PathBuf> },
+    /// A directory marketplace's plugin folder, which the Claude home `home` loads. Survives updates.
+    PluginSource { marketplace: String, plugin: String, home: PathBuf },
     /// `<CODEX_HOME>/skills`, except `.system`.
     CodexPersonal { home: PathBuf },
     /// `~/.cursor/skills`.
@@ -136,7 +136,7 @@ impl Place {
 }
 
 /// A folder holding skills as `<dir>/<skill>/SKILL.md`. `dir` is canonical, so two routes to one
-/// folder (a symlinked home) compare equal.
+/// folder (a symlinked home) compare equal, and `inventory` makes their skills one copy.
 struct Root {
     dir: PathBuf,
     place: Place,
@@ -180,7 +180,7 @@ pub(crate) fn claude_roots(home: &Path, project: Option<&Path>, plugin_dirs: &[P
         let cache = |loaded| Place::Writable(Writable::PluginCache { home: home.to_path_buf(), plugin: plugin.id.clone(), version: plugin.version.clone(), loaded });
         match directory_source(home, &plugin.id) {
             Some((marketplace, source)) => {
-                out.push(root(source, prefix.clone(), Place::Writable(Writable::PluginSource { marketplace, plugin: plugin.id.clone(), homes: vec![home.to_path_buf()] })));
+                out.push(root(source, prefix.clone(), Place::Writable(Writable::PluginSource { marketplace, plugin: plugin.id.clone(), home: home.to_path_buf() })));
                 out.push(root(plugin.path.clone(), prefix, cache(false)));
             }
             None => out.push(root(plugin.path.clone(), prefix, cache(true))),
@@ -252,23 +252,7 @@ fn roots(places: &Places) -> Vec<Root> {
     }
     rows.push((places.home.join(".agents/skills"), Place::Writable(Writable::Agents), String::new()));
 
-    let mut out: Vec<Root> = vec![];
-    for (dir, place, prefix) in rows {
-        let Ok(dir) = dunce::canonicalize(&dir) else { continue };
-        if !dir.is_dir() {
-            continue;
-        }
-        match out.iter_mut().find(|r| r.dir == dir) {
-            Some(Root { place: Place::Writable(Writable::PluginSource { homes, .. }), .. }) => {
-                if let Place::Writable(Writable::PluginSource { homes: more, .. }) = place {
-                    homes.extend(more);
-                }
-            }
-            Some(_) => {}
-            None => out.push(Root { dir, place, prefix }),
-        }
-    }
-    out
+    rows.into_iter().filter_map(|(dir, place, prefix)| Some(Root { dir: dunce::canonicalize(&dir).ok().filter(|dir| dir.is_dir())?, place, prefix })).collect()
 }
 
 fn children(dir: &Path) -> Vec<PathBuf> {
@@ -297,30 +281,57 @@ fn plugin_name(dir: &Path) -> String {
         .unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
 }
 
-/// One skill folder in one place. `P` is `Place` after listing, `Writable` once parsed for a write.
+/// One skill folder and every place it is in. `P` is `Place` after listing, `Writable` once
+/// parsed for a write.
 #[derive(Clone)]
 struct SkillCopy<P> {
     /// Canonical skill folder.
     dir: PathBuf,
     key: String,
     description: String,
+    /// The first place the table lists it in, which names its row.
     place: P,
+    /// The other places that reach the same folder through a symlink.
+    also: Vec<Place>,
 }
 
-impl SkillCopy<Place> {
-    /// The only way to get a `SkillCopy<Writable>`.
-    fn writable(self) -> Result<SkillCopy<Writable>, Fixed> {
-        let SkillCopy { dir, key, description, place } = self;
-        match place {
-            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place }),
-            Place::Fixed(fixed) => Err(fixed),
-        }
+impl<P: Clone + Into<Place>> SkillCopy<P> {
+    fn places(&self) -> Vec<Place> {
+        std::iter::once(self.place.clone().into()).chain(self.also.iter().cloned()).collect()
     }
 }
 
-/// Every copy on the machine, and the skill folders with no SKILL.md under writable places.
+impl From<Writable> for Place {
+    fn from(place: Writable) -> Place {
+        Place::Writable(place)
+    }
+}
+
+impl SkillCopy<Place> {
+    /// The only way to get a `SkillCopy<Writable>`. Every place of the folder must be writable.
+    fn writable(self) -> Result<SkillCopy<Writable>, Fixed> {
+        let SkillCopy { dir, key, description, place, also } = self;
+        if let Some(Place::Fixed(fixed)) = also.iter().find(|p| matches!(p, Place::Fixed(_))) {
+            return Err(fixed.clone());
+        }
+        match place {
+            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place, also }),
+            Place::Fixed(fixed) => Err(fixed),
+        }
+    }
+
+    /// Read-only when any place is, else lost on update when any place is.
+    fn edit(&self) -> Edit {
+        let edits: Vec<Edit> = self.places().iter().map(Place::edit).collect();
+        let worst = edits.iter().find(|e| matches!(e, Edit::No { .. })).or_else(|| edits.iter().find(|e| **e == Edit::LostOnUpdate));
+        worst.unwrap_or(&Edit::Yes).clone()
+    }
+}
+
+/// Every copy on the machine, one per canonical folder, and the skill folders with no SKILL.md
+/// under writable places.
 fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
-    let (mut copies, mut hollow) = (vec![], vec![]);
+    let (mut copies, mut hollow): (Vec<SkillCopy<Place>>, Vec<PathBuf>) = (vec![], vec![]);
     for root in roots(places) {
         let personal = matches!(root.place, Place::Writable(Writable::ClaudePersonal { .. }));
         for dir in children(&root.dir) {
@@ -329,9 +340,15 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
                 continue;
             }
             let Ok(dir) = dunce::canonicalize(&dir) else { continue };
+            if let Some(known) = copies.iter_mut().find(|c| c.dir == dir) {
+                if known.place != root.place && !known.also.contains(&root.place) {
+                    known.also.push(root.place.clone());
+                }
+                continue;
+            }
             let skill = dir.join("SKILL.md");
             if !skill.is_file() {
-                if matches!(root.place, Place::Writable(_)) {
+                if matches!(root.place, Place::Writable(_)) && !hollow.contains(&dir) {
                     hollow.push(dir);
                 }
                 continue;
@@ -342,6 +359,7 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
                 key: format!("{}{}", root.prefix, meta("name").unwrap_or(name)),
                 description: meta("description").unwrap_or_default(),
                 place: root.place.clone(),
+                also: vec![],
                 dir,
             });
         }
@@ -427,6 +445,8 @@ pub struct CopyView {
     /// Canonical folder, the copy's address in `ReadSkill` and `SaveSkill`.
     pub dir: String,
     pub place: Place,
+    /// Other places that reach the same folder through a symlink.
+    pub also: Vec<Place>,
     #[serde(flatten)]
     pub edit: Edit,
     pub tree: String,
@@ -513,11 +533,13 @@ pub fn list(places: &Places) -> Listing {
     let copies = copies
         .into_iter()
         .map(|c| {
-            let readers = sessions.iter().filter(|(_, s)| reach(&c.place, &s.session(&c.place)).is_some()).map(|(r, _)| Reader { provider: r.provider, account: r.account.clone() }).collect();
-            let edited = c.place.edit() == Edit::LostOnUpdate
+            let all = c.places();
+            let readers = sessions.iter().filter(|(_, s)| all.iter().any(|p| reach(p, &s.session(p)).is_some())).map(|(r, _)| Reader { provider: r.provider, account: r.account.clone() }).collect();
+            let edit = c.edit();
+            let edited = edit == Edit::LostOnUpdate
                 && files(&c.dir).iter().any(|(_, path)| original(&places.originals, path).is_some_and(|kept| std::fs::read_to_string(path).ok() != Some(kept)));
-            let linked = c.place.linked(&c.dir.file_name().unwrap_or_default().to_string_lossy());
-            CopyView { scope: c.place.scope(), edit: c.place.edit(), dir: c.dir.display().to_string(), tree: tree(&c.dir), key: c.key, description: c.description, place: c.place, linked, readers, edited }
+            let linked = all.iter().find_map(|p| p.linked(&c.dir.file_name().unwrap_or_default().to_string_lossy()));
+            CopyView { scope: c.place.scope(), edit, dir: c.dir.display().to_string(), tree: tree(&c.dir), key: c.key, description: c.description, place: c.place, also: c.also, linked, readers, edited }
         })
         .collect();
     Listing { copies, hollow: hollow.iter().map(|d| d.display().to_string()).collect() }
@@ -627,7 +649,7 @@ fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: &
     if now != since {
         return Outcome::Changed { tree: now };
     }
-    let replaced_on_update = matches!(copy.place, Writable::PluginCache { .. } | Writable::CursorPlugin { cached: true, .. });
+    let replaced_on_update = copy.places().iter().any(|p| p.edit() == Edit::LostOnUpdate);
     let kept = originals.join(crate::sync::sha(path.to_string_lossy().as_bytes()));
     let written = match std::fs::read(&path) {
         Ok(bytes) if replaced_on_update && !kept.exists() => crate::fsx::replace(&kept, &bytes, None, None),
@@ -636,7 +658,7 @@ fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: &
     .and_then(|()| crate::fsx::replace(&path, text.as_bytes(), None, None));
     match written {
         Ok(()) => {
-            touched.push(Place::Writable(copy.place.clone()));
+            touched.extend(copy.places());
             Outcome::Saved { tree: tree(&copy.dir) }
         }
         Err(error) => Outcome::Failed { error },
@@ -682,7 +704,7 @@ pub fn reach(place: &Place, session: &Session) -> Option<Nudge> {
             W(Writable::ClaudePersonal { home }) | F(Fixed::ClaudeAccountSynced { home }) => same_home(home),
             W(Writable::ClaudeProject { checkout }) => session.cwd.starts_with(checkout),
             W(Writable::PluginCache { home, loaded, .. }) => *loaded && same_home(home),
-            W(Writable::PluginSource { homes, .. }) => homes.iter().any(|h| same_home(h)),
+            W(Writable::PluginSource { home, .. }) => same_home(home),
             F(Fixed::SyncedPlugin { plugin }) => session.plugin_dirs.iter().any(|d| d.file_name().is_some_and(|n| n == plugin.as_str())),
             F(Fixed::Pinned) => true,
             _ => false,
@@ -888,6 +910,36 @@ mod tests {
         assert_eq!((source.key.as_str(), cache.key.as_str()), ("mods:tidy", "mods:tidy"));
         assert_eq!(source.tree, cache.tree);
         assert_eq!(source.scope, cache.scope);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_places_on_one_folder_are_one_copy_and_a_save_reaches_both() {
+        let mut f = fixture();
+        let work = f.root.join("config/accounts/work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::os::unix::fs::symlink(f.root.join("home/.claude/skills"), work.join("skills")).unwrap();
+        std::os::unix::fs::symlink(f.root.join("home/.claude/skills/unslop"), f.root.join("home/.agents/skills/unslop")).unwrap();
+        f.places.claude_homes.push(("work".into(), work.clone()));
+        let listing = list(&f.places);
+        let dirs: Vec<&str> = listing.copies.iter().map(|c| c.dir.as_str()).collect();
+        let unique: std::collections::BTreeSet<&str> = dirs.iter().copied().collect();
+        assert_eq!(dirs.len(), unique.len(), "a folder is listed twice: {dirs:?}");
+        let dir = f.dir("home/.claude/skills/unslop");
+        let unslop = copy(&listing, &dir);
+        let kinds: Vec<String> = std::iter::once(&unslop.place).chain(&unslop.also).map(kind).collect();
+        assert_eq!(kinds, ["claude-personal", "claude-personal", "agents"]);
+        let readers: Vec<&str> = unslop.readers.iter().map(|r| r.account.as_str()).collect();
+        assert_eq!(readers, ["claude", "work", "codex", "cursor"]);
+        let written = save(&f.places, "SKILL.md", "new", &[target(&listing, &dir)]).unwrap();
+        assert_eq!(
+            written.touched,
+            [
+                Place::Writable(Writable::ClaudePersonal { home: f.root.join("home/.claude") }),
+                Place::Writable(Writable::ClaudePersonal { home: work }),
+                Place::Writable(Writable::Agents),
+            ]
+        );
     }
 
     #[test]
