@@ -70,20 +70,16 @@ pub fn list(claude: &Path, cwd: &Path, shared: &[PathBuf]) -> Vec<Command> {
         .iter()
         .map(|(name, description)| Command { name: (*name).into(), description: (*description).into(), source: "builtin", skill: false })
         .collect();
-    add_from(&mut out, claude, "", "user");
-    add_from(&mut out, &cwd.join(".claude"), "", "project");
-    for (name, root) in plugins(claude) {
-        add_from(&mut out, &root, &format!("{name}:"), "plugin");
-    }
-    for dir in shared {
-        let Some(name) = dir.file_name().and_then(|s| s.to_str()).and_then(|id| id.split('@').next()).filter(|name| !name.is_empty()) else { continue };
-        add_from(&mut out, dir, &format!("{name}:"), "plugin");
-    }
-    if let Some(account) = account(claude) {
-        add_skills(&mut out, &claude.join("skills/synced").join(&account), "", "user");
-        for (name, root) in synced_plugins(&claude.join("plugins/synced").join(&account)) {
-            add_from(&mut out, &root, &format!("{name}:"), "plugin");
+    for root in crate::skills::claude_roots(claude, Some(cwd), shared).into_iter().filter(|root| root.loaded()) {
+        let source = match &root.place {
+            _ if !root.prefix.is_empty() => "plugin",
+            crate::skills::Place::Writable(crate::skills::Writable::ClaudeProject { .. }) => "project",
+            _ => "user",
+        };
+        if !root.skills_only {
+            add_commands(&mut out, &root.base.join("commands"), &root.prefix, source);
         }
+        add_skills(&mut out, &root.skills(), &root.prefix, source);
     }
     out
 }
@@ -91,7 +87,7 @@ pub fn list(claude: &Path, cwd: &Path, shared: &[PathBuf]) -> Vec<Command> {
 /// claude.ai syncs skills and plugins into a folder per signed-in account, named for its
 /// organization and account, so the folders of an account signed in before stay on disk. Claude
 /// keeps `.claude.json` inside a CLAUDE_CONFIG_DIR, and beside the default `~/.claude`.
-fn account(claude: &Path) -> Option<String> {
+pub(crate) fn account(claude: &Path) -> Option<String> {
     let file = [claude.join(".claude.json"), claude.parent()?.join(".claude.json")].into_iter().find(|f| f.is_file())?;
     let config: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
     let account = &config["oauthAccount"];
@@ -100,7 +96,7 @@ fn account(claude: &Path) -> Option<String> {
 
 /// The synced plugins' names and folders, from the account's manifest. A plugin's later generation
 /// has its own folder, `design~g2`, beside the one it replaced.
-fn synced_plugins(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn synced_plugins(dir: &Path) -> Vec<(String, PathBuf)> {
     let manifest: Value = std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let Some(plugins) = manifest["plugins"].as_array() else { return vec![] };
     plugins
@@ -111,11 +107,6 @@ fn synced_plugins(dir: &Path) -> Vec<(String, PathBuf)> {
             Some((name.to_owned(), dir.join(folder)))
         })
         .collect()
-}
-
-fn add_from(out: &mut Vec<Command>, root: &Path, prefix: &str, source: &'static str) {
-    add_commands(out, &root.join("commands"), prefix, source);
-    add_skills(out, &root.join("skills"), prefix, source);
 }
 
 fn add_commands(out: &mut Vec<Command>, dir: &Path, prefix: &str, source: &'static str) {
@@ -171,7 +162,7 @@ fn files(dir: &Path, depth: usize, want: &dyn Fn(&Path) -> bool) -> Vec<PathBuf>
 
 /// The `key: value` lines of a markdown file's front matter, and the text after it. A folded
 /// value (`>` or `|`) takes the indented lines below it.
-fn front_matter(text: &str) -> (impl Fn(&str) -> Option<String> + '_, &str) {
+pub(crate) fn front_matter(text: &str) -> (impl Fn(&str) -> Option<String> + '_, &str) {
     let (head, body) = match text.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---")) {
         Some((head, body)) => (head, body),
         None => ("", text),
@@ -227,10 +218,6 @@ pub(crate) fn enabled_plugins(claude: &Path) -> Vec<EnabledPlugin> {
             })
         })
         .collect()
-}
-
-fn plugins(claude: &Path) -> Vec<(String, PathBuf)> {
-    enabled_plugins(claude).into_iter().map(|plugin| (plugin.name, plugin.path)).collect()
 }
 
 #[cfg(test)]

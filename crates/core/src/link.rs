@@ -3,12 +3,12 @@
 use crate::account::Credentials;
 use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
-use crate::sync;
+use crate::{skills, sync};
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -50,6 +50,7 @@ struct Shared {
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
+    sync_now: AtomicBool,
 }
 
 impl Shared {
@@ -109,6 +110,11 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (stop, stopped) = watch::channel(false);
     let (synced, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     let syncing = std::thread::spawn(move || sync_projects(&synced, &synced_machine, &sync_stopped));
+    let (waking, sync_thread) = (shared.clone(), syncing.thread().clone());
+    machine.set_sync_waker(Arc::new(move || {
+        waking.sync_now.store(true, Ordering::SeqCst);
+        sync_thread.unpark();
+    }));
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
         events.send(&MachineFrame::Event { event: event.clone() });
@@ -214,6 +220,9 @@ impl Syncer {
                 if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
+                if shared.sync_now.swap(false, Ordering::SeqCst) {
+                    break;
+                }
                 std::thread::park_timeout(left);
             }
             wait = SYNC_EVERY;
@@ -250,20 +259,24 @@ impl Syncer {
                 self.shared_projects.insert(key.clone());
             }
             match sync::sync(shared, state, &checkout, SystemTime::now()) {
-                Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
-                    eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
+                Ok(done) => {
+                    machine.skills_changed(&skills::pulled_by_project_sync(&checkout, &done.pulled));
+                    if !done.pushed.is_empty() || !done.pulled.is_empty() {
+                        eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
             }
         }
         for share in machine.plugin_shares() {
             match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
-                Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
+                Ok(done) => {
                     self.reported_old_hub = false;
-                    eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
+                    machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
+                    if !done.pushed.is_empty() || !done.pulled.is_empty() {
+                        eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
+                    }
                 }
-                Ok(_) => self.reported_old_hub = false,
                 Err(e) if sync::old_hub(&e) => {
                     if !self.reported_old_hub {
                         eprintln!("pinned: this hub does not share plugins yet: {e}");

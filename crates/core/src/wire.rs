@@ -313,6 +313,22 @@ pub enum Call {
     Commands { tab: TabId },
     /// `Vec<String>`: the tab's folder's files and folders, relative, for `@` mentions.
     Files { tab: TabId },
+    /// `skills::Listing`: every skill folder on the machine.
+    Skills,
+    /// `skills::SkillText` of `file` in the listed skill folder at `dir`.
+    ReadSkill {
+        dir: String,
+        #[serde(default = "skill_md")]
+        file: String,
+    },
+    /// `skills::SaveReport`. Writes `text` to `file` in each listed, writable copy that is
+    /// unchanged since its `since`, then reloads the sessions that load them.
+    SaveSkill {
+        #[serde(default = "skill_md")]
+        file: String,
+        text: String,
+        copies: Vec<crate::skills::Target>,
+    },
     /// `branches::Branches` of the tab's folder.
     Branches { tab: TabId },
     /// `null`. Switches the tab's folder to `branch`, a new one when `create`. Refused while claude works there.
@@ -541,6 +557,10 @@ pub enum Call {
     ResetSync,
 }
 
+fn skill_md() -> String {
+    "SKILL.md".into()
+}
+
 fn pulls_limit() -> usize {
     100
 
@@ -568,6 +588,9 @@ impl Call {
                 | Call::OpenIn { .. }
                 | Call::Commands { .. }
                 | Call::Files { .. }
+                | Call::Skills
+                | Call::ReadSkill { .. }
+                | Call::SaveSkill { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
                 | Call::ListAccounts
@@ -729,6 +752,8 @@ pub enum MachineEvent {
     Thread { tab: TabId },
     /// Some while this process is installing a release, None when it connects with nothing in progress.
     Update { status: Option<UpdateStatus> },
+    /// Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.
+    SkillsChanged { scopes: Vec<crate::skills::Scope> },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -1054,6 +1079,22 @@ mod tests {
         assert_eq!(serde_json::to_value(&frame).unwrap(), expected);
         let parsed: T = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+    }
+
+    #[test]
+    fn skill_calls_default_to_skill_md_and_name_their_copies() {
+        let read: Call = serde_json::from_value(json!({ "cmd": "read_skill", "dir": "/h/.claude/skills/unslop" })).unwrap();
+        assert_eq!(read, Call::ReadSkill { dir: "/h/.claude/skills/unslop".into(), file: "SKILL.md".into() });
+        round_trip(
+            Call::SaveSkill { file: "SKILL.md".into(), text: "body".into(), copies: vec![crate::skills::Target { dir: "/h/.agents/skills/x".into(), since: "abc".into() }] },
+            json!({ "cmd": "save_skill", "file": "SKILL.md", "text": "body", "copies": [{ "dir": "/h/.agents/skills/x", "since": "abc" }] }),
+        );
+        round_trip(Call::Skills, json!({ "cmd": "skills" }));
+        assert!(Call::Skills.may_wait() && read.may_wait());
+        round_trip(
+            MachineEvent::SkillsChanged { scopes: vec![crate::skills::Scope::Personal, crate::skills::Scope::Plugin { plugin: "pstack".into() }] },
+            json!({ "kind": "skills-changed", "scopes": [{ "kind": "personal" }, { "kind": "plugin", "plugin": "pstack" }] }),
+        );
     }
 
     fn tab_view() -> TabView {

@@ -1101,6 +1101,7 @@ function onMachineEvent(machine, event) {
   if (!machines.has(machine)) return;
   if (event.kind === "tabs") return setTabs(machine, event.tabs);
   if (event.kind === "thread") return onThreadEvent(machine, event);
+  if (event.kind === "skills-changed") return skillsChanged(machine);
   if (event.kind === "usage") {
     machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();
