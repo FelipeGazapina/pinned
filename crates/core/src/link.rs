@@ -112,10 +112,10 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (synced, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     let syncing = std::thread::spawn(move || sync_projects(&synced, &synced_machine, &sync_stopped));
     let (waking, sync_thread) = (shared.clone(), syncing.thread().clone());
-    machine.set_sync_waker(Some(Arc::new(move || {
+    machine.set_sync_waker(Arc::new(move || {
         waking.sync_now.store(true, Ordering::SeqCst);
         sync_thread.unpark();
-    })));
+    }));
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
         events.send(&MachineFrame::Event { event: event.clone() });

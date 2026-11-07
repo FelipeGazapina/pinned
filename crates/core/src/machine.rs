@@ -421,7 +421,7 @@ pub struct Machine {
     next_listener: AtomicU64,
     me: Weak<Machine>,
     gate: Mutex<Gate>,
-    /// Runs the hub link's next sync cycle now. Set while a link runs.
+    /// Runs the hub link's next sync cycle now. Set once a link starts.
     sync_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
@@ -941,7 +941,7 @@ impl Machine {
                 if !written.touched.is_empty() {
                     self.wake_sync();
                 }
-                json(written.report(sessions))
+                json(skills::SaveReport { copies: written.copies, sessions })
             }
         }
     }
@@ -2117,22 +2117,16 @@ impl Machine {
         nudged
     }
 
-    /// Types `/reload-skills` into a tab that owes it, once it is idle. True when it typed, so the
-    /// delegate pass leaves the tab's notices for its next tick.
-    fn maybe_reload(&self, tab: &str) -> bool {
-        self.tab(tab, Tab::reload_if_idle).unwrap_or(false)
-    }
-
     /// Runs the hub link's next sync cycle now. Without a link it does nothing.
-    pub(crate) fn wake_sync(&self) {
+    fn wake_sync(&self) {
         let waker = self.sync_waker.lock().unwrap().clone();
         if let Some(wake) = waker {
             wake();
         }
     }
 
-    pub(crate) fn set_sync_waker(&self, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
-        *self.sync_waker.lock().unwrap() = wake;
+    pub(crate) fn set_sync_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self.sync_waker.lock().unwrap() = Some(wake);
     }
 
     fn shared_plugin_dirs(&self, account: &Account) -> Vec<PathBuf> {
@@ -2673,7 +2667,7 @@ impl Machine {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
-                    if !machine.maybe_reload(&tab) {
+                    if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
                         machine.maybe_deliver(&tab);
                     }
                 }

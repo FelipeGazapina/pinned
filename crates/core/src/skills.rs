@@ -609,12 +609,6 @@ pub struct Written {
     pub touched: Vec<Place>,
 }
 
-impl Written {
-    pub fn report(self, sessions: Vec<Nudged>) -> SaveReport {
-        SaveReport { copies: self.copies, sessions }
-    }
-}
-
 /// Writes `text` to `file` in each target copy that is listed, writable, and unchanged since its
 /// `since`. A copy that already holds `text` is `Saved` without a write, so running it twice
 /// changes nothing the second time. A saved plugin source copy also writes its `followers`, with
@@ -704,16 +698,6 @@ pub enum Nudge {
     /// Claude Code reloads personal, project and plugin skills with `/reload-skills`.
     ReloadSkills,
     NextStart,
-}
-
-impl Nudge {
-    /// The text typed into the terminal, for the nudges that have one.
-    pub fn command(self) -> Option<&'static str> {
-        match self {
-            Nudge::ReloadSkills => Some("/reload-skills"),
-            Nudge::NextStart => None,
-        }
-    }
 }
 
 /// The facts of one running session that decide what it loads.
@@ -1128,7 +1112,6 @@ mod tests {
         assert_eq!(reach(&Place::Writable(Writable::Agents), &session(Provider::Codex, "/x")), Some(Nudge::NextStart));
         assert_eq!(reach(&Place::Writable(Writable::Agents), &session(Provider::Claude, "/x")), None);
         assert_eq!(reach(&Place::Writable(Writable::CursorPersonal), &session(Provider::Cursor, "/x")), Some(Nudge::NextStart));
-        assert_eq!(Nudge::ReloadSkills.command(), Some("/reload-skills"));
     }
 
     #[test]
