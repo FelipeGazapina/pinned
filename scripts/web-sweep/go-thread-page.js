@@ -33,10 +33,11 @@ async function goThread(o) {
   };
   const REQUIRED = ["gui.thinking", "dom.thinking", "gui.bash", "dom.bash", "tab.menu", "dom.menu", "phase.asking"];
   const result = { variant: o.variant, ok: false, failures: [], seen: {}, statuses: [], menus: [], errors: [] };
+  let tab;
   try {
     await fetch(`${o.mock}/mock/script`, { method: "POST", body: JSON.stringify({ first: o.first, preview: o.preview, gapMs: o.gapMs }) });
     setMode("gui");
-    const tab = await openTab(o.machine, o.folder, o.bypass);
+    tab = await openTab(o.machine, o.folder, o.bypass);
     result.tab = tab.view.id;
     await until("the tab to run", () => tab.view.running, 20000);
     activate(tab);
@@ -143,7 +144,9 @@ async function goThread(o) {
       await sleep(100);
     }
     result.failures = REQUIRED.filter((name) => !(name in result.seen));
-    result.screen = screenLines(tab).filter((l) => l.trim()).slice(-14);
+    // Blank rows kept: menuOn reads them, so a replay needs them.
+    const screen = screenLines(tab);
+    result.screen = screen.slice(Math.max(0, screen.findLastIndex((l) => /^\s*[─━]{8,}/.test(l)) - 16)).map((l) => l.trimEnd());
     result.shown = document.querySelector("#thread .turn:last-of-type")?.innerText.split("\n").filter((l) => l.trim()).slice(-8);
     if (typeof goThreadCapture === "function") await goThreadCapture(o.variant);
 
@@ -165,7 +168,9 @@ async function goThread(o) {
     }));
     closeTab(tab);
   } catch (e) {
-    result.failures.push(String(e?.stack ?? e));
+    // WebKit's stack holds only the frames, not the message.
+    result.failures.push(`${e}\n${e?.stack ?? ""}`.trim());
+    result.view = tab && { account: tab.view.account, running: tab.view.running, status: tab.view.status, message: tab.view.message };
   }
   result.ok = result.failures.length === 0;
   return result;
