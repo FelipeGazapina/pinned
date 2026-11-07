@@ -560,7 +560,7 @@ fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTr
 const DENY_FILE: &[&str] = &["settings.json", "settings.local.json", ".claude.json", "installed_plugins.json", ".env", "credentials.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
 const SKIP_DIR: &[&str] = &["node_modules", ".git", "secrets", ".secrets", "target", "dist", "build", "vendor"];
 
-fn blocked(name: &str) -> bool {
+pub(crate) fn blocked(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     DENY_FILE.iter().any(|item| *item == name)
         || SKIP_DIR.iter().any(|item| *item == name)
