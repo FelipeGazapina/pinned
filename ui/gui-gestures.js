@@ -1,10 +1,11 @@
-/** On a phone a swipe does what a tap in the header does: right opens the sidebar and left closes it, and
- * a pull from the top opens the thread's menu. The UI follows the finger; letting go past the gesture's
- * reach or with a flick runs the same toggle a tap does, and the inline styles go once it settles so the
- * CSS owns the final state. */
-const SWIPE = { lock: 10, flick: 0.4, flickWindow: 100, settle: 200, pull: 56 };
+/** On a phone a swipe does what a tap in the header does: right opens the sidebar and left closes it,
+ * a pull from the top opens the thread's menu, and left over the chat opens the header's options. The
+ * UI follows the finger; letting go past the gesture's reach or with a flick runs the same toggle a tap
+ * does, and the inline styles go once it settles so the CSS owns the final state. */
+const SWIPE = { lock: 10, flick: 0.4, flickWindow: 100, settle: 200, pull: 56, options: 72 };
 /** A touch starting in any of these belongs to it: typing, the terminal, the side panel, a menu. */
 const SWIPE_SKIP = "input, textarea, select, [contenteditable], .xterm, #terms, #drawer-resize, #panel, #side-menu, #panel-menu, #panel-submenu, #header-menu, #composer-menu, #composer-dialog, #details-card, #image-zoom, .popup, dialog";
+const headMore = document.getElementById("head-more");
 const swipeMs = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : SWIPE.settle);
 /** A rubber band: the first pixels move almost 1:1, then it stiffens toward 24px. */
 const rubber = (d) => 24 * (1 - Math.exp(-d / 64));
@@ -41,6 +42,16 @@ function clearTitlePull() {
   for (const p of ["--pull", "transition", "transform"]) crumbEl.style.removeProperty(p);
 }
 
+function nudgeOptions(d, ms = 0) {
+  headMore.classList.toggle("on", d >= SWIPE.options);
+  Object.assign(headMore.style, { transition: ms ? `transform ${ms}ms ease-out` : "none",
+    transform: d ? `translateX(${-rubber(d) / 2}px) scale(${1 + 0.25 * Math.min(1, d / SWIPE.options)})` : "" });
+}
+function clearOptionsNudge() {
+  headMore.classList.remove("on");
+  for (const p of ["transition", "transform"]) headMore.style.removeProperty(p);
+}
+
 /** Every swipe the page answers. `reach` is how far, in pixels along `direction`, a release commits;
  * `commit` and `cancel` return how long they animate before `clear` drops the inline styles. */
 const gestures = [
@@ -53,6 +64,9 @@ const gestures = [
   { name: "title menu", direction: "down", accepts: (start) => !!active && !!titleButton() && !!start.target.closest("#chat-head, #thread"),
     reach: () => SWIPE.pull, track: (d) => pullTitle(d),
     commit: () => (clearTitlePull(), titleButton()?.click(), 0), cancel: () => (pullTitle(0, swipeMs()), swipeMs()), clear: clearTitlePull },
+  { name: "options", direction: "left", accepts: (start) => !!active && !!headMore.offsetParent && !!start.target.closest("#chat"),
+    reach: () => SWIPE.options, track: (d) => nudgeOptions(d),
+    commit: () => (clearOptionsNudge(), headMore.click(), 0), cancel: () => (nudgeOptions(0, swipeMs()), swipeMs()), clear: clearOptionsNudge },
 ];
 
 /** The nearest box between `target` and the workspace that can still scroll the way the finger moves,
