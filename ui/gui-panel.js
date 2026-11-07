@@ -1249,9 +1249,19 @@ function codeRows(tab, s, text, reviewing) {
 function codeHtml(tab, s, text, locked = false) {
   const key = `file:${s.id}`;
   const reviewing = !s.editAnyway && (ui.selection?.key === key || ui.commentAt?.key === key || reviewComments(tab, key).get(s.path)?.size > 0);
+  return editorHtml(s.path, text, { locked, rows: codeRows(tab, s, text, reviewing), cls: reviewing ? " reviewing" : "", attrs: ` data-comments data-key="${esc(key)}"` });
+}
+/** The highlighted source under a transparent textarea that takes edits, with no thread behind it.
+ * `rows` replaces the plain numbered lines, as the File panel's review rows do. */
+function editorHtml(path, text, { locked = false, rows = plainRows(path, text), cls = "", attrs = "" } = {}) {
   const digits = String(text.split("\n").length).length;
-  return `<div class="code-view${ui.fileWrap ? " wrap" : ""}${reviewing ? " reviewing" : ""}" data-comments data-key="${esc(key)}"><div class="file" data-path="${esc(s.path)}" style="--digits:${digits}"><div class="code-lines">${codeRows(tab, s, text, reviewing)}</div>
-    <textarea class="code-edit" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Edit ${esc(s.path)}"${locked ? " readonly" : ""}>${esc(text)}</textarea></div></div>`;
+  return `<div class="code-view${ui.fileWrap ? " wrap" : ""}${cls}"${attrs}><div class="file" data-path="${esc(path)}" style="--digits:${digits}"><div class="code-lines">${rows}</div>
+    <textarea class="code-edit" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Edit ${esc(path)}"${locked ? " readonly" : ""}>${esc(text)}</textarea></div></div>`;
+}
+function plainRows(path, text) {
+  const lines = text.replace(/\n$/, "").split("\n");
+  const colored = highlightLines(lines, langOf(path));
+  return lines.map((_, i) => `<div class="fl" data-n="${i + 1}"><span class="no">${i + 1}</span><span class="code">${colored[i] || " "}</span></div>`).join("");
 }
 
 function revealLine(s) {
@@ -1292,7 +1302,7 @@ panelBody.addEventListener("scroll", (e) => {
   if (!e.target.matches?.(".code-edit")) return;
 }, true);
 /** ⌘S saves the file being edited; elsewhere it keeps doing what the composer gave it, stashing the draft. */
-onGuiKey("s", () => saveFile(shownSurface(active)), { when: () => !!document.activeElement?.closest?.(".code-edit") });
+onGuiKey("s", () => saveFile(shownSurface(active)), { when: () => panelBody.contains(document.activeElement) && !!document.activeElement.closest(".code-edit") });
 panelBody.addEventListener("keydown", (e) => {
   if (e.target.matches(".code-edit")) {
     if (e.key === "Tab" && !e.shiftKey) {
