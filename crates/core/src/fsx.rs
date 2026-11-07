@@ -45,16 +45,20 @@ fn persist(temp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> 
 /// handle opened without delete sharing still blocks it, so a few retries wait that out.
 #[cfg(not(unix))]
 fn persist(temp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
-    let temp = temp.into_temp_path();
+    // `keep` clears the temporary attribute by path, so it runs before the rename moves the file.
+    let temp = temp.into_temp_path().keep().map_err(|e| e.error)?;
     let mut tries = 0;
     loop {
         match std::fs::rename(&temp, target) {
-            Ok(()) => return temp.keep().map(drop).map_err(|e| e.error),
+            Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tries < 10 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
         }
     }
 }
