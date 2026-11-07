@@ -399,6 +399,9 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   body[data-mode="gui"] #sidebar { position: absolute; top: 0; bottom: 0; left: 0; z-index: 35; width: min(360px, calc(100% - 12px));
     box-shadow: 16px 0 40px -8px var(--g-shadow); }
   body[data-mode="gui"][data-sidebar="open"] #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5); }
+  /* A swipe dims the thread by how far the sidebar has come in (gui-gestures.js). */
+  body[data-mode="gui"].sidebar-dragging #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5);
+    opacity: var(--scrim, 0); transition: opacity var(--scrim-ms, 0ms) ease-out; }
   #chat-head { padding: 0 8px 0 12px; }
 }
 @media (max-width: 639px) {
