@@ -15,12 +15,18 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const EVENT_RESULT: &str = "dictation://result";
 const EVENT_STATUS: &str = "dictation://status";
+const EVENT_NOTICE: &str = "dictation://notice";
 
 #[derive(Clone, serde::Serialize)]
 struct DictationResult {
     text: String,
     #[serde(rename = "isFinal")]
     is_final: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DictationNotice {
+    message: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -130,6 +136,11 @@ fn pump(app: &AppHandle, stdout: std::process::ChildStdout) {
                 let is_final = value.get("isFinal").and_then(|f| f.as_bool()).unwrap_or(false);
                 if !text.is_empty() {
                     let _ = app.emit(EVENT_RESULT, DictationResult { text, is_final });
+                }
+            }
+            Some("notice") => {
+                if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
+                    let _ = app.emit(EVENT_NOTICE, DictationNotice { message: message.to_string() });
                 }
             }
             Some("error") => {
