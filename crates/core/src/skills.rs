@@ -305,15 +305,14 @@ struct SkillCopy<P> {
     key: String,
     description: String,
     place: P,
-    tree: String,
 }
 
 impl SkillCopy<Place> {
     /// The only way to get a `SkillCopy<Writable>`.
     fn writable(self) -> Result<SkillCopy<Writable>, Fixed> {
-        let SkillCopy { dir, key, description, place, tree } = self;
+        let SkillCopy { dir, key, description, place } = self;
         match place {
-            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place, tree }),
+            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place }),
             Place::Fixed(fixed) => Err(fixed),
         }
     }
@@ -342,7 +341,6 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
             copies.push(SkillCopy {
                 key: format!("{}{}", root.prefix, meta("name").unwrap_or(name)),
                 description: meta("description").unwrap_or_default(),
-                tree: tree(&dir),
                 place: root.place.clone(),
                 dir,
             });
@@ -519,7 +517,7 @@ pub fn list(places: &Places) -> Listing {
             let edited = c.place.edit() == Edit::LostOnUpdate
                 && files(&c.dir).iter().any(|(_, path)| original(&places.originals, path).is_some_and(|kept| std::fs::read_to_string(path).ok() != Some(kept)));
             let linked = c.place.linked(&c.dir.file_name().unwrap_or_default().to_string_lossy());
-            CopyView { scope: c.place.scope(), edit: c.place.edit(), dir: c.dir.display().to_string(), key: c.key, description: c.description, place: c.place, tree: c.tree, linked, readers, edited }
+            CopyView { scope: c.place.scope(), edit: c.place.edit(), dir: c.dir.display().to_string(), tree: tree(&c.dir), key: c.key, description: c.description, place: c.place, linked, readers, edited }
         })
         .collect();
     Listing { copies, hollow: hollow.iter().map(|d| d.display().to_string()).collect() }
@@ -570,7 +568,7 @@ pub fn read(places: &Places, dir: &str, file: &str) -> Result<SkillText, String>
     let text = String::from_utf8(std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?).map_err(|_| format!("{} is not text", path.display()))?;
     let files = files(&copy.dir).into_iter().filter(|(_, p)| is_text(p)).map(|(rel, _)| rel).collect();
     let original = original(&places.originals, &path).filter(|o| *o != text);
-    Ok(SkillText { text, tree: copy.tree, files, original })
+    Ok(SkillText { text, tree: tree(&copy.dir), files, original })
 }
 
 fn is_text(path: &Path) -> bool {
@@ -606,38 +604,43 @@ pub fn save(places: &Places, file: &str, text: &str, targets: &[Target]) -> Resu
         let outcome = match find(&copies, &target.dir).map(SkillCopy::writable) {
             None => Outcome::Missing,
             Some(Err(fixed)) => Outcome::ReadOnly { why: fixed.why().into() },
-            Some(Ok(copy)) => match file.in_dir(&copy.dir) {
-                Err(error) => Outcome::Failed { error },
-                Ok(path) if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) => Outcome::Saved { tree: tree(&copy.dir) },
-                Ok(_) if copy.tree != target.since => Outcome::Changed { tree: copy.tree.clone() },
-                Ok(path) => match write_copy(&copy, &path, text, &places.originals) {
-                    Ok(tree) => {
-                        written.touched.push(Place::Writable(copy.place.clone()));
-                        Outcome::Saved { tree }
-                    }
-                    Err(error) => Outcome::Failed { error },
-                },
-            },
+            Some(Ok(copy)) => write_copy(&copy, &file, text, &target.since, &places.originals, &mut written.touched),
         };
         written.copies.push(CopyOutcome { dir: target.dir.clone(), outcome });
     }
     Ok(written)
 }
 
-/// Keeps the installed bytes first when the place is replaced on update, then replaces the file.
-/// Returns the folder's new tree.
-fn write_copy(copy: &SkillCopy<Writable>, path: &Path, text: &str, originals: &Path) -> Result<String, String> {
-    let replaced_on_update = matches!(copy.place, Writable::PluginCache { .. } | Writable::CursorPlugin { cached: true, .. });
-    if replaced_on_update {
-        let kept = originals.join(crate::sync::sha(path.to_string_lossy().as_bytes()));
-        if !kept.exists() {
-            if let Ok(bytes) = std::fs::read(path) {
-                crate::fsx::replace(&kept, &bytes, None, None)?;
-            }
-        }
+/// Writes `text` to `file` in `copy` unless the folder's tree is no longer `since`. The tree is
+/// taken under `fsx::hold`, so a sync pull cannot land between the check and the write. Keeps the
+/// installed bytes first when the place is replaced on update.
+fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: &str, originals: &Path, touched: &mut Vec<Place>) -> Outcome {
+    let path = match file.in_dir(&copy.dir) {
+        Ok(path) => path,
+        Err(error) => return Outcome::Failed { error },
+    };
+    let _held = crate::fsx::hold();
+    let now = tree(&copy.dir);
+    if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
+        return Outcome::Saved { tree: now };
     }
-    crate::fsx::replace(path, text.as_bytes(), None, None)?;
-    Ok(tree(&copy.dir))
+    if now != since {
+        return Outcome::Changed { tree: now };
+    }
+    let replaced_on_update = matches!(copy.place, Writable::PluginCache { .. } | Writable::CursorPlugin { cached: true, .. });
+    let kept = originals.join(crate::sync::sha(path.to_string_lossy().as_bytes()));
+    let written = match std::fs::read(&path) {
+        Ok(bytes) if replaced_on_update && !kept.exists() => crate::fsx::replace(&kept, &bytes, None, None),
+        _ => Ok(()),
+    }
+    .and_then(|()| crate::fsx::replace(&path, text.as_bytes(), None, None));
+    match written {
+        Ok(()) => {
+            touched.push(Place::Writable(copy.place.clone()));
+            Outcome::Saved { tree: tree(&copy.dir) }
+        }
+        Err(error) => Outcome::Failed { error },
+    }
 }
 
 /// What a session needs after a place it loads changed.

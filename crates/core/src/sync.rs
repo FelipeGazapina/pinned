@@ -366,6 +366,11 @@ fn exchange(
         let mut result = Ok(());
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
+            let _held = crate::fsx::hold();
+            // A skill save that wrote the file after this cycle hashed it wins. The next cycle shares it.
+            if state.hash(&target).map(|(sha, _)| sha) != local.get(&file.entry.path).map(|(sha, _)| sha.clone()) {
+                continue;
+            }
             match apply(state, key, &file, &target) {
                 Ok(update) => {
                     synced.pulled.push(file.entry.path.clone());
@@ -1560,6 +1565,64 @@ mod tests {
         sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
         sync_plugins(&hub, &mut State::default(), &mini, SystemTime::now()).unwrap();
         assert_eq!(std::fs::read_to_string(mini.claude_home.join("skills/use-railway/SKILL.md")).ok().as_deref(), Some("railway"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Runs `during` once, between a cycle's choice to pull and the pull's write.
+    struct WriteDuringPull<'a> {
+        hub: &'a MemHub,
+        during: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+    }
+
+    impl Hub for WriteDuringPull<'_> {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.hub.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.hub.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            if let Some(during) = self.during.borrow_mut().take() {
+                during();
+            }
+            self.hub.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.hub.mark_executable(project, repairs)
+        }
+    }
+
+    #[test]
+    fn a_save_that_lands_while_a_pull_is_on_its_way_is_kept_and_shared_next() {
+        let root = root("save-mid-pull");
+        let hub = MemHub::default();
+        let (mac, mini) = (
+            PluginShare { claude_home: root.join("mac/.claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: root.join("mini/.claude"), dir: root.join("mini-synced") },
+        );
+        let (mut mac_state, mut mini_state) = (State::default(), State::default());
+        let (notes, gone) = (mini.claude_home.join("skills/notes/SKILL.md"), mini.claude_home.join("skills/notes/old.md"));
+        put(&mac.claude_home.join("skills/notes/SKILL.md"), "one");
+        put(&mac.claude_home.join("skills/notes/old.md"), "old");
+        sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        put(&mac.claude_home.join("skills/notes/SKILL.md"), "two from mac");
+        std::fs::remove_file(mac.claude_home.join("skills/notes/old.md")).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let racing = WriteDuringPull {
+            hub: &hub,
+            during: RefCell::new(Some(Box::new(|| {
+                crate::fsx::replace(&notes, b"saved on mini", None, None).unwrap();
+                crate::fsx::replace(&gone, b"old, saved on mini", None, None).unwrap();
+            }))),
+        };
+        let pulled = sync_plugins(&racing, &mut mini_state, &mini, SystemTime::now()).unwrap().pulled;
+        assert_eq!(pulled, Vec::<String>::new());
+        assert_eq!((std::fs::read_to_string(&notes).unwrap(), std::fs::read_to_string(&gone).unwrap()), ("saved on mini".into(), "old, saved on mini".into()));
+        sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        let shared = texts(&hub);
+        assert_eq!((shared["user-skills/notes/SKILL.md"].as_str(), shared["user-skills/notes/old.md"].as_str()), ("saved on mini", "old, saved on mini"));
         let _ = std::fs::remove_dir_all(root);
     }
 

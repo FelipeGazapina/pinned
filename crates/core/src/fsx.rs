@@ -8,6 +8,13 @@ use std::time::{Duration, UNIX_EPOCH};
 /// cycle that runs mid-write neither pushes it nor deletes it on other machines.
 pub const TEMP_PREFIX: &str = ".pinned-tmp-";
 
+/// Held by a sync pull and by a skill save from the check that a file is still what they last
+/// saw to the write, so neither overwrites what the other wrote after that check.
+pub fn hold() -> std::sync::MutexGuard<'static, ()> {
+    static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Writes `bytes` to a file beside `target` and renames it over `target`, so a reader sees the
 /// old file or the new one, never part of one. A symlink at `target` keeps pointing where it did,
 /// and the file it points to is replaced. A hard link to `target` keeps the old bytes. The mode is
