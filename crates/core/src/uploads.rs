@@ -61,7 +61,7 @@ pub fn image(dir: &Path, path: &str) -> Result<String, String> {
 /// The picture a reply names at `path`, absolute or under `home` as `~/`, as a `data:` URL.
 pub fn named(path: &str, home: &Path) -> Result<String, String> {
     let path = path.trim();
-    if !(path.starts_with('/') || path.starts_with("~/")) {
+    if !(Path::new(path).is_absolute() || path.starts_with("~/")) {
         return Err(format!("{path} is not an absolute path"));
     }
     let path = crate::projects::expand(path, home);
