@@ -889,7 +889,7 @@ async function send() {
   const tab = active;
   if (!tab) return toggleProjects();
   // Sending ends a dictation session and keeps everything said so far.
-  if (typeof stopDictation === "function" && dictationActive()) stopDictation();
+  if (typeof dictationOnSend === "function") dictationOnSend();
   if (!tab.view.running) return startTab(tab);
   if (tab.answering || composer.dataset.sending === "true") return;
   const t = threadOf(tab);

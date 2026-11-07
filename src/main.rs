@@ -430,6 +430,7 @@ fn main() {
             account::account,
             account::sign_in,
             account::change_password,
+            account::dictation_feedback,
             account::sign_out,
             browser::browser_show,
             browser::browser_place,

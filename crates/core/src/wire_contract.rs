@@ -2,7 +2,7 @@
 //! Each root stores what that version sends and what it accepts. One schema cannot say both.
 
 use crate::account::{
-    Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn,
+    DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn,
 };
 use crate::connectors::{Connector, Settings, Suggestions};
 use crate::wire::{
@@ -61,6 +61,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     inbound.insert("NewPassword".into(), schemas::<NewPassword>());
     inbound.insert("NewMachine".into(), schemas::<NewMachine>());
     inbound.insert("Pairing".into(), schemas::<Pairing>());
+    inbound.insert("DictationFeedback".into(), schemas::<DictationFeedback>());
     outbound.insert("ToClient".into(), schemas::<ToClient>());
     outbound.insert("ToMachine".into(), schemas::<ToMachine>());
     outbound.insert("Session".into(), schemas::<Session>());

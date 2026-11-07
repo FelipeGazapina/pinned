@@ -7,6 +7,7 @@
     "POST /api/password",
     "POST /api/machines",
     "POST /api/pair",
+    "POST /api/dictation/feedback",
     "GET /api/version",
     "GET /ws/client",
     "GET /ws/machine",
@@ -11468,6 +11469,142 @@
             "required": [
               "machine",
               "tab"
+            ]
+          }
+        }
+      }
+    },
+    "DictationFeedback": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "DictationFeedback",
+        "description": "`POST /api/dictation/feedback`, with the user token as bearer, takes this: one dictation\nsession the user rated and agreed to share. Text only, never audio.",
+        "type": "object",
+        "properties": {
+          "rating": {
+            "$ref": "#/$defs/DictationRating"
+          },
+          "raw": {
+            "description": "The final phrases exactly as the recognizer returned them, one per line.",
+            "type": "string"
+          },
+          "cleaned": {
+            "description": "The same phrases after the composer's cleanup, one per line.",
+            "type": "string"
+          },
+          "final_text": {
+            "description": "The composer's text when the session ended.",
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "engine": {
+            "$ref": "#/$defs/DictationEngine"
+          },
+          "app_version": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "rating",
+          "raw",
+          "cleaned",
+          "final_text",
+          "locale",
+          "engine",
+          "app_version",
+          "platform",
+          "duration_ms"
+        ],
+        "$defs": {
+          "DictationRating": {
+            "type": "string",
+            "enum": [
+              "good",
+              "bad"
+            ]
+          },
+          "DictationEngine": {
+            "type": "string",
+            "enum": [
+              "native",
+              "web"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "DictationFeedback",
+        "description": "`POST /api/dictation/feedback`, with the user token as bearer, takes this: one dictation\nsession the user rated and agreed to share. Text only, never audio.",
+        "type": "object",
+        "properties": {
+          "rating": {
+            "$ref": "#/$defs/DictationRating"
+          },
+          "raw": {
+            "description": "The final phrases exactly as the recognizer returned them, one per line.",
+            "type": "string"
+          },
+          "cleaned": {
+            "description": "The same phrases after the composer's cleanup, one per line.",
+            "type": "string"
+          },
+          "final_text": {
+            "description": "The composer's text when the session ended.",
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "engine": {
+            "$ref": "#/$defs/DictationEngine"
+          },
+          "app_version": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "rating",
+          "raw",
+          "cleaned",
+          "final_text",
+          "locale",
+          "engine",
+          "app_version",
+          "platform",
+          "duration_ms"
+        ],
+        "$defs": {
+          "DictationRating": {
+            "type": "string",
+            "enum": [
+              "good",
+              "bad"
+            ]
+          },
+          "DictationEngine": {
+            "type": "string",
+            "enum": [
+              "native",
+              "web"
             ]
           }
         }

@@ -61,6 +61,38 @@ pub struct NewPassword {
     pub password: String,
 }
 
+/// `POST /api/dictation/feedback`, with the user token as bearer, takes this: one dictation
+/// session the user rated and agreed to share. Text only, never audio.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct DictationFeedback {
+    pub rating: DictationRating,
+    /// The final phrases exactly as the recognizer returned them, one per line.
+    pub raw: String,
+    /// The same phrases after the composer's cleanup, one per line.
+    pub cleaned: String,
+    /// The composer's text when the session ended.
+    pub final_text: String,
+    pub locale: String,
+    pub engine: DictationEngine,
+    pub app_version: String,
+    pub platform: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DictationRating {
+    Good,
+    Bad,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DictationEngine {
+    Native,
+    Web,
+}
+
 /// `POST /api/machines`, with the user token as bearer, takes this.
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMachine {
@@ -115,6 +147,10 @@ pub fn register_machine(hub: &str, user_token: &str, name: &str, os: &str) -> Re
     Ok((registered.machine, registered.token))
 }
 
+pub fn dictation_feedback(hub: &str, user_token: &str, feedback: &DictationFeedback) -> Result<(), String> {
+    send(hub, "/api/dictation/feedback", Some(user_token), feedback).map(drop)
+}
+
 /// Adds this machine to the account that made `code`. The credentials name the hub's public URL,
 /// and carry no user token.
 pub fn pair(hub: &str, code: &str, name: &str, os: &str) -> Result<Credentials, String> {
@@ -164,6 +200,12 @@ fn os_named(os: &str, kernel_release: Option<&str>) -> String {
 }
 
 fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> Result<T, String> {
+    let text = send(hub, path, bearer, body)?;
+    serde_json::from_str(&text).map_err(|e| format!("{} answered something pinned can't read: {e}", hub.trim().trim_end_matches('/')))
+}
+
+/// The body of a successful answer, or the hub's own words for a failed one.
+fn send(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> Result<String, String> {
     let hub = hub.trim().trim_end_matches('/');
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
     let mut request = client.post(format!("{hub}{path}")).json(body);
@@ -176,7 +218,7 @@ fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: 
     if !status.is_success() {
         return Err(serde_json::from_str::<Failure>(&text).map_or_else(|_| format!("{hub} answered {status}"), |f| f.error));
     }
-    serde_json::from_str(&text).map_err(|e| format!("{hub} answered something pinned can't read: {e}"))
+    Ok(text)
 }
 
 #[cfg(test)]

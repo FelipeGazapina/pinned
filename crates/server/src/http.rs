@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pinned_core::agent::Subject;
-use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
+use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
@@ -39,6 +39,10 @@ const PING: Duration = Duration::from_secs(25);
 /// A machine pings every 20s; one silent this long is gone.
 const MACHINE_SILENT: Duration = Duration::from_secs(60);
 const INSTALL: &str = include_str!("install.sh");
+/// Bounds on one shared dictation, checked before it reaches the learning database.
+const DICTATION_TEXT_CHARS: usize = 20_000;
+const DICTATION_LABEL_CHARS: usize = 40;
+const DICTATION_LONGEST_MS: u64 = 24 * 60 * 60 * 1000;
 
 pub struct Server {
     hub: Arc<Hub>,
@@ -46,6 +50,7 @@ pub struct Server {
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
     hashing: tokio::sync::Semaphore,
     open_signup: bool,
+    learning: Option<db::Learning>,
 }
 
 /// Routes a released hub keeps serving. Dropping one breaks apps that still call it.
@@ -56,6 +61,7 @@ pub const ROUTES: &[&str] = &[
     "POST /api/password",
     "POST /api/machines",
     "POST /api/pair",
+    "POST /api/dictation/feedback",
     "GET /api/version",
     "GET /ws/client",
     "GET /ws/machine",
@@ -69,8 +75,8 @@ fn route(spec: &str) -> &str {
     spec.split_once(' ').expect("METHOD /path").1
 }
 
-pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool) -> Router {
-    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), open_signup });
+pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool, learning: Option<db::Learning>) -> Router {
+    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), open_signup, learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         .route(route("POST /api/login"), post(login))
@@ -78,6 +84,7 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool)
         .route(route("POST /api/password"), post(change_password))
         .route(route("POST /api/machines"), post(register))
         .route(route("POST /api/pair"), post(pair))
+        .route(route("POST /api/dictation/feedback"), post(dictation_feedback))
         .route(route("GET /api/version"), get(|| async { env!("CARGO_PKG_VERSION") }))
         .route(route("GET /ws/client"), get(client_socket))
         .route(route("GET /ws/machine"), get(machine_socket))
@@ -275,6 +282,39 @@ async fn pair(State(server): State<Arc<Server>>, Json(body): Json<Pairing>) -> A
     eprintln!("pinned-server: account {account} paired machine {}", machine.id);
     server.hub.push_machines(&*server.hub.account(account).await.map_err(internal)?).await;
     Ok(Json(Paired { machine, token, hub: server.hub.public_url.clone(), email }))
+}
+
+/// Keeps one dictation the user rated and agreed to share, in the learning database.
+async fn dictation_feedback(State(server): State<Arc<Server>>, headers: HeaderMap, Json(body): Json<DictationFeedback>) -> Result<StatusCode, Error> {
+    let account = signed_in(&server, &headers).await?;
+    let learning = server.learning.as_ref().ok_or_else(|| Error(StatusCode::SERVICE_UNAVAILABLE, "this hub keeps no dictation feedback: it runs without a learning database".into()))?;
+    dictation_fields(&body)?;
+    learning.save_dictation(account, &body).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn dictation_fields(feedback: &DictationFeedback) -> Result<(), Error> {
+    let bad = |why: String| Err(Error(StatusCode::BAD_REQUEST, why));
+    // Postgres text can't hold a NUL.
+    let texts = [("raw", &feedback.raw), ("cleaned", &feedback.cleaned), ("final_text", &feedback.final_text)];
+    for (name, text) in texts {
+        if text.chars().count() > DICTATION_TEXT_CHARS || text.contains('\0') {
+            return bad(format!("{name} must be text of up to {DICTATION_TEXT_CHARS} characters"));
+        }
+    }
+    if feedback.raw.trim().is_empty() {
+        return bad("raw is empty: there is no dictation to keep".into());
+    }
+    let labels = [("locale", &feedback.locale), ("app_version", &feedback.app_version), ("platform", &feedback.platform)];
+    for (name, label) in labels {
+        if label.is_empty() || label.chars().count() > DICTATION_LABEL_CHARS || label.chars().any(|c| c.is_control()) {
+            return bad(format!("{name} must be one line of 1 to {DICTATION_LABEL_CHARS} characters"));
+        }
+    }
+    if feedback.duration_ms > DICTATION_LONGEST_MS {
+        return bad("duration_ms is longer than a day".into());
+    }
+    Ok(())
 }
 
 async fn install(State(server): State<Arc<Server>>) -> Response {

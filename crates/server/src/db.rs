@@ -1,5 +1,6 @@
 //! The hub's Postgres: accounts, logins, machines, pairing codes and the boxes runs live in. Tokens
-//! are stored as their sha256, so the database alone can't sign anyone in.
+//! are stored as their sha256, so the database alone can't sign anyone in. A second, optional
+//! database keeps what users chose to share to improve the app, such as rated dictations.
 
 use crate::boxes::{BoxRow, Phase, Remains};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -7,6 +8,7 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
+use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::sync;
 use pinned_core::upstash::BoxId;
@@ -44,6 +46,12 @@ create table if not exists boxes (id text primary key, account uuid not null ref
   size text not null, phase text not null, reason text, created_at timestamptz not null default now(),
   unique (account, connector, subject));
 ";
+const LEARNING_SCHEMA: &str = "
+create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
+  created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
+  final_text text not null, locale text not null, engine text not null, app_version text not null,
+  platform text not null, duration_ms bigint not null);
+";
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// Compressed bytes of synced project files one account may keep on the hub.
 const SYNC_QUOTA: i64 = 1 << 30;
@@ -56,9 +64,35 @@ const LOGIN_IDLE_DAYS: i32 = 90;
 #[derive(Clone)]
 pub struct Db {
     sealer: Sealer,
+    connection: Connection,
+}
+
+/// The learning database. It holds no accounts, so its rows name the account only by id.
+#[derive(Clone)]
+pub struct Learning(Connection);
+
+#[derive(Clone)]
+struct Connection {
     url: Arc<str>,
     /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay down.
     client: Arc<tokio::sync::Mutex<Arc<Client>>>,
+}
+
+impl Connection {
+    async fn open(url: &str, schema: &str) -> Result<Connection, String> {
+        let client = open(url).await?;
+        client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
+        Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+    }
+
+    async fn client(&self) -> Result<Arc<Client>, String> {
+        let mut client = self.client.lock().await;
+        if client.is_closed() {
+            *client = Arc::new(open(&self.url).await?);
+            eprintln!("pinned-server: reconnected to Postgres");
+        }
+        Ok(client.clone())
+    }
 }
 
 pub struct Token {
@@ -180,20 +214,54 @@ fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
     row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
 }
 
+impl Learning {
+    pub async fn connect(url: &str) -> Result<Learning, String> {
+        Connection::open(url, LEARNING_SCHEMA).await.map(Learning).map_err(|e| format!("learning database: {e}"))
+    }
+
+    pub async fn save_dictation(&self, account: Uuid, feedback: &DictationFeedback) -> Result<(), String> {
+        let rating = match feedback.rating {
+            DictationRating::Good => "good",
+            DictationRating::Bad => "bad",
+        };
+        let engine = match feedback.engine {
+            DictationEngine::Native => "native",
+            DictationEngine::Web => "web",
+        };
+        let duration = i64::try_from(feedback.duration_ms).map_err(|e| e.to_string())?;
+        self.0
+            .client()
+            .await?
+            .execute(
+                "insert into dictation_feedback (id, account, rating, raw, cleaned, final_text, locale, engine, app_version, platform, duration_ms)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &[
+                    &Uuid::new_v4(),
+                    &account,
+                    &rating,
+                    &feedback.raw,
+                    &feedback.cleaned,
+                    &feedback.final_text,
+                    &feedback.locale,
+                    &engine,
+                    &feedback.app_version,
+                    &feedback.platform,
+                    &duration,
+                ],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+}
+
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        let client = open(url).await?;
-        client.batch_execute(SCHEMA).await.map_err(|e| format!("could not create the tables: {e}"))?;
-        Ok(Db { sealer, url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await? })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
-        let mut client = self.client.lock().await;
-        if client.is_closed() {
-            *client = Arc::new(open(&self.url).await?);
-            eprintln!("pinned-server: reconnected to Postgres");
-        }
-        Ok(client.clone())
+        self.connection.client().await
     }
 
     /// The new account, or None when the email is taken.

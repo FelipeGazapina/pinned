@@ -15,6 +15,10 @@
  *
  * In the Mac app a tap of fn (Globe) alone does what the mic does.
  *
+ * When a session that wrote something ends, a badge asks how it went and then
+ * whether to share its text with the hub to improve dictation. Nothing is sent
+ * unless the user says Save.
+ *
  * The language button next to the mic cycles DICTATION_LANGUAGES and
  * remembers the choice; a running session switches without ending.
  *
@@ -124,6 +128,8 @@ const DICTATION_VOCABULARY = [...new Set([
   "deploy", "refactor", "endpoint", "subagent", "hub", "pinned", "Claude", "Cursor", "Railway", "Postgres",
   "Tauri", "Rust", "Swift", "lint", "diff", "repo", "stash", "cherry-pick",
 ])];
+// The hub keeps up to this many characters of each text in a shared dictation.
+const DICTATION_FEEDBACK_CHARS = 20_000;
 // What the recognizer hears on silence or noise. Dropped only when it is the
 // entire confirmed phrase, exactly like the speech-to-text app.
 const DICTATION_HALLUCINATIONS = new Set([
@@ -136,6 +142,8 @@ const dictationState = {
   want: false, // the session the user asked for; only send or the mic ends it
   engine: null, // 'native' | 'web' | null while starting
   live: null, // the interim phrase on screen: { text, span: [from, to], value } while prompt.value === value
+  session: null, // the running session's final phrases: { raw: [], cleaned: [], startedAt }
+  feedback: null, // the badge: { step: "rate" | "consent" | "saving" | "saved" | "failed", record, rating, sent, error }
   rendering: false, // our own prompt.value writes, not the user's typing
   rec: null, // web SpeechRecognition instance
   locale: null, // what the running engine listens in; cleanup follows it, not the button
@@ -268,7 +276,15 @@ function revealPromptCaret() {
 
 function dictationConfirmProvisional() {
   const live = liveDictation();
-  if (live) writeDictation(dictationCleanup(live.text, dictationState.locale), true);
+  if (live) confirmDictation(live.text);
+}
+
+/** A phrase the recognizer finished: cleaned, written in place, and kept for the feedback badge. */
+function confirmDictation(raw) {
+  const cleaned = dictationCleanup(raw, dictationState.locale);
+  dictationState.session?.raw.push(raw);
+  dictationState.session?.cleaned.push(cleaned);
+  writeDictation(cleaned, true);
 }
 
 function joinDictation(base, addition) {
@@ -300,7 +316,7 @@ function onDictationResult(text, isFinal) {
   dictationClearNotice();
   if (isFinal) {
     dictationState.restarts = 0;
-    writeDictation(dictationCleanup(text, dictationState.locale), true);
+    confirmDictation(text);
   } else {
     writeDictation(text.trim(), false);
   }
@@ -316,6 +332,8 @@ async function startDictation() {
   if (dictationState.want) return;
   dictationState.want = true;
   dictationState.live = null;
+  dictationState.session = { raw: [], cleaned: [], startedAt: Date.now() };
+  dropDictationFeedback();
   dictationState.restarts = 0;
   dictationState.locale = dictationLocale();
   renderDictationButton();
@@ -357,6 +375,8 @@ function startNativeDictation(locale) {
 
 function stopDictation() {
   if (!dictationState.want && !dictationState.engine) return;
+  const { session, engine } = dictationState;
+  dictationState.session = null;
   dictationState.want = false;
   // Whatever is on screen is what the user keeps.
   dictationState.live = null;
@@ -366,6 +386,7 @@ function stopDictation() {
   for (const off of dictationState.unlisten.splice(0)) off();
   dictationState.engine = null;
   renderDictationButton();
+  if (session?.raw.length && account?.user_token) offerDictationFeedback(dictationRecord(session, engine));
 }
 
 function dropWebDictation() {
@@ -401,6 +422,93 @@ async function switchDictationLanguage() {
     onDictationError(String(err));
   }
 }
+
+/** What a shared session carries, cut to the hub's bounds. The rating comes from the badge. */
+function dictationRecord(session, engine) {
+  const text = (value) => value.slice(0, DICTATION_FEEDBACK_CHARS);
+  return {
+    raw: text(session.raw.join("\n")),
+    cleaned: text(session.cleaned.join("\n")),
+    final_text: text(prompt.value),
+    locale: dictationState.locale,
+    engine,
+    duration_ms: Date.now() - session.startedAt,
+  };
+}
+
+function offerDictationFeedback(record) {
+  dictationState.feedback = { step: "rate", record, rating: null, sent: false, error: "" };
+  renderDictationFeedback();
+}
+
+function dropDictationFeedback() {
+  dictationState.feedback = null;
+  renderDictationFeedback();
+}
+
+/** A send ends a session. Its badge is about the message going out, so it stays until the next send. */
+function dictationOnSend() {
+  if (dictationActive()) stopDictation();
+  const feedback = dictationState.feedback;
+  if (feedback?.sent) dropDictationFeedback();
+  else if (feedback) feedback.sent = true;
+}
+
+const DICTATION_FEEDBACK_STEPS = {
+  rate: () => `<span>How was this dictation?</span><button type="button" data-rating="good">Good</button><button type="button" data-rating="bad">Bad</button>`,
+  consent: () => `<span>Save this dictation's text to help improve dictation?</span><button type="button" data-save="yes">Save</button><button type="button" data-save="no">Don't save</button>`,
+  saving: () => `<span>Saving…</span>`,
+  saved: () => `<span>Saved. Thank you.</span>`,
+  failed: ({ error }) => `<span>The dictation wasn't saved: ${esc(error)}</span>`,
+};
+
+function renderDictationFeedback() {
+  const badge = document.getElementById("dictation-feedback");
+  if (!badge) return;
+  const feedback = dictationState.feedback;
+  badge.hidden = !feedback;
+  badge.innerHTML = feedback ? DICTATION_FEEDBACK_STEPS[feedback.step](feedback) : "";
+}
+
+async function saveDictationFeedback(feedback) {
+  feedback.step = "saving";
+  renderDictationFeedback();
+  try {
+    const app_version = await (TAURI ? TAURI.app.getVersion() : fetch("/api/version").then((r) => r.text()));
+    const record = { ...feedback.record, rating: feedback.rating, app_version: app_version || "unknown", platform: dictationPlatform() };
+    if (TAURI) await invoke("dictation_feedback", { feedback: record });
+    else {
+      const res = await fetch("/api/dictation/feedback", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${account.user_token}` },
+        body: JSON.stringify(record),
+      });
+      if (!res.ok) throw (await res.json().catch(() => ({}))).error ?? res.statusText;
+    }
+    feedback.step = "saved";
+  } catch (err) {
+    Object.assign(feedback, { step: "failed", error: String(err) });
+  }
+  if (dictationState.feedback !== feedback) return;
+  renderDictationFeedback();
+  setTimeout(() => dictationState.feedback === feedback && dropDictationFeedback(), feedback.step === "saved" ? 2500 : 6000);
+}
+
+function dictationPlatform() {
+  if (!TAURI) return "web";
+  return IS_MAC ? "macos" : /Win/.test(navigator.platform) ? "windows" : "linux";
+}
+
+document.getElementById("dictation-feedback")?.addEventListener("click", (e) => {
+  const feedback = dictationState.feedback;
+  const button = e.target.closest("button");
+  if (!feedback || !button) return;
+  if (button.dataset.rating) {
+    Object.assign(feedback, { step: "consent", rating: button.dataset.rating });
+    renderDictationFeedback();
+  } else if (button.dataset.save === "yes") saveDictationFeedback(feedback);
+  else if (button.dataset.save === "no") dropDictationFeedback();
+});
 
 /** The mic: the only thing besides sending that ends a session. */
 function toggleDictation() {

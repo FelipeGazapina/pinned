@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open] [--learning-db <postgres url>]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -85,7 +85,7 @@ impl Args {
 }
 
 fn hub(args: &[String]) -> Result<(), String> {
-    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup"], 0)?;
+    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db"], 0)?;
     let open_signup = match args.flags.get("signup").map(String::as_str) {
         None | Some("first") => false,
         Some("open") => true,
@@ -101,6 +101,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         open_signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
         box_policy: pinned_server::boxes::Policy::default(),
+        learning_db: args.flags.get("learning-db").cloned(),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

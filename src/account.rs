@@ -43,6 +43,13 @@ impl Account {
         self.signed_in.read().unwrap().is_some()
     }
 
+    /// The hub and the user token its HTTP routes take.
+    fn login(&self) -> Result<(String, String), String> {
+        let signed_in = self.signed_in.read().unwrap();
+        let creds = &signed_in.as_ref().ok_or("sign in first")?.creds;
+        Ok((creds.hub.clone(), creds.user_token.clone()))
+    }
+
     pub fn forward(&self, message: pinned_core::agent::Message) -> Result<Result<String, String>, pinned_core::agent::Message> {
         match self.signed_in.read().unwrap().as_ref() {
             Some(signed_in) => Ok(signed_in.link.forward(message)),
@@ -177,9 +184,19 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
 #[tauri::command]
 pub async fn change_password(app: AppHandle, current: String, password: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<Account>();
-        let (hub, token) = state.signed_in.read().unwrap().as_ref().map(|s| (s.creds.hub.clone(), s.creds.user_token.clone())).ok_or("sign in first")?;
+        let (hub, token) = app.state::<Account>().login()?;
         account::change_password(&hub, &token, &current, &password)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Shares one rated dictation with the account's hub, after the user said Save.
+#[tauri::command]
+pub async fn dictation_feedback(app: AppHandle, feedback: account::DictationFeedback) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (hub, token) = app.state::<Account>().login()?;
+        account::dictation_feedback(&hub, &token, &feedback)
     })
     .await
     .map_err(|e| e.to_string())?

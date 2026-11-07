@@ -23,6 +23,8 @@ pub struct Config {
     /// Upstash's Box API; tests pass a fake.
     pub box_api: Arc<dyn boxes::BoxApi>,
     pub box_policy: boxes::Policy,
+    /// A second Postgres for what users share to improve the app; without it the hub keeps none.
+    pub learning_db: Option<String>,
 }
 
 pub struct Running {
@@ -34,12 +36,16 @@ pub struct Running {
 /// Connects to Postgres, starts every account's connectors and serves until the task ends.
 pub async fn start(config: Config) -> Result<Running, String> {
     let db = db::Db::connect(&config.db, db::Sealer::load(&config.key_file)?).await?;
+    let learning = match &config.learning_db {
+        Some(url) => Some(db::Learning::connect(url).await?),
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
     let hub = hub::Hub::new(db, public_url, config.box_api, config.box_policy);
     hub.watch_all().await?;
-    let app = http::router(hub.clone(), config.ui, config.downloads, config.open_signup).into_make_service_with_connect_info::<SocketAddr>();
+    let app = http::router(hub.clone(), config.ui, config.downloads, config.open_signup, learning).into_make_service_with_connect_info::<SocketAddr>();
     let server = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("pinned-server: the hub stopped: {e}");

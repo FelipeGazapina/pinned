@@ -61,6 +61,7 @@ impl Hub {
             open_signup: true,
             box_api: Arc::new(Upstash),
             box_policy: Policy::default(),
+            learning_db: None,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let running = runtime.block_on(pinned_server::start(config)).unwrap();

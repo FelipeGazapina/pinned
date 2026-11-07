@@ -1,5 +1,5 @@
 use base64::Engine;
-use pinned_core::account::{self, Credentials};
+use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
@@ -37,6 +37,8 @@ struct TestHub {
     dir: PathBuf,
     boxes: Arc<FakeBoxes>,
     policy: Policy,
+    /// The learning database's name, when the hub runs with one.
+    learning: Option<String>,
 }
 
 impl TestHub {
@@ -49,17 +51,31 @@ impl TestHub {
     }
 
     fn start_with_boxes(name: &str, open_signup: bool, policy: Policy) -> TestHub {
+        TestHub::start_full(name, open_signup, policy, false)
+    }
+
+    /// A hub with a second, learning database next to its own.
+    fn start_learning(name: &str) -> TestHub {
+        TestHub::start_full(name, true, Policy::default(), true)
+    }
+
+    fn start_full(name: &str, open_signup: bool, policy: Policy, with_learning: bool) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
         admin(&format!("create database {database}"));
+        let learning = with_learning.then(|| format!("pinned_learning_{name}_{}", std::process::id()));
+        if let Some(learning) = &learning {
+            admin(&format!("drop database if exists {learning} with (force)"));
+            admin(&format!("create database {learning}"));
+        }
         let dir = temp(&format!("hub-{name}"));
         std::fs::create_dir_all(dir.join("ui")).unwrap();
         std::fs::write(dir.join("ui/index.html"), "<title>pinned</title>").unwrap();
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning };
         hub.serve("127.0.0.1:0", open_signup);
         hub
     }
@@ -75,6 +91,7 @@ impl TestHub {
             open_signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
+            learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
         };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
@@ -108,6 +125,9 @@ impl Drop for TestHub {
             running.server.abort();
         }
         admin(&format!("drop database if exists {} with (force)", self.database));
+        if let Some(learning) = &self.learning {
+            admin(&format!("drop database if exists {learning} with (force)"));
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -1392,6 +1412,87 @@ fn stored_plugin_paths(database: &str) -> Vec<String> {
         let rows = client.query("select path from project_files where project = $1 order by path", &[&sync::PLUGINS_KEY]).await.unwrap();
         rows.iter().map(|row| row.get(0)).collect()
     })
+}
+
+fn dictation(raw: &str) -> DictationFeedback {
+    DictationFeedback {
+        rating: DictationRating::Bad,
+        raw: raw.into(),
+        cleaned: raw.replace("comet", "commit"),
+        final_text: format!("please {raw}"),
+        locale: "en-US".into(),
+        engine: DictationEngine::Native,
+        app_version: "0.17.15".into(),
+        platform: "macos".into(),
+        duration_ms: 4200,
+    }
+}
+
+fn learning_rows(database: &str) -> Vec<Value> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let rows = client
+            .query("select account::text, rating, raw, cleaned, final_text, locale, engine, app_version, platform, duration_ms, created_at > now() - interval '1 minute' from dictation_feedback", &[])
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| {
+                json!({ "account": r.get::<_, String>(0), "rating": r.get::<_, String>(1), "raw": r.get::<_, String>(2), "cleaned": r.get::<_, String>(3),
+                    "final_text": r.get::<_, String>(4), "locale": r.get::<_, String>(5), "engine": r.get::<_, String>(6), "app_version": r.get::<_, String>(7),
+                    "platform": r.get::<_, String>(8), "duration_ms": r.get::<_, i64>(9), "just_now": r.get::<_, bool>(10) })
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn a_shared_dictation_lands_in_the_learning_database_under_its_account() {
+    let hub = TestHub::start_learning("dictation");
+    let url = hub.url.clone();
+    let learning = hub.learning.clone().unwrap();
+    let (token, ana) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+
+    assert_eq!(account::dictation_feedback(&url, "not-a-token", &dictation("add a comet")), Err("sign in first".into()));
+    account::dictation_feedback(&url, &token, &dictation("add a comet\nto the branch")).unwrap();
+    assert_eq!(
+        learning_rows(&learning),
+        [json!({ "account": ana.id, "rating": "bad", "raw": "add a comet\nto the branch", "cleaned": "add a commit\nto the branch",
+            "final_text": "please add a comet\nto the branch", "locale": "en-US", "engine": "native", "app_version": "0.17.15",
+            "platform": "macos", "duration_ms": 4200, "just_now": true })]
+    );
+
+    let refused = [
+        (DictationFeedback { raw: "x".repeat(20_001), ..dictation("") }, "raw must be text of up to 20000 characters"),
+        (DictationFeedback { final_text: "a\0b".into(), ..dictation("hi") }, "final_text must be text of up to 20000 characters"),
+        (dictation("  "), "raw is empty: there is no dictation to keep"),
+        (DictationFeedback { locale: "en-US\nDROP".into(), ..dictation("hi") }, "locale must be one line of 1 to 40 characters"),
+        (DictationFeedback { platform: String::new(), ..dictation("hi") }, "platform must be one line of 1 to 40 characters"),
+        (DictationFeedback { duration_ms: 86_400_001, ..dictation("hi") }, "duration_ms is longer than a day"),
+    ];
+    for (feedback, why) in refused {
+        assert_eq!(account::dictation_feedback(&url, &token, &feedback), Err(why.into()));
+    }
+    let mut unknown = serde_json::to_value(dictation("hi")).unwrap();
+    unknown["rating"] = json!("meh");
+    let answer = reqwest::blocking::Client::new().post(format!("{url}/api/dictation/feedback")).bearer_auth(&token).json(&unknown).send().unwrap();
+    assert_eq!(answer.status(), 422, "a rating other than good or bad is refused");
+    assert_eq!(learning_rows(&learning).len(), 1, "nothing refused was kept");
+}
+
+#[test]
+fn a_hub_without_a_learning_database_keeps_no_dictation() {
+    let hub = TestHub::start("no_learning");
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    assert_eq!(
+        account::dictation_feedback(&hub.url, &token, &dictation("add a comet")),
+        Err("this hub keeps no dictation feedback: it runs without a learning database".into())
+    );
+    let answer = reqwest::blocking::Client::new().post(format!("{}/api/dictation/feedback", hub.url)).bearer_auth(&token).json(&dictation("hi")).send().unwrap();
+    assert_eq!(answer.status(), 503);
+    let anonymous = reqwest::blocking::Client::new().post(format!("{}/api/dictation/feedback", hub.url)).json(&dictation("hi")).send().unwrap();
+    assert_eq!(anonymous.status(), 401);
 }
 
 #[test]
