@@ -1,23 +1,209 @@
 #!/usr/bin/env node
 // Stands in for OpenCode Go in the web sweep: the models endpoint validates the key, and the
 // usage endpoint reports a rolling, weekly and monthly allowance. It answers on 127.0.0.1 only.
+//
+// POST /mock/script sets how the next main-thread requests start, one entry per request:
+//   "529"         answers 529 overloaded at once
+//   "504:<ms>"    sends nothing for <ms>, then 504
+//   "delay:<ms>"  waits <ms> before the first byte, then streams
+// It also takes `gapMs` (pause between streamed events) and `preview` (each option of the
+// question carries a preview). GET /mock/log lists every Messages request the mock answered.
+// GO_MOCK_FIRST (comma-separated) and GO_MOCK_GAP_MS set the same at start.
 const http = require("http");
 
 const port = Number(process.argv[2] || 8798);
 const KEY = "oc_sk_sweep";
+const MODELS = [
+  { id: "kimi-k3", name: "Kimi K3" },
+  { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+];
 const meter = (percent, seconds) => ({ status: "ok", percent, resetsAt: new Date(Date.now() + seconds * 1000).toISOString() });
+const script = {
+  first: (process.env.GO_MOCK_FIRST || "").split(",").filter(Boolean),
+  gapMs: Number(process.env.GO_MOCK_GAP_MS || 350),
+  preview: false,
+};
+const log = [];
+let ids = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const id = (prefix) => `${prefix}_sweep${String(++ids).padStart(6, "0")}`;
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => resolve(body));
+  });
+}
+
+const textOf = (content) => (typeof content === "string" ? content : (content ?? []).map((b) => b.text ?? "").join(""));
+
+function stepOf(messages) {
+  const last = messages.at(-1);
+  const results = Array.isArray(last?.content) ? last.content.filter((b) => b.type === "tool_result") : [];
+  if (!results.length) return { step: "start" };
+  const asked = new Map();
+  for (const m of messages) {
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (const b of m.content) if (b.type === "tool_use") asked.set(b.id, b.name);
+  }
+  const names = results.map((r) => asked.get(r.tool_use_id));
+  if (names.includes("AskUserQuestion")) return { step: "answered", answer: textOf(results.find((r) => asked.get(r.tool_use_id) === "AskUserQuestion").content) };
+  return { step: "asked" };
+}
+
+function blocksFor(step) {
+  if (step.step === "start") {
+    return [
+      { type: "thinking", text: ["The user wants the sweep checked. ", "I'll run a quick command first ", "to see what the shell prints."] },
+      { type: "tool_use", name: "Bash", input: { command: "echo sweep", description: "Print the sweep word" } },
+    ];
+  }
+  if (step.step === "asked") {
+    const option = (label, description, preview) => ({ label, description, ...(script.preview ? { preview } : {}) });
+    return [
+      { type: "thinking", text: ["The shell printed sweep. ", "Two ways forward; ", "the user should pick one."] },
+      {
+        type: "tool_use",
+        name: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              question: "Which way should the sweep go?",
+              header: "Direction",
+              multiSelect: false,
+              options: [option("North route", "Walk the north side first.", "North\n  step one\n  step two"), option("South route", "Walk the south side first.", "South\n  step one\n  step two")],
+            },
+          ],
+        },
+      },
+    ];
+  }
+  return [{ type: "text", text: [`You picked: ${step.answer.slice(0, 80)}. `, "The sweep is done."] }];
+}
+
+function messageStart(model, inputTokens) {
+  return {
+    id: id("msg"),
+    type: "message",
+    role: "assistant",
+    model,
+    content: [],
+    stop_reason: null,
+    stop_sequence: null,
+    usage: { input_tokens: inputTokens, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+  };
+}
+
+async function stream(res, model, blocks, gapMs) {
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "request-id": id("req") });
+  send("message_start", { message: messageStart(model, 1200) });
+  await sleep(gapMs);
+  let stop = "end_turn";
+  for (const [index, block] of blocks.entries()) {
+    if (res.destroyed) return;
+    if (block.type === "thinking") {
+      send("content_block_start", { index, content_block: { type: "thinking", thinking: "", signature: "" } });
+      for (const part of block.text) {
+        await sleep(gapMs);
+        send("content_block_delta", { index, delta: { type: "thinking_delta", thinking: part } });
+      }
+    } else if (block.type === "text") {
+      send("content_block_start", { index, content_block: { type: "text", text: "" } });
+      for (const part of block.text) {
+        await sleep(gapMs);
+        send("content_block_delta", { index, delta: { type: "text_delta", text: part } });
+      }
+    } else {
+      stop = "tool_use";
+      send("content_block_start", { index, content_block: { type: "tool_use", id: id("call"), name: block.name, input: {} } });
+      const json = JSON.stringify(block.input);
+      for (let at = 0; at < json.length; at += 40) {
+        await sleep(gapMs / 4);
+        send("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: json.slice(at, at + 40) } });
+      }
+    }
+    await sleep(gapMs);
+    send("content_block_stop", { index });
+  }
+  send("message_delta", { delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 64 } });
+  send("message_stop", {});
+  res.end();
+}
+
+function whole(res, model, blocks) {
+  const content = blocks.map((b) => (b.type === "text" ? { type: "text", text: b.text.join("") } : b.type === "thinking" ? { type: "thinking", thinking: b.text.join(""), signature: "" } : { type: "tool_use", id: id("call"), name: b.name, input: b.input }));
+  const message = { ...messageStart(model, 1200), content, stop_reason: content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn" };
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(message));
+}
+
+async function messages(req, res, body) {
+  const at = Date.now();
+  if (req.url.includes("/count_tokens")) {
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ input_tokens: 1200 }));
+  }
+  let request;
+  try {
+    request = JSON.parse(body);
+  } catch {
+    res.writeHead(400, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "body is not JSON" } }));
+  }
+  const main = (request.tools ?? []).some((t) => t.name === "Bash");
+  const step = main ? stepOf(request.messages ?? []) : { step: "side" };
+  const how = main ? script.first.shift() ?? "" : "";
+  const entry = { at, main, step: step.step, how, model: request.model, stream: !!request.stream, thinking: request.thinking ?? null };
+  log.push(entry);
+  console.log("messages", JSON.stringify(entry));
+  const [kind, ms] = how.split(":");
+  if (kind === "529") {
+    res.writeHead(529, { "content-type": "application/json", "x-should-retry": "true" });
+    return res.end(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }));
+  }
+  if (kind === "504") {
+    await sleep(Number(ms));
+    if (res.destroyed) return;
+    res.writeHead(504, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: "upstream timed out" } }));
+  }
+  if (kind === "delay") await sleep(Number(ms));
+  if (res.destroyed) return;
+  const blocks = main ? blocksFor(step) : [{ type: "text", text: ['{"title":"Go sweep thread"}'] }];
+  entry.answeredAt = Date.now();
+  if (request.stream) return stream(res, request.model, blocks, main ? script.gapMs : 0);
+  whole(res, request.model, blocks);
+}
 
 http
-  .createServer((req, res) => {
-    console.log(req.method, req.url, req.headers.authorization === `Bearer ${KEY}` ? "ok" : "unauthorized");
+  .createServer(async (req, res) => {
+    const authorized = req.headers.authorization === `Bearer ${KEY}` || req.headers["x-api-key"] === KEY;
+    console.log(req.method, req.url, authorized ? "ok" : "unauthorized");
     if (req.url === "/health") return res.end("ok");
-    if (req.headers.authorization !== `Bearer ${KEY}`) {
+    if (req.url.startsWith("/mock/")) res.setHeader("access-control-allow-origin", "*");
+    if (req.url === "/mock/log") {
+      res.setHeader("content-type", "application/json");
+      return res.end(JSON.stringify(log));
+    }
+    const body = await readBody(req);
+    if (req.url === "/mock/script" && req.method === "POST") {
+      const next = JSON.parse(body || "{}");
+      script.first = next.first ?? [];
+      script.gapMs = next.gapMs ?? script.gapMs;
+      script.preview = !!next.preview;
+      log.length = 0;
+      return res.end(JSON.stringify(script));
+    }
+    if (!authorized) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { type: "server_error", message: "Invalid credential" } }));
     }
+    if (req.method === "POST" && /\/v1\/messages(\/count_tokens)?(\?|$)/.test(req.url)) return messages(req, res, body);
     res.setHeader("content-type", "application/json");
     if (req.url.startsWith("/v1/models") || req.url.startsWith("/inference/go/v1/models")) {
-      return res.end(JSON.stringify({ object: "list", data: [{ id: "kimi-k3", name: "Kimi K3" }] }));
+      return res.end(JSON.stringify({ object: "list", data: MODELS }));
     }
     if (req.url.startsWith("/zen/go/v1/usage")) {
       return res.end(

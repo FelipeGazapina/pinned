@@ -8,6 +8,9 @@
 # SWEEP_DIR (default $TMPDIR/pinned-web-sweep) holds every file; SWEEP_PG_PORT (5497) and
 # SWEEP_HUB_PORT (8797) pick the ports; CARGO runs cargo (default `cargo`). Nothing outside
 # SWEEP_DIR is written: the node runs with HOME set inside it.
+#
+# SWEEP_REAL_CLAUDE=<path to claude> runs that claude for every OpenCode Go session, against
+# mock-opencode-go's Messages endpoint; every other session keeps fake-claude.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -58,6 +61,11 @@ start() {
 
   # The node asks the login shell for PATH; this shell answers with the sweep's, fake claude first.
   cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/claude"
+  if [ -n "${SWEEP_REAL_CLAUDE:-}" ]; then
+    mv "$DIR/bin/claude" "$DIR/bin/fake-claude"
+    printf '#!/bin/sh\n[ -n "${PINNED_OPENCODE_GO_KEY:-}" ] && DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 exec "%s" "$@"\nexec "%s" "$@"\n' \
+      "$SWEEP_REAL_CLAUDE" "$DIR/bin/fake-claude" >"$DIR/bin/claude"
+  fi
   cp "$REPO/scripts/web-sweep/fake-gh" "$DIR/bin/gh"
   cp "$REPO/scripts/web-sweep/fake-npx" "$DIR/bin/npx"
   cp "$REPO/scripts/web-sweep/fake-adb" "$DIR/bin/adb"
@@ -76,7 +84,7 @@ start() {
   echo $! >"$DIR/go.pid"
   wait_for "curl -fs http://127.0.0.1:$GO_PORT/health" "the OpenCode Go mock"
   env HOME="$DIR/home" PINNED_OPENCODE_GO_MODELS_BASE="http://127.0.0.1:$GO_PORT" PINNED_OPENCODE_GO_USAGE_URL="http://127.0.0.1:$GO_PORT/zen/go/v1/usage" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
-  env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_OPENCODE_GO_MODELS_BASE="http://127.0.0.1:$GO_PORT" PINNED_OPENCODE_GO_USAGE_URL="http://127.0.0.1:$GO_PORT/zen/go/v1/usage" PINNED_PR_WATCH_SECS=2 "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
+  env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_OPENCODE_GO_MODELS_BASE="http://127.0.0.1:$GO_PORT" PINNED_OPENCODE_GO_USAGE_URL="http://127.0.0.1:$GO_PORT/zen/go/v1/usage" PINNED_OPENCODE_GO_BASE="http://127.0.0.1:$GO_PORT/inference/go/anthropic" PINNED_PR_WATCH_SECS=2 "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
   echo $! >"$DIR/node.pid"
 
   echo "hub $HUB"

@@ -100,13 +100,17 @@ pub fn env(key: &str) -> Vec<(String, String)> {
     let key = key.trim().to_owned();
     vec![
         (KEY_ENV.to_owned(), key.clone()),
-        ("ANTHROPIC_BASE_URL".into(), BASE_URL.into()),
+        ("ANTHROPIC_BASE_URL".into(), gateway_from(std::env::var("PINNED_OPENCODE_GO_BASE").ok().as_deref())),
         ("ANTHROPIC_AUTH_TOKEN".into(), key),
         ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), DEFAULT_OPUS_MODEL.into()),
         ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), DEFAULT_SONNET_MODEL.into()),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), DEFAULT_HAIKU_MODEL.into()),
         ("ANTHROPIC_SMALL_FAST_MODEL".into(), SMALL_FAST_MODEL.into()),
     ]
+}
+
+fn gateway_from(value: Option<&str>) -> String {
+    value.and_then(allowed_override).unwrap_or_else(|| BASE_URL.to_owned())
 }
 
 /// Asks the models endpoint whether `key` is a Go key. `PINNED_OPENCODE_GO_MODELS_BASE` points a
@@ -374,6 +378,14 @@ mod tests {
         assert_eq!(allowed_override("ftp://opencode.ai"), None);
         assert_eq!(allowed_override("not a url"), None);
         assert_eq!(allowed_override(""), None);
+    }
+
+    #[test]
+    fn a_session_gateway_override_passes_the_same_gate() {
+        assert_eq!(gateway_from(Some("http://127.0.0.1:55101/")), "http://127.0.0.1:55101");
+        assert_eq!(gateway_from(Some("http://192.168.1.2:55101")), BASE_URL);
+        assert_eq!(gateway_from(Some("not a url")), BASE_URL);
+        assert_eq!(gateway_from(None), BASE_URL);
     }
 
     #[test]

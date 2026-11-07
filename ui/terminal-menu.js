@@ -18,26 +18,39 @@ const terminalMode = (tab) => modeOn(screenLines(tab));
  * ❯, numbered or not, under the text it asks, which starts after the rule claude draws above. A
  * question's numbered options may have a rule above the last few. Each option's `label` is all of
  * its lines; `head` is its first and `more` the rest, which a question uses for a description. */
-function menuOn(lines) {
+function menuOn(screen) {
+  const previewRow = screen.findLastIndex((l) => PREVIEW_ROW.test(l));
+  return (previewRow >= 0 && readMenu(withoutPreview(screen, previewRow), previewRow)) || readMenu(screen, -1);
+}
+
+/** `previewRow` is the row of the menu's first option when a preview box was drawn beside it. */
+function readMenu(lines, previewRow) {
+  const preview = previewRow >= 0;
+  const hint = (k) => k >= 0 && /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[k]);
+  // In a narrow terminal claude wraps its hint line itself, and the rest starts at the left edge.
+  const hintTail = (k) => /^\S/.test(lines[k]) && hint(k - 1);
   let end = lines.length - 1;
-  while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
+  while (end >= 0 && (!lines[end].trim() || hint(end) || hintTail(end)) && !CURSOR.test(lines[end])) end--;
   let cursor = end;
   while (cursor >= Math.max(0, end - 16) && !CURSOR.test(lines[cursor])) cursor--;
   if (cursor < Math.max(0, end - 16)) return null;
   const at = lines[cursor].search(CURSOR) + 2;
   const option = (l) => l.length > at && !l.slice(0, at).replace(CURSOR, "").trim() && l[at] !== " ";
   const continued = (l) => l.length > at && !l.slice(0, at + 1).trim();
-  const numbered = /^\d+\.\s/.test(lines[cursor].slice(at));
+  const numbered = preview || /^\d+\.\s/.test(lines[cursor].slice(at));
   const rule = (l) => numbered && /^\s*[─━]{8,}\s*$/.test(l);
   let first = cursor;
   while (first > 0 && (option(lines[first - 1]) || continued(lines[first - 1]) || (rule(lines[first - 1]) && first - 1 > 0 && option(lines[first - 2])))) first--;
   while (!option(lines[first])) first++;
+  if (preview && first !== previewRow) return null;
   const options = [];
   for (let k = first; k <= end; k++) {
     const text = lines[k].slice(at).trim();
     if (option(lines[k])) {
       const number = text.match(/^(\d+)\.\s+/);
-      if (numbered && Number(number?.[1]) !== options.length + 1) return null;
+      // Beside a preview box claude leaves the option under the rule, "Chat about this", unnumbered.
+      const unnumberedLast = preview && !number && rule(lines[k - 1]);
+      if (numbered && !unnumberedLast && Number(number?.[1]) !== options.length + 1) return null;
       const head = text.slice(number?.[0].length ?? 0);
       options.push({ n: options.length + 1, label: head, head, more: "", chosen: CURSOR.test(lines[k]) });
     } else if (continued(lines[k]) && options.length) {
@@ -58,6 +71,17 @@ function menuOn(lines) {
   return { question, box, options, amend: /Tab to amend/.test(hints) };
 }
 const CURSOR = /[❯›](?= )/;
+
+const PREVIEW_ROW = /^[\s❯›]*1\.\s.*\S\s+┌─+┐\s*$/;
+
+function withoutPreview(lines, top) {
+  const pane = lines[top].lastIndexOf("┌");
+  const below = lines.slice(top).flatMap((l) => {
+    if (!l.slice(0, pane).trim()) return [];
+    return /^[┌│└]/.test(l.slice(pane)) ? [l.slice(0, pane).trimEnd()] : [l];
+  });
+  return [...lines.slice(0, top), ...below];
+}
 
 /** Claude's permission mode, from the line it draws under its prompt box, such as
  * "⏵⏵ accept edits on (shift+tab to cycle)"; a claude older than the manual mode's own line shows
