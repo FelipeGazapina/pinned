@@ -109,3 +109,10 @@ test("a draft that starts with a number in claude's prompt box is not a menu", (
 test("numbered options that skip a number are not a menu", () => {
   assert.equal(context.menuOn([RULE, "Pick one", "❯ 1. One", "  3. Three", "Enter to select"]), null);
 });
+
+test("a numbered line with a box beside it in earlier output is not a preview for the menu below", () => {
+  const output = "  1. Client sends   ┌──────────┐";
+  assert.equal(context.menuOn([output, RULE, "❯ 1. fix the bug", RULE, "  ⏵⏵ accept edits on (shift+tab to cycle)"]), null);
+  const model = menuOn([output, RULE, " Select model", "", " ❯ Default", "   Opus", "   Sonnet", "", " Enter to confirm · Esc to exit"]);
+  assert.deepEqual(model.options.map((o) => o.head), ["Default", "Opus", "Sonnet"]);
+});

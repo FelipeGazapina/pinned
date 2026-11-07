@@ -19,8 +19,13 @@ const terminalMode = (tab) => modeOn(screenLines(tab));
  * question's numbered options may have a rule above the last few. Each option's `label` is all of
  * its lines; `head` is its first and `more` the rest, which a question uses for a description. */
 function menuOn(screen) {
-  const lines = withoutPreview(screen);
-  const preview = lines !== screen;
+  const previewRow = screen.findLastIndex((l) => PREVIEW_ROW.test(l));
+  return (previewRow >= 0 && readMenu(withoutPreview(screen, previewRow), previewRow)) || readMenu(screen, -1);
+}
+
+/** `previewRow` is the row of the menu's first option when a preview box was drawn beside it. */
+function readMenu(lines, previewRow) {
+  const preview = previewRow >= 0;
   let end = lines.length - 1;
   while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
   let cursor = end;
@@ -34,6 +39,7 @@ function menuOn(screen) {
   let first = cursor;
   while (first > 0 && (option(lines[first - 1]) || continued(lines[first - 1]) || (rule(lines[first - 1]) && first - 1 > 0 && option(lines[first - 2])))) first--;
   while (!option(lines[first])) first++;
+  if (preview && first !== previewRow) return null;
   const options = [];
   for (let k = first; k <= end; k++) {
     const text = lines[k].slice(at).trim();
@@ -63,9 +69,9 @@ function menuOn(screen) {
 }
 const CURSOR = /[❯›](?= )/;
 
-function withoutPreview(lines) {
-  const top = lines.findLastIndex((l) => /^[\s❯›]*1\.\s.*\S\s+┌─+┐\s*$/.test(l));
-  if (top < 0) return lines;
+const PREVIEW_ROW = /^[\s❯›]*1\.\s.*\S\s+┌─+┐\s*$/;
+
+function withoutPreview(lines, top) {
   const pane = lines[top].lastIndexOf("┌");
   const below = lines.slice(top).flatMap((l) => {
     if (!l.slice(0, pane).trim()) return [];
