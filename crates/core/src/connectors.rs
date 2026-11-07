@@ -2428,7 +2428,7 @@ fn generate_instructions(workflows: &str) -> String {
 A map has nodes and edges. Exactly one node is the trigger; no edge enters it. An edge links a node's output port to another node by NAME. A port with no edge ends its branch.
 
 Node types, fields (? means optional) and ports:
-- trigger: the watch that starts the run: {{"kind":"linear-label","label":"..."}} for a Linear label, {{"kind":"slack-mention","channel":"..."}} when the bot is @mentioned, {{"kind":"slack-message","channel":"..."}} for every message (heavy: prefer mention), {{"kind":"called"}} when another workflow calls it. Ports: out.
+- trigger: the watch that starts the run, always as a "watch" object with a kind and its channel or label copied exactly as the description writes them: {{"kind":"linear-label","label":"..."}} for a Linear label, {{"kind":"slack-mention","channel":"..."}} when the bot is @mentioned, {{"kind":"slack-message","channel":"..."}} for every message (heavy: prefer mention), {{"kind":"called"}} when another workflow calls it. Never invent another kind. Ports: out.
 - classify: asks a model: {{"model":""? (leave empty, the user picks), "instructions":""?, "questions":[{{"name":""? (lowercase kind/agent), "ask":""?, "choices":[{{"id":""?,"label":""?,"description":""?}}]}}], "branch_on":""? (a question name)}}. Ports: one per choice of the branched question, else out.
 - switch: branches on an earlier classify's answer without another model call: {{"classify":"<classify node NAME>", "question":""?, "cases":[{{"id":""?,"equals":""?}}]}}. Ports: one per case plus otherwise.
 - session: opens the run's session with its own setup: {{"prompt":""?, "folder":""?, "repo":""?, "model":""?, "effort":""? (low/medium/high/xhigh/max), "permission":""? (manual/acceptEdits/auto/dontAsk/bypassPermissions/plan), "account":""?, "worktree":false?, "instructions":""?}}. Leave environment fields empty unless the description names them; always write the prompt. The first session step opens the session, later ones type into it. Ports: out, error.
@@ -2471,6 +2471,31 @@ fn build_generated(store: &Store, draft: DraftGraph) -> Result<Graph, String> {
     fn str_field(fields: &std::collections::BTreeMap<String, Value>, name: &str) -> String {
         fields.get(name).and_then(Value::as_str).unwrap_or_default().trim().to_owned()
     }
+    /// The trigger's watch, tolerating a model that names the kind but drops the channel or
+    /// flattens it beside the watch. The kind is required; an empty channel or label opens in
+    /// the editor flagged, which beats losing the whole draft.
+    fn lenient_watch(fields: &std::collections::BTreeMap<String, Value>) -> Option<Watch> {
+        let watch = fields.get("watch").cloned().unwrap_or(Value::Null);
+        if let Ok(parsed) = serde_json::from_value::<Watch>(watch.clone()) {
+            return Some(parsed);
+        }
+        let obj = watch.as_object()?;
+        let field = |name| {
+            obj.get(name)
+                .and_then(Value::as_str)
+                .or_else(|| fields.get(name).and_then(Value::as_str))
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
+        match obj.get("kind").and_then(Value::as_str).or_else(|| fields.get("kind").and_then(Value::as_str))? {
+            "linear-label" => Some(Watch::LinearLabel { label: field("label") }),
+            "slack-mention" => Some(Watch::SlackMention { channel: field("channel") }),
+            "slack-message" => Some(Watch::SlackMessage { channel: field("channel") }),
+            "called" => Some(Watch::Called),
+            _ => None,
+        }
+    }
     if draft.nodes.is_empty() {
         return Err("the model answered no steps".into());
     }
@@ -2490,8 +2515,7 @@ fn build_generated(store: &Store, draft: DraftGraph) -> Result<Graph, String> {
     for node in &draft.nodes {
         let kind = match node.kind.as_str() {
             "trigger" => {
-                let watch = node.fields.get("watch").cloned().unwrap_or(Value::Null);
-                let watch: Watch = serde_json::from_value(watch).map_err(|_| format!("step {:?} has no usable trigger", node.name))?;
+                let watch = lenient_watch(&node.fields).ok_or_else(|| format!("step {:?} has no usable trigger", node.name))?;
                 NodeKind::Trigger { watch }
             }
             "classify" => NodeKind::Classify(Classify {
@@ -3967,6 +3991,35 @@ mod tests {
         assert_eq!(trigger.group_name.as_deref(), Some("Triage"));
         assert!(graph.nodes.windows(2).all(|pair| pair[0].position[0] <= pair[1].position[0]), "columns run left to right");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn generated(name: &str, nodes: serde_json::Value) -> Result<Graph, String> {
+        let (connectors, dir) = stored(name, vec![]);
+        let draft: DraftGraph = serde_json::from_value(json!({ "nodes": nodes, "edges": [{ "from": "Message", "port": "out", "to": "Reply" }] })).unwrap();
+        let graph = build_generated(&connectors.store.lock().unwrap(), draft);
+        let _ = std::fs::remove_dir_all(dir);
+        graph
+    }
+
+    #[test]
+    fn a_generated_trigger_missing_its_channel_opens_flagged_instead_of_failing() {
+        let graph = generated(
+            "generate-lenient",
+            json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-message" } }, { "name": "Reply", "type": "reply", "text": "hi" }]),
+        )
+        .unwrap();
+        let trigger = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Trigger { .. })).unwrap();
+        assert!(matches!(&trigger.kind, NodeKind::Trigger { watch } if watch == &Watch::SlackMessage { channel: String::new() }), "the editor flags the empty channel: {trigger:?}");
+    }
+
+    #[test]
+    fn a_generated_trigger_of_an_unknown_kind_still_fails() {
+        let err = generated(
+            "generate-strict-kind",
+            json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "smoke-signal" } }, { "name": "Reply", "type": "reply", "text": "hi" }]),
+        )
+        .unwrap_err();
+        assert!(err.contains("has no usable trigger"), "unexpected: {err}");
     }
 
     #[test]
