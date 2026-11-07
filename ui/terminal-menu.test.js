@@ -70,6 +70,42 @@ test("a question without previews keeps its numbered options and their descripti
   ]);
 });
 
+test("a preview question with the cursor on its unnumbered last option still reads as a menu", () => {
+  const screen = CLAUDE_2_1_319_PREVIEW_SCREEN.map((l) => l.replace("❯ 1.", "  1.").replace(/^  Chat about this/, "❯ Chat about this"));
+  assert.deepEqual(menuOn(screen).options.map((o) => [o.n, o.head, o.chosen]), [
+    [1, "North route", false],
+    [2, "South route", false],
+    [3, "Chat about this", true],
+  ]);
+});
+
+test("a box in earlier output leaves a permission request below it whole", () => {
+  const screen = [
+    "⏺ ┌──────────┐",
+    "  │ client   │",
+    "  └──────────┘",
+    RULE,
+    " Bash command",
+    "   echo sweep",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and don't ask again for echo commands in this folder",
+    "   3. No, and tell Claude what to do differently (esc)",
+    "",
+    " Esc to cancel · Tab to amend",
+  ];
+  assert.deepEqual(menuOn(screen).options.map((o) => o.head), ["Yes", "Yes, and don't ask again for echo commands in this folder", "No, and tell Claude what to do differently (esc)"]);
+});
+
+test("a box in tool output keeps the descriptions of a question below it", () => {
+  const screen = ["  ⎿  ┌──────────┐", "     │ client   │", "     └──────────┘", ...PLAIN_SCREEN];
+  assert.equal(menuOn(screen).options[0].more, "Go up the hill.");
+});
+
+test("a draft that starts with a number in claude's prompt box is not a menu", () => {
+  assert.equal(context.menuOn(["⏺ Done.", "", RULE, "❯ 1. fix the bug", RULE, "  ⏵⏵ accept edits on (shift+tab to cycle)"]), null);
+});
+
 test("numbered options that skip a number are not a menu", () => {
   assert.equal(context.menuOn([RULE, "Pick one", "❯ 1. One", "  3. Three", "Enter to select"]), null);
 });
