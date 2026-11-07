@@ -362,6 +362,15 @@ impl Tab {
     fn type_command(&mut self, command: &str) -> bool {
         self.session.as_mut().is_some_and(|s| s.raw() && s.write(&paste(command)).is_ok())
     }
+
+    /// Types `/reload-skills` when the tab owes it and is idle. True when it typed.
+    fn reload_if_idle(&mut self) -> bool {
+        let typed = self.reload && self.notice_idle() && self.type_command("/reload-skills");
+        if typed {
+            self.reload = false;
+        }
+        typed
+    }
 }
 
 pub struct Machine {
@@ -2090,8 +2099,11 @@ impl Machine {
             let delivery = match nudge {
                 skills::Nudge::NextStart => skills::Delivery::NextStart,
                 skills::Nudge::ReloadSkills => {
-                    let _ = self.tab(&tab, |t| t.reload = true);
-                    if self.maybe_reload(&tab) {
+                    let typed = self.tab(&tab, |t| {
+                        t.reload = true;
+                        t.reload_if_idle()
+                    });
+                    if typed.unwrap_or(false) {
                         skills::Delivery::Reloaded
                     } else {
                         self.arm_delegate_pass();
@@ -2108,14 +2120,7 @@ impl Machine {
     /// Types `/reload-skills` into a tab that owes it, once it is idle. True when it typed, so the
     /// delegate pass leaves the tab's notices for its next tick.
     fn maybe_reload(&self, tab: &str) -> bool {
-        self.tab(tab, |t| {
-            let typed = t.reload && t.notice_idle() && t.type_command("/reload-skills");
-            if typed {
-                t.reload = false;
-            }
-            typed
-        })
-        .unwrap_or(false)
+        self.tab(tab, Tab::reload_if_idle).unwrap_or(false)
     }
 
     /// Runs the hub link's next sync cycle now. Without a link it does nothing.
