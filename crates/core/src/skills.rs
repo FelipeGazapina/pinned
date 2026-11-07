@@ -617,26 +617,59 @@ impl Written {
 
 /// Writes `text` to `file` in each target copy that is listed, writable, and unchanged since its
 /// `since`. A copy that already holds `text` is `Saved` without a write, so running it twice
-/// changes nothing the second time. Never deletes.
+/// changes nothing the second time. A saved plugin source copy also writes its `followers`, with
+/// an outcome each. Never deletes.
 pub fn save(places: &Places, file: &str, text: &str, targets: &[Target]) -> Result<Written, String> {
     let file = SkillFile::parse(file)?;
     let copies = inventory(places).0;
+    let targeted: Vec<PathBuf> = targets.iter().filter_map(|t| dunce::canonicalize(&t.dir).ok()).collect();
     let mut written = Written { copies: vec![], touched: vec![] };
     for target in targets {
+        let mut followed = vec![];
         let outcome = match find(&copies, &target.dir).map(SkillCopy::writable) {
             None => Outcome::Missing,
             Some(Err(fixed)) => Outcome::ReadOnly { why: fixed.why().into() },
-            Some(Ok(copy)) => write_copy(&copy, &file, text, &target.since, &places.originals, &mut written.touched),
+            Some(Ok(copy)) => {
+                let outcome = write_copy(&copy, &file, text, Some(&target.since), &places.originals, &mut written.touched);
+                if matches!(outcome, Outcome::Saved { .. }) {
+                    for follower in followers(&copies, &copy).into_iter().filter(|f| !targeted.contains(&f.dir)) {
+                        let dir = follower.dir.display().to_string();
+                        let outcome = match follower.writable() {
+                            Ok(follower) => write_copy(&follower, &file, text, None, &places.originals, &mut written.touched),
+                            Err(fixed) => Outcome::ReadOnly { why: fixed.why().into() },
+                        };
+                        followed.push(CopyOutcome { dir, outcome });
+                    }
+                }
+                outcome
+            }
         };
         written.copies.push(CopyOutcome { dir: target.dir.clone(), outcome });
+        written.copies.extend(followed);
     }
     Ok(written)
 }
 
-/// Writes `text` to `file` in `copy` unless the folder's tree is no longer `since`. The tree is
-/// taken under `fsx::hold`, so a sync pull cannot land between the check and the write. Keeps the
-/// installed bytes first when the place is replaced on update.
-fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: &str, originals: &Path, touched: &mut Vec<Place>) -> Outcome {
+/// The cache copies of a directory-marketplace plugin's skill, which follow its source copy.
+/// Sessions load the source, and plugin sync publishes the cache, so an edit to the source reaches
+/// other machines only through them.
+fn followers(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<SkillCopy<Place>> {
+    let sources: Vec<(String, PathBuf)> = source
+        .places()
+        .into_iter()
+        .filter_map(|p| match p {
+            Place::Writable(Writable::PluginSource { plugin, home, .. }) => Some((plugin, home)),
+            _ => None,
+        })
+        .collect();
+    let follows = |p: &Place| matches!(p, Place::Writable(Writable::PluginCache { plugin, home, loaded: false, .. }) if sources.iter().any(|(id, h)| id == plugin && h == home));
+    copies.iter().filter(|c| c.dir != source.dir && c.dir.file_name() == source.dir.file_name() && c.places().iter().any(follows)).cloned().collect()
+}
+
+/// Writes `text` to `file` in `copy` unless the folder's tree is no longer `since`. A follower
+/// has no `since`. The tree is taken under `fsx::hold`, so a sync pull cannot land between the
+/// check and the write. Keeps the installed bytes first when the place is replaced on update.
+fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: Option<&str>, originals: &Path, touched: &mut Vec<Place>) -> Outcome {
     let path = match file.in_dir(&copy.dir) {
         Ok(path) => path,
         Err(error) => return Outcome::Failed { error },
@@ -646,7 +679,7 @@ fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: &
     if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
         return Outcome::Saved { tree: now };
     }
-    if now != since {
+    if since.is_some_and(|since| since != now) {
         return Outcome::Changed { tree: now };
     }
     let replaced_on_update = copy.places().iter().any(|p| p.edit() == Edit::LostOnUpdate);
@@ -956,7 +989,7 @@ mod tests {
         let text = "---\nname: x\ndescription: New\n---\nNew body.\n";
         let first = save(&f.places, "SKILL.md", text, &targets).unwrap();
         assert!(first.copies.iter().all(|c| matches!(c.outcome, Outcome::Saved { .. })), "{:?}", first.copies);
-        assert_eq!(first.touched.len(), WRITABLE.len());
+        assert_eq!((first.copies.len(), first.touched.len()), (9, 9), "the local-mods source writes its cache copy too");
         for rel in WRITABLE {
             assert_eq!(body(&f, rel), text, "{rel}");
         }
@@ -1030,6 +1063,24 @@ mod tests {
         save(&f.places, "references/new.md", "new", &[target(&listing, &f.dir(rel))]).unwrap();
         let names: Vec<String> = files(&f.root.join(rel)).into_iter().map(|(rel, _)| rel).collect();
         assert_eq!(names, ["SKILL.md", "references/new.md", "references/notes.md"]);
+    }
+
+    #[test]
+    fn a_save_to_a_plugin_source_also_writes_the_cache_copy_that_sync_publishes() {
+        let f = fixture();
+        let (source, cache) = ("local-mods/mods/skills/tidy", "home/.claude/plugins/cache/local-mods/mods/0.1.0/skills/tidy");
+        let outcomes = |w: &Written| -> Vec<(String, String)> { w.copies.iter().map(|c| (c.dir.clone(), serde_json::to_value(&c.outcome).unwrap()["outcome"].as_str().unwrap().to_owned())).collect() };
+        let written = save(&f.places, "SKILL.md", "edited", &[target(&list(&f.places), &f.dir(source))]).unwrap();
+        assert_eq!(outcomes(&written), [(f.dir(source), "saved".to_owned()), (f.dir(cache), "saved".to_owned())]);
+        assert_eq!((body(&f, source), body(&f, cache)), ("edited".to_owned(), "edited".to_owned()));
+        let cache_place = Place::Writable(Writable::PluginCache { home: f.root.join("home/.claude"), plugin: "mods@local-mods".into(), version: "0.1.0".into(), loaded: false });
+        assert!(written.touched.contains(&cache_place), "{:?}", written.touched);
+        let listing = list(&f.places);
+        let both = save(&f.places, "SKILL.md", "again", &[target(&listing, &f.dir(source)), target(&listing, &f.dir(cache))]).unwrap();
+        assert_eq!(outcomes(&both), [(f.dir(source), "saved".to_owned()), (f.dir(cache), "saved".to_owned())]);
+        let only_cache = save(&f.places, "SKILL.md", "cache only", &[target(&list(&f.places), &f.dir(cache))]).unwrap();
+        assert_eq!(outcomes(&only_cache), [(f.dir(cache), "saved".to_owned())]);
+        assert_eq!(body(&f, source), "again");
     }
 
     #[test]

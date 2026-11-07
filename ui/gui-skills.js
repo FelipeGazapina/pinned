@@ -149,7 +149,7 @@ function checklistHtml(row, o) {
     const differs = !fixed && c.tree !== o.got.tree && copyId(o.copy) !== id;
     const seen = o.compared.has(id);
     const why = fixed ? c.why : differs && !seen ? "Differs from the copy you opened. Compare it first." : c.edit === "lost-on-update" ? "Lost on the next plugin update." : "";
-    const note = c.place.kind === "plugin-cache" && !c.place.loaded ? " Sessions here load the plugin's source copy, this one feeds plugin sync." : "";
+    const note = c.place.kind === "plugin-cache" && !c.place.loaded ? " Sessions here load the plugin's source copy. A save to the source writes this copy too, and plugin sync sends it to your other machines." : "";
     return `<li class="${fixed ? "fixed" : ""}"><label><input type="checkbox" data-skill-check="${esc(id)}"${o.checked.has(id) ? " checked" : ""}${fixed || (differs && !seen) ? " disabled" : ""}>
       <span class="where">${esc(whereLabel(c))}</span>${copyId(o.copy) === id ? `<span class="tag">open</span>` : ""}${c.edited ? `<span class="tag warn">edited</span>` : ""}</label>
       ${differs ? `<button type="button" class="link" data-skill-compare="${esc(id)}">Compare</button>` : ""}
