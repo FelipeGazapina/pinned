@@ -12,10 +12,42 @@
  * "utils dot ts") become written code. The heavy LLM rewrite pass the other
  * app does stays out of 0.17.2; the deterministic layer below is what ships.
  *
+ * The language button next to the mic cycles DICTATION_LANGUAGES and
+ * remembers the choice; a running session switches without ending.
+ *
  * Engines, in order: the app's on-device helper (macOS Speech framework,
  * `dictation_start`/`dictation_stop`), then the browser's SpeechRecognition
  * where the WebView offers it. Elsewhere the mic explains itself.
  */
+
+const DICTATION_LANGUAGES = [
+  { locale: "en-US", label: "EN", name: "English" },
+  { locale: "pt-BR", label: "PT", name: "Português" },
+];
+const DICTATION_LOCALE_KEY = "dictation-locale";
+let dictationChosenLocale = null;
+try {
+  dictationChosenLocale = localStorage.getItem(DICTATION_LOCALE_KEY);
+} catch {}
+
+function dictationLanguage(locale = dictationLocale()) {
+  return DICTATION_LANGUAGES.find((language) => language.locale === locale);
+}
+
+function dictationLocale() {
+  if (DICTATION_LANGUAGES.some((language) => language.locale === dictationChosenLocale)) return dictationChosenLocale;
+  return (navigator.language || "en-US").startsWith("pt") ? "pt-BR" : "en-US";
+}
+
+/** The next language in the table becomes the choice. Memory keeps it when storage can't. */
+function cycleDictationLocale() {
+  const index = DICTATION_LANGUAGES.findIndex((language) => language.locale === dictationLocale());
+  dictationChosenLocale = DICTATION_LANGUAGES[(index + 1) % DICTATION_LANGUAGES.length].locale;
+  try {
+    localStorage.setItem(DICTATION_LOCALE_KEY, dictationChosenLocale);
+  } catch {}
+  return dictationChosenLocale;
+}
 
 // Terms Whisper/SFSpeech tend to mangle in developer speech. Applied as
 // whole-word, case-insensitive fixes on confirmed phrases only, so interim
@@ -95,11 +127,11 @@ const dictationState = {
   provisional: "", // the live interim text, not confirmed yet
   rendering: false, // our own prompt.value writes, not the user's typing
   rec: null, // web SpeechRecognition instance
+  locale: null, // what the running engine listens in; cleanup follows it, not the button
+  noted: false, // a dictation note is up and the next transcript clears it
   restarts: 0,
   unlisten: [],
 };
-
-const dictationLocale = () => (navigator.language || "en-US").startsWith("pt") ? "pt-BR" : "en-US";
 
 /** Deterministic cleanup for one confirmed phrase, ported from the
  * speech-to-text app's basic_cleanup + glossary. Never translates. */
@@ -158,12 +190,31 @@ function renderDictationButton() {
   button.dataset.active = dictationActive();
   button.setAttribute("aria-pressed", dictationActive());
   button.title = dictationActive() ? "Stop dictation" : "Dictate with your voice";
+  const lang = document.getElementById("composer-dictate-lang");
+  if (lang) {
+    const { label, name } = dictationLanguage();
+    lang.textContent = label;
+    lang.title = `Dictation language: ${name}. Click to switch.`;
+    lang.setAttribute("aria-label", lang.title);
+  }
   composer.dataset.dictating = dictationActive();
   composer.dataset.provisional = !!(dictationActive() && dictationState.provisional);
 }
 
 function dictationShow(note, error = false) {
   showComposerNote(note, error);
+}
+
+/** A status line that stays until the user hears from the engine again. */
+function dictationNotice(note) {
+  dictationState.noted = true;
+  dictationShow(note);
+}
+
+function dictationClearNotice() {
+  if (!dictationState.noted) return;
+  dictationState.noted = false;
+  dictationShow("");
 }
 
 /** Displayed value = confirmed text + live provisional tail. */
@@ -179,7 +230,7 @@ function renderDictation() {
 
 function dictationConfirmProvisional() {
   if (!dictationState.provisional) return;
-  const cleaned = dictationCleanup(dictationState.provisional);
+  const cleaned = dictationCleanup(dictationState.provisional, dictationState.locale);
   dictationState.confirmed = joinDictation(dictationState.confirmed, cleaned);
   dictationState.provisional = "";
 }
@@ -195,9 +246,10 @@ function joinDictation(base, addition) {
  * confirms a phrase and clears the tail for the next one. */
 function onDictationResult(text, isFinal) {
   if (!dictationState.want) return;
+  dictationClearNotice();
   if (isFinal) {
     dictationState.restarts = 0;
-    const cleaned = dictationCleanup(text);
+    const cleaned = dictationCleanup(text, dictationState.locale);
     dictationState.confirmed = joinDictation(dictationState.confirmed, cleaned);
     dictationState.provisional = "";
     // A new phrase starts: what came before is confirmed, period.
@@ -220,6 +272,7 @@ async function startDictation() {
   dictationState.confirmed = prompt.value;
   dictationState.provisional = "";
   dictationState.restarts = 0;
+  dictationState.locale = dictationLocale();
   renderDictationButton();
   prompt.focus();
   // Native first: the app's on-device helper. The browser engine covers the web build.
@@ -230,7 +283,8 @@ async function startDictation() {
         if (error) onDictationError(error);
         else if (!running && dictationState.want && dictationState.engine === "native") startDictationEngine();
       }));
-      await invoke("dictation_start", { locale: dictationLocale() });
+      dictationState.unlisten.push(await listen("dictation://notice", ({ message }) => dictationState.want && dictationNotice(message)));
+      await invoke("dictation_start", { locale: dictationState.locale });
       dictationState.engine = "native";
       renderDictationButton();
       return;
@@ -249,7 +303,7 @@ async function startDictation() {
 /** The session the helper dropped (it never ends one itself); reopen it while wanted. */
 function startDictationEngine() {
   if (!dictationState.want || dictationState.engine !== "native") return;
-  invoke("dictation_start", { locale: dictationLocale() }).catch((err) => onDictationError(String(err)));
+  invoke("dictation_start", { locale: dictationState.locale }).catch((err) => onDictationError(String(err)));
 }
 
 function stopDictation() {
@@ -258,17 +312,47 @@ function stopDictation() {
   // Whatever is on screen is what the user keeps.
   dictationState.confirmed = prompt.value;
   dictationState.provisional = "";
+  dictationClearNotice();
   if (dictationState.engine === "native" && TAURI) invoke("dictation_stop").catch(() => {});
-  if (dictationState.rec) {
-    try {
-      dictationState.rec.onend = null;
-      dictationState.rec.stop();
-    } catch {}
-    dictationState.rec = null;
-  }
+  dropWebDictation();
   for (const off of dictationState.unlisten.splice(0)) off();
   dictationState.engine = null;
   renderDictationButton();
+}
+
+function dropWebDictation() {
+  if (!dictationState.rec) return;
+  try {
+    dictationState.rec.onend = null;
+    dictationState.rec.stop();
+  } catch {}
+  dictationState.rec = null;
+}
+
+/** The language button. A running session keeps going: what was heard so far
+ * is confirmed in the old language, and the engine reopens in the new one. */
+async function switchDictationLanguage() {
+  const locale = cycleDictationLocale();
+  renderDictationButton();
+  if (!dictationActive() || !dictationState.engine) return;
+  dictationConfirmProvisional();
+  renderDictation();
+  dictationState.locale = locale;
+  dictationState.restarts = 0;
+  dictationNotice(`Dictating in ${dictationLanguage(locale).name}`);
+  if (dictationState.engine === "web") {
+    dropWebDictation();
+    if (!startWebDictation()) onDictationError("the browser could not switch language");
+    return;
+  }
+  // dictation_stop also fires the status listener's reopen; both starts carry
+  // the new locale, and whichever lands second finds the helper running.
+  try {
+    await invoke("dictation_stop");
+    if (dictationState.want && dictationState.engine === "native") await invoke("dictation_start", { locale });
+  } catch (err) {
+    onDictationError(String(err));
+  }
 }
 
 /** The mic: the only thing besides sending that ends a session. */
@@ -283,7 +367,7 @@ function startWebDictation() {
   const rec = new Engine();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = dictationLocale();
+  rec.lang = dictationState.locale;
   rec.onresult = (event) => {
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -325,6 +409,8 @@ function dictationRetarget() {
 }
 
 document.getElementById("composer-dictate")?.addEventListener("click", toggleDictation);
+document.getElementById("composer-dictate-lang")?.addEventListener("click", switchDictationLanguage);
+renderDictationButton();
 
 // Typing confirms the provisional text: what the user touches becomes final.
 prompt.addEventListener("input", () => {

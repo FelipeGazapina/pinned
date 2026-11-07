@@ -184,6 +184,8 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #composer[data-dictating="true"] #prompt { border-color: rgb(var(--g-error-rgb) / 0.4); }
 #composer[data-provisional="true"] #prompt { caret-color: var(--g-error); }
 @media (prefers-reduced-motion: reduce) { #composer-dictate[data-active="true"] .i { animation: none; } }
+#composer-dictate-lang { width: auto; min-width: 28px; padding: 0 5px; font: 600 10.5px/1 var(--g-sans); letter-spacing: 0.06em; }
+#composer[data-dictating="true"] #composer-dictate-lang { color: var(--g-fg); }
 #composer .controls .pick { margin-left: 0; }
 #composer .pick[aria-pressed="true"] { background: var(--g-accent); color: var(--g-fg); }
 #composer .pick:active:not([aria-haspopup]) { transform: scale(0.97); }
