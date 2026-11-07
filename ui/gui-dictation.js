@@ -13,6 +13,8 @@
  * "utils dot ts") become written code. The heavy LLM rewrite pass the other
  * app does stays out of 0.17.2; the deterministic layer below is what ships.
  *
+ * In the Mac app a tap of fn (Globe) alone does what the mic does.
+ *
  * The language button next to the mic cycles DICTATION_LANGUAGES and
  * remembers the choice; a running session switches without ending.
  *
@@ -198,7 +200,7 @@ function renderDictationButton() {
   if (!button) return;
   button.dataset.active = dictationActive();
   button.setAttribute("aria-pressed", dictationActive());
-  button.title = dictationActive() ? "Stop dictation" : "Dictate with your voice";
+  button.title = `${dictationActive() ? "Stop dictation" : "Dictate with your voice"}${TAURI && IS_MAC ? " (fn)" : ""}`;
   const lang = document.getElementById("composer-dictate-lang");
   if (lang) {
     const { label, name } = dictationLanguage();
@@ -453,6 +455,11 @@ function dictationRetarget() {
 
 document.getElementById("composer-dictate")?.addEventListener("click", toggleDictation);
 document.getElementById("composer-dictate-lang")?.addEventListener("click", switchDictationLanguage);
+// A tap of fn alone, which only the app's native side can see.
+if (TAURI) listen("dictation://toggle", () => {
+  toggleDictation();
+  prompt.focus();
+});
 renderDictationButton();
 
 // Typing confirms the provisional text: what the user touches becomes final.

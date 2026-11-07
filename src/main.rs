@@ -5,6 +5,7 @@ mod awake;
 mod browser;
 mod commands;
 mod dictation;
+mod fn_key;
 mod fonts;
 mod navigation;
 
@@ -472,6 +473,7 @@ fn main() {
             app.manage(connectors::Connectors::new(storage, exe.display().to_string()));
             app.manage(account::Account::start(app.handle(), app.path().app_config_dir()?, machine.clone()));
             app.manage(std::sync::Arc::new(dictation::Dictation::new(app.handle().clone())));
+            fn_key::watch(app.handle());
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
