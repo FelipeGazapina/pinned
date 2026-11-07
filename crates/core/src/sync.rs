@@ -316,7 +316,7 @@ fn exchange(
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
         let target = resolve(&path).ok_or("no history here")?;
         let mine = std::fs::read(&target).unwrap_or_default();
-        write(&target, &merge_history(&mine, &theirs), None, None)?;
+        crate::fsx::replace(&target, &merge_history(&mine, &theirs), None, None)?;
         push.push(path);
     }
 
@@ -521,7 +521,7 @@ fn apply(state: &mut State, key: &str, file: &File, target: &Path) -> Result<Opt
         };
     };
     let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
-    write(target, &unpack(data)?, Some(file.entry.modified), mode)?;
+    crate::fsx::replace(target, &unpack(data)?, Some(file.entry.modified), mode)?;
     state.hash(target);
     Ok(Some(file.entry.sha.clone()))
 }
@@ -562,7 +562,12 @@ const SKIP_DIR: &[&str] = &["node_modules", ".git", "secrets", ".secrets", "targ
 
 fn blocked(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    DENY_FILE.iter().any(|item| *item == name) || SKIP_DIR.iter().any(|item| *item == name) || name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key")
+    DENY_FILE.iter().any(|item| *item == name)
+        || SKIP_DIR.iter().any(|item| *item == name)
+        || name.starts_with(".env")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.starts_with(crate::fsx::TEMP_PREFIX)
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -829,6 +834,9 @@ pub fn shared_path(path: &str) -> bool {
 fn walk(dir: &Path, prefix: &str, files: &mut Vec<(String, PathBuf)>) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(crate::fsx::TEMP_PREFIX) {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             walk(&path, &format!("{prefix}/{name}"), files);
@@ -914,27 +922,6 @@ fn heal_owner_execute(path: &Path) -> Result<(), String> {
     }
 }
 
-fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<bool>) -> Result<(), String> {
-    let previous = executable.is_none().then(|| std::fs::metadata(target).ok()).flatten().map(|meta| meta.permissions());
-    if let Some(dir) = target.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let file = std::fs::File::create(target).map_err(|e| format!("could not write {}: {e}", target.display()))?;
-    (&file).write_all(bytes).map_err(|e| e.to_string())?;
-    match executable {
-        Some(bit) => apply_executable(&file, bit)?,
-        None => {
-            if let Some(perms) = previous {
-                file.set_permissions(perms).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    if let Some(ms) = modified {
-        let _ = file.set_modified(UNIX_EPOCH + Duration::from_millis(ms));
-    }
-    Ok(())
-}
-
 #[cfg(all(unix, test))]
 thread_local! {
     static DENY_OWNER_EXECUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -950,22 +937,6 @@ fn set_owner_execute(path: &Path) -> Result<(), String> {
     let mut perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
     perms.set_mode(perms.mode() | 0o100);
     std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
-}
-
-fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
-        let mode = perms.mode();
-        perms.set_mode(if executable { mode | 0o100 } else { mode & !0o111 });
-        file.set_permissions(perms).map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, executable);
-    }
-    Ok(())
 }
 
 pub fn sha(bytes: &[u8]) -> String {
@@ -1589,6 +1560,23 @@ mod tests {
         sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
         sync_plugins(&hub, &mut State::default(), &mini, SystemTime::now()).unwrap();
         assert_eq!(std::fs::read_to_string(mini.claude_home.join("skills/use-railway/SKILL.md")).ok().as_deref(), Some("railway"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_mid_replace_is_never_shared() {
+        let root = root("mid-replace");
+        let hub = MemHub::default();
+        let home = root.join("mac/.claude");
+        let share = PluginShare { claude_home: home.clone(), dir: root.join("mac-synced") };
+        put(&home.join("skills/notes/SKILL.md"), "notes");
+        put(&home.join(format!("skills/notes/{}abc", crate::fsx::TEMP_PREFIX)), "half");
+        let mut side = Side::new(&root, "mini", "app");
+        put(&side.checkout.path.join(".claude/skills/deploy/SKILL.md"), "deploy");
+        put(&side.checkout.path.join(format!(".claude/skills/deploy/{}xyz", crate::fsx::TEMP_PREFIX)), "half");
+        sync_plugins(&hub, &mut State::default(), &share, SystemTime::now()).unwrap();
+        side.sync(&hub);
+        assert_eq!(texts(&hub).into_keys().collect::<Vec<_>>(), ["skills/deploy/SKILL.md", "user-skills/notes/SKILL.md"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2630,19 +2618,20 @@ mod tests {
         let root = root("pull-fails");
         let hub = MemHub::default();
         let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
-        notes(&mac, 2, "one\n", SystemTime::now());
+        notes(&mac, 1, "one\n", SystemTime::now());
+        put(&mac.claude("memory/sub/old.md"), "old\n");
         mac.sync(&hub);
         let file = root.join("sync.json");
         mini.state.save(&file).unwrap();
         mini.sync(&hub);
         put(&mac.claude("memory/note-0000.md"), "two two\n");
-        std::fs::remove_file(mac.claude("memory/note-0001.md")).unwrap();
+        std::fs::remove_file(mac.claude("memory/sub/old.md")).unwrap();
         mac.sync(&hub);
-        let folder = mini.claude("memory");
+        let folder = mini.claude("memory/sub");
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
         let blocked = sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now());
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", mini.claude("memory/note-0001.md").display())));
+        assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", mini.claude("memory/sub/old.md").display())));
         let saved = State::load(&file, &root.join("legacy")).unwrap();
         let agreed = &saved.agreed[&format!("github.com/acme/app {}", mini.checkout.path.display())];
         assert_eq!(agreed.get("claude/memory/note-0000.md"), Some(&sha(b"two two\n")));

@@ -11,6 +11,7 @@ pub mod device;
 pub mod evidence;
 pub mod favicon;
 pub mod files;
+pub mod fsx;
 pub mod github;
 pub mod graph;
 pub mod history;
