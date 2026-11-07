@@ -15,9 +15,10 @@
  *
  * In the Mac app a tap of fn (Globe) alone does what the mic does.
  *
- * When a session that wrote something ends, a badge asks how it went and then
- * whether to share its text with the hub to improve dictation. Nothing is sent
- * unless the user says Save.
+ * When a session that wrote something ends, a badge in that thread asks how it
+ * went and then whether to share its text with the hub to improve dictation.
+ * Nothing is sent unless the user says Save. After one Save the app remembers
+ * the consent and the badge asks only how it went, sending the answer.
  *
  * The language button next to the mic cycles DICTATION_LANGUAGES and
  * remembers the choice; a running session switches without ending.
@@ -54,6 +55,19 @@ function cycleDictationLocale() {
     localStorage.setItem(DICTATION_LOCALE_KEY, dictationChosenLocale);
   } catch {}
   return dictationChosenLocale;
+}
+
+const DICTATION_CONSENT_KEY = "dictation-feedback-consent";
+let dictationConsent = false;
+try {
+  dictationConsent = localStorage.getItem(DICTATION_CONSENT_KEY) === "yes";
+} catch {}
+
+function rememberDictationConsent() {
+  dictationConsent = true;
+  try {
+    localStorage.setItem(DICTATION_CONSENT_KEY, "yes");
+  } catch {}
 }
 
 // Terms Whisper/SFSpeech tend to mangle in developer speech. Applied as
@@ -143,7 +157,7 @@ const dictationState = {
   engine: null, // 'native' | 'web' | null while starting
   live: null, // the interim phrase on screen: { text, span: [from, to], value } while prompt.value === value
   session: null, // the running session's final phrases: { raw: [], cleaned: [], startedAt }
-  feedback: null, // the badge: { step: "rate" | "consent" | "saving" | "saved" | "failed", record, rating, sent, error }
+  feedback: null, // the badge: { step: "rate" | "consent" | "saving" | "saved" | "failed", record, rating, thread, sent, error }
   rendering: false, // our own prompt.value writes, not the user's typing
   rec: null, // web SpeechRecognition instance
   locale: null, // what the running engine listens in; cleanup follows it, not the button
@@ -386,7 +400,7 @@ function stopDictation() {
   for (const off of dictationState.unlisten.splice(0)) off();
   dictationState.engine = null;
   renderDictationButton();
-  if (session?.raw.length && account?.user_token) offerDictationFeedback(dictationRecord(session, engine));
+  if (session?.cleaned.some(Boolean) && account?.user_token) offerDictationFeedback(dictationRecord(session, engine));
 }
 
 function dropWebDictation() {
@@ -436,8 +450,9 @@ function dictationRecord(session, engine) {
   };
 }
 
+/** The badge belongs to the thread the dictation ended in; leaving that thread drops it. */
 function offerDictationFeedback(record) {
-  dictationState.feedback = { step: "rate", record, rating: null, sent: false, error: "" };
+  dictationState.feedback = { step: "rate", record, rating: null, thread: composer.dataset.tab, sent: false, error: "" };
   renderDictationFeedback();
 }
 
@@ -505,9 +520,12 @@ document.getElementById("dictation-feedback")?.addEventListener("click", (e) => 
   if (!feedback || !button) return;
   if (button.dataset.rating) {
     Object.assign(feedback, { step: "consent", rating: button.dataset.rating });
-    renderDictationFeedback();
-  } else if (button.dataset.save === "yes") saveDictationFeedback(feedback);
-  else if (button.dataset.save === "no") dropDictationFeedback();
+    if (dictationConsent) saveDictationFeedback(feedback);
+    else renderDictationFeedback();
+  } else if (button.dataset.save === "yes") {
+    rememberDictationConsent();
+    saveDictationFeedback(feedback);
+  } else if (button.dataset.save === "no") dropDictationFeedback();
 });
 
 /** The mic: the only thing besides sending that ends a session. */
@@ -559,6 +577,7 @@ function startWebDictation() {
 /** A new thread keeps the session: the mic stays on, the mirrors restart here. */
 function dictationRetarget() {
   dictationState.live = null;
+  if (dictationState.feedback && dictationState.feedback.thread !== composer.dataset.tab) dropDictationFeedback();
 }
 
 document.getElementById("composer-dictate")?.addEventListener("click", toggleDictation);
