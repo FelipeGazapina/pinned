@@ -18,7 +18,8 @@ const terminalMode = (tab) => modeOn(screenLines(tab));
  * ❯, numbered or not, under the text it asks, which starts after the rule claude draws above. A
  * question's numbered options may have a rule above the last few. Each option's `label` is all of
  * its lines; `head` is its first and `more` the rest, which a question uses for a description. */
-function menuOn(lines) {
+function menuOn(screen) {
+  const lines = withoutPreview(screen);
   let end = lines.length - 1;
   while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab|ctrl\+\w)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
   let cursor = end;
@@ -37,7 +38,9 @@ function menuOn(lines) {
     const text = lines[k].slice(at).trim();
     if (option(lines[k])) {
       const number = text.match(/^(\d+)\.\s+/);
-      if (numbered && Number(number?.[1]) !== options.length + 1) return null;
+      // Beside a preview box claude leaves the option under the rule, "Chat about this", unnumbered.
+      const unnumberedLast = !number && rule(lines[k - 1]);
+      if (numbered && !unnumberedLast && Number(number?.[1]) !== options.length + 1) return null;
       const head = text.slice(number?.[0].length ?? 0);
       options.push({ n: options.length + 1, label: head, head, more: "", chosen: CURSOR.test(lines[k]) });
     } else if (continued(lines[k]) && options.length) {
@@ -58,6 +61,20 @@ function menuOn(lines) {
   return { question, box, options, amend: /Tab to amend/.test(hints) };
 }
 const CURSOR = /[❯›](?= )/;
+
+/** The screen without the preview box claude draws to the right of a question's options, which
+ * starts on the first option's line. Lines with nothing left of the box go: its sides, the "Notes:"
+ * hint under it and the blank rows around them. Option lines keep their text left of it. */
+function withoutPreview(lines) {
+  const top = lines.findLastIndex((l) => /\S\s+┌─+┐\s*$/.test(l));
+  if (top < 0) return lines;
+  const pane = lines[top].lastIndexOf("┌");
+  const below = lines.slice(top).flatMap((l) => {
+    if (!l.slice(0, pane).trim()) return [];
+    return /^[┌│└]/.test(l.slice(pane)) ? [l.slice(0, pane).trimEnd()] : [l];
+  });
+  return [...lines.slice(0, top), ...below];
+}
 
 /** Claude's permission mode, from the line it draws under its prompt box, such as
  * "⏵⏵ accept edits on (shift+tab to cycle)"; a claude older than the manual mode's own line shows
