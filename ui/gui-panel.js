@@ -1398,7 +1398,8 @@ ui.fileWrap = load("gui-file-wrap") === "true";
  * or a bare word stays as written. */
 function fileChip(raw, label = null) {
   const [, path, line] = raw.trim().replace(/#L(\d+)(?:C\d+)?$/i, ":$1").match(/^(.+?)(?::(\d+))?(?::\d+)?$/) ?? [];
-  if (!path || /\s|:\/\/|^[@~]|[`'"<>(){}[\]|*?]/.test(path) || /^[a-z]+:/i.test(path)) return null;
+  if (!path || /\s|:\/\/|^[@]|[`'"<>(){}[\]|*?]/.test(path) || /^[a-z]+:/i.test(path)) return null;
+  if (path.startsWith("~") && !imageRef(path)) return null;
   const explicit = /^(\.{1,2})?\//.test(path);
   const base = path.replace(/\/+$/, "").split("/").pop();
   if (!line && !path.includes("/") && label === null) return null;
@@ -1414,7 +1415,7 @@ function openFileChip(chip) {
   let path = chip.dataset.filePath;
   const cwd = tab.view.cwd.replace(/\/+$/, "");
   if (path.startsWith(`${cwd}/`)) path = path.slice(cwd.length + 1);
-  else if (path.startsWith("/")) return flash(`${path} is outside this thread's folder`);
+  else if (path.startsWith("/") || path.startsWith("~/")) return imageRef(path) ? openChipImage(chip) : flash(`${path} is outside this thread's folder`);
   openFileSurface(path.replace(/^\.\//, ""), { line: Number(chip.dataset.fileLine) || null });
 }
 document.addEventListener("click", (e) => {

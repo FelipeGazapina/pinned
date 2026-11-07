@@ -259,29 +259,66 @@ function imageHtml(href, alt) {
   try {
     path = decodeURIComponent(path);
   } catch {}
-  if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("~")) return imageUnavailable(alt);
+  if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) return imageUnavailable(alt);
   return `<img ${common} data-local="${esc(path)}">`;
 }
 
 /** Files a reply's images name, read through the machine once per thread folder. */
 const localImages = new Map();
+const PICTURE_EXT = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+/** A path a reply names that is a picture: absolute, `~/`-relative, or relative and containing a `/`. */
+function imageRef(raw) {
+  const path = (raw ?? "").trim().replace(/#L\d+(?:C\d+)?$/i, "").replace(/:\d+(?::\d+)?$/, "");
+  if (!PICTURE_EXT.test(path) || /\s/.test(path)) return null;
+  if (path.startsWith("/") || path.startsWith("~/")) return path;
+  return path.includes("/") ? path : null;
+}
+/** The chip as written, plus the picture it names when the path is an image reference. */
+function withInlineImage(raw, chip) {
+  const path = imageRef(raw);
+  if (!path) return chip;
+  return `${chip ?? ""}${imageHtml(path, path.split("/").pop()).replace('class="md-image"', 'class="md-image" data-inline')}`;
+}
+/** A chip-derived image leaves the sentence it sat in and follows the block it belongs to. */
+function placeInlineImages(root) {
+  const seen = new Map();
+  for (const img of [...root.querySelectorAll("img.md-image[data-inline]")]) {
+    const block = img.closest("li, p, td");
+    if (!block) continue;
+    if (!seen.has(block)) seen.set(block, new Set());
+    if (seen.get(block).has(img.dataset.local)) {
+      img.remove();
+      continue;
+    }
+    seen.get(block).add(img.dataset.local);
+    const nested = block.matches("li") ? block.querySelector(":scope > ul, :scope > ol") : null;
+    block.insertBefore(img, nested);
+  }
+}
 function loadLocalImages(root, tab) {
+  placeInlineImages(root);
   for (const img of root.querySelectorAll("img.md-image[data-local]:not([src])")) {
     const cwd = tab.view.cwd.replace(/\/+$/, "");
     let path = img.dataset.local;
-    if (path.startsWith(`${cwd}/`)) path = path.slice(cwd.length + 1);
+    const home = path.startsWith("~/");
+    if (!home && path.startsWith(`${cwd}/`)) path = path.slice(cwd.length + 1);
     path = path.replace(/^\.\//, "");
     const key = `${tab.machine}|${cwd}|${path}`;
-    if (!localImages.has(key)) localImages.set(key, path.startsWith("/") ? Promise.resolve(null) : callOn(tab.machine, { cmd: "read_file", tab: tab.view.id, path, root: false }).then((f) => f.image ?? null, () => null));
+    const outside = home || path.startsWith("/");
+    if (!localImages.has(key)) localImages.set(key, outside ? callOn(tab.machine, { cmd: "read_image", path }).then((src) => src || null, () => null) : callOn(tab.machine, { cmd: "read_file", tab: tab.view.id, path, root: false }).then((f) => f.image ?? null, () => null));
     localImages.get(key).then((src) => {
       if (!img.isConnected) return;
       if (src) img.src = src;
+      else if (img.hasAttribute("data-inline")) img.remove();
       else img.outerHTML = imageUnavailable(img.alt);
     });
   }
 }
 document.addEventListener("error", (e) => {
-  if (e.target.matches?.("img.md-image")) e.target.outerHTML = imageUnavailable(e.target.alt);
+  const img = e.target;
+  if (!img.matches?.("img.md-image")) return;
+  if (img.hasAttribute("data-inline")) img.remove();
+  else img.outerHTML = imageUnavailable(img.alt);
 }, true);
 
 /** T3 Code draws a ```mermaid block as its diagram, with Pele and the SVG sanitized, and a toggle to
@@ -348,7 +385,7 @@ const RENDERER = {
   html: ({ text }) => sanitizeHtml(text),
   link({ href, tokens }) {
     const text = this.parser.parseInline(tokens);
-    if (!WEB_URL.test(href)) return fileChip(href, text) ?? text;
+    if (!WEB_URL.test(href)) return withInlineImage(href, fileChip(href, text) ?? text);
     return `<a href="${esc(href)}" title="${esc(href)}"${PR_URL.test(href) ? ` data-pr="${esc(href)}"` : ""}>${linkIcon(href)}${text}</a>`;
   },
   table(token) {
@@ -357,7 +394,7 @@ const RENDERER = {
       <div class="table-foot"><button type="button" class="xs" data-table-expand title="${wraps(key) ? "Collapse table cells" : "Expand table cells"}">${icon(wraps(key) ? "minimize-2" : "maximize-2")}</button>
       <span class="table-copy"><button type="button" class="xs" data-table-menu title="Copy table">${icon("copy")}</button><span class="table-menu" hidden><button type="button" data-copy-table="markdown">Copy as Markdown</button><button type="button" data-copy-table="csv">Copy as CSV</button></span></span></div></div>`;
   },
-  codespan: ({ text }) => fileChip(text) ?? false,
+  codespan: ({ text }) => (imageRef(text) ? withInlineImage(text, fileChip(text) ?? `<code>${esc(text)}</code>`) : fileChip(text) ?? false),
   image: ({ href, text }) => imageHtml(href, text ?? ""),
   code({ text, lang }) {
     const language = (lang ?? "").trim().split(/\s+/)[0].toLowerCase();
@@ -1901,6 +1938,15 @@ function openMedia(images, index = 0) {
   imageZoom.querySelector(".media-close").focus({ preventScroll: true });
 }
 const zoomImage = (src, name = "image") => openMedia([{ src, name }]);
+/** An image chip outside the thread folder opens the picture already drawn for it, instead of a file tab. */
+function openChipImage(chip) {
+  const path = imageRef(chip.dataset.filePath);
+  const img = [...(chip.closest(".md")?.querySelectorAll("img.md-image[data-inline][src]") ?? [])].find((one) => one.dataset.local === path);
+  if (img) return zoomImage(img.src, img.dataset.name);
+  const tab = active;
+  if (!tab) return;
+  callOn(tab.machine, { cmd: "read_image", path }).then((src) => (src ? zoomImage(src, path.split("/").pop()) : flash("Image unavailable")), () => flash("Image unavailable"));
+}
 function closeMedia() {
   imageZoom.hidden = true;
   if (media.opener?.isConnected) media.opener.focus({ preventScroll: true });

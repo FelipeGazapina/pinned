@@ -679,6 +679,23 @@
                 ]
               },
               {
+                "description": "The `data:` URL of the picture file at `path`, so a chat draws a picture a reply names by\npath. `path` is absolute or starts with `~/`. Refused otherwise, for a file that isn't a\npicture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_image"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
                 "description": "`Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.",
                 "type": "object",
                 "properties": {
@@ -6428,6 +6445,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "The `data:` URL of the picture file at `path`, so a chat draws a picture a reply names by\npath. `path` is absolute or starts with `~/`. Refused otherwise, for a file that isn't a\npicture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_image"
                   },
                   "path": {
                     "type": "string"
@@ -30593,6 +30627,23 @@
                 ]
               },
               {
+                "description": "The `data:` URL of the picture file at `path`, so a chat draws a picture a reply names by\npath. `path` is absolute or starts with `~/`. Refused otherwise, for a file that isn't a\npicture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_image"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
                 "description": "`Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.",
                 "type": "object",
                 "properties": {
@@ -34356,6 +34407,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "The `data:` URL of the picture file at `path`, so a chat draws a picture a reply names by\npath. `path` is absolute or starts with `~/`. Refused otherwise, for a file that isn't a\npicture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_image"
                   },
                   "path": {
                     "type": "string"

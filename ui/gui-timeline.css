@@ -379,6 +379,7 @@ body:not([data-mode="gui"]) #minimap { display: none !important; }
 .system-divider .i { width: 12px; height: 12px; flex: none; }
 /* T3 Code's markdown media: images up to 30rem, an unavailable one as a muted note. */
 .md img.md-image { display: inline-block; max-width: min(100%, 30rem); max-height: 30rem; width: auto; height: auto; object-fit: contain; cursor: zoom-in; vertical-align: middle; }
+.md img.md-image[data-inline] { display: block; margin-top: 6px; }
 .md a img.md-image { cursor: pointer; }
 .md-image-missing { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--g-border); border-radius: 6px; background: var(--g-accent); padding: 4px 8px; font-size: 12px; color: var(--g-muted); }
 .md-image-missing .i { width: 14px; height: 14px; flex: none; }
