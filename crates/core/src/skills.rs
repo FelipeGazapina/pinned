@@ -5,22 +5,39 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CanonicalPath(PathBuf);
+
+impl CanonicalPath {
+    pub fn new(path: impl AsRef<Path>) -> std::io::Result<CanonicalPath> {
+        dunce::canonicalize(path).map(CanonicalPath)
+    }
+}
+
+impl std::ops::Deref for CanonicalPath {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
 pub struct Places {
     pub home: PathBuf,
     pub claude_homes: Vec<(AccountId, PathBuf)>,
     pub codex_homes: Vec<(AccountId, PathBuf)>,
     pub cursor: Option<AccountId>,
-    pub projects: Vec<PathBuf>,
+    pub projects: Vec<CanonicalPath>,
     pub synced_plugins: Option<PathBuf>,
     pub pinned_plugin: PathBuf,
-    pub originals: PathBuf,
+    pub installed_plugin_files: PathBuf,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Place {
     Writable(Writable),
-    Fixed(Fixed),
+    OwnedElsewhere(OwnedElsewhere),
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -48,7 +65,7 @@ pub enum Writable {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum Fixed {
+pub enum OwnedElsewhere {
     /// What claude.ai syncs into `<home>/skills/synced` and `<home>/plugins/synced`.
     ClaudeAccountSynced { home: PathBuf },
     SyncedPlugin { plugin: String },
@@ -59,19 +76,19 @@ pub enum Fixed {
     CursorBuiltin,
 }
 
-impl Fixed {
+impl OwnedElsewhere {
     pub fn why(&self) -> &'static str {
         match self {
-            Fixed::ClaudeAccountSynced { .. } => "Managed by claude.ai, which rewrites it.",
-            Fixed::SyncedPlugin { .. } => "Mirror of a plugin from another machine. Edit it on the machine that installed it.",
-            Fixed::Pinned => "Built into pinned. Change plugin/skills in the pinned repository and release.",
-            Fixed::CodexSystem { .. } => "Built into Codex.",
-            Fixed::CursorBuiltin => "Built into Cursor.",
+            OwnedElsewhere::ClaudeAccountSynced { .. } => "Managed by claude.ai, which rewrites it.",
+            OwnedElsewhere::SyncedPlugin { .. } => "Mirror of a plugin from another machine. Edit it on the machine that installed it.",
+            OwnedElsewhere::Pinned => "Built into pinned. Change plugin/skills in the pinned repository and release.",
+            OwnedElsewhere::CodexSystem { .. } => "Built into Codex.",
+            OwnedElsewhere::CursorBuiltin => "Built into Cursor.",
         }
     }
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(tag = "edit", rename_all = "kebab-case")]
 pub enum Edit {
     Yes,
@@ -91,7 +108,7 @@ pub enum Scope {
 impl Place {
     pub fn edit(&self) -> Edit {
         match self {
-            Place::Fixed(fixed) => Edit::No { why: fixed.why().into() },
+            Place::OwnedElsewhere(owned) => Edit::No { why: owned.why().into() },
             Place::Writable(Writable::PluginCache { .. } | Writable::CursorPlugin { cached: true, .. }) => Edit::LostOnUpdate,
             Place::Writable(_) => Edit::Yes,
         }
@@ -103,18 +120,18 @@ impl Place {
             Place::Writable(Writable::ClaudePersonal { .. } | Writable::CodexPersonal { .. } | Writable::CursorPersonal | Writable::Agents) => Scope::Personal,
             Place::Writable(Writable::ClaudeProject { checkout }) => Scope::Project { checkout: checkout.clone() },
             Place::Writable(Writable::PluginCache { plugin: id, .. } | Writable::PluginSource { plugin: id, .. } | Writable::CursorPlugin { plugin: id, .. }) => plugin(id),
-            Place::Fixed(Fixed::SyncedPlugin { plugin: id }) => plugin(id),
-            Place::Fixed(Fixed::ClaudeAccountSynced { .. } | Fixed::Pinned | Fixed::CodexSystem { .. } | Fixed::CursorBuiltin) => Scope::Builtin,
+            Place::OwnedElsewhere(OwnedElsewhere::SyncedPlugin { plugin: id }) => plugin(id),
+            Place::OwnedElsewhere(OwnedElsewhere::ClaudeAccountSynced { .. } | OwnedElsewhere::Pinned | OwnedElsewhere::CodexSystem { .. } | OwnedElsewhere::CursorBuiltin) => Scope::Builtin,
         }
     }
 
-    fn linked(&self, dir_name: &str) -> Option<String> {
+    fn sync_group(&self, dir_name: &str) -> Option<String> {
         matches!(self, Place::Writable(Writable::ClaudePersonal { .. })).then(|| format!("user-skills/{dir_name}"))
     }
 }
 
 struct Root {
-    dir: PathBuf,
+    dir: CanonicalPath,
     place: Place,
     prefix: String,
 }
@@ -162,10 +179,10 @@ pub(crate) fn claude_roots(home: &Path, project: Option<&Path>, plugin_dirs: &[P
     for dir in plugin_dirs {
         let Some(id) = dir.file_name().and_then(|s| s.to_str()) else { continue };
         let Some(name) = id.split('@').next().filter(|name| !name.is_empty()) else { continue };
-        out.push(root(dir.clone(), format!("{name}:"), Place::Fixed(Fixed::SyncedPlugin { plugin: id.to_owned() })));
+        out.push(root(dir.clone(), format!("{name}:"), Place::OwnedElsewhere(OwnedElsewhere::SyncedPlugin { plugin: id.to_owned() })));
     }
     if let Some(account) = crate::commands::account(home) {
-        let synced = Place::Fixed(Fixed::ClaudeAccountSynced { home: home.to_path_buf() });
+        let synced = Place::OwnedElsewhere(OwnedElsewhere::ClaudeAccountSynced { home: home.to_path_buf() });
         out.push(ClaudeRoot { base: home.join("skills/synced").join(&account), skills_only: true, prefix: String::new(), place: synced.clone() });
         for (name, dir) in crate::commands::synced_plugins(&home.join("plugins/synced").join(&account)) {
             out.push(root(dir, format!("{name}:"), synced.clone()));
@@ -198,23 +215,23 @@ fn roots(places: &Places) -> Vec<Root> {
         rows.extend(claude_roots(home, None, &[]).into_iter().map(|r| (r.skills(), r.place, r.prefix)));
     }
     for checkout in &places.projects {
-        rows.push((checkout.join(".claude/skills"), Place::Writable(Writable::ClaudeProject { checkout: checkout.clone() }), String::new()));
+        rows.push((checkout.join(".claude/skills"), Place::Writable(Writable::ClaudeProject { checkout: checkout.to_path_buf() }), String::new()));
     }
     if let Some(synced) = &places.synced_plugins {
         for dir in children(&synced.join("plugins")) {
             let Some(id) = dir.file_name().and_then(|s| s.to_str()).map(str::to_owned) else { continue };
             let name = id.split('@').next().unwrap_or(&id).to_owned();
-            rows.push((dir.join("skills"), Place::Fixed(Fixed::SyncedPlugin { plugin: id }), format!("{name}:")));
+            rows.push((dir.join("skills"), Place::OwnedElsewhere(OwnedElsewhere::SyncedPlugin { plugin: id }), format!("{name}:")));
         }
     }
-    rows.push((places.pinned_plugin.join("skills"), Place::Fixed(Fixed::Pinned), "pinned:".into()));
+    rows.push((places.pinned_plugin.join("skills"), Place::OwnedElsewhere(OwnedElsewhere::Pinned), "pinned:".into()));
     for (_, home) in &places.codex_homes {
         rows.push((home.join("skills"), Place::Writable(Writable::CodexPersonal { home: home.clone() }), String::new()));
-        rows.push((home.join("skills/.system"), Place::Fixed(Fixed::CodexSystem { home: home.clone() }), String::new()));
+        rows.push((home.join("skills/.system"), Place::OwnedElsewhere(OwnedElsewhere::CodexSystem { home: home.clone() }), String::new()));
     }
     let cursor = places.home.join(".cursor");
     rows.push((cursor.join("skills"), Place::Writable(Writable::CursorPersonal), String::new()));
-    rows.push((cursor.join("skills-cursor"), Place::Fixed(Fixed::CursorBuiltin), String::new()));
+    rows.push((cursor.join("skills-cursor"), Place::OwnedElsewhere(OwnedElsewhere::CursorBuiltin), String::new()));
     for (folder, cached) in [("cache", true), ("local", false)] {
         for plugin in cursor_plugins(&cursor.join("plugins").join(folder), 4) {
             let name = plugin_name(&plugin);
@@ -223,7 +240,7 @@ fn roots(places: &Places) -> Vec<Root> {
     }
     rows.push((places.home.join(".agents/skills"), Place::Writable(Writable::Agents), String::new()));
 
-    rows.into_iter().filter_map(|(dir, place, prefix)| Some(Root { dir: dunce::canonicalize(&dir).ok().filter(|dir| dir.is_dir())?, place, prefix })).collect()
+    rows.into_iter().filter_map(|(dir, place, prefix)| Some(Root { dir: CanonicalPath::new(&dir).ok().filter(|dir| dir.is_dir())?, place, prefix })).collect()
 }
 
 fn children(dir: &Path) -> Vec<PathBuf> {
@@ -253,16 +270,16 @@ fn plugin_name(dir: &Path) -> String {
 
 #[derive(Clone)]
 struct SkillCopy<P> {
-    dir: PathBuf,
+    dir: CanonicalPath,
     key: String,
     description: String,
     place: P,
-    also: Vec<Place>,
+    same_folder: Vec<Place>,
 }
 
 impl<P: Clone + Into<Place>> SkillCopy<P> {
     fn places(&self) -> Vec<Place> {
-        std::iter::once(self.place.clone().into()).chain(self.also.iter().cloned()).collect()
+        std::iter::once(self.place.clone().into()).chain(self.same_folder.iter().cloned()).collect()
     }
 }
 
@@ -273,26 +290,29 @@ impl From<Writable> for Place {
 }
 
 impl SkillCopy<Place> {
-    fn writable(self) -> Result<SkillCopy<Writable>, Fixed> {
-        let SkillCopy { dir, key, description, place, also } = self;
-        if let Some(Place::Fixed(fixed)) = also.iter().find(|p| matches!(p, Place::Fixed(_))) {
-            return Err(fixed.clone());
+    fn writable(self) -> Result<SkillCopy<Writable>, OwnedElsewhere> {
+        let SkillCopy { dir, key, description, place, same_folder } = self;
+        if let Some(Place::OwnedElsewhere(owned)) = same_folder.iter().find(|p| matches!(p, Place::OwnedElsewhere(_))) {
+            return Err(owned.clone());
         }
         match place {
-            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place, also }),
-            Place::Fixed(fixed) => Err(fixed),
+            Place::Writable(place) => Ok(SkillCopy { dir, key, description, place, same_folder }),
+            Place::OwnedElsewhere(owned) => Err(owned),
         }
     }
 
     fn edit(&self) -> Edit {
-        let edits: Vec<Edit> = self.places().iter().map(Place::edit).collect();
-        let worst = edits.iter().find(|e| matches!(e, Edit::No { .. })).or_else(|| edits.iter().find(|e| **e == Edit::LostOnUpdate));
-        worst.unwrap_or(&Edit::Yes).clone()
+        self.places().iter().map(Place::edit).max().unwrap_or(Edit::Yes)
     }
 }
 
-fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
-    let (mut copies, mut hollow): (Vec<SkillCopy<Place>>, Vec<PathBuf>) = (vec![], vec![]);
+struct Inventory {
+    copies: Vec<SkillCopy<Place>>,
+    hollow: Vec<CanonicalPath>,
+}
+
+fn inventory(places: &Places) -> Inventory {
+    let mut inventory = Inventory { copies: vec![], hollow: vec![] };
     for root in roots(places) {
         let personal = matches!(root.place, Place::Writable(Writable::ClaudePersonal { .. }));
         for dir in children(&root.dir) {
@@ -300,35 +320,35 @@ fn inventory(places: &Places) -> (Vec<SkillCopy<Place>>, Vec<PathBuf>) {
             if name.starts_with('.') || (personal && name == "synced") {
                 continue;
             }
-            let Ok(dir) = dunce::canonicalize(&dir) else { continue };
-            if let Some(known) = copies.iter_mut().find(|c| c.dir == dir) {
-                if known.place != root.place && !known.also.contains(&root.place) {
-                    known.also.push(root.place.clone());
+            let Ok(dir) = CanonicalPath::new(&dir) else { continue };
+            if let Some(known) = inventory.copies.iter_mut().find(|c| c.dir == dir) {
+                if known.place != root.place && !known.same_folder.contains(&root.place) {
+                    known.same_folder.push(root.place.clone());
                 }
                 continue;
             }
             let skill = dir.join("SKILL.md");
             if !skill.is_file() {
-                if matches!(root.place, Place::Writable(_)) && !hollow.contains(&dir) {
-                    hollow.push(dir);
+                if matches!(root.place, Place::Writable(_)) && !inventory.hollow.contains(&dir) {
+                    inventory.hollow.push(dir);
                 }
                 continue;
             }
             let text = std::fs::read_to_string(&skill).unwrap_or_default();
             let (meta, _) = front_matter(&text);
-            copies.push(SkillCopy {
+            inventory.copies.push(SkillCopy {
                 key: format!("{}{}", root.prefix, meta("name").unwrap_or(name)),
                 description: meta("description").unwrap_or_default(),
                 place: root.place.clone(),
-                also: vec![],
+                same_folder: vec![],
                 dir,
             });
         }
     }
-    (copies, hollow)
+    inventory
 }
 
-fn tree(dir: &Path) -> String {
+fn content_hash(dir: &Path) -> String {
     let mut hasher = Sha256::new();
     for (rel, path) in files(dir) {
         let sha = std::fs::read(&path).map(|bytes| crate::sync::sha(&bytes)).unwrap_or_default();
@@ -480,18 +500,18 @@ pub struct SaveReport {
 }
 
 pub fn list(places: &Places) -> Listing {
-    let (copies, hollow) = inventory(places);
+    let Inventory { copies, hollow } = inventory(places);
     let sessions = account_sessions(places);
     let copies = copies
         .into_iter()
         .map(|c| {
             let all = c.places();
-            let readers = sessions.iter().filter(|(_, s)| all.iter().any(|p| reach(p, &s.session(p)).is_some())).map(|(r, _)| Reader { provider: r.provider, account: r.account.clone() }).collect();
+            let readers = sessions.iter().filter(|(_, s)| all.iter().any(|p| nudge_if_loaded(p, &s.session(p, &places.projects)).is_some())).map(|(r, _)| Reader { provider: r.provider, account: r.account.clone() }).collect();
             let edit = c.edit();
             let edited = edit == Edit::LostOnUpdate
-                && files(&c.dir).iter().any(|(_, path)| original(&places.originals, path).is_some_and(|kept| std::fs::read_to_string(path).ok() != Some(kept)));
-            let linked = all.iter().find_map(|p| p.linked(&c.dir.file_name().unwrap_or_default().to_string_lossy()));
-            CopyView { scope: c.place.scope(), edit, dir: c.dir.display().to_string(), tree: tree(&c.dir), key: c.key, description: c.description, place: c.place, also: c.also, linked, readers, edited }
+                && files(&c.dir).iter().any(|(_, path)| original(&places.installed_plugin_files, path).is_some_and(|kept| std::fs::read_to_string(path).ok() != Some(kept)));
+            let linked = all.iter().find_map(|p| p.sync_group(&c.dir.file_name().unwrap_or_default().to_string_lossy()));
+            CopyView { scope: c.place.scope(), edit, dir: c.dir.display().to_string(), tree: content_hash(&c.dir), key: c.key, description: c.description, place: c.place, also: c.same_folder, linked, readers, edited }
         })
         .collect();
     Listing { copies, hollow: hollow.iter().map(|d| d.display().to_string()).collect() }
@@ -504,10 +524,10 @@ struct AccountSession {
 }
 
 impl AccountSession {
-    fn session<'a>(&'a self, place: &'a Place) -> Session<'a> {
+    fn session<'a>(&'a self, place: &Place, projects: &'a [CanonicalPath]) -> Session<'a> {
         let cwd = match place {
-            Place::Writable(Writable::ClaudeProject { checkout }) => checkout.as_path(),
-            _ => self.home.as_path(),
+            Place::Writable(Writable::ClaudeProject { checkout }) => projects.iter().find(|project| project.0 == *checkout),
+            _ => None,
         };
         Session { provider: self.provider, home: &self.home, cwd, plugin_dirs: &self.plugin_dirs }
     }
@@ -529,26 +549,30 @@ fn account_sessions(places: &Places) -> Vec<(Reader, AccountSession)> {
 }
 
 fn find(copies: &[SkillCopy<Place>], dir: &str) -> Option<SkillCopy<Place>> {
-    let dir = dunce::canonicalize(dir).ok()?;
+    let dir = CanonicalPath::new(dir).ok()?;
     copies.iter().find(|c| c.dir == dir).cloned()
 }
 
 pub fn read(places: &Places, dir: &str, file: &str) -> Result<SkillText, String> {
     let file = SkillFile::parse(file)?;
-    let copy = find(&inventory(places).0, dir).ok_or_else(|| format!("no listed skill folder at {dir}"))?;
+    let copy = find(&inventory(places).copies, dir).ok_or_else(|| format!("no listed skill folder at {dir}"))?;
     let path = file.in_dir(&copy.dir)?;
     let text = String::from_utf8(std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?).map_err(|_| format!("{} is not text", path.display()))?;
     let files = files(&copy.dir).into_iter().filter(|(_, p)| is_text(p)).map(|(rel, _)| rel).collect();
-    let original = original(&places.originals, &path).filter(|o| *o != text);
-    Ok(SkillText { text, tree: tree(&copy.dir), files, original })
+    let original = original(&places.installed_plugin_files, &path).filter(|o| *o != text);
+    Ok(SkillText { text, tree: content_hash(&copy.dir), files, original })
 }
 
 fn is_text(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|bytes| std::str::from_utf8(&bytes).is_ok() && !bytes[..bytes.len().min(8192)].contains(&0))
 }
 
-fn original(originals: &Path, file: &Path) -> Option<String> {
-    std::fs::read_to_string(originals.join(crate::sync::sha(file.to_string_lossy().as_bytes()))).ok()
+fn installed_file(installed_plugin_files: &Path, file: &Path) -> PathBuf {
+    installed_plugin_files.join(crate::sync::sha(file.to_string_lossy().as_bytes()))
+}
+
+fn original(installed_plugin_files: &Path, file: &Path) -> Option<String> {
+    std::fs::read_to_string(installed_file(installed_plugin_files, file)).ok()
 }
 
 pub struct Written {
@@ -558,40 +582,40 @@ pub struct Written {
 
 /// Writes `text` to `file` in each target copy that is listed, writable, and unchanged since its
 /// `since`. A copy that already holds `text` is `Saved` without a write, so running it twice
-/// changes nothing the second time. A saved plugin source copy also writes its `followers`, with
+/// changes nothing the second time. A saved plugin source copy also writes its cache copies, with
 /// an outcome each. Never deletes.
 pub fn save(places: &Places, file: &str, text: &str, targets: &[Target]) -> Result<Written, String> {
     let file = SkillFile::parse(file)?;
-    let copies = inventory(places).0;
-    let targeted: Vec<PathBuf> = targets.iter().filter_map(|t| dunce::canonicalize(&t.dir).ok()).collect();
+    let copies = inventory(places).copies;
+    let targeted: Vec<CanonicalPath> = targets.iter().filter_map(|t| CanonicalPath::new(&t.dir).ok()).collect();
     let mut written = Written { copies: vec![], touched: vec![] };
     for target in targets {
-        let mut followed = vec![];
+        let mut cache_outcomes = vec![];
         let outcome = match find(&copies, &target.dir).map(SkillCopy::writable) {
             None => Outcome::Missing,
-            Some(Err(fixed)) => Outcome::ReadOnly { why: fixed.why().into() },
+            Some(Err(owned)) => Outcome::ReadOnly { why: owned.why().into() },
             Some(Ok(copy)) => {
-                let outcome = write_copy(&copy, &file, text, Some(&target.since), &places.originals, &mut written.touched);
+                let outcome = write_copy(&copy, &file, text, Precondition::TreeIs(&target.since), &places.installed_plugin_files, &mut written.touched);
                 if matches!(outcome, Outcome::Saved { .. }) {
-                    for follower in followers(&copies, &copy).into_iter().filter(|f| !targeted.contains(&f.dir)) {
-                        let dir = follower.dir.display().to_string();
-                        let outcome = match follower.writable() {
-                            Ok(follower) => write_copy(&follower, &file, text, None, &places.originals, &mut written.touched),
-                            Err(fixed) => Outcome::ReadOnly { why: fixed.why().into() },
+                    for cache in cache_copies_in_step_with(&copies, &copy).into_iter().filter(|c| !targeted.contains(&c.dir)) {
+                        let dir = cache.dir.display().to_string();
+                        let outcome = match cache.writable() {
+                            Ok(cache) => write_copy(&cache, &file, text, Precondition::FollowsSource, &places.installed_plugin_files, &mut written.touched),
+                            Err(owned) => Outcome::ReadOnly { why: owned.why().into() },
                         };
-                        followed.push(CopyOutcome { dir, outcome });
+                        cache_outcomes.push(CopyOutcome { dir, outcome });
                     }
                 }
                 outcome
             }
         };
         written.copies.push(CopyOutcome { dir: target.dir.clone(), outcome });
-        written.copies.extend(followed);
+        written.copies.extend(cache_outcomes);
     }
     Ok(written)
 }
 
-fn followers(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<SkillCopy<Place>> {
+fn cache_copies_in_step_with(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<SkillCopy<Place>> {
     let sources: Vec<(String, PathBuf)> = source
         .places()
         .into_iter()
@@ -604,21 +628,26 @@ fn followers(copies: &[SkillCopy<Place>], source: &SkillCopy<Writable>) -> Vec<S
     copies.iter().filter(|c| c.dir != source.dir && c.dir.file_name() == source.dir.file_name() && c.places().iter().any(follows)).cloned().collect()
 }
 
-fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: Option<&str>, originals: &Path, touched: &mut Vec<Place>) -> Outcome {
+enum Precondition<'a> {
+    TreeIs(&'a str),
+    FollowsSource,
+}
+
+fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, precondition: Precondition, installed_plugin_files: &Path, touched: &mut Vec<Place>) -> Outcome {
     let path = match file.in_dir(&copy.dir) {
         Ok(path) => path,
         Err(error) => return Outcome::Failed { error },
     };
     let _held = crate::fsx::hold();
-    let now = tree(&copy.dir);
+    let now = content_hash(&copy.dir);
     if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
         return Outcome::Saved { tree: now };
     }
-    if since.is_some_and(|since| since != now) {
+    if matches!(precondition, Precondition::TreeIs(since) if since != now) {
         return Outcome::Changed { tree: now };
     }
     let replaced_on_update = copy.places().iter().any(|p| p.edit() == Edit::LostOnUpdate);
-    let kept = originals.join(crate::sync::sha(path.to_string_lossy().as_bytes()));
+    let kept = installed_file(installed_plugin_files, &path);
     let written = match std::fs::read(&path) {
         Ok(bytes) if replaced_on_update && !kept.exists() => crate::fsx::replace(&kept, &bytes, None, None),
         _ => Ok(()),
@@ -627,7 +656,7 @@ fn write_copy(copy: &SkillCopy<Writable>, file: &SkillFile, text: &str, since: O
     match written {
         Ok(()) => {
             touched.extend(copy.places());
-            Outcome::Saved { tree: tree(&copy.dir) }
+            Outcome::Saved { tree: content_hash(&copy.dir) }
         }
         Err(error) => Outcome::Failed { error },
     }
@@ -643,29 +672,29 @@ pub enum Nudge {
 pub struct Session<'a> {
     pub provider: Provider,
     pub home: &'a Path,
-    pub cwd: &'a Path,
+    pub cwd: Option<&'a CanonicalPath>,
     pub plugin_dirs: &'a [PathBuf],
 }
 
-pub fn reach(place: &Place, session: &Session) -> Option<Nudge> {
-    use Place::{Fixed as F, Writable as W};
+pub fn nudge_if_loaded(place: &Place, session: &Session) -> Option<Nudge> {
+    use Place::{OwnedElsewhere as O, Writable as W};
     let same_home = |home: &Path| home == session.home;
     let reached = match session.provider {
         Provider::Claude => match place {
-            W(Writable::ClaudePersonal { home }) | F(Fixed::ClaudeAccountSynced { home }) => same_home(home),
-            W(Writable::ClaudeProject { checkout }) => session.cwd.starts_with(checkout),
+            W(Writable::ClaudePersonal { home }) | O(OwnedElsewhere::ClaudeAccountSynced { home }) => same_home(home),
+            W(Writable::ClaudeProject { checkout }) => session.cwd.is_some_and(|cwd| cwd.starts_with(checkout)),
             W(Writable::PluginCache { home, loaded, .. }) => *loaded && same_home(home),
             W(Writable::PluginSource { home, .. }) => same_home(home),
-            F(Fixed::SyncedPlugin { plugin }) => session.plugin_dirs.iter().any(|d| d.file_name().is_some_and(|n| n == plugin.as_str())),
-            F(Fixed::Pinned) => true,
+            O(OwnedElsewhere::SyncedPlugin { plugin }) => session.plugin_dirs.iter().any(|d| d.file_name().is_some_and(|n| n == plugin.as_str())),
+            O(OwnedElsewhere::Pinned) => true,
             _ => false,
         },
         Provider::Codex => match place {
-            W(Writable::CodexPersonal { home }) | F(Fixed::CodexSystem { home }) => same_home(home),
+            W(Writable::CodexPersonal { home }) | O(OwnedElsewhere::CodexSystem { home }) => same_home(home),
             W(Writable::Agents) => true,
             _ => false,
         },
-        Provider::Cursor => matches!(place, W(Writable::CursorPersonal | Writable::CursorPlugin { .. } | Writable::Agents) | F(Fixed::CursorBuiltin)),
+        Provider::Cursor => matches!(place, W(Writable::CursorPersonal | Writable::CursorPlugin { .. } | Writable::Agents) | O(OwnedElsewhere::CursorBuiltin)),
     };
     reached.then_some(if session.provider == Provider::Claude { Nudge::ReloadSkills } else { Nudge::NextStart })
 }
@@ -676,7 +705,7 @@ pub fn pulled_by_plugin_sync(share: &crate::sync::PluginShare, pulled: &[String]
         let place = if path.starts_with("user-skills/") {
             Place::Writable(Writable::ClaudePersonal { home: share.claude_home.clone() })
         } else if let Some(id) = path.strip_prefix("plugins/").and_then(|rest| rest.split('/').next()) {
-            Place::Fixed(Fixed::SyncedPlugin { plugin: id.to_owned() })
+            Place::OwnedElsewhere(OwnedElsewhere::SyncedPlugin { plugin: id.to_owned() })
         } else {
             continue;
         };
@@ -763,10 +792,10 @@ mod tests {
             claude_homes: vec![("claude".into(), claude), ("bloom".into(), bloom)],
             codex_homes: vec![("codex".into(), home.join(".codex"))],
             cursor: Some("cursor".into()),
-            projects: vec![root.join("app")],
+            projects: vec![CanonicalPath::new(root.join("app")).unwrap()],
             synced_plugins: Some(synced),
             pinned_plugin: root.join("pinned-plugin"),
-            originals: root.join("config/skill-originals"),
+            installed_plugin_files: root.join("config/skill-originals"),
         };
         Fixture { _temp: temp, root, places }
     }
@@ -798,7 +827,7 @@ mod tests {
         "home/.agents/skills/use-railway",
     ];
 
-    const FIXED: [&str; 5] = [
+    const OWNED_ELSEWHERE: [&str; 5] = [
         "home/.claude/skills/synced/org_me/brainstorm",
         "config/synced-plugins/plugins/far@mkt/skills/far-skill",
         "pinned-plugin/skills/bro",
@@ -846,7 +875,7 @@ mod tests {
         assert_eq!(copy(&listing, &f.dir("app/.claude/skills/deploy")).scope, Scope::Project { checkout: f.root.join("app") });
         assert_eq!(copy(&listing, &f.dir("config/synced-plugins/plugins/far@mkt/skills/far-skill")).scope, Scope::Plugin { plugin: "far".into() });
         assert_eq!(copy(&listing, &f.dir("pinned-plugin/skills/bro")).scope, Scope::Builtin);
-        assert_eq!(serde_json::to_value(copy(&listing, &f.dir("pinned-plugin/skills/bro"))).unwrap()["why"], Fixed::Pinned.why());
+        assert_eq!(serde_json::to_value(copy(&listing, &f.dir("pinned-plugin/skills/bro"))).unwrap()["why"], OwnedElsewhere::Pinned.why());
     }
 
     #[test]
@@ -927,10 +956,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_place_is_read_only() {
+    fn a_place_owned_elsewhere_is_read_only() {
         let f = fixture();
         let listing = list(&f.places);
-        for rel in FIXED {
+        for rel in OWNED_ELSEWHERE {
             let before = body(&f, rel);
             let written = save(&f.places, "SKILL.md", "mine", &[target(&listing, &f.dir(rel))]).unwrap();
             assert!(matches!(&written.copies[0].outcome, Outcome::ReadOnly { why } if !why.is_empty()), "{rel}: {:?}", written.copies);
@@ -1029,20 +1058,26 @@ mod tests {
 
     #[test]
     fn claude_reloads_skills_and_codex_and_cursor_wait_for_their_next_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = |rel: &str| {
+            std::fs::create_dir_all(temp.path().join(rel)).unwrap();
+            CanonicalPath::new(temp.path().join(rel)).unwrap()
+        };
+        let (x, app_crates, other_src) = (folder("x"), folder("src/app/crates"), folder("src/other"));
         let home = PathBuf::from("/h/.claude");
-        let session = |provider, cwd: &'static str| Session { provider, home: &home, cwd: Path::new(cwd), plugin_dirs: &[] };
+        let session = |provider, cwd| Session { provider, home: &home, cwd: Some(cwd), plugin_dirs: &[] };
         let personal = Place::Writable(Writable::ClaudePersonal { home: home.clone() });
         let other = Place::Writable(Writable::ClaudePersonal { home: "/h/bloom".into() });
-        let project = Place::Writable(Writable::ClaudeProject { checkout: "/src/app".into() });
+        let project = Place::Writable(Writable::ClaudeProject { checkout: folder("src/app").to_path_buf() });
         let unloaded = Place::Writable(Writable::PluginCache { home: home.clone(), plugin: "mods@local-mods".into(), version: "1".into(), loaded: false });
-        assert_eq!(reach(&personal, &session(Provider::Claude, "/x")), Some(Nudge::ReloadSkills));
-        assert_eq!(reach(&other, &session(Provider::Claude, "/x")), None);
-        assert_eq!(reach(&project, &session(Provider::Claude, "/src/app/crates")), Some(Nudge::ReloadSkills));
-        assert_eq!(reach(&project, &session(Provider::Claude, "/src/other")), None);
-        assert_eq!(reach(&unloaded, &session(Provider::Claude, "/x")), None);
-        assert_eq!(reach(&Place::Writable(Writable::Agents), &session(Provider::Codex, "/x")), Some(Nudge::NextStart));
-        assert_eq!(reach(&Place::Writable(Writable::Agents), &session(Provider::Claude, "/x")), None);
-        assert_eq!(reach(&Place::Writable(Writable::CursorPersonal), &session(Provider::Cursor, "/x")), Some(Nudge::NextStart));
+        assert_eq!(nudge_if_loaded(&personal, &session(Provider::Claude, &x)), Some(Nudge::ReloadSkills));
+        assert_eq!(nudge_if_loaded(&other, &session(Provider::Claude, &x)), None);
+        assert_eq!(nudge_if_loaded(&project, &session(Provider::Claude, &app_crates)), Some(Nudge::ReloadSkills));
+        assert_eq!(nudge_if_loaded(&project, &session(Provider::Claude, &other_src)), None);
+        assert_eq!(nudge_if_loaded(&unloaded, &session(Provider::Claude, &x)), None);
+        assert_eq!(nudge_if_loaded(&Place::Writable(Writable::Agents), &session(Provider::Codex, &x)), Some(Nudge::NextStart));
+        assert_eq!(nudge_if_loaded(&Place::Writable(Writable::Agents), &session(Provider::Claude, &x)), None);
+        assert_eq!(nudge_if_loaded(&Place::Writable(Writable::CursorPersonal), &session(Provider::Cursor, &x)), Some(Nudge::NextStart));
     }
 
     #[test]
@@ -1051,7 +1086,7 @@ mod tests {
         let pulled = ["user-skills/a/SKILL.md", "user-skills/b/SKILL.md", "plugins/far@mkt/skills/x/SKILL.md"].map(String::from);
         assert_eq!(
             pulled_by_plugin_sync(&share, &pulled),
-            [Place::Writable(Writable::ClaudePersonal { home: "/h/.claude".into() }), Place::Fixed(Fixed::SyncedPlugin { plugin: "far@mkt".into() })]
+            [Place::Writable(Writable::ClaudePersonal { home: "/h/.claude".into() }), Place::OwnedElsewhere(OwnedElsewhere::SyncedPlugin { plugin: "far@mkt".into() })]
         );
         let project = crate::sync::Project { key: "k".into(), name: "app".into(), repo: "r".into() };
         let checkout = crate::sync::Checkout { project, path: "/nowhere/app".into(), history: None, claude_home: None };

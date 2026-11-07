@@ -75,7 +75,7 @@ function checklist() {
 }
 
 const skillCopy = (machine, dir, tree, place = { kind: "agents" }, more = {}) => ({ machine, dir, tree, place, edit: "yes", readers: [], linked: null, ...more });
-const opened = (copy, tree) => ({ copy, got: { text: "body", tree }, draft: null, compared: new Map(), checked: new Set(), since: new Map(), changed: new Set() });
+const opened = (copy, tree) => ({ copy, got: { text: "body", tree }, draft: null, compared: new Map(), checked: new Set(), treeShown: new Map(), changed: new Set() });
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const boxes = (api, o, row) => row.copies.map((c) => {
   const s = api.copyCheck(o, row, c);

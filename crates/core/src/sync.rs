@@ -167,6 +167,10 @@ impl State {
         Ok(())
     }
 
+    fn changed_since_hashed(&mut self, file: &Path, hashed: Option<&(String, u64)>) -> bool {
+        self.hash(file).map(|(sha, _)| sha).as_ref() != hashed.map(|(sha, _)| sha)
+    }
+
     fn hash(&mut self, file: &Path) -> Option<(String, u64)> {
         let meta = std::fs::metadata(file).ok().filter(|m| m.is_file())?;
         let modified = millis(meta.modified().ok()?);
@@ -367,7 +371,7 @@ fn exchange(
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
             let _held = crate::fsx::hold();
-            if state.hash(&target).map(|(sha, _)| sha) != local.get(&file.entry.path).map(|(sha, _)| sha.clone()) {
+            if state.changed_since_hashed(&target, local.get(&file.entry.path)) {
                 continue;
             }
             match apply(state, key, &file, &target) {

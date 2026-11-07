@@ -272,7 +272,7 @@ struct Tab {
     turn_pending: Option<Instant>,
     /// The terminal's input line. Done does not clear it.
     draft: Draft,
-    reload: bool,
+    owes_reload: bool,
     /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
     permission_mode: Option<String>,
     /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
@@ -363,9 +363,9 @@ impl Tab {
     }
 
     fn reload_if_idle(&mut self) -> bool {
-        let typed = self.reload && self.notice_idle() && self.type_command("/reload-skills");
+        let typed = self.owes_reload && self.notice_idle() && self.type_command("/reload-skills");
         if typed {
-            self.reload = false;
+            self.owes_reload = false;
         }
         typed
     }
@@ -2056,7 +2056,7 @@ impl Machine {
         let homes = |provider| accounts.iter().filter(|a| a.provider == provider).map(|a| (a.id.clone(), self.accounts.home(a))).filter(|(_, home)| inside(home)).collect();
         let mut projects: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
         projects.extend(self.tabs.lock().unwrap().values().map(|t| t.cwd.clone()));
-        let mut projects: Vec<PathBuf> = projects.iter().filter_map(|p| dunce::canonicalize(p).ok()).collect();
+        let mut projects: Vec<skills::CanonicalPath> = projects.iter().filter_map(|p| skills::CanonicalPath::new(p).ok()).collect();
         projects.sort();
         projects.dedup();
         let home = if test_binary() { config.clone().unwrap_or_default().join("home") } else { home() };
@@ -2068,7 +2068,7 @@ impl Machine {
             projects,
             synced_plugins: config.as_ref().map(|c| c.join("synced-plugins")),
             pinned_plugin: self.launch.plugin_dir.clone(),
-            originals: config.unwrap_or_else(std::env::temp_dir).join("skill-originals"),
+            installed_plugin_files: config.unwrap_or_else(std::env::temp_dir).join("skill-originals"),
         }
     }
 
@@ -2086,14 +2086,14 @@ impl Machine {
         };
         let mut nudged = vec![];
         for (tab, account, cwd, title) in running {
-            let (home, cwd, plugin_dirs) = (self.accounts.home(&account), dunce::canonicalize(&cwd).unwrap_or(cwd), self.shared_plugin_dirs(&account));
-            let session = skills::Session { provider: account.provider, home: &home, cwd: &cwd, plugin_dirs: &plugin_dirs };
-            let Some(nudge) = touched.iter().find_map(|place| skills::reach(place, &session)) else { continue };
+            let (home, cwd, plugin_dirs) = (self.accounts.home(&account), skills::CanonicalPath::new(&cwd).ok(), self.shared_plugin_dirs(&account));
+            let session = skills::Session { provider: account.provider, home: &home, cwd: cwd.as_ref(), plugin_dirs: &plugin_dirs };
+            let Some(nudge) = touched.iter().find_map(|place| skills::nudge_if_loaded(place, &session)) else { continue };
             let delivery = match nudge {
                 skills::Nudge::NextStart => skills::Delivery::NextStart,
                 skills::Nudge::ReloadSkills => {
                     let typed = self.tab(&tab, |t| {
-                        t.reload = true;
+                        t.owes_reload = true;
                         t.reload_if_idle()
                     });
                     if typed.unwrap_or(false) {
@@ -2797,7 +2797,7 @@ impl Machine {
             held: vec![],
             turn_pending: None,
             draft: Draft::default(),
-            reload: false,
+            owes_reload: false,
             permission_mode: None,
             permission_unknown: false,
             screen: Arc::default(),
@@ -5828,7 +5828,7 @@ exec sleep 30
         let nudged = m.skills_changed(&[personal_skills(&m, &claude)]);
         assert_eq!(nudged, [skills::Nudged { tab: tab.clone(), title: None, nudge: skills::Delivery::Reloaded }]);
         wait_for("the reload command", || read_pty(&root.join("typed.bin")).contains("/reload-skills"));
-        assert_eq!(m.tab(&tab, |t| (t.reload, t.turn_pending.is_none(), t.notice_idle())).unwrap(), (false, true, true));
+        assert_eq!(m.tab(&tab, |t| (t.owes_reload, t.turn_pending.is_none(), t.notice_idle())).unwrap(), (false, true, true));
         assert_eq!(skills_changed_events(&events), [vec![skills::Scope::Personal]]);
         let _ = std::fs::remove_dir_all(root);
     }

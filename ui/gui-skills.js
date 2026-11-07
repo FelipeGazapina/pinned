@@ -113,28 +113,28 @@ const editText = (o) => o.draft ?? o.got?.text ?? "";
 const skillDirty = (o) => o?.got != null && o.draft != null && o.draft !== o.got.text;
 
 function openChecks(o, row) {
-  o.since = new Map(row.copies.map((c) => [copyId(c), c.tree]));
-  o.since.set(copyId(o.copy), o.got.tree);
-  o.checked = new Set(row.copies.filter((c) => c.edit !== "no" && o.since.get(copyId(c)) === o.got.tree).map(copyId));
+  o.treeShown = new Map(row.copies.map((c) => [copyId(c), c.tree]));
+  o.treeShown.set(copyId(o.copy), o.got.tree);
+  o.checked = new Set(row.copies.filter((c) => c.edit !== "no" && o.treeShown.get(copyId(c)) === o.got.tree).map(copyId));
   o.changed = new Set();
 }
 
 function refreshChecks(o, row) {
   for (const c of row.copies) {
     const id = copyId(c);
-    if (!o.since.has(id)) o.since.set(id, c.tree);
-    else if (o.since.get(id) !== c.tree) {
+    if (!o.treeShown.has(id)) o.treeShown.set(id, c.tree);
+    else if (o.treeShown.get(id) !== c.tree) {
       o.checked.delete(id);
       o.compared.delete(id);
       o.changed.add(id);
-      o.since.set(id, c.tree);
+      o.treeShown.set(id, c.tree);
     }
   }
 }
 
 function sawCopy(o, c, got) {
   o.compared.set(copyId(c), got);
-  if (got.tree) o.since.set(copyId(c), got.tree);
+  if (got.tree) o.treeShown.set(copyId(c), got.tree);
   o.changed.delete(copyId(c));
 }
 
@@ -171,7 +171,7 @@ function saveTargets(o, row) {
   const byMachine = new Map();
   for (const c of row.copies) {
     if (!copyCheck(o, row, c).checked) continue;
-    byMachine.set(c.machine, [...(byMachine.get(c.machine) ?? []), { dir: c.dir, since: o.since.get(copyId(c)) }]);
+    byMachine.set(c.machine, [...(byMachine.get(c.machine) ?? []), { dir: c.dir, since: o.treeShown.get(copyId(c)) }]);
   }
   return byMachine;
 }
@@ -190,7 +190,7 @@ function skillsChanged(machine) {
 /** Opens `copy`: reads it, and checks every editable copy whose tree is the one read. */
 async function openSkill(row, copy, file = "SKILL.md") {
   skillsUi.opened = (skillsUi.opened ?? 0) + 1;
-  skillsUi.open = { id: skillsUi.opened, row: row.id, copy, file, got: null, draft: null, view: "edit", checked: new Set(), since: new Map(), changed: new Set(), compared: new Map(), report: null, saving: false, leaving: null };
+  skillsUi.open = { id: skillsUi.opened, row: row.id, copy, file, got: null, draft: null, view: "edit", checked: new Set(), treeShown: new Map(), changed: new Set(), compared: new Map(), report: null, saving: false, leaving: null };
   renderSkillsPage();
   const o = skillsUi.open;
   try {
@@ -345,7 +345,7 @@ async function saveSkill() {
   const got = await Promise.allSettled(ms.map((m) => callOn(m, { cmd: "save_skill", file: o.file, text, copies: byMachine.get(m) })));
   o.report = ms.map((m, i) => ({ machine: m, ...(got[i].status === "fulfilled" ? got[i].value : { error: String(got[i].reason) }) }));
   o.saving = false;
-  for (const r of o.report) for (const c of r.copies ?? []) if (c.outcome === "saved") o.since.set(`${r.machine}\n${c.dir}`, c.tree);
+  for (const r of o.report) for (const c of r.copies ?? []) if (c.outcome === "saved") o.treeShown.set(`${r.machine}\n${c.dir}`, c.tree);
   const mine = o.report.find((r) => r.machine === o.copy.machine)?.copies?.find((c) => c.dir === o.copy.dir);
   if (mine?.outcome === "saved") {
     o.got = { ...o.got, text, tree: mine.tree };
