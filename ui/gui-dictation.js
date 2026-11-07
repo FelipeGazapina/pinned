@@ -2,9 +2,10 @@
  *
  * One tap on the mic starts a session that only ends when the message is sent
  * or the mic is tapped again — never on a pause. While it runs:
- * - interim results show as provisional text after the caret area,
- * - each final result confirms one phrase into the prompt,
- * - typing or editing confirms the provisional text on the spot.
+ * - interim results show as provisional text at the caret,
+ * - each final result confirms one phrase there and the caret moves past it,
+ * - typing or editing confirms the provisional text on the spot, and a click
+ *   or a typed edit moves where the next phrase goes.
  *
  * The transcript is cleaned with the same ideas as the speech-to-text app:
  * a developer glossary steers spelling (kubectl, useState, async/await…),
@@ -123,8 +124,7 @@ const DICTATION_HALLUCINATIONS = new Set([
 const dictationState = {
   want: false, // the session the user asked for; only send or the mic ends it
   engine: null, // 'native' | 'web' | null while starting
-  confirmed: "", // frozen text: the prompt at start + every confirmed phrase
-  provisional: "", // the live interim text, not confirmed yet
+  live: null, // the interim phrase on screen: { text, span: [from, to], value } while prompt.value === value
   rendering: false, // our own prompt.value writes, not the user's typing
   rec: null, // web SpeechRecognition instance
   locale: null, // what the running engine listens in; cleanup follows it, not the button
@@ -198,7 +198,7 @@ function renderDictationButton() {
     lang.setAttribute("aria-label", lang.title);
   }
   composer.dataset.dictating = dictationActive();
-  composer.dataset.provisional = !!(dictationActive() && dictationState.provisional);
+  composer.dataset.provisional = !!(dictationActive() && liveDictation());
 }
 
 function dictationShow(note, error = false) {
@@ -217,22 +217,47 @@ function dictationClearNotice() {
   dictationShow("");
 }
 
-/** Displayed value = confirmed text + live provisional tail. */
-function renderDictation() {
-  const tail = dictationState.provisional ? (dictationState.confirmed && !dictationState.confirmed.endsWith(" ") && !dictationState.confirmed.endsWith("\n") ? " " : "") + dictationState.provisional : "";
+/** The interim phrase, while the prompt still holds what dictation last wrote. Any edit,
+ * typed or not, freezes it where it is. */
+function liveDictation() {
+  const live = dictationState.live;
+  return live && live.value === prompt.value ? live : null;
+}
+
+/** Writes `text` over the live phrase, or at the caret when none shows. A final phrase
+ * stays where it landed and the next one goes wherever the caret is then. */
+function writeDictation(text, final) {
+  const placed = placeDictation(prompt.value, liveDictation()?.span ?? null, [prompt.selectionStart, prompt.selectionEnd], text);
   dictationState.rendering = true;
-  prompt.value = dictationState.confirmed + tail;
+  prompt.value = placed.value;
+  prompt.setSelectionRange(...placed.selection);
   dictationState.rendering = false;
+  dictationState.live = final ? null : { text, span: placed.span, value: placed.value };
   autosize();
+  revealPromptCaret();
   if (active) saveDraft(active, prompt.value);
   renderDictationButton();
 }
 
+/** Scrolls the prompt so its caret shows: the bottom at the end, else the caret's line. */
+function revealPromptCaret() {
+  const { value, selectionStart: start, selectionEnd: end, scrollTop } = prompt;
+  if (end >= value.length) return void (prompt.scrollTop = prompt.scrollHeight);
+  // The text up to the caret, in a box too short to hold it, is as tall as the caret is low.
+  const height = prompt.style.height;
+  prompt.style.height = "0px";
+  prompt.value = value.slice(0, end);
+  const caretBottom = prompt.scrollHeight;
+  prompt.value = value;
+  prompt.style.height = height;
+  prompt.setSelectionRange(start, end);
+  const line = parseFloat(getComputedStyle(prompt).lineHeight) || 20;
+  prompt.scrollTop = Math.min(Math.max(scrollTop, caretBottom - prompt.clientHeight), Math.max(0, caretBottom - line));
+}
+
 function dictationConfirmProvisional() {
-  if (!dictationState.provisional) return;
-  const cleaned = dictationCleanup(dictationState.provisional, dictationState.locale);
-  dictationState.confirmed = joinDictation(dictationState.confirmed, cleaned);
-  dictationState.provisional = "";
+  const live = liveDictation();
+  if (live) writeDictation(dictationCleanup(live.text, dictationState.locale), true);
 }
 
 function joinDictation(base, addition) {
@@ -242,21 +267,31 @@ function joinDictation(base, addition) {
   return `${base} ${addition}`;
 }
 
-/** One transcript from either engine. Interim replaces the tail; final
- * confirms a phrase and clears the tail for the next one. */
+/** Dictated `text` placed in `value` over `span` (the live phrase) or, without one, over the
+ * selection, spaced against the characters on both sides. The caret follows the text unless
+ * the user put it outside the live phrase. `span` comes back covering the text and any space
+ * added around it, so the next interim result replaces exactly that. */
+function placeDictation(value, span, selection, text) {
+  const [from, to] = span ?? selection;
+  const before = joinDictation(value.slice(0, from), text);
+  const after = value.slice(to);
+  const glue = text && after && !/^[\s.,!?;:)\]}]/.test(after) && !/\s$/.test(text) ? " " : "";
+  const next = before + glue + after;
+  const caret = before.length;
+  const follow = (at) => (!span || (at > from && at <= to) ? caret : at <= from ? at : at + next.length - value.length);
+  return { value: next, selection: selection.map(follow), span: [from, caret + glue.length] };
+}
+
+/** One transcript from either engine. Interim replaces the live phrase; final
+ * confirms it in place, cleaned. */
 function onDictationResult(text, isFinal) {
   if (!dictationState.want) return;
   dictationClearNotice();
   if (isFinal) {
     dictationState.restarts = 0;
-    const cleaned = dictationCleanup(text, dictationState.locale);
-    dictationState.confirmed = joinDictation(dictationState.confirmed, cleaned);
-    dictationState.provisional = "";
-    // A new phrase starts: what came before is confirmed, period.
-    renderDictation();
+    writeDictation(dictationCleanup(text, dictationState.locale), true);
   } else {
-    dictationState.provisional = text.trim();
-    renderDictation();
+    writeDictation(text.trim(), false);
   }
 }
 
@@ -269,8 +304,7 @@ function onDictationError(message) {
 async function startDictation() {
   if (dictationState.want) return;
   dictationState.want = true;
-  dictationState.confirmed = prompt.value;
-  dictationState.provisional = "";
+  dictationState.live = null;
   dictationState.restarts = 0;
   dictationState.locale = dictationLocale();
   renderDictationButton();
@@ -310,8 +344,7 @@ function stopDictation() {
   if (!dictationState.want && !dictationState.engine) return;
   dictationState.want = false;
   // Whatever is on screen is what the user keeps.
-  dictationState.confirmed = prompt.value;
-  dictationState.provisional = "";
+  dictationState.live = null;
   dictationClearNotice();
   if (dictationState.engine === "native" && TAURI) invoke("dictation_stop").catch(() => {});
   dropWebDictation();
@@ -336,7 +369,6 @@ async function switchDictationLanguage() {
   renderDictationButton();
   if (!dictationActive() || !dictationState.engine) return;
   dictationConfirmProvisional();
-  renderDictation();
   dictationState.locale = locale;
   dictationState.restarts = 0;
   dictationNotice(`Dictating in ${dictationLanguage(locale).name}`);
@@ -403,9 +435,7 @@ function startWebDictation() {
 
 /** A new thread keeps the session: the mic stays on, the mirrors restart here. */
 function dictationRetarget() {
-  if (!dictationActive()) return;
-  dictationState.confirmed = prompt.value;
-  dictationState.provisional = "";
+  dictationState.live = null;
 }
 
 document.getElementById("composer-dictate")?.addEventListener("click", toggleDictation);
@@ -415,7 +445,6 @@ renderDictationButton();
 // Typing confirms the provisional text: what the user touches becomes final.
 prompt.addEventListener("input", () => {
   if (dictationState.rendering || !dictationState.want) return;
-  dictationState.confirmed = prompt.value;
-  dictationState.provisional = "";
+  dictationState.live = null;
   renderDictationButton();
 });

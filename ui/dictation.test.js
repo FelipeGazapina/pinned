@@ -105,3 +105,58 @@ test("joining phrases spaces them once", () => {
   assert.equal(joinDictation("", "hello"), "hello");
   assert.equal(joinDictation("done", ""), "done");
 });
+
+test("a phrase dictated mid-text lands at the caret, spaced on both sides", () => {
+  const { placeDictation } = loadDictation();
+  const placed = placeDictation("fix the bug today", null, [8, 8], "login");
+  assert.equal(placed.value, "fix the login bug today");
+  assert.deepEqual([...placed.selection], [13, 13]);
+});
+
+test("a phrase dictated at the start or the end spaces only the side that has text", () => {
+  const { placeDictation } = loadDictation();
+  const start = placeDictation("run the tests", null, [0, 0], "please");
+  assert.equal(start.value, "please run the tests");
+  assert.deepEqual([...start.selection], [6, 6]);
+  const end = placeDictation("run the tests", null, [13, 13], "and deploy");
+  assert.equal(end.value, "run the tests and deploy");
+  assert.deepEqual([...end.selection], [24, 24]);
+});
+
+test("no space goes before punctuation or where one already is", () => {
+  const { placeDictation } = loadDictation();
+  assert.equal(placeDictation("ship it. ", null, [9, 9], "Then rest").value, "ship it. Then rest");
+  assert.equal(placeDictation("ship it", null, [7, 7], ", then rest").value, "ship it, then rest");
+  assert.equal(placeDictation("ship .", null, [4, 4], "now").value, "ship now .");
+  assert.equal(placeDictation("a b", null, [1, 1], "x").value, "a x b");
+  assert.equal(placeDictation("ab", null, [1, 1], "x").value, "a x b");
+});
+
+test("dictating over a selection replaces it", () => {
+  const { placeDictation } = loadDictation();
+  const placed = placeDictation("use the old name here", null, [8, 16], "new name");
+  assert.equal(placed.value, "use the new name here");
+  assert.deepEqual([...placed.selection], [16, 16]);
+});
+
+test("each interim result replaces the last one in place, then the final one stays", () => {
+  const { placeDictation } = loadDictation();
+  let placed = placeDictation("fix the bug", null, [7, 7], "log");
+  assert.equal(placed.value, "fix the log bug");
+  placed = placeDictation(placed.value, placed.span, placed.selection, "login page");
+  assert.equal(placed.value, "fix the login page bug");
+  assert.deepEqual([...placed.selection], [18, 18]);
+  const next = placeDictation(placed.value, null, placed.selection, "and");
+  assert.equal(next.value, "fix the login page and bug");
+});
+
+test("a caret the user moved away keeps its place while the phrase grows", () => {
+  const { placeDictation } = loadDictation();
+  const first = placeDictation("one two", null, [3, 3], "and a");
+  assert.equal(first.value, "one and a two");
+  const before = placeDictation(first.value, first.span, [0, 0], "and a half");
+  assert.equal(before.value, "one and a half two");
+  assert.deepEqual([...before.selection], [0, 0]);
+  const after = placeDictation(first.value, first.span, [13, 13], "and a half");
+  assert.deepEqual([...after.selection], [18, 18]);
+});
