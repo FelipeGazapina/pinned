@@ -165,3 +165,17 @@ test("the same picture named in two list items shows in each", () => {
 test("plain code renders exactly as marked renders it", () => {
   assert.equal(render("`a &amp; <b>`"), "<p><code>a &amp;amp; &lt;b&gt;</code></p>\n");
 });
+
+test("a picture already placed is not moved again", () => {
+  let moves = 0;
+  const block = { matches: () => false, insertBefore: () => moves++ };
+  const images = [{ dataset: { local: "/tmp/a/shot.png" }, closest: () => block, remove() {} }];
+  sandbox.placeInlineImages({ querySelectorAll: () => images });
+  sandbox.placeInlineImages({ querySelectorAll: () => images });
+  assert.equal(moves, 1);
+});
+
+test("a codespan naming a remote picture fetches nothing", () => {
+  assert.doesNotMatch(render("`https://host/a.png`"), /<img/);
+  assert.doesNotMatch(render("`//host/a.png`"), /<img/);
+});

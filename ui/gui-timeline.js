@@ -269,7 +269,7 @@ const PICTURE_EXT = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
 /** A path a reply names that is a picture: absolute, `~/`-relative, or relative and containing a `/`. */
 function imageRef(raw) {
   const path = (raw ?? "").trim().replace(/#L\d+(?:C\d+)?$/i, "").replace(/:\d+(?::\d+)?$/, "");
-  if (!PICTURE_EXT.test(path) || /\s/.test(path)) return null;
+  if (!PICTURE_EXT.test(path) || /\s/.test(path) || IMAGE_DIRECT.test(path)) return null;
   if (path.startsWith("/") || path.startsWith("~/")) return path;
   return path.includes("/") ? path : null;
 }
@@ -291,6 +291,9 @@ function placeInlineImages(root) {
       continue;
     }
     seen.get(block).add(img.dataset.local);
+    // Moving a node, even to where it already is, wakes the media observer that called this.
+    if ("placed" in img.dataset) continue;
+    img.dataset.placed = "";
     const nested = block.matches("li") ? block.querySelector(":scope > ul, :scope > ol") : null;
     block.insertBefore(img, nested);
   }
