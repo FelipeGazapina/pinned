@@ -203,6 +203,14 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .logo[data-logo] { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.08); }
 .logo[data-logo] svg { width: 60%; height: 60%; }
 .logo.upstash { background: #00c98d; }
+.logo.agents { background: #7c5cff; }
+.agent-consent { border-color: rgb(124 92 255 / 0.6); }
+.agent-consent h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.agent-checks { display: grid; gap: 6px; }
+.agent-checks .check { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.agent-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.agent-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+#mcp-endpoint { font: 12px ui-monospace, Menlo, monospace; }
 .badge.box { margin-left: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }

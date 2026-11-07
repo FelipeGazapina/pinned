@@ -1,4 +1,5 @@
 use crate::db;
+use crate::{mcp, oauth};
 use crate::hub::{Account, Hub, Outbox};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
@@ -41,7 +42,7 @@ const MACHINE_SILENT: Duration = Duration::from_secs(60);
 const INSTALL: &str = include_str!("install.sh");
 
 pub struct Server {
-    hub: Arc<Hub>,
+    pub(crate) hub: Arc<Hub>,
     downloads: PathBuf,
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
     hashing: tokio::sync::Semaphore,
@@ -62,6 +63,17 @@ pub const ROUTES: &[&str] = &[
     "GET /install.sh",
     "GET /download/{file}",
     "GET /new",
+    "GET /.well-known/oauth-protected-resource",
+    "GET /.well-known/oauth-protected-resource/mcp",
+    "GET /.well-known/oauth-authorization-server",
+    "POST /oauth/register",
+    "GET /oauth/authorize",
+    "POST /oauth/token",
+    "POST /oauth/revoke",
+    "GET /connect-agent",
+    "POST /mcp",
+    "GET /mcp",
+    "DELETE /mcp",
 ];
 
 fn route(spec: &str) -> &str {
@@ -85,6 +97,25 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool)
         .route(route("GET /download/{file}"), get(download))
         // A prompt link, /new?prompt=…, is the app itself, which reads the link from its address.
         .route_service(route("GET /new"), SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        .route(route("GET /.well-known/oauth-protected-resource"), get(oauth::resource_metadata))
+        .route(route("GET /.well-known/oauth-protected-resource/mcp"), get(oauth::resource_metadata))
+        .route(route("GET /.well-known/oauth-authorization-server"), get(oauth::server_metadata))
+        .route(route("POST /oauth/register"), post(oauth::register))
+        .route(route("GET /oauth/authorize"), get(oauth::authorize))
+        .route(route("POST /oauth/token"), post(oauth::token))
+        .route(route("POST /oauth/revoke"), post(oauth::revoke))
+        // The web app shows the pending authorization in its address to the signed-in account.
+        .route_service(
+            route("GET /connect-agent"),
+            SetResponseHeader::overriding(
+                SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
+            ),
+        )
+        .route(route("POST /mcp"), post(mcp::post))
+        .route(route("GET /mcp"), get(mcp::not_offered))
+        .route(route("DELETE /mcp"), axum::routing::delete(mcp::not_offered))
         // Without it a browser guesses the files stay fresh for hours, and runs an old UI after a deploy.
         .fallback_service(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         .with_state(server)
@@ -96,6 +127,10 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         (self.0, Json(Failure { error: self.1 })).into_response()
     }
+}
+
+pub(crate) fn internal_response(e: String) -> Response {
+    internal(e).into_response()
 }
 
 fn internal(e: String) -> Error {
@@ -117,7 +152,7 @@ async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<Uuid, Error> 
 
 /// The address a request came from: nginx's last `X-Forwarded-For` hop when it came through a
 /// proxy on this host, else the peer itself.
-fn client_address(peer: SocketAddr, headers: &HeaderMap) -> String {
+pub(crate) fn client_address(peer: SocketAddr, headers: &HeaderMap) -> String {
     let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(str::trim);
     match forwarded {
         Some(hop) if peer.ip().is_loopback() && !hop.is_empty() => hop.to_owned(),
@@ -183,7 +218,7 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
 impl Server {
     /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
     /// before the password is checked, so a burst of parallel requests can't all slip under the limit.
-    fn attempt(&self, keys: &[(String, usize)]) -> bool {
+    pub(crate) fn attempt(&self, keys: &[(String, usize)]) -> bool {
         let mut attempts = self.attempts.lock().unwrap();
         attempts.retain(|_, at| {
             at.retain(|at| at.elapsed() < ATTEMPT_WINDOW);
@@ -199,7 +234,7 @@ impl Server {
     }
 
     /// Takes back the attempts of a sign in that succeeded.
-    fn succeeded(&self, keys: &[(String, usize)]) {
+    pub(crate) fn succeeded(&self, keys: &[(String, usize)]) {
         let mut attempts = self.attempts.lock().unwrap();
         for (key, _) in keys {
             if let Some(at) = attempts.get_mut(key) {
