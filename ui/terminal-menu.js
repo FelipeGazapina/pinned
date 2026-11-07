@@ -62,9 +62,6 @@ function menuOn(screen) {
 }
 const CURSOR = /[❯›](?= )/;
 
-/** The screen without the preview box claude draws to the right of a question's options, which
- * starts on the first option's line. Lines with nothing left of the box go: its sides, the "Notes:"
- * hint under it and the blank rows around them. Option lines keep their text left of it. */
 function withoutPreview(lines) {
   const top = lines.findLastIndex((l) => /\S\s+┌─+┐\s*$/.test(l));
   if (top < 0) return lines;

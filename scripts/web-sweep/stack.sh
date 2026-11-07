@@ -63,7 +63,6 @@ start() {
   cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/claude"
   if [ -n "${SWEEP_REAL_CLAUDE:-}" ]; then
     mv "$DIR/bin/claude" "$DIR/bin/fake-claude"
-    # pinned sets PINNED_OPENCODE_GO_KEY only on a Go session's process.
     printf '#!/bin/sh\n[ -n "${PINNED_OPENCODE_GO_KEY:-}" ] && DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 exec "%s" "$@"\nexec "%s" "$@"\n' \
       "$SWEEP_REAL_CLAUDE" "$DIR/bin/fake-claude" >"$DIR/bin/claude"
   fi

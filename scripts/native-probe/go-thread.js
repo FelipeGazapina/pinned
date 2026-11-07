@@ -1,5 +1,3 @@
-// Evaluated in the desktop window after go-thread-page.js (see go-thread.sh): adds the Go
-// account, runs each variant of the Go thread check, and posts every result to server.js.
 (async () => {
   const base = "http://127.0.0.1:__PORT__";
   const report = (r) => fetch(`${base}/report`, { method: "POST", body: JSON.stringify(r) });

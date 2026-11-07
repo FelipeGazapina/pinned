@@ -11,9 +11,7 @@ const menuOn = (lines) => JSON.parse(JSON.stringify(context.menuOn(lines)));
 const RULE = "─".repeat(100);
 const BOX = "─".repeat(42);
 
-// claude 2.1.319 asking a question whose options carry previews, as the desktop window captured it,
-// blank rows included.
-const PREVIEW_SCREEN = [
+const CLAUDE_2_1_319_PREVIEW_SCREEN = [
   "  ⎿  sweep",
   "  Thought for 3s, ran 1 shell command",
   "",
@@ -51,7 +49,7 @@ const PLAIN_SCREEN = [
 ];
 
 test("a question whose options carry previews reads as its options, without the preview box", () => {
-  assert.deepEqual(menuOn(PREVIEW_SCREEN), {
+  assert.deepEqual(menuOn(CLAUDE_2_1_319_PREVIEW_SCREEN), {
     question: "☐ Direction\nWhich way should the sweep go?",
     box: "",
     amend: false,

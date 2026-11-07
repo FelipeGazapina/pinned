@@ -109,7 +109,6 @@ pub fn env(key: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// `PINNED_OPENCODE_GO_BASE` points a Go session's Messages requests at a test gateway.
 fn gateway_from(value: Option<&str>) -> String {
     value.and_then(allowed_override).unwrap_or_else(|| BASE_URL.to_owned())
 }

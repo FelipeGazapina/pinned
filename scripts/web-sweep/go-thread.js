@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-// Runs a real claude on an OpenCode Go account through the web app and checks that the turn's
-// thinking, its Bash call and its question show while the turn runs, in bypass and normal
-// permission modes, with a fast gateway and one that times out twice before it answers slowly,
-// and with a question whose options carry previews, as DeepSeek's did. mock-opencode-go plays the
-// gateway; go-thread-page.js drives the page and lists the variants.
-//
 //   SWEEP_DIR=... SWEEP_REAL_CLAUDE=~/.local/bin/claude scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/go-thread.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
@@ -35,8 +29,7 @@ const waitFor = async (what, fn, timeout = 20000) => {
   throw new Error(`timed out waiting for ${what}`);
 };
 
-/** When claude wrote the turn's lines to its transcript, in seconds after Send. */
-function onDisk(session, t0) {
+function transcriptTimes(session, t0) {
   const projects = path.join(DIR, "node/accounts/go/projects");
   const file = fs.existsSync(projects) && fs.readdirSync(projects).map((p) => path.join(projects, p, `${session}.jsonl`)).find((f) => fs.existsSync(f));
   if (!file) return {};
@@ -86,7 +79,7 @@ function onDisk(session, t0) {
   const results = [];
   for (const v of variants) {
     const result = await page.evaluate((o) => goThread(o), { ...v, machine, account: "go", folder: path.join(HOME, "work/alpha"), mock: MOCK });
-    if (result.session) Object.assign(result.seen, onDisk(result.session, result.t0));
+    if (result.session) Object.assign(result.seen, transcriptTimes(result.session, result.t0));
     results.push(result);
     console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.variant}  ${JSON.stringify(result)}`);
   }

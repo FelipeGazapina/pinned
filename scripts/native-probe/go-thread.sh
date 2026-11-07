@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # Usage: scripts/native-probe/go-thread.sh [dir]
-# The check of scripts/web-sweep/go-thread.js inside the real desktop window. Builds a debug app
-# under a test identifier and HOME, adds an OpenCode Go account whose gateway is
-# mock-opencode-go, and runs scripts/web-sweep/go-thread-page.js once per variant with a real
-# claude (REAL_CLAUDE, default ~/.local/bin/claude) on that account. Prints one line per variant.
-# GO_THREAD_VARIANTS picks variants by name; PROBE_SKIP_BUILD=1 reuses the last build. The window
-# shows on screen while it runs.
+# REAL_CLAUDE (default ~/.local/bin/claude) runs on the Go account. GO_THREAD_VARIANTS picks
+# variants by name; PROBE_SKIP_BUILD=1 reuses the last build.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 DIR="${1:-$(mktemp -d)}"
@@ -16,7 +12,6 @@ rm -rf "$DIR/home" "$DIR/bin"
 mkdir -p "$DIR/home/work" "$DIR/bin"
 
 cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/fake-claude"
-# pinned sets PINNED_OPENCODE_GO_KEY only on a Go session's process.
 printf '#!/bin/sh\n[ -n "${PINNED_OPENCODE_GO_KEY:-}" ] && DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 exec "%s" "$@"\nexec "%s" "$@"\n' "$CLAUDE" "$DIR/bin/fake-claude" >"$DIR/bin/claude"
 printf '#!/bin/sh\nshift\nexec /bin/sh -c "$1"\n' >"$DIR/bin/shell"
 chmod +x "$DIR/bin/claude" "$DIR/bin/fake-claude" "$DIR/bin/shell"

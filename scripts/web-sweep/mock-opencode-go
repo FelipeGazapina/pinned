@@ -1,22 +1,14 @@
 #!/usr/bin/env node
-// Stands in for OpenCode Go in the web sweep: the models endpoint validates the key, the usage
-// endpoint reports a rolling, weekly and monthly allowance, and the Anthropic Messages endpoint
-// streams a scripted DeepSeek turn to a real `claude`. It answers on 127.0.0.1 only.
-//
-// A main-thread request (one that carries the Bash tool) gets, by where the conversation is:
-//   a new prompt          thinking, then Bash `echo sweep`
-//   Bash's result         thinking, then AskUserQuestion with two options
-//   the question's answer a short text that ends the turn
-// Any other request (a title, a side query) gets a short text answer.
+// Stands in for OpenCode Go in the web sweep: the models endpoint validates the key, and the
+// usage endpoint reports a rolling, weekly and monthly allowance. It answers on 127.0.0.1 only.
 //
 // POST /mock/script sets how the next main-thread requests start, one entry per request:
-//   "529"         answers 529 overloaded at once, which claude retries
-//   "504:<ms>"    sends nothing for <ms>, then 504, as a gateway that timed out
+//   "529"         answers 529 overloaded at once
+//   "504:<ms>"    sends nothing for <ms>, then 504
 //   "delay:<ms>"  waits <ms> before the first byte, then streams
 // It also takes `gapMs` (pause between streamed events) and `preview` (each option of the
-// question carries a preview, as the real DeepSeek question did). GET /mock/log lists every
-// Messages request the mock answered. GO_MOCK_FIRST (comma-separated) and GO_MOCK_GAP_MS set the
-// same at start.
+// question carries a preview). GET /mock/log lists every Messages request the mock answered.
+// GO_MOCK_FIRST (comma-separated) and GO_MOCK_GAP_MS set the same at start.
 const http = require("http");
 
 const port = Number(process.argv[2] || 8798);
@@ -46,8 +38,6 @@ function readBody(req) {
 
 const textOf = (content) => (typeof content === "string" ? content : (content ?? []).map((b) => b.text ?? "").join(""));
 
-/** Which scripted step answers `messages`: the tool whose result the last user message carries
- * decides, and a plain prompt starts the turn. */
 function stepOf(messages) {
   const last = messages.at(-1);
   const results = Array.isArray(last?.content) ? last.content.filter((b) => b.type === "tool_result") : [];
@@ -192,7 +182,6 @@ http
     const authorized = req.headers.authorization === `Bearer ${KEY}` || req.headers["x-api-key"] === KEY;
     console.log(req.method, req.url, authorized ? "ok" : "unauthorized");
     if (req.url === "/health") return res.end("ok");
-    // The page under test drives the script itself, from the hub's or the app's origin.
     if (req.url.startsWith("/mock/")) res.setHeader("access-control-allow-origin", "*");
     if (req.url === "/mock/log") {
       res.setHeader("content-type", "application/json");

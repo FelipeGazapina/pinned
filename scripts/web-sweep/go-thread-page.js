@@ -1,29 +1,12 @@
-// Runs inside pinned's own page: opens a thread on an OpenCode Go account, picks DeepSeek, sends a
-// prompt to a real claude that mock-opencode-go answers, and times when the turn's thinking, its
-// Bash call and its question reach each layer, while the turn is still running. go-thread.js loads
-// it into the web app through the hub; scripts/native-probe/go-thread.sh into the desktop window.
-//
-// Milestones are seconds after Send:
-//   machine.*  the machine's `thread` call returns the item
-//   gui.*      threadOf(tab).items holds it
-//   dom.*      #thread draws it
-//   screen.*   claude's own screen shows it (the PTY stream reached the page)
-//   tab.menu / dom.menu  the app parsed the question / the question card is drawn
-//   phase.asking         phaseOf(tab) says the thread waits on the user
-//
-// The real gateway's first request on 2026-11-07 went unanswered three times, 30 s apart, and the
-// slow variants replay that; the preview variant asks the question the way DeepSeek did, with a
-// preview on each option.
-const GO_THREAD_SLOW = ["504:30000", "504:30000", "delay:30000"];
+const GATEWAY_TIMES_OUT_TWICE_THEN_ANSWERS_SLOWLY = ["504:30000", "504:30000", "delay:30000"];
 const GO_THREAD_VARIANTS = [
   { variant: "bypass-fast", bypass: true, first: [] },
-  { variant: "bypass-slow", bypass: true, first: GO_THREAD_SLOW },
+  { variant: "bypass-slow", bypass: true, first: GATEWAY_TIMES_OUT_TWICE_THEN_ANSWERS_SLOWLY },
   { variant: "normal-fast", bypass: false, first: [] },
-  { variant: "normal-slow", bypass: false, first: GO_THREAD_SLOW },
+  { variant: "normal-slow", bypass: false, first: GATEWAY_TIMES_OUT_TWICE_THEN_ANSWERS_SLOWLY },
   { variant: "bypass-fast-preview", bypass: true, first: [], preview: true },
 ];
 
-/** `o` is a variant plus where it runs: `machine`, the Go `account`, the work `folder` and the `mock`'s origin. */
 async function goThread(o) {
   o = { model: "deepseek-v4.1-flash", gapMs: 350, prompt: "check the sweep", deadlineMs: o.first.length ? 240000 : 90000, ...o };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,32 +32,27 @@ async function goThread(o) {
     document.querySelector(`[data-row="${o.model}"]`).click();
     await until("the tab to run on the Go account", () => tab.view.account === o.account && tab.view.running, 30000);
 
-    // A fresh Go home asks claude's first-run questions (the folder's trust, bypass mode's
-    // warning) through the same card a turn's question uses; each is answered with its Yes.
     const answered = [];
     let idleSince = 0;
-    await until(
-      "claude's prompt on the Go account",
-      () => {
-        const menu = tab.menu;
-        if (menu) {
-          idleSince = 0;
-          const yes = menu.options.find((x) => /^Yes\b/.test(x.head));
-          const key = menu.options.map((x) => x.head).join("|");
-          if (yes && answered.at(-1) !== key) {
-            answered.push(key);
-            const button = document.querySelector(`#approval [data-option="${yes.n}"]`) ?? document.querySelector('#approval [data-approval="accept"]');
-            if (button) button.click();
-            else chooseOption(tab, yes.n, yes.label);
-          }
-          return false;
+    const answerFirstRunQuestionsUntilIdle = () => {
+      const menu = tab.menu;
+      if (menu) {
+        idleSince = 0;
+        const yes = menu.options.find((x) => /^Yes\b/.test(x.head));
+        const key = menu.options.map((x) => x.head).join("|");
+        if (yes && answered.at(-1) !== key) {
+          answered.push(key);
+          const button = document.querySelector(`#approval [data-option="${yes.n}"]`) ?? document.querySelector('#approval [data-approval="accept"]');
+          if (button) button.click();
+          else chooseOption(tab, yes.n, yes.label);
         }
-        if (!terminalMode(tab)) return (idleSince = 0), false;
-        idleSince ||= Date.now();
-        return Date.now() - idleSince > 1500;
-      },
-      90000,
-    );
+        return false;
+      }
+      if (!terminalMode(tab)) return (idleSince = 0), false;
+      idleSince ||= Date.now();
+      return Date.now() - idleSince > 1500;
+    };
+    await until("claude's prompt on the Go account", answerFirstRunQuestionsUntilIdle, 90000);
     result.startup = answered;
 
     prompt.value = o.prompt;
@@ -129,7 +107,6 @@ async function goThread(o) {
       mark("phase.asking", phaseOf(tab) === "asking");
       const status = `${statusOf(tab)}${tab.view.message ? ` (${tab.view.message})` : ""} phase=${phaseOf(tab)}`;
       if (result.statuses.at(-1)?.[1] !== status) result.statuses.push([at(), status]);
-      // A non-bypass tab asks before it runs Bash; that card is approved as a user would.
       const menu = tab.menu;
       if (menu && menuKind(menu) === "approval" && !result.menus.includes(menu.question)) {
         result.menus.push(menu.question);
@@ -144,9 +121,7 @@ async function goThread(o) {
       await sleep(100);
     }
     result.failures = REQUIRED.filter((name) => !(name in result.seen));
-    // Blank rows kept: menuOn reads them, so a replay needs them.
-    const screen = screenLines(tab);
-    result.screen = screen.slice(Math.max(0, screen.findLastIndex((l) => /^\s*[─━]{8,}/.test(l)) - 16)).map((l) => l.trimEnd());
+    result.screen = menuRowsWithBlankRows(tab);
     result.shown = document.querySelector("#thread .turn:last-of-type")?.innerText.split("\n").filter((l) => l.trim()).slice(-8);
     if (typeof goThreadCapture === "function") await goThreadCapture(o.variant);
 
@@ -174,4 +149,9 @@ async function goThread(o) {
   }
   result.ok = result.failures.length === 0;
   return result;
+}
+
+function menuRowsWithBlankRows(tab) {
+  const screen = screenLines(tab);
+  return screen.slice(Math.max(0, screen.findLastIndex((l) => /^\s*[─━]{8,}/.test(l)) - 16)).map((l) => l.trimEnd());
 }
