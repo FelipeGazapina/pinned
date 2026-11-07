@@ -744,7 +744,7 @@ mod tests {
 
     impl Fixture {
         fn dir(&self, rel: &str) -> String {
-            self.root.join(rel).display().to_string()
+            rel.split('/').fold(self.root.clone(), |dir, part| dir.join(part)).display().to_string()
         }
     }
 

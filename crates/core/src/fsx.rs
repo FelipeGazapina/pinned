@@ -29,10 +29,34 @@ pub fn replace(target: &Path, bytes: &[u8], modified: Option<u64>, executable: O
         let _ = temp.as_file().set_modified(UNIX_EPOCH + Duration::from_millis(ms));
     }
     flush(temp.as_file()).map_err(failed)?;
-    temp.persist(target).map_err(|e| failed(e.error))?;
+    persist(temp, target).map_err(failed)?;
     #[cfg(unix)]
     std::fs::File::open(dir).and_then(|dir| flush(&dir)).map_err(failed)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn persist(temp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    temp.persist(target).map(drop).map_err(|e| e.error)
+}
+
+/// `std::fs::rename` renames with POSIX semantics where Windows has them, so it replaces a file
+/// that a reading session holds open. tempfile's `persist` uses `MoveFileExW`, which refuses. A
+/// handle opened without delete sharing still blocks it, so a few retries wait that out.
+#[cfg(not(unix))]
+fn persist(temp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    let temp = temp.into_temp_path();
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&temp, target) {
+            Ok(()) => return temp.keep().map(drop).map_err(|e| e.error),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn through_links(path: &Path) -> std::path::PathBuf {
@@ -120,6 +144,8 @@ mod tests {
         assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), UNIX_EPOCH + Duration::from_millis(1_700_000_000_000));
     }
 
+    /// Windows refuses to rename over a file another handle has open.
+    #[cfg(unix)]
     #[test]
     fn a_reader_with_the_old_file_open_keeps_reading_the_old_bytes() {
         use std::io::Read;
@@ -132,6 +158,18 @@ mod tests {
         reader.read_to_string(&mut seen).unwrap();
         assert_eq!(seen, "old body");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new body");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_a_reader_holds_open_is_still_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("SKILL.md");
+        std::fs::write(&file, "old body").unwrap();
+        let _reader = std::fs::File::open(&file).unwrap();
+        replace(&file, b"new body", None, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new body");
+        assert_eq!(names(dir.path()), ["SKILL.md"]);
     }
 
     #[cfg(unix)]
