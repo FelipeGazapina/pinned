@@ -154,7 +154,8 @@ async function goThread(o) {
       menu: tab.menu?.question ?? null,
       answering: !!tab.answering,
       waitingForIdle: threadOf(tab).onIdle?.length ?? 0,
-      note: document.querySelector("#composer-note")?.textContent ?? null,
+      // The note keeps its text once hidden, so a hidden one may be an earlier variant's.
+      note: document.querySelector("#composer-note:not([hidden])")?.textContent ?? null,
       screen: screenLines(tab).filter((l) => l.trim()).slice(-12),
     };
   }
