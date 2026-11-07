@@ -22,3 +22,24 @@ test("the graph editor loads as a module that settings.js reads when it renders"
   const topLevel = settings.split("\n").filter((line) => /^\S/.test(line) && /PinnedGraph/.test(line));
   assert.deepEqual(topLevel, ["const graphApi = () => globalThis.PinnedGraph;"]);
 });
+
+// Classic scripts share one global scope, so a second top-level `const` of a name throws and
+// its whole file never runs.
+test("no two classic scripts declare the same top-level name", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const files = [...html.matchAll(/<script\b([^>]*)>/g)]
+    .map((match) => match[1])
+    .filter((attrs) => !/type="module"/.test(attrs))
+    .map((attrs) => /src="([^"]+)"/.exec(attrs)?.[1])
+    .filter((src) => src && !/^(https?:)?\/\//.test(src));
+  const owner = new Map();
+  const clashes = [];
+  for (const file of files) {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+    for (const [, name] of source.matchAll(/^(?:const|let|class)\s+([A-Za-z_$][\w$]*)/gm)) {
+      if (owner.has(name) && owner.get(name) !== file) clashes.push(`${name} in ${owner.get(name)} and ${file}`);
+      else owner.set(name, file);
+    }
+  }
+  assert.deepEqual(clashes, []);
+});

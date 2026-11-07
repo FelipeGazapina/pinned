@@ -40,7 +40,7 @@ test("the sidebar chip shows age and spend against the budget", () => {
 });
 
 test("budgets parse to cents and preview hours", () => {
-  const context = runSlice(adding, "const BOX_SIZES", 'PALETTE_VIEWS["add-box-budget"]');
+  const context = runSlice(adding, "const BOX_SIZE_CHOICES", 'PALETTE_VIEWS["add-box-budget"]');
   assert.equal(context.parseBoxBudget("2"), 2);
   assert.equal(context.parseBoxBudget("$2.50"), 2.5);
   assert.equal(context.parseBoxBudget("0.05"), null, "below an hour");

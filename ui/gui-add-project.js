@@ -201,7 +201,7 @@ function confirmBox({ input, repository, remoteUrl }) {
   palette.hi = -1;
   renderPalette();
 }
-const BOX_SIZES = [["small", "Small"], ["medium", "Medium"], ["large", "Large"]];
+const BOX_SIZE_CHOICES = [["small", "Small"], ["medium", "Medium"], ["large", "Large"]];
 /** The most a box may spend, in USD. Boxes bill $0.10 an hour, so $1 is ten hours. */
 const parseBoxBudget = (query) => {
   const n = Number(query.trim().replace(/^\$/, ""));
@@ -229,7 +229,7 @@ PALETTE_VIEWS["add-box-budget"] = {
   footerAction: () => "Create box",
   empty: () => "The box shuts down and deletes the session when the money runs out.",
   groups() {
-    return [{ label: "Size", items: BOX_SIZES.map(([id, label]) => ({ icon: "server", title: label, trail: palette.adding.size === id ? icon("check", "chev") : "", terms: [], keep: true, run: () => { palette.adding.size = id; renderPalette(); } })) }];
+    return [{ label: "Size", items: BOX_SIZE_CHOICES.map(([id, label]) => ({ icon: "server", title: label, trail: palette.adding.size === id ? icon("check", "chev") : "", terms: [], keep: true, run: () => { palette.adding.size = id; renderPalette(); } })) }];
   },
   submit: (query) => createBox(query),
 };
