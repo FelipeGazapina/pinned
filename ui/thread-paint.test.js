@@ -105,6 +105,10 @@ function modelName(tab) { return tab.model ?? "Default"; }
 function highlightLines(lines) { return lines; }
 function threadKey(tab) { return tab.key; }
 function limitBanner() { return null; }
+const LOCAL = "local";
+function isBoxMachine() { return false; }
+const boxInfo = new Map();
+function tell() {}
 function icon(name, cls = "") { return '<svg data-icon="' + name + '" class="' + cls + '"></svg>'; }
 function esc(text) { return String(text ?? "").replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";"); }
 function terminalOnly() { return false; }

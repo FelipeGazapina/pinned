@@ -464,6 +464,12 @@ impl Db {
         row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
+    /// Adds to the row's budget, kept in its spec beside the run.
+    pub async fn set_box_budget(&self, id: &str, budget: f64) -> Result<(), String> {
+        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1", &[&id, &budget]).await.map_err(err)?;
+        Ok(())
+    }
+
     /// Moves the row from `from` to `to`, and answers false when it was no longer at `from`:
     /// another hub, as during a deploy, moved it first.
     pub async fn set_box_phase(&self, id: &str, from: &Phase, to: &Phase) -> Result<bool, String> {

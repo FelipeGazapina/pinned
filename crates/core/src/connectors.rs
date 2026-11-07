@@ -1028,6 +1028,7 @@ impl Run {
             env: agent::session_env(&self.connector, &self.subject),
             token: None,
             account: self.account.clone(),
+            budget_usd: None,
         }
     }
 }

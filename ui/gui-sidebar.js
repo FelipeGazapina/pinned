@@ -480,6 +480,40 @@ const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
 /** The branch's start shrinks with an ellipsis and its last characters stay, as T3 Code's MiddleTruncate does. */
 
+/** An Upstash Box hour costs this in USD, matching the hub's `BOX_USD_PER_HOUR`. */
+const BOX_USD_PER_HOUR = 0.1;
+const boxMachineOf = (m) => machines.get(m)?.view?.name ?? "";
+const isBoxMachine = (m) => boxMachineOf(m).startsWith("Box · ");
+const boxAgeText = (secs) => {
+  const mins = Math.max(0, Math.floor(secs / 60));
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h${String(mins % 60).padStart(2, "0")}`;
+  return `${Math.floor(hours / 24)}d${hours % 24}h`;
+};
+const boxSpent = (st) => st.age_secs / 3600 * st.rate_usd_per_hour;
+const boxChipHtml = (st) => {
+  const spent = boxSpent(st);
+  const money = st.budget_usd != null ? `$${spent.toFixed(2)} of $${st.budget_usd.toFixed(2)}` : `$${spent.toFixed(2)}`;
+  return `<span class="remote box" title="Upstash Box · ${boxAgeText(st.age_secs)} online · ${money}">${icon("server")}<span class="head">${boxAgeText(st.age_secs)} · $${spent.toFixed(2)}</span></span>`;
+};
+/** The latest `box_status` by box machine, refreshed on the sidebar tick for visible box tabs. */
+const boxInfo = new Map();
+async function refreshBoxInfo() {
+  if (!hub) return;
+  const seen = [...new Set(tabs.filter((t) => t.machine !== LOCAL && isBoxMachine(t.machine)).map((t) => t.machine))];
+  await Promise.all(seen.map(async (m) => {
+    try {
+      boxInfo.set(m, await hub.hub({ cmd: "box_status", machine: m }));
+    } catch {
+      boxInfo.delete(m);
+    }
+  }));
+  if (guiOn()) {
+    renderSidebar();
+    if (active) renderThread();
+  }
+}
 function cardRow(tab) {
   const slot = statusSlot(tab);
   const phase = phaseOf(tab);
@@ -496,7 +530,8 @@ function cardRow(tab) {
   const where = ws?.branch
     ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
-  const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const box = tab.machine !== LOCAL && !scratchMachine && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
+  const remote = box ? boxChipHtml(box) : tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot

@@ -2683,6 +2683,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "budget_usd": {
+                "description": "What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               }
             },
             "required": [
@@ -4035,6 +4043,74 @@
                   "cmd",
                   "model",
                   "description"
+                ]
+              },
+              {
+                "description": "Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "budget_usd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo",
+                  "size"
+                ]
+              },
+              {
+                "description": "`BoxStatus` for the box behind `machine`, or an error when it is no box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_status"
+                  },
+                  "machine": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "Adds `extra_usd` to the box behind `machine`'s budget. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "extend_box"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "extra_usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "extra_usd"
                 ]
               },
               {
@@ -8348,6 +8424,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "budget_usd": {
+                "description": "What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               }
             },
             "required": [
@@ -9679,6 +9763,73 @@
                   "cmd",
                   "model",
                   "description"
+                ]
+              },
+              {
+                "description": "Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "budget_usd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo"
+                ]
+              },
+              {
+                "description": "`BoxStatus` for the box behind `machine`, or an error when it is no box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_status"
+                  },
+                  "machine": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "Adds `extra_usd` to the box behind `machine`'s budget. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "extend_box"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "extra_usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "extra_usd"
                 ]
               },
               {
@@ -12519,6 +12670,74 @@
                   "cmd",
                   "model",
                   "description"
+                ]
+              },
+              {
+                "description": "Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "budget_usd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo",
+                  "size"
+                ]
+              },
+              {
+                "description": "`BoxStatus` for the box behind `machine`, or an error when it is no box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_status"
+                  },
+                  "machine": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "Adds `extra_usd` to the box behind `machine`'s budget. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "extend_box"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "extra_usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "extra_usd"
                 ]
               },
               {
@@ -15379,6 +15598,73 @@
                   "cmd",
                   "model",
                   "description"
+                ]
+              },
+              {
+                "description": "Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "budget_usd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo"
+                ]
+              },
+              {
+                "description": "`BoxStatus` for the box behind `machine`, or an error when it is no box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_status"
+                  },
+                  "machine": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "Adds `extra_usd` to the box behind `machine`'s budget. Returns `BoxStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "extend_box"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "extra_usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "extra_usd"
                 ]
               },
               {
@@ -32311,6 +32597,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "budget_usd": {
+                "description": "What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               }
             },
             "required": [
@@ -36058,6 +36352,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "budget_usd": {
+                "description": "What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               }
             },
             "required": [

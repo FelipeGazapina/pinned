@@ -362,6 +362,15 @@ impl Hub {
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
+            HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd).await?), false),
+            HubCall::BoxStatus { machine } => {
+                let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
+                (json(self.boxes.box_status(self, account, machine).await?), false)
+            }
+            HubCall::ExtendBox { machine, extra_usd } => {
+                let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
+                (json(self.boxes.extend_box(self, account, machine, extra_usd).await?), false)
+            }
             HubCall::Import { store, linear_key, slack_key, github_key, vercel_key } => {
                 let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key })?;
                 (json(imported), imported)

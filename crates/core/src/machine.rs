@@ -4489,6 +4489,7 @@ pub(crate) mod tests {
             env: vec![("PINNED_CONNECTOR".into(), "c1".into())],
             token: None,
             account: None,
+            budget_usd: None,
         };
         let id = m.open_run(&run).unwrap();
         let view = m.view(&id).unwrap();
@@ -4503,7 +4504,7 @@ pub(crate) mod tests {
     fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
         let dir = temp("run-resume");
         let m = machine();
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, account: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, account: None, budget_usd: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.tab(&id, |t| t.launch.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone())).unwrap(), Some("s1".into()));
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
@@ -4532,6 +4533,7 @@ pub(crate) mod tests {
             env: vec![],
             token: None,
             account: None,
+            budget_usd: None,
         };
         let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
         let err = refused.run(&run).unwrap_err();
@@ -4569,6 +4571,7 @@ pub(crate) mod tests {
             env: vec![],
             token: None,
             account: None,
+            budget_usd: None,
         };
         let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
         let err = refused.run(&run).unwrap_err();
@@ -4640,7 +4643,7 @@ pub(crate) mod tests {
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, "/nonexistent/claude".into())]), ..launch() }, None, Some("/repo".into()), |_| {});
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, account: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, account: None, budget_usd: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
@@ -4878,7 +4881,7 @@ pub(crate) mod tests {
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         m.open_project(app.clone());
         let run = |account: Option<&str>| {
-            let spec = RunSpec { folder: app.display().to_string(), repo: None, args: vec!["Fix ENG-7".into()], env: vec![], token: None, account: account.map(Into::into) };
+            let spec = RunSpec { folder: app.display().to_string(), repo: None, args: vec!["Fix ENG-7".into()], env: vec![], token: None, account: account.map(Into::into), budget_usd: None };
             m.call(Call::Run { run: spec })
         };
         assert_eq!(run(Some("work")), Err("account work is not signed in on this machine".into()));
@@ -5149,7 +5152,7 @@ pub(crate) mod tests {
         let m = Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, None, Some("/repo".into()), |_| {});
         m.open_project(other);
         m.open_project(ours.clone());
-        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, account: None };
+        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, account: None, budget_usd: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.view(&id).unwrap().cwd, ours.display().to_string());
         let _ = std::fs::remove_dir_all(root);

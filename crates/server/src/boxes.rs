@@ -10,7 +10,7 @@ use pinned_core::account::Credentials;
 use pinned_core::agent::Subject;
 use pinned_core::connectors::{BoxPermission, BoxSize, BoxStep, FixedClaim, Placement, Run};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
-use pinned_core::wire::{Call, RunSpec};
+use pinned_core::wire::{BoxStatus, Call, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
 use rand_core::{OsRng, RngCore};
@@ -234,6 +234,11 @@ enum Boot {
 }
 
 /// Whether a running row's session has ended. Every end rule lives here.
+/// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
+fn over_budget(spec: &RunSpec, age: Duration) -> bool {
+    spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
+}
+
 fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
@@ -304,6 +309,23 @@ fn box_env(keys: &Keys, github: Option<&str>) -> String {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
     env
+}
+
+/// An `owner/repo` shorthand or GitHub clone URL as the https URL the box clones.
+fn normalize_repo(repo: &str) -> Option<String> {
+    let repo = repo.trim().trim_end_matches('/').trim_end_matches(".git");
+    if repo.is_empty() {
+        return None;
+    }
+    if let Some(rest) = repo.strip_prefix("https://github.com/").or_else(|| repo.strip_prefix("http://github.com/")) {
+        let rest = rest.trim_matches('/');
+        return (rest.contains('/') && machine::repo_name(rest).is_some()).then(|| format!("https://github.com/{rest}.git"));
+    }
+    if repo.contains("://") || repo.contains('@') || !repo.contains('/') {
+        return None;
+    }
+    let parts: Vec<&str> = repo.split('/').collect();
+    (parts.len() == 2 && parts.iter().all(|p| !p.is_empty())).then(|| format!("https://github.com/{repo}.git"))
 }
 
 /// `Box · <the session's name>`, as the run names its tab.
@@ -389,6 +411,80 @@ impl Boxes {
             return self.open_fixed(hub, account, &connectors, run, step, &keys).await;
         }
         self.open_new(hub, account, run, step, &keys, None, false).await
+    }
+
+    /// An interactive session on a new box cloning `repo`. The client polls `box_status` until it
+    /// runs, then opens its tab. The budget dialog is the session permission's ask; a session
+    /// permission of off refuses.
+    pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>) -> Result<BoxStatus, String> {
+        let connectors = hub.connectors(account).await?;
+        let keys = connectors.box_keys().ok_or("Upstash Box is not connected: connect it in pinned's Connectors settings")?;
+        if matches!(connectors.box_access().session, BoxPermission::Off) {
+            return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
+        }
+        let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
+        if let Some(budget) = budget_usd {
+            if !(budget >= BOX_USD_PER_HOUR) {
+                return Err(format!("name at least ${BOX_USD_PER_HOUR:.2}, an hour on a box"));
+            }
+        }
+        self.within_cap(&hub.db.boxes(account.id).await?)?;
+        let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
+        let id = new_row_id();
+        let machine = Uuid::new_v4();
+        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), name], env: vec![], token: None, account: None, budget_usd };
+        let fresh = BoxRow {
+            id: id.clone(),
+            account: account.id,
+            machine,
+            upstash: None,
+            connector: "session".into(),
+            subject: Subject::LinearIssue { issue: format!("box {id}") },
+            spec,
+            size,
+            phase: Phase::Creating,
+            age: Duration::ZERO,
+        };
+        if self.drive_guard(&fresh.id).is_none() {
+            return Err("Upstash Box: its box is still booting; try again".into());
+        }
+        hub.db.reserve_box(&fresh).await?;
+        let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
+        let row = fresh.clone();
+        tokio::spawn(async move {
+            let Some(_driving) = hub.boxes.drive_guard(&row.id) else { return };
+            if let Err(e) = hub.boxes.drive(&hub, &account, row.clone(), &row.spec, &keys).await {
+                eprintln!("pinned-server: could not boot interactive box {}: {e}", row.id);
+            }
+        });
+        Ok(BoxStatus { id, phase: "creating".into(), machine: machine.to_string(), tab: None, age_secs: 0.0, budget_usd, rate_usd_per_hour: BOX_USD_PER_HOUR })
+    }
+
+    /// The box behind `machine`: its phase, age and budget, for its cost display.
+    pub async fn box_status(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid) -> Result<BoxStatus, String> {
+        let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+        let phase = match &row.phase {
+            Phase::Creating => "creating",
+            Phase::Booting => "booting",
+            Phase::Running => "running",
+            Phase::Ending(_) => "ending",
+        }
+        .to_owned();
+        let tab = account.placed(&row.connector, &row.subject).map(|(_, tab)| tab);
+        Ok(BoxStatus { id: row.id, phase, machine: machine.to_string(), tab, age_secs: row.age.as_secs_f64(), budget_usd: row.spec.budget_usd, rate_usd_per_hour: BOX_USD_PER_HOUR })
+    }
+
+    /// Adds `extra_usd` to the box behind `machine`'s budget.
+    pub async fn extend_box(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid, extra_usd: f64) -> Result<BoxStatus, String> {
+        if !(extra_usd > 0.0) {
+            return Err("name an amount above zero".into());
+        }
+        let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+        if matches!(row.phase, Phase::Ending(_)) {
+            return Err("this box is already ending".into());
+        }
+        hub.db.set_box_budget(&row.id, row.spec.budget_usd.unwrap_or(0.0) + extra_usd).await?;
+        self.box_status(hub, account, machine).await
     }
 
     async fn open_fixed(
@@ -799,6 +895,8 @@ impl Boxes {
                 },
                 Phase::Running => {
                     let gone = listed.as_ref().zip(row.upstash.as_ref()).is_some_and(|(listed, id)| !listed.iter().any(|b| b.id == *id));
+                    // A budget outlives idleness: the box ends when its money runs out, whatever it does.
+                    let over_budget = over_budget(&row.spec, row.age);
                     // Later runs reuse this row. The fresh-box timers would delete it between them.
                     if connectors.box_access().owns_row(&row.id) {
                         gone.then_some(End::Vanished)
@@ -813,7 +911,9 @@ impl Boxes {
                             slot.exited_since = None;
                             slot.gone_since = None;
                             slot.offline_since = None;
-                            (row.age >= self.policy.max_life).then_some(End::Expired)
+                            (row.age >= self.policy.max_life || over_budget).then_some(End::Expired)
+                        } else if over_budget {
+                            Some(End::Expired)
                         } else {
                             let verdict = verdict(row.age, seen, slot, now, &self.policy);
                             if gone { Some(End::Vanished) } else { verdict }
@@ -877,6 +977,30 @@ mod tests {
             assert_eq!(after(seen, 21 * MIN, MIN), Some(end), "{seen:?} for 21 of 20 minutes");
         }
         assert_eq!(after(Seen::Tab { running: true, quiet: false }, 21 * MIN, MIN), None, "a working session never idles");
+    }
+
+    fn spec_with(budget_usd: Option<f64>) -> RunSpec {
+        RunSpec { folder: String::new(), repo: Some("https://github.com/o/r.git".into()), args: vec!["--name".into(), "r".into()], env: vec![], token: None, account: None, budget_usd }
+    }
+
+    #[test]
+    fn a_budget_ends_the_box_when_its_money_runs_out() {
+        let hour = Duration::from_secs(3600);
+        assert!(!over_budget(&spec_with(None), 100 * hour), "no budget runs free");
+        assert!(!over_budget(&spec_with(Some(1.0)), 9 * hour), "$1 buys ten hours");
+        assert!(over_budget(&spec_with(Some(1.0)), 10 * hour), "the tenth hour spends the last cent");
+        assert!(over_budget(&spec_with(Some(0.1)), hour + Duration::from_secs(1)), "$0.10 buys one hour");
+    }
+
+    #[test]
+    fn normalize_repo_takes_shorthand_and_https() {
+        assert_eq!(normalize_repo("o/r"), Some("https://github.com/o/r.git".into()));
+        assert_eq!(normalize_repo("https://github.com/o/r"), Some("https://github.com/o/r.git".into()));
+        assert_eq!(normalize_repo("https://github.com/o/r.git"), Some("https://github.com/o/r.git".into()));
+        assert_eq!(normalize_repo(""), None);
+        assert_eq!(normalize_repo("just-a-name"), None);
+        assert_eq!(normalize_repo("git@github.com:o/r.git"), None, "ssh stays out: the box clones with a token");
+        assert_eq!(normalize_repo("https://example.com/o/r.git"), None);
     }
 
     #[test]
@@ -972,7 +1096,7 @@ mod tests {
 
     #[test]
     fn a_box_machine_is_named_after_its_session() {
-        let spec = |args: &[&str]| RunSpec { folder: "/repo".into(), repo: None, args: args.iter().map(|a| a.to_string()).collect(), env: vec![], token: None, account: None };
+        let spec = |args: &[&str]| RunSpec { folder: "/repo".into(), repo: None, args: args.iter().map(|a| a.to_string()).collect(), env: vec![], token: None, account: None, budget_usd: None };
         assert_eq!(machine_name(&spec(&["--effort", "high", "--name", "ENG-142 Fix login", "prompt"])), "Box · ENG-142 Fix login");
         assert_eq!(machine_name(&spec(&["prompt"])), "Box · pinned");
         assert_eq!(machine_name(&spec(&["--name", &"x".repeat(200)])).chars().count(), 100);

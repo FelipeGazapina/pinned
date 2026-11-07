@@ -305,6 +305,7 @@ setInterval(() => {
   for (const tab of tabs) if (followed(tab)) fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
+setInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   markThreadSeen(active);
   publishThreadWatch();

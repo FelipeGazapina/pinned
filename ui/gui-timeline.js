@@ -962,6 +962,39 @@ function windowOf(t, ids, anchor, scrolled) {
 const resumeDismissed = new Set();
 /** Whether the thread offers to continue the turn that was running when pinned closed. */
 const resumeOffered = (tab) => !subagentShown() && !!tab?.view.interrupted && !tab?.view.running && !resumeDismissed.has(tab.key);
+/** Box budgets dismissed this boot, so the funds banner offers once per tab. */
+const boxWarned = new Set();
+/** A box tab whose budget runs out within the hour: seconds left, once per tab per boot. */
+const boxSoon = (tab) => {
+  if (tab.machine === LOCAL || !isBoxMachine(tab.machine)) return null;
+  const st = boxInfo.get(tab.machine);
+  if (!st || st.phase !== "running" || st.budget_usd == null || boxWarned.has(tab.key)) return null;
+  const leftSecs = (st.budget_usd - boxSpent(st)) / st.rate_usd_per_hour * 3600;
+  if (!(leftSecs > 0 && leftSecs <= 3600)) return null;
+  return { st, leftSecs };
+};
+const boxKey = (warn) => (warn ? Math.ceil(warn.leftSecs / 300) : "");
+/** A banner offering funds before the box shuts down and deletes the session. */
+const boxHtml = (warn) => {
+  const left = warn.st.budget_usd - boxSpent(warn.st);
+  return `<div class="resume-banner box" role="alert">${icon("server")}<div><b>This box ends in ${boxAgeText(warn.leftSecs)}</b>
+  <span>$${left.toFixed(2)} left of $${warn.st.budget_usd.toFixed(2)} · add funds or it shuts down and the session is deleted.</span></div>
+  <button type="button" class="secondary" data-box-add="2">+$2</button>
+  <button type="button" class="secondary" data-box-add="5">+$5</button>
+  <button type="button" class="icon" data-dismiss-box aria-label="Dismiss">${icon("x")}</button></div>`;
+};
+async function extendBoxFunds(tab, usd) {
+  if (!hub) return;
+  try {
+    boxInfo.set(tab.machine, await hub.hub({ cmd: "extend_box", machine: tab.machine, extra_usd: usd }));
+    boxWarned.add(tab.key);
+    tell(`<b>Box funded</b> $${usd.toFixed(2)} added.`, 4000);
+  } catch (e) {
+    tell(`<b>Box funding failed</b> ${esc(e?.message ?? e)}`, 6000);
+  }
+  renderThread();
+  renderSidebar();
+}
 /** A banner offering to continue the turn that was running when pinned closed. */
 const resumeHtml = () => `<div class="resume-banner" role="alert">${icon("refresh-cw", "spin")}<div><b>Continue working from where you stopped?</b>
   <span>This session still had work when pinned closed.</span></div>
@@ -985,12 +1018,13 @@ function renderThread() {
   const working = !sub && turnLive(tab);
   t.editable = !sub && (working ? "busy" : true);
   const resume = !sub && resumeOffered(tab);
+  const box = !sub && boxSoon(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsOf(t.items);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1019,7 +1053,7 @@ function renderThread() {
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
@@ -1641,6 +1675,12 @@ threadView.addEventListener("click", (e) => {
     resumeDismissed.add(active.key);
     return startTab(active);
   }
+  if (e.target.closest("[data-dismiss-box]")) {
+    boxWarned.add(active.key);
+    return renderThread();
+  }
+  const boxAdd = e.target.closest("[data-box-add]");
+  if (boxAdd) return extendBoxFunds(active, Number(boxAdd.dataset.boxAdd));
   const dialogKey = e.target.closest("[data-dialog-key]");
   if (dialogKey) {
     dialogKey.closest(".dialog-card").focus({ preventScroll: true });

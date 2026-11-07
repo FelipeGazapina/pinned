@@ -182,7 +182,9 @@ PALETTE_VIEWS["add-repository"] = {
     renderPalette();
     try {
       const repository = await lookupGithub(typed);
-      if (palette.adding === flow) confirmClone({ input: typed, repository, remoteUrl: repository.url });
+      if (palette.adding !== flow) return;
+      if (flow.source === "box") confirmBox({ input: typed, repository, remoteUrl: repository.url });
+      else confirmClone({ input: typed, repository, remoteUrl: repository.url });
     } catch (e) {
       tell(`<b>Repository lookup failed</b> ${esc(e?.message ?? e)}`, 6000);
     } finally {
@@ -191,6 +193,107 @@ PALETTE_VIEWS["add-repository"] = {
     }
   },
 };
+/** A repo picked for a box: size and budget next, then the box boots around it. */
+function confirmBox({ input, repository, remoteUrl }) {
+  Object.assign(palette.adding, { input, repository, remoteUrl, size: "medium" });
+  palette.views.push({ view: "add-box-budget", query: "", adding: true });
+  paletteInput.value = paletteView().query;
+  palette.hi = -1;
+  renderPalette();
+}
+const BOX_SIZES = [["small", "Small"], ["medium", "Medium"], ["large", "Large"]];
+/** The most a box may spend, in USD. Boxes bill $0.10 an hour, so $1 is ten hours. */
+const parseBoxBudget = (query) => {
+  const n = Number(query.trim().replace(/^\$/, ""));
+  return Number.isFinite(n) && n >= BOX_USD_PER_HOUR ? Math.round(n * 100) / 100 : null;
+};
+const boxHoursText = (usd) => {
+  const hours = usd / BOX_USD_PER_HOUR;
+  return hours < 10 ? `${+hours.toFixed(1)}h` : `${Math.round(hours)}h`;
+};
+PALETTE_VIEWS["add-box-budget"] = {
+  placeholder: "Max spend in USD (e.g. 2)",
+  lead: () => "server",
+  unhighlighted: true,
+  summary(query) {
+    const { repository, input, size } = palette.adding;
+    const usd = parseBoxBudget(query);
+    const funds = usd == null ? "Name the most this box may spend" : `$${usd.toFixed(2)} ≈ ${boxHoursText(usd)} at $0.10/h`;
+    return `<div class="summary-head">Box session</div><div class="summary"><span class="ic">${icon("server")}</span><span class="text"><span class="title"><span class="name">${esc(repository?.nameWithOwner ?? input)}</span></span><span class="sub">${esc(`${size} box · ${funds}`)}</span></span></div>`;
+  },
+  accessory() {
+    const usd = parseBoxBudget(paletteView().query);
+    const label = palette.adding.creating ? "Creating box" : usd == null ? "Create box" : `Create box · $${usd.toFixed(2)}`;
+    return submitButton(label, "Enter", usd == null || palette.adding.creating);
+  },
+  footerAction: () => "Create box",
+  empty: () => "The box shuts down and deletes the session when the money runs out.",
+  groups() {
+    return [{ label: "Size", items: BOX_SIZES.map(([id, label]) => ({ icon: "server", title: label, trail: palette.adding.size === id ? icon("check", "chev") : "", terms: [], keep: true, run: () => { palette.adding.size = id; renderPalette(); } })) }];
+  },
+  submit: (query) => createBox(query),
+};
+async function createBox(query) {
+  const flow = palette.adding;
+  const usd = parseBoxBudget(query);
+  if (usd == null || flow.creating) return;
+  if (!hub) return tell("<b>Sign in first</b> Boxes belong to an account.", 6000);
+  flow.creating = true;
+  renderPalette();
+  try {
+    const st = await hub.hub({ cmd: "open_box", repo: flow.repository?.url ?? flow.remoteUrl, size: flow.size ?? "medium", budget_usd: usd });
+    Object.assign(flow, { creating: false, box: st.id, machine: st.machine });
+    palette.views.push({ view: "add-box-wait", query: "", adding: true });
+    renderPalette();
+    watchBox(flow);
+  } catch (e) {
+    flow.creating = false;
+    tell(`<b>Box failed to start</b> ${esc(e?.message ?? e)}`, 8000);
+    if (paletteOpen()) renderPalette();
+  }
+}
+PALETTE_VIEWS["add-box-wait"] = {
+  placeholder: "",
+  lead: () => "server",
+  unhighlighted: true,
+  summary() {
+    const { repository, input } = palette.adding;
+    return `<div class="summary-head">Box is booting</div><div class="summary"><span class="ic">${icon("server")}</span><span class="text"><span class="title"><span class="name">${esc(repository?.nameWithOwner ?? input)}</span></span><span class="sub">This takes a few minutes; the thread opens itself.</span></span></div>`;
+  },
+  accessory: () => submitButton("Booting", "", true),
+  groups: () => [],
+  empty: () => "Leave the palette open; the box thread opens on its own.",
+  submit: () => {},
+};
+/** Polls a booting box until its session tab opens, then reveals it. */
+async function watchBox(flow) {
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (!hub || palette.adding !== flow || !paletteOpen()) return;
+    let st = null;
+    try {
+      st = await hub.hub({ cmd: "box_status", machine: flow.machine });
+    } catch {
+      return;
+    }
+    if (st.phase === "ending") {
+      palette.views.pop();
+      tell("<b>Box ended while booting</b> Try again.", 6000);
+      if (paletteOpen()) renderPalette();
+      return;
+    }
+    if (st.phase === "running" && st.tab) {
+      closePalette();
+      try {
+        await revealTab(flow.machine, st.tab);
+        refreshBoxInfo();
+      } catch (e) {
+        tell(`<b>Box is up, open its thread</b> ${esc(e?.message ?? e)}`, 8000);
+      }
+      return;
+    }
+  }
+}
 /** The account's own repositories answer first; any other public one is asked of GitHub. */
 async function lookupGithub(typed) {
   const name = typed.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "");
@@ -219,14 +322,17 @@ PALETTE_VIEWS["add-sources"] = {
   groups(query) {
     const machine = palette.adding.machine;
     const ready = !!palette.adding.github;
+    const boxed = !!palette.adding.upstash;
     const github = { icon: "github", title: "GitHub repository", sub: "Clone GitHub owner/repo", terms: ["clone", "remote", "repository", "repo", "git", "GitHub", ...(ready ? [] : ["setup required"])], keep: true, run: () => pickSource("github") };
+    const box = { icon: "server", title: "Box", sub: "Open a GitHub repo on a new Upstash Box", terms: ["box", "upstash", "cloud", "remote", "github", ...(boxed ? [] : ["setup required"])], keep: true, run: () => pickSource("box") };
     const items = [
       { icon: "folder-git-2", title: "New project", sub: "Start a new Git repository from a name", terms: ["new project", "create", "empty", "repository", "git init"], keep: true, run: () => newProjectOn(machine) },
       { icon: "folder-plus", title: "Local folder", sub: "Browse a folder on disk", terms: ["local", "folder", "directory", "browse"], keep: true, run: () => browseForProject(machine) },
       { icon: "link", title: "Git URL", sub: "Clone from a remote URL", terms: ["clone", "remote", "repository", "repo", "git", "Git URL"], keep: true, run: () => pickSource("url") },
       ready ? github : { ...github, disabled: true, trail: `<button type="button" class="setup" data-setup title="Connect GitHub under Settings → Connectors">Setup Required</button>` },
+      boxed ? box : { ...box, disabled: true, trail: `<button type="button" class="setup" data-setup title="Connect Upstash Box under Settings → Connectors">Setup Required</button>` },
     ];
-    return filterGroups([{ label: "Sources", items: ready ? items : [...items.slice(0, 3), items[3]] }], query);
+    return filterGroups([{ label: "Sources", items }], query);
   },
 };
 function pickSource(source) {
@@ -255,7 +361,7 @@ PALETTE_VIEWS["add-environments"] = {
   },
 };
 function showSources(machine) {
-  palette.adding = { machine, github: palette.adding?.github ?? null };
+  palette.adding = { machine, github: palette.adding?.github ?? null, upstash: palette.adding?.upstash ?? null };
   palette.views.push({ view: "add-sources", query: "", adding: true });
   paletteInput.value = "";
   palette.hi = 0;
@@ -263,10 +369,11 @@ function showSources(machine) {
 }
 /** Asks once whether GitHub is connected, for the Sources' GitHub repository row. */
 function beginAdding(machine) {
-  palette.adding = { machine, github: null };
+  palette.adding = { machine, github: null, upstash: null };
   connectorCall("get_settings").then((s) => {
     if (!palette.adding) return;
     palette.adding.github = s?.github ?? null;
+    palette.adding.upstash = s?.upstash ?? null;
     if (paletteOpen() && paletteView().view === "add-sources") renderPalette();
   }, () => {});
 }

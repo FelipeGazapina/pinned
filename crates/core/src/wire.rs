@@ -3,7 +3,10 @@
 
 use crate::accounts::{self, AccountId, Auth, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
-use crate::connectors::{BoxAccess, Connector, Settings};
+use crate::connectors::{BoxAccess, BoxSize, Connector, Settings};
+
+/// What an Upstash Box hour costs in USD. The app previews budgets from it; the hub enforces them.
+pub const BOX_USD_PER_HOUR: f64 = 0.10;
 use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
@@ -678,6 +681,24 @@ pub struct RunSpec {
     /// The agent account the connector names; none runs the session under its project's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<AccountId>,
+    /// What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+}
+
+/// An interactive Upstash Box session: its phase, age and budget, for its cost display.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct BoxStatus {
+    pub id: String,
+    /// `creating`, `booting` or `running`.
+    pub phase: String,
+    pub machine: String,
+    pub tab: Option<String>,
+    /// Seconds since the box row was written.
+    pub age_secs: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+    pub rate_usd_per_hour: f64,
 }
 
 /// What a machine reports on its own.
@@ -768,6 +789,18 @@ pub enum HubCall {
     DeleteConnector { id: String },
     /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
     GenerateWorkflow { model: String, description: String },
+    /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
+    OpenBox {
+        repo: String,
+        #[serde(default)]
+        size: BoxSize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_usd: Option<f64>,
+    },
+    /// `BoxStatus` for the box behind `machine`, or an error when it is no box.
+    BoxStatus { machine: MachineId },
+    /// Adds `extra_usd` to the box behind `machine`'s budget. Returns `BoxStatus`.
+    ExtendBox { machine: MachineId, extra_usd: f64 },
     /// `Vec<MachineView>`.
     Machines,
     RenameMachine { id: MachineId, name: String },
@@ -1017,6 +1050,7 @@ mod tests {
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
                     token: None,
                     account: Some("work".into()),
+                    budget_usd: None,
                 },
             },
             json!({
@@ -1128,7 +1162,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, account: None } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, account: None, budget_usd: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 
