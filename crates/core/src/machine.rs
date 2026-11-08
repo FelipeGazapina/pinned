@@ -1947,8 +1947,12 @@ impl Machine {
             (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name),
         };
         let mut lines = vec![];
+        let mut seen = HashSet::new();
         let mut stack: Vec<(&TabView, usize)> = workers.iter().filter(|w| top(w)).rev().map(|w| (w, 0)).collect();
         while let Some((w, depth)) = stack.pop() {
+            if !seen.insert(w.id.as_str()) {
+                continue;
+            }
             lines.push(format!("{}{}: {} ({}) in {}", "  ".repeat(depth), w.id, w.title.as_deref().unwrap_or("untitled"), state(w), w.cwd));
             stack.extend(workers.iter().filter(|c| c.spawned_by.as_deref() == Some(w.id.as_str())).rev().map(|c| (c, depth + 1)));
         }
@@ -2266,7 +2270,7 @@ impl Machine {
         {
             let mut tabs = self.tabs.lock().unwrap();
             for (id, parent) in &restored {
-                let parent = parent.as_ref().and_then(|session| tabs.iter().find(|(_, t)| t.claude_session.as_ref() == Some(session)).map(|(id, _)| id.clone()));
+                let parent = parent.as_ref().and_then(|session| tabs.iter().find(|(other, t)| *other != id && t.claude_session.as_ref() == Some(session)).map(|(other, _)| other.clone()));
                 if let Some(tab) = tabs.get_mut(id) {
                     tab.spawned_by = parent;
                 }
@@ -3516,6 +3520,25 @@ pub(crate) mod tests {
         let tabs = after.restore_tabs();
         let parents: Vec<_> = tabs.iter().map(|id| after.view(id).unwrap().spawned_by).collect();
         assert_eq!(parents, [None, Some(tabs[0].clone()), Some(tabs[1].clone())], "the restored tabs nest under their restored parents");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_tab_never_becomes_its_own_parent() {
+        let root = temp("restore-self-parent");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "s1", "env": [], "bypass": false, "interrupted": false, "resume_at": null, "spawned_by": "s1"}}]"#, app.display()),
+        )
+        .unwrap();
+        let m = accounts_machine(&root);
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(m.view(&tabs[0]).unwrap().spawned_by, None, "a saved parent equal to the tab's own session is dropped");
         let _ = std::fs::remove_dir_all(root);
     }
 

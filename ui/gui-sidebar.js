@@ -329,9 +329,19 @@ function spawnTree(list) {
   const byId = new Map(list.map((t) => [`${t.machine}:${t.view.id}`, t]));
   const roots = [];
   const kids = new Map();
+  const parentOf = (t) => t.view.spawned_by && byId.get(`${t.machine}:${t.view.spawned_by}`);
+  // A thread whose spawner chain leads back to itself has no top to hang from, so it stands on its own.
+  const loops = (tab) => {
+    const seen = new Set();
+    for (let p = parentOf(tab); p && !seen.has(p); p = parentOf(p)) {
+      if (p === tab) return true;
+      seen.add(p);
+    }
+    return false;
+  };
   for (const tab of list) {
-    const parent = tab.view.spawned_by && byId.get(`${tab.machine}:${tab.view.spawned_by}`);
-    if (parent) kids.set(parent.key, [...(kids.get(parent.key) ?? []), tab]);
+    const parent = parentOf(tab);
+    if (parent && !loops(tab)) kids.set(parent.key, [...(kids.get(parent.key) ?? []), tab]);
     else roots.push(tab);
   }
   for (const list of kids.values()) list.sort((a, b) => a.view.opened - b.view.opened);
@@ -363,7 +373,7 @@ function spawnRow({ tab, depth, under }) {
   if (!under) return row;
   const folded = isFolded(tab);
   const label = `${folded ? "Show" : "Hide"} ${under} ${under === 1 ? "worker" : "workers"}`;
-  const fold = `<span class="fold" role="button" data-act="fold" aria-expanded="${!folded}" aria-label="${label}" title="${label}">${icon(folded ? "chevron-right" : "chevron-down")}${folded ? `<span class="count">${under}</span>` : ""}</span>`;
+  const fold = `<span class="fold" role="button" tabindex="0" data-act="fold" aria-expanded="${!folded}" aria-label="${label}" title="${label}">${icon(folded ? "chevron-right" : "chevron-down")}${folded ? `<span class="count">${under}</span>` : ""}</span>`;
   (row.querySelector(".l1") ?? row).insertAdjacentHTML("afterbegin", fold);
   return row;
 }
@@ -1234,6 +1244,11 @@ threadList.addEventListener("keydown", (e) => {
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     row.click();
+  }
+  const fold = e.target.closest(".fold[data-act]");
+  if (fold && (e.key === "Enter" || e.key === " ")) {
+    e.preventDefault();
+    fold.click();
   }
 });
 threadList.addEventListener("mousemove", (e) => {

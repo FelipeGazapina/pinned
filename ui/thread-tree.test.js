@@ -34,3 +34,13 @@ test("a folded thread hides everything under it and still counts it", () => {
 test("a worker whose parent is not listed, or lives on another machine, stands on its own", () => {
   assert.deepEqual(lines([worker, nested, elsewhere]), ["tab-3 (1)", "  tab-4", "tab-7"]);
 });
+
+test("a thread that names itself as its spawner, or two that name each other, still show once", () => {
+  const self = tab("m", "tab-8", 8, "tab-8");
+  const a = tab("m", "tab-9", 9, "tab-10");
+  const b = tab("m", "tab-10", 10, "tab-9");
+  const under = tab("m", "tab-11", 11, "tab-9");
+  assert.deepEqual(lines([self]), ["tab-8"]);
+  assert.deepEqual(lines([a, b]), ["tab-9", "tab-10"]);
+  assert.deepEqual(lines([a, b, under]), ["tab-9 (1)", "  tab-11", "tab-10"]);
+});
