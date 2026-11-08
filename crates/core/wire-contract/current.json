@@ -12446,6 +12446,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "spawned_by": {
+                "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -12562,7 +12569,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }
@@ -15589,6 +15596,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "spawned_by": {
+                "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -15698,7 +15712,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }
@@ -26012,6 +26026,13 @@
                 "type": "null"
               }
             ]
+          },
+          "spawned_by": {
+            "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -26128,7 +26149,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }
@@ -26262,6 +26283,13 @@
                 "type": "null"
               }
             ]
+          },
+          "spawned_by": {
+            "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -26371,7 +26399,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }
@@ -26785,6 +26813,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "spawned_by": {
+                "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -26901,7 +26936,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }
@@ -29220,6 +29255,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "spawned_by": {
+                "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -29329,7 +29371,7 @@
                 "const": "orchestrator"
               },
               {
-                "description": "Does one task the orchestrator delegated.",
+                "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
               }

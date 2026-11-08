@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 
-// The Orchestration section renders from the machine's settings and saves through it.
+// The Capitão and workers section renders from the machine's settings and saves through it.
 function harness(stored = null, failing = false) {
   const els = {};
   const element = (id) => (els[id] ??= { value: "", onchange: null, textContent: "" });
@@ -35,7 +35,7 @@ function harness(stored = null, failing = false) {
 test("the section shows the machine style and worker cap", async () => {
   const { context } = harness({ style: "quality", max_workers: 40 });
   const html = await context.orchestrationSettingsHtml();
-  assert.match(html, /Orchestration/);
+  assert.match(html, /<h2 class="looks-title">Capitão and workers<\/h2>/);
   assert.match(html, /value="quality" selected/);
   assert.match(html, /value="40"/);
 });

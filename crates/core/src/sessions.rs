@@ -31,6 +31,9 @@ pub struct Saved {
     /// Claude's permission mode from the last hook that reported one. `plan` is read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The session of the tab that started this one, which nests it there again on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<String>,
 }
 
 /// What the harness types to a session that has work left.
@@ -92,7 +95,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None, spawned_by: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         let claude = crate::accounts::Provider::Claude;
@@ -114,7 +117,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-sessions-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sessions.json");
-        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None };
+        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None, spawned_by: None };
         save(&file, &[kept("s1")]).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         assert!(save(&file, &[kept("s2")]).is_err(), "a read-only drive fails the write");
@@ -137,6 +140,7 @@ mod tests {
             account: "work".into(),
             model: Some("claude-opus-4-8".into()),
             permission_mode: Some("plan".into()),
+            spawned_by: Some("4f0e2b8a-parent".into()),
         }];
         save(&file, &saved).unwrap();
         assert_eq!(load(&file), saved);

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::agent::{Message, ProjectTool, Role, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{Message, ProjectTool, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::delegate::{self, Mode};
 use crate::ipc::UnixStream;
 
@@ -182,9 +182,8 @@ pub fn serve_io(reminders: bool, input: impl BufRead, output: impl Write + Send 
                 "serverInfo": { "name": SERVER, "version": env!("CARGO_PKG_VERSION") },
             })),
             Some("tools/list") => {
-                let role = std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse);
                 let child = std::env::var(TASK_ENV).ok().is_some_and(|value| !value.is_empty());
-                Ok(json!({ "tools": tool_definitions(reminders, role, child) }))
+                Ok(json!({ "tools": tool_definitions(reminders, child) }))
             }
             Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
@@ -209,10 +208,10 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
-fn tool_definitions(reminders: bool, role: Option<Role>, child: bool) -> Value {
-    // A worker or a delegated child never starts more workers. The orchestrator and a plain
-    // thread both fan out to workers the same way, so both get delegate and agents.
-    let spawner = delegate::delegate_block(role, child).is_none();
+fn tool_definitions(reminders: bool, child: bool) -> Value {
+    // The orchestrator, a plain thread and a worker all fan out to workers the same way, so all
+    // get delegate and agents. A delegated child never starts more workers.
+    let spawner = delegate::delegate_block(child).is_none();
     let project = project_tools().into_iter().filter(|(needs_spawner, _)| !needs_spawner || spawner).map(|(_, tool)| tool);
     let mut tools = if reminders { reminder_tools() } else { vec![] };
     tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || spawner));
@@ -330,8 +329,8 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
 /// Every session gets the memory tools; one outside a project is told it has no memory.
-/// Each project tool, and whether it needs a session that may start workers (the orchestrator
-/// or a plain thread): workers and delegated children never get those.
+/// Each project tool, and whether it needs a session that may start workers: a delegated child
+/// never gets those.
 fn project_tools() -> [(bool, serde_json::Value); 5] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     [
@@ -662,7 +661,7 @@ mod tests {
 
     #[test]
     fn delegate_task_names_every_argument() {
-        let tools = tool_definitions(true, None, false);
+        let tools = tool_definitions(true, false);
         let tool = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "delegate_task").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         let mut names: Vec<_> = props.keys().cloned().collect();
@@ -918,18 +917,14 @@ fn restore_var(name: &str, value: Option<String>) {
 }
 
     #[test]
-    fn a_session_gets_the_project_tools_its_role_has() {
-        let names = |role| tool_definitions(true, role, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    fn a_session_gets_the_project_tools_a_delegated_child_lacks() {
+        let names = |child| tool_definitions(true, child).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        // A plain thread fans out to workers the same way the orchestrator does.
-        let plain = names(None);
-        assert_eq!(plain, [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
-        let worker = names(Some(Role::Worker));
-        assert_eq!(worker, plain.iter().filter(|name| !["delegate_task", "delegate", "agents"].contains(&name.as_str())).cloned().collect::<Vec<_>>());
-        assert_eq!(names(Some(Role::Orchestrator)), plain);
-        let on_a_node = tool_definitions(false, None, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(names(false), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
+        assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
+        let on_a_node = tool_definitions(false, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &["delegate", "agents"], &memory].concat());
         assert_eq!(permissions()[7..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
 
@@ -965,18 +960,14 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[test]
     #[cfg(unix)]
-    fn a_worker_and_a_child_are_not_offered_delegate_task() {
+    fn a_worker_is_offered_the_delegate_tools_and_a_child_is_not() {
         let plain = offered(None, None);
         assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
         assert!(plain.contains(&"delegate".to_owned()) && plain.contains(&"agents".to_owned()), "{plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        let orchestrator = offered(Some("orchestrator"), None);
-        assert!(orchestrator.contains(&"delegate_task".to_owned()) && orchestrator.contains(&"delegate".to_owned()), "{orchestrator:?}");
-        let worker = offered(Some("worker"), None);
-        assert!(!worker.contains(&"delegate_task".to_owned()), "{worker:?}");
-        assert!(!worker.contains(&"delegate".to_owned()), "{worker:?}");
-        assert!(worker.contains(&"memory_search".to_owned()) && worker.contains(&"task_status".to_owned()), "{worker:?}");
+        assert_eq!(offered(Some("orchestrator"), None), plain);
+        assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
         assert!(!child.contains(&"delegate".to_owned()), "{child:?}");

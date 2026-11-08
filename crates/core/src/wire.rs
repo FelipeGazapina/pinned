@@ -112,6 +112,10 @@ pub struct TabView {
     /// The tab is its project's orchestrator, or a worker the orchestrator started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// The tab that started this one: the thread that delegated a worker, or the thread whose
+    /// delegated task this tab reopened. The sidebar nests the tab under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<TabId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1118,7 +1122,19 @@ mod tests {
             interrupted: false,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             role: None,
+            spawned_by: None,
         }
+    }
+
+    #[test]
+    fn a_tab_names_the_tab_that_started_it_only_when_one_did() {
+        let worker = TabView { role: Some(Role::Worker), spawned_by: Some("tab-1".into()), ..tab_view() };
+        let sent = serde_json::to_value(&worker).unwrap();
+        assert_eq!((&sent["role"], &sent["spawned_by"]), (&json!("worker"), &json!("tab-1")));
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), worker);
+        let plain = serde_json::to_value(tab_view()).unwrap();
+        assert!(plain.get("spawned_by").is_none(), "a tab nobody started sends no spawned_by: {plain}");
+        assert_eq!(serde_json::from_value::<TabView>(plain).unwrap().spawned_by, None, "an older machine's tab reads as started by nobody");
     }
 
     #[test]

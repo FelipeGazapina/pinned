@@ -264,6 +264,6 @@ pub fn codex_constraints() -> Vec<String> {
 pub fn cursor_constraints() -> Vec<String> {
     vec![
         "Cursor supports only its built-in account.".into(),
-        "A worker or a delegated child cannot start another pinned worker. A Cursor session cannot delegate.".into(),
+        "A delegated child cannot start another pinned worker. A Cursor session cannot delegate.".into(),
     ]
 }
