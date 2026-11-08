@@ -5635,6 +5635,7 @@ mod tests {
             interrupted: false,
             stats: None,
             role: None,
+            spawned_by: None,
         }
     }
 

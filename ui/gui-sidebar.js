@@ -51,6 +51,14 @@ onRekey((from, to) => {
   }
   saveMarks();
 });
+/** Threads whose workers are folded away under their row, by `threadKey`. */
+let foldedThreads = new Set();
+try {
+  foldedThreads = new Set(JSON.parse(load("gui-folded")) ?? []);
+} catch {}
+const isFolded = (tab) => foldedThreads.has(threadKey(tab));
+const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
+onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
 Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
@@ -315,9 +323,56 @@ function renderSidebar() {
   scheduleWake();
 }
 
+/** Splits `list` into the threads that stand on their own and, by tab key, the threads each one
+ * started, oldest first. A thread whose spawner is not in `list` stands on its own. */
+function spawnTree(list) {
+  const byId = new Map(list.map((t) => [`${t.machine}:${t.view.id}`, t]));
+  const roots = [];
+  const kids = new Map();
+  for (const tab of list) {
+    const parent = tab.view.spawned_by && byId.get(`${tab.machine}:${tab.view.spawned_by}`);
+    if (parent) kids.set(parent.key, [...(kids.get(parent.key) ?? []), tab]);
+    else roots.push(tab);
+  }
+  for (const list of kids.values()) list.sort((a, b) => a.view.opened - b.view.opened);
+  return { roots, kids };
+}
+/** `tab` and, unless `folded(tab)`, the threads under it, as a file manager lists a folder: each
+ * `{ tab, depth, under }`, `under` counting every thread below it, folded or not. */
+function spawnRows(tab, kids, folded, depth = 0) {
+  const own = kids.get(tab.key) ?? [];
+  const under = (t) => (kids.get(t.key) ?? []).reduce((n, k) => n + 1 + under(k), 0);
+  return [{ tab, depth, under: under(tab) }, ...(own.length && !folded(tab) ? own.flatMap((k) => spawnRows(k, kids, folded, depth + 1)) : [])];
+}
+
+function toggleFold(tab) {
+  const key = threadKey(tab);
+  if (!foldedThreads.delete(key)) foldedThreads.add(key);
+  saveFolded();
+  renderSidebar();
+}
+/** A thread's row at its depth in the tree, drawn as its own section draws it, with a chevron
+ * that folds the threads under it. */
+function spawnRow({ tab, depth, under }) {
+  const section = sectionOf(tab);
+  const row = section === "snoozed" ? slimRow(tab, "wake") : section === "settled" ? slimRow(tab, "unsettle") : cardRow(tab);
+  if (depth) {
+    row.classList.add("child");
+    row.style.setProperty("--depth", depth);
+  }
+  if (!under) return row;
+  const folded = isFolded(tab);
+  const label = `${folded ? "Show" : "Hide"} ${under} ${under === 1 ? "worker" : "workers"}`;
+  const fold = `<span class="fold" role="button" data-act="fold" aria-expanded="${!folded}" aria-label="${label}" title="${label}">${icon(folded ? "chevron-right" : "chevron-down")}${folded ? `<span class="count">${under}</span>` : ""}</span>`;
+  (row.querySelector(".l1") ?? row).insertAdjacentHTML("afterbegin", fold);
+  return row;
+}
+
 function shelfRows(list) {
+  const { roots, kids } = spawnTree(list);
+  const branch = (tab) => spawnRows(tab, kids, isFolded).map(spawnRow);
   const by = { pinned: [], active: [], working: [], snoozed: [], settled: [] };
-  for (const tab of list) by[sectionOf(tab)].push(tab);
+  for (const tab of roots) by[sectionOf(tab)].push(tab);
   const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[threadKey(t)] ?? 0, sideSettings.working ? Math.max(latestUserAt(t), returnedAt.get(t.key) ?? 0) : 0);
   by.pinned.sort((a, b) => sideMarks.pins.indexOf(threadKey(a)) - sideMarks.pins.indexOf(threadKey(b)));
   // As T3 Code's: threads never dragged, new or re-opened, come first, newest on top; then the dragged
@@ -330,9 +385,9 @@ function shelfRows(list) {
   const settledAt = (t) => sideMarks.settled[threadKey(t)] || latestUserAt(t);
   by.settled.sort((a, b) => settledAt(b) - settledAt(a));
   for (const shelf of [by.active, by.working, by.settled]) shelf.sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
-  const rows = [...by.pinned, ...by.active].map(cardRow);
+  const rows = [...by.pinned, ...by.active].flatMap(branch);
   let sink = true;
-  const shelf = (kind, list, label, open, visible, rowOf) => {
+  const shelf = (kind, list, label, open, visible) => {
     if (!list.length) return;
     const head = document.createElement("button");
     head.className = "settled-head";
@@ -341,13 +396,13 @@ function shelfRows(list) {
     head.dataset.shelf = kind;
     head.dataset.open = open;
     head.innerHTML = `<span>${open ? label : `${label} (${list.length})`}</span><span class="line"></span>${icon("chevron-down")}`;
-    rows.push(head, ...(open ? visible : list.filter((t) => t === active)).map(rowOf));
+    rows.push(head, ...(open ? visible : list.filter((t) => t === active)).flatMap(branch));
   };
-  shelf("working", by.working, "Working", ui.workingOpen, by.working, cardRow);
-  shelf("snoozed", by.snoozed, "Snoozed", ui.snoozedOpen, by.snoozed, (t) => slimRow(t, "wake"));
+  shelf("working", by.working, "Working", ui.workingOpen, by.working);
+  shelf("snoozed", by.snoozed, "Snoozed", ui.snoozedOpen, by.snoozed);
   const shownSettled = by.settled.slice(0, ui.settledShown);
   if (by.settled.includes(active) && !shownSettled.includes(active)) shownSettled.push(active);
-  shelf("settled", by.settled, "Settled", ui.settledOpen, shownSettled, (t) => slimRow(t, "unsettle"));
+  shelf("settled", by.settled, "Settled", ui.settledOpen, shownSettled);
   const hidden = by.settled.length - shownSettled.length;
   if (ui.settledOpen && hidden > 0) {
     const more = document.createElement("button");
@@ -367,7 +422,7 @@ function rowShell(tab, cls) {
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
-  row.setAttribute("aria-label", tab.view.role === "orchestrator" || tab.view.role === "worker" ? `${threadTitle(tab)}, ${tab.view.role}` : threadTitle(tab));
+  row.setAttribute("aria-label", isOrchestrator(tab) ? `${threadTitle(tab)}, Capitão` : tab.view.role === "worker" ? `${threadTitle(tab)}, worker` : threadTitle(tab));
   return row;
 }
 
@@ -474,7 +529,7 @@ function openLinkedPrs(tab) {
 }
 const isOrchestrator = (tab) => tab.view.role === "orchestrator";
 const roleMark = (tab) =>
-  isOrchestrator(tab) ? `<span class="role">Orchestrator</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker of the project's orchestrator">${icon("bot")}</span>` : "";
+  isOrchestrator(tab) ? `<span class="role">Capitão</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker another thread started">${icon("bot")}</span>` : "";
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
@@ -957,7 +1012,7 @@ function rowMenuItems(tab) {
   const session = threadOf(tab).session;
   return [
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
-    { label: `Open the ${project} orchestrator`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) },
+    { label: `Open the ${project} Capitão`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) },
     isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: bindingLabel("thread.pin"), run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: bindingLabel("thread.pin"), run: () => pin(tab) },
     settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: bindingLabel("thread.settle"), run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
@@ -1146,7 +1201,7 @@ threadList.addEventListener("click", (e) => {
   if (row.classList.contains("result")) return openResult(tab);
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "snooze") return openSideMenu(snoozeItems([tab]), e.target.closest("[data-act]"));
-  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft, terminal: revealTerminal, prs: openLinkedPrs }[act](tab);
+  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft, terminal: revealTerminal, prs: openLinkedPrs, fold: toggleFold }[act](tab);
   const pr = e.target.closest("[data-pr]");
   if (pr && isModClick(e)) return openOutside(pr.dataset.pr);
   if (!pr && isModClick(e)) return toggleSelected(tab);
@@ -1228,7 +1283,7 @@ threadList.addEventListener("pointerdown", (e) => {
   if (e.pointerType !== "mouse" || e.button !== 0 || ui.search || isModClick(e) || e.shiftKey) return;
   const row = e.target.closest(".thread-row:not(.result)");
   const act = e.target.closest("[data-act]")?.dataset.act;
-  if (!row || e.target.closest("input, .pr, .pin, .woke, .term-run") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
+  if (!row || e.target.closest("input, .pr, .pin, .woke, .term-run") || (act && !["settle", "unsettle", "wake"].includes(act)) || (!act && row.classList.contains("child"))) return;
   rowDrag = { row, key: row.dataset.tab, x: e.clientX, y: e.clientY, sweep: act ?? null, started: false };
 });
 addEventListener("pointermove", (e) => {
@@ -1303,7 +1358,7 @@ function dragTo(drag, y) {
 function endRowDrag(drag) {
   const tab = tabByKey(drag.key);
   const key = threadKey(tab);
-  const keysIn = (section) => [...threadList.querySelectorAll(".thread-row")].filter((r) => sectionAt(r) === section).map((r) => threadKey(tabByKey(r.dataset.tab)));
+  const keysIn = (section) => [...threadList.querySelectorAll(".thread-row:not(.child)")].filter((r) => sectionAt(r) === section).map((r) => threadKey(tabByKey(r.dataset.tab)));
   const verb = dropVerb(drag.from, drag.to);
   if (verb === "settle") return settle(tab);
   if (drag.to === "pinned" || drag.to === "active") {
@@ -1500,7 +1555,7 @@ function openProjectMenu() {
     list.innerHTML = shown.length
       ? shown.map((g, i) => {
           const where = g.key ? projectWhere(PinnedProjects.sessionOn(g.checkouts, directory)) : "";
-          const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
+          const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} Capitão">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
           return `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}${projectNameMark(g.name)}${where}${gears}</div>`;
         }).join("")
       : `<p class="empty">No matching projects.</p>`;
@@ -1577,7 +1632,7 @@ async function openOrchestrator(machine, path) {
     const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path }));
     if (!tab.view.running) await startTab(tab);
   } catch (e) {
-    tell(`Couldn't open the orchestrator: ${esc(e)}`, 6000);
+    tell(`Couldn't open the Capitão: ${esc(e)}`, 6000);
   }
 }
 /** A new session in the thread's folder, on its machine, without the picker. */

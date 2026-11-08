@@ -893,6 +893,7 @@ mod tests {
                 account: "work".into(),
                 model: None,
                 permission_mode: None,
+                spawned_by: None,
             }
         };
         pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>()).unwrap();

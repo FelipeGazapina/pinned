@@ -257,8 +257,9 @@ struct Tab {
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
     made: Option<PathBuf>,
-    /// The tab that spawned this worker with the delegate tool. Its news goes to the project's
-    /// orchestrator while one runs, else back here.
+    /// The tab that spawned this worker with the delegate tool, or whose delegated task this tab
+    /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
+    /// once this tab is closed.
     spawned_by: Option<TabId>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
@@ -300,6 +301,7 @@ impl Tab {
             account: self.account.id.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone().filter(|_| !self.permission_unknown),
+            spawned_by: None,
         })
     }
 
@@ -334,6 +336,7 @@ impl Tab {
             interrupted: self.interrupted,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
             role: role_of(&self.env).map(|(role, _)| role),
+            spawned_by: self.spawned_by.clone(),
         }
     }
 
@@ -1831,7 +1834,7 @@ impl Machine {
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         match tool {
             ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
-            ProjectTool::Agents => Ok(self.workers(&self.orchestrated(tab)?)),
+            ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
             ProjectTool::MemorySearch { query, limit } => {
                 let found = self.memories.search(&self.project_of_tab(tab)?, &query, limit.unwrap_or(SEARCH_LIMIT))?;
                 if found.is_empty() {
@@ -1858,12 +1861,11 @@ impl Machine {
         self.project_of_tab(tab).map(|project| self.memories.recall(&project, prompt)).unwrap_or_default()
     }
 
-    /// The project `tab` may fan out to workers in: the orchestrator's project, or any plain
-    /// thread's own project. Workers and delegated children never start more workers.
+    /// The project `tab` may fan out to workers in: an orchestrator's or a worker's project, or
+    /// a plain thread's own. A worker's workers nest under it; the worker cap is the only limit.
     fn orchestrated(&self, tab: &str) -> Result<PathBuf, String> {
         match self.tab(tab, |t| role_of(&t.env))? {
-            Some((Role::Worker, _)) => Err("workers cannot start other workers".into()),
-            Some((Role::Orchestrator, project)) => Ok(project),
+            Some((_, project)) => Ok(project),
             None => self.project_of_tab(tab),
         }
     }
@@ -1888,8 +1890,6 @@ impl Machine {
         }
     }
 
-    /// Opens a worker tab on the project of the orchestrator `from`, in a new worktree when the
-    /// project is a git repository, starts it on `task`, and says which tab it is.
     /// Refuses new workers past the global cap, naming where to raise it.
     fn check_worker_cap(&self) -> Result<(), String> {
         let max = self.orchestration.lock().unwrap().max_workers as usize;
@@ -1900,6 +1900,8 @@ impl Machine {
         Ok(())
     }
 
+    /// Opens a worker tab on `project` under `from`, in a new worktree when the project is a git
+    /// repository, starts it on `task`, and says which tab it is.
     fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>, tools: Vec<String>) -> Result<String, String> {
         self.check_worker_cap()?;
         let task = crate::delegate::granted_brief(&task, &tools);
@@ -1931,23 +1933,34 @@ impl Machine {
         Ok(format!("Started worker {id} in {}. You get a message when it finishes or needs input.", cwd.display()))
     }
 
-    fn workers(&self, project: &Path) -> String {
+    /// The workers `from` sees, one per line, each indented under the worker that started it:
+    /// the orchestrator sees every worker of its project, any other thread the ones it started.
+    fn workers(&self, from: &str, project: &Path) -> String {
         let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id)).collect();
         workers.sort_by_key(|w| w.opened);
-        if workers.is_empty() {
-            return "No workers yet.".into();
-        }
+        let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
+        let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
+        let top = |w: &TabView| if everyone { !w.spawned_by.as_deref().is_some_and(is_worker) } else { w.spawned_by.as_deref() == Some(from) };
         let state = |w: &TabView| match (w.running, w.status) {
             (false, _) => "stopped",
             (true, None) => "starting",
             (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name),
         };
-        workers.iter().map(|w| format!("{}: {} ({}) in {}", w.id, w.title.as_deref().unwrap_or("untitled"), state(w), w.cwd)).collect::<Vec<_>>().join("\n")
+        let mut lines = vec![];
+        let mut stack: Vec<(&TabView, usize)> = workers.iter().filter(|w| top(w)).rev().map(|w| (w, 0)).collect();
+        while let Some((w, depth)) = stack.pop() {
+            lines.push(format!("{}{}: {} ({}) in {}", "  ".repeat(depth), w.id, w.title.as_deref().unwrap_or("untitled"), state(w), w.cwd));
+            stack.extend(workers.iter().filter(|c| c.spawned_by.as_deref() == Some(w.id.as_str())).rev().map(|c| (c, depth + 1)));
+        }
+        if lines.is_empty() {
+            return "No workers yet.".into();
+        }
+        lines.join("\n")
     }
 
-    /// Types a worker's news into its project's running orchestrator, or back into the tab that
-    /// spawned it when no orchestrator runs: that it finished, with its last message, that it
-    /// needs input, or that its turn failed. Dropped when neither is open.
+    /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
+    /// that tab is closed: that it finished, with its last message, that it needs input, or that
+    /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
@@ -1966,13 +1979,13 @@ impl Machine {
             AgentStatus::Failed => format!("stopped on an error: {}", event.message.as_deref().unwrap_or("unknown")),
             AgentStatus::Working => return,
         };
-        // The news goes to the project's running orchestrator, else the tab that spawned the
-        // worker. Either may have no running session right now (a tab restored after a restart,
-        // or one the web UI has not started): then the report waits in the queue instead of
-        // dropping, and the delegate pass types it once the tab is idle. A worker always reports
-        // home unless its orchestrator and its spawner are both gone.
+        // The news goes to the tab that spawned the worker, so a worker's own workers report to
+        // it, else the project's running orchestrator. Either may have no running session right
+        // now (a tab restored after a restart, or one the web UI has not started): then the report
+        // waits in the queue instead of dropping, and the delegate pass types it once the tab is
+        // idle. A worker always reports home unless its spawner and its orchestrator are both gone.
         let spawner = self.tab(worker, |t| t.spawned_by.clone()).ok().flatten().filter(|id| self.tabs.lock().unwrap().contains_key(id));
-        let Some(target) = self.live_tab(&role_env(Role::Orchestrator, project)).or_else(|| self.find_tab(&role_env(Role::Orchestrator, project))).or(spawner) else {
+        let Some(target) = spawner.or_else(|| self.live_tab(&role_env(Role::Orchestrator, project))).or_else(|| self.find_tab(&role_env(Role::Orchestrator, project))) else {
             eprintln!("pinned: worker {worker} \"{title}\" {what} (no orchestrator or spawner tab takes it)");
             return;
         };
@@ -2238,7 +2251,7 @@ impl Machine {
             return vec![];
         };
         let now = unix_now();
-        let ids: Vec<TabId> = sessions::load(file)
+        let restored: Vec<(TabId, Option<String>)> = sessions::load(file)
             .into_iter()
             .filter(|s| s.cwd.is_dir())
             .filter_map(|s| {
@@ -2247,9 +2260,19 @@ impl Machine {
                 let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
-                Some(id)
+                Some((id, s.spawned_by))
             })
             .collect();
+        {
+            let mut tabs = self.tabs.lock().unwrap();
+            for (id, parent) in &restored {
+                let parent = parent.as_ref().and_then(|session| tabs.iter().find(|(_, t)| t.claude_session.as_ref() == Some(session)).map(|(id, _)| id.clone()));
+                if let Some(tab) = tabs.get_mut(id) {
+                    tab.spawned_by = parent;
+                }
+            }
+        }
+        let ids: Vec<TabId> = restored.into_iter().map(|(id, _)| id).collect();
         self.emit_tabs();
         // A resumed session reports no new id, so its transcript is read here.
         for id in &ids {
@@ -2453,9 +2476,7 @@ impl Machine {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
         self.check_worker_cap()?;
-        let child = caller.task.is_some();
-        let role = caller.tab.as_deref().and_then(|id| self.tab(id, |t| role_of(&t.env)).ok().flatten().map(|(role, _)| role));
-        if let Some(error) = crate::delegate::delegate_block(role, child) {
+        if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
         let parent = if let Some(tab) = caller.tab.clone() {
@@ -2720,6 +2741,7 @@ impl Machine {
         Ok(capabilities(&parent, &listed, search).to_string())
     }
 
+    /// Opens a finished delegated task's conversation as a thread nested under `tab`, its owner.
     fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
         use crate::delegate::Access;
         let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
@@ -2732,6 +2754,7 @@ impl Machine {
         }
         let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
         let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
+        let _ = self.tab(&id, |t| t.spawned_by = Some(tab.to_owned()));
         if plan {
             let _ = self.tab(&id, |t| t.permission_mode = Some("plan".into()));
         }
@@ -2834,7 +2857,8 @@ impl Machine {
         let Some(file) = &self.sessions_file else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
-            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
+            let parent_session = |t: &Tab| tabs.get(t.spawned_by.as_ref()?)?.claude_session.clone();
+            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), sessions::Saved { spawned_by: parent_session(t), ..t.saved()? }))).collect();
             open.sort_by_key(|(n, _)| *n);
             open.into_iter().map(|(_, s)| s).collect()
         };
@@ -3466,6 +3490,33 @@ pub(crate) mod tests {
         m.open_tab(None, false).unwrap();
         m.quit();
         assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_tree_survives_a_restart() {
+        let root = temp("restore-tree");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let before = accounts_machine(&root);
+        let open = |session: &str, parent: Option<&TabId>| {
+            let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some(session.into()));
+            before.tab(&tab, |t| t.spawned_by = parent.cloned()).unwrap();
+            tab
+        };
+        let root_tab = open("s-root", None);
+        let worker = open("s-worker", Some(&root_tab));
+        open("s-nested", Some(&worker));
+        before.save_sessions();
+        let saved: Vec<_> = sessions::load(&root.join("config/sessions.json")).into_iter().map(|s| (s.session, s.spawned_by)).collect();
+        assert_eq!(saved, [("s-root".into(), None), ("s-worker".into(), Some("s-root".into())), ("s-nested".into(), Some("s-worker".into()))]);
+
+        let after = accounts_machine(&root);
+        let tabs = after.restore_tabs();
+        let parents: Vec<_> = tabs.iter().map(|id| after.view(id).unwrap().spawned_by).collect();
+        assert_eq!(parents, [None, Some(tabs[0].clone()), Some(tabs[1].clone())], "the restored tabs nest under their restored parents");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4449,6 +4500,7 @@ pub(crate) mod tests {
         init(&owned_task.id, "owned-1");
         let opened = m.open_delegated(&parent, &owned_task.id).unwrap();
         assert_eq!(m.tab(&opened, |t| t.made.clone()).unwrap(), Some(owned.clone()));
+        assert_eq!(m.view(&opened).unwrap().spawned_by, Some(parent.clone()), "an opened task nests under the thread that delegated it");
         m.close_tab(&parent);
         assert!(!loose.exists(), "closing the parent left a worktree no tab owns");
         assert!(owned.is_dir(), "closing the parent removed a worktree an opened tab owns");
@@ -5364,12 +5416,12 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
-    fn a_worker_cannot_start_another_pinned_worker() {
+    fn a_worker_may_start_a_delegated_task() {
         let root = temp("worker-delegate");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, root.join("missing-claude"))]), ..launch() }, None, None, |_| {});
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
-        assert_eq!(m.start_delegate(Some(tab), None, None, request).unwrap_err(), "a worker cannot start another pinned worker");
+        assert_eq!(m.start_delegate(Some(tab), None, None, request).unwrap_err(), "Claude Code is not installed on this machine", "the worker got past every check up to the missing binary");
         assert!(m.delegates.running().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5611,6 +5663,7 @@ echo '{"type":"result","result":"ok"}'
                 account: "claude".into(),
                 model: None,
                 permission_mode: Some("plan".into()),
+                spawned_by: None,
             }],
         )
         .unwrap();
@@ -6418,11 +6471,20 @@ while True:
         assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
         assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
 
-        assert_eq!(tool(&worker, delegate), Err("workers cannot start other workers".into()));
+        let nested = worker_of(&tool(&worker, r#""name":"delegate","task":"Test the flag.","title":"Flag tests""#).unwrap());
+        let nested_tree = started(&claude, &nested)[0].clone();
+        assert_ne!(nested_tree, tree.display().to_string(), "a nested worker shares its parent's checkout");
+        assert_eq!(m.view(&nested).unwrap().spawned_by, Some(worker.clone()));
+        assert_eq!(m.view(&worker).unwrap().spawned_by, Some(plain.clone()));
+        assert_eq!(m.view(&second).unwrap().spawned_by, Some(orchestrator.clone()));
+        let agents = r#""name":"agents""#;
         assert_eq!(
-            tool(&orchestrator, r#""name":"agents""#),
-            Ok(format!("{worker}: JSON output (starting) in {}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
+            tool(&orchestrator, agents),
+            Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
         );
+        assert_eq!(tool(&plain, agents), Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}", tree.display())));
+        assert_eq!(tool(&worker, agents), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
+        assert_eq!(tool(&nested, agents), Ok("No workers yet.".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6886,6 +6948,49 @@ while True:
         wait_for("the report", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A nested worker's news goes to the worker that started it, even while the project's
+    /// orchestrator runs, and to the orchestrator once that worker's tab is closed.
+    #[test]
+    #[cfg(unix)]
+    fn a_nested_workers_news_goes_to_its_parent_before_the_orchestrator() {
+        let root = temp("report-parent");
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: root.join("hook.sock"), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let typed_into = |env: Vec<(String, String)>, name: &str| {
+            let file = root.join(name);
+            let tab = running(&m, env, &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+            let (seen, sink) = viewer();
+            m.attach(&tab, "test".into(), sink).unwrap();
+            wait_for("stty", || text(&seen).contains("ready"));
+            (tab, file)
+        };
+        let (_orchestrator, orchestrator_file) = typed_into(role_env(Role::Orchestrator, &project), "orchestrator.bin");
+        let (parent, parent_file) = typed_into(role_env(Role::Worker, &project), "parent.bin");
+        let nested = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        m.tab(&nested, |t| {
+            t.title = Some("Flag tests".into());
+            t.spawned_by = Some(parent.clone());
+        })
+        .unwrap();
+        let ask = |message: &str| AgentEvent { status: AgentStatus::NeedsInput, message: Some(message.into()), tab: Some(nested.clone()), ..done_event(&nested) };
+
+        m.record_event(ask("May I run the tests?"));
+        let to_parent = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: May I run the tests?\x1b[201~\r");
+        wait_for("the parent's report", || std::fs::read(&parent_file).is_ok_and(|b| b.len() >= to_parent.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(String::from_utf8(std::fs::read(&parent_file).unwrap()).unwrap(), to_parent);
+        assert_eq!(std::fs::read(&orchestrator_file).unwrap_or_default(), b"", "the orchestrator got news its worker's worker owed the worker");
+
+        m.close_tab(&parent);
+        m.record_event(ask("Still there?"));
+        let to_orchestrator = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: Still there?\x1b[201~\r");
+        wait_for("the orchestrator's report", || std::fs::read(&orchestrator_file).is_ok_and(|b| b.len() >= to_orchestrator.len()));
+        assert_eq!(String::from_utf8(std::fs::read(&orchestrator_file).unwrap()).unwrap(), to_orchestrator);
         let _ = std::fs::remove_dir_all(root);
     }
 

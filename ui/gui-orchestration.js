@@ -1,5 +1,5 @@
-/** The Orchestration section of the General page: the global cost style the orchestrator
- * routes by, and how many workers it may run at once on this machine. */
+/** The Capitão and workers section of the General page: the global cost style the Capitão
+ * routes by, and how many workers may run at once on this machine. */
 const ORCHESTRATION_STYLES = [
   ["economical", "Economical", "The cheapest model that can do the job, one worker."],
   ["balanced", "Balanced", "Mid models first, a second opinion only when it matters."],
@@ -14,7 +14,7 @@ async function orchestrationSettingsHtml() {
     console.warn("orchestration", e);
   }
   const styles = ORCHESTRATION_STYLES.map(([v, label]) => `<option value="${v}"${v === current.style ? " selected" : ""}>${label}</option>`).join("");
-  return `<section id="orchestration-settings"><h2 class="looks-title">Orchestration</h2>
+  return `<section id="orchestration-settings"><h2 class="looks-title">Capitão and workers</h2>
     <div class="side-setting" data-setting="style"><div><label for="orchestration-style">Cost style</label><p class="meta" id="orchestration-style-about">${esc((ORCHESTRATION_STYLES.find(([v]) => v === current.style) ?? [])[2] ?? "")}</p></div>
       <select id="orchestration-style" aria-label="Cost style">${styles}</select></div>
     <div class="side-setting" data-setting="maxWorkers"><div><label for="orchestration-max">Max workers</label><p class="meta">How many workers run at once on this ${COMPUTER}. Per-project habits stay in that project's memory.</p></div>
