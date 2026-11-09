@@ -460,8 +460,11 @@ pub struct Machine {
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
     memories: Arc<memory::Memories>,
-    orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
+    /// Each working worker thread's spend so far, by task, with the session it read.
+    meters: Mutex<HashMap<String, (String, usage::Meter)>>,
+    /// The price list the meters price with, and when it was read.
+    meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
     tastes_shared: Arc<AtomicBool>,
@@ -581,9 +584,8 @@ impl Machine {
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let sent = global::Ledger::load(dir.as_deref());
-        // Seeds taste.json from the old cost style now, before a change to the worker cap rewrites
-        // orchestration.json without it.
-        taste::load(dir.as_deref());
+        // Seeds taste.json from the old cost style, then moves the old worker cap into it.
+        taste::migrate_worker_cap(dir.as_deref());
         let home = home();
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
@@ -621,8 +623,9 @@ impl Machine {
             agents: Mutex::default(),
             delegates,
             memories,
-            orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
+            meters: Mutex::default(),
+            meter_rates: Mutex::default(),
             tastes_shared: Arc::default(),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
@@ -1545,8 +1548,9 @@ impl Machine {
             }
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
-                prompt.extend(tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)).brief()));
-                prompt.push(self.orchestration.lock().unwrap().hint());
+                let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
+                prompt.extend(scoped.as_ref().map(taste::Taste::brief));
+                prompt.extend(scoped.map(|t| t.limits().hint()));
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
@@ -2411,14 +2415,77 @@ impl Machine {
         }
     }
 
-    /// Refuses new workers past the global cap, naming where to raise it.
-    fn check_worker_cap(&self) -> Result<(), String> {
-        let max = self.orchestration.lock().unwrap().max_workers as usize;
-        let running = self.worker_count();
-        if running >= max {
-            return Err(format!("{running} workers are already running, the most this machine starts at once. Raise it under Settings, or wait for one to finish."));
+    /// The delegation limits a call from `caller` is held to, and the project it works in: its
+    /// scope's limits in the account's tastes, a project's over the Captains', narrowed by the
+    /// limits of the task the caller itself runs as.
+    fn caller_limits(&self, caller: &crate::delegate::Caller) -> Result<(taste::Limits, PathBuf), String> {
+        let (cwd, global, own_task) = if let Some(tab) = caller.tab.as_deref() {
+            self.tab(tab, |t| (t.cwd.clone(), global::is_global(&t.env), t.task.clone()))?
+        } else {
+            let id = caller.task.clone().unwrap_or_default();
+            let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
+            (task.cwd, false, Some(id))
+        };
+        let project = history::project_of(&cwd);
+        let scope = if global { TasteScope::Orchestrator } else { captain_scope(&project) };
+        let limits = self.tastes().resolve(&scope).limits();
+        let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
+        Ok((outer.map_or(limits, |outer| limits.narrow(outer)), project))
+    }
+
+    /// Refuses one more worker in `project` once `parallel` of them work there.
+    fn check_parallel(&self, limits: &taste::Limits, project: &Path) -> Result<(), String> {
+        let running = self.delegates.working_cwds().iter().filter(|cwd| history::project_of(cwd) == project).count();
+        if running >= limits.parallel as usize {
+            let running = if running == 1 { "1 worker already runs".to_owned() } else { format!("{running} workers already run") };
+            return Err(format!("{running} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
         }
         Ok(())
+    }
+
+    /// Prices what each working worker thread's transcript gained, records it on its task, and
+    /// stops the ones past their budget. Cursor and Codex children run headless and are not metered.
+    fn meter_workers(&self) {
+        let threads: Vec<(String, String, Account)> = self
+            .tabs
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|t| Some((t.task.clone()?, t.claude_session.clone()?, t.account.clone())))
+            .filter(|(task, ..)| self.delegates.get(task).is_some_and(|task| task.state == crate::delegate::WorkState::Working && task.thread.is_some_and(|thread| thread.runs)))
+            .collect();
+        self.meters.lock().unwrap().retain(|task, _| threads.iter().any(|(working, ..)| working == task));
+        if threads.is_empty() {
+            return;
+        }
+        let rates = self.meter_rates();
+        let book = usage::PriceBook::load(self.prices_file().as_deref());
+        let mut used = vec![];
+        for (task, session, account) in threads {
+            let Some(file) = self.find_transcript(&account, &session) else { continue };
+            let mut meters = self.meters.lock().unwrap();
+            let (read, meter) = meters.entry(task.clone()).or_insert_with(|| (session.clone(), usage::Meter::default()));
+            if *read != session {
+                (*read, *meter) = (session, usage::Meter::default());
+            }
+            if meter.advance(&file).is_ok() {
+                used.push((task, meter.usage(&rates, &book)));
+            }
+        }
+        self.delegates.meter(&used, self.launch.path_env.as_deref());
+    }
+
+    /// The price list, read again each hour.
+    fn meter_rates(&self) -> Arc<usage::RateTable> {
+        let mut held = self.meter_rates.lock().unwrap();
+        match &*held {
+            Some((read, rates)) if read.elapsed() < Duration::from_secs(3600) => rates.clone(),
+            _ => {
+                let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
+                *held = Some((Instant::now(), rates.clone()));
+                rates
+            }
+        }
     }
 
     /// The workers `from` sees, one per line, each indented under the worker that started it:
@@ -2816,22 +2883,6 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
-    /// How this machine's orchestrator routes and how many workers it may run.
-    pub fn orchestration(&self) -> crate::orchestration::Orchestration {
-        self.orchestration.lock().unwrap().clone()
-    }
-
-    /// Saves a new worker cap, clamped into range.
-    pub fn set_orchestration(&self, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
-        let mut current = self.orchestration.lock().unwrap();
-        *current = crate::orchestration::Orchestration { max_workers };
-        current.clamp();
-        let saved = current.clone();
-        drop(current);
-        saved.save(self.orchestration_dir.as_deref())?;
-        *self.orchestration.lock().unwrap() = saved.clone();
-        Ok(saved)
-    }
 
     /// The account's tastes: the hub's while this machine is linked, which `taste.json` keeps for
     /// when the hub can't answer, or else this machine's own. Waits at most `TASTE_WAIT` for the
@@ -2885,12 +2936,6 @@ impl Machine {
             tastes.reset(scope, field);
             Ok(())
         })
-    }
-
-    /// Workers running right now: live worker threads plus active delegate tasks.
-    fn worker_count(&self) -> usize {
-        let threads = self.tabs.lock().unwrap().values().filter(|t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker)).count();
-        threads + self.delegates.active_count()
     }
 
     fn record_usage(&self, account: accounts::AccountId, report: Usage) {
@@ -3076,7 +3121,8 @@ impl Machine {
                 return Err(NO_PROJECT_WORK.into());
             }
         }
-        self.check_worker_cap()?;
+        let (limits, project) = self.caller_limits(&caller)?;
+        self.check_parallel(&limits, &project)?;
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
@@ -3114,7 +3160,8 @@ impl Machine {
         // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
-        let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
+        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref())?;
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(caller.tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
@@ -3135,7 +3182,8 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
-        self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
         if let Some(tab) = caller.tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
@@ -3466,6 +3514,7 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.meter_workers();
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
@@ -4161,7 +4210,8 @@ fn captain_scope(folder: &Path) -> TasteScope {
     git_remote(folder).and_then(|remote| repo_key(&remote)).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo })
 }
 
-fn repo_key(url: &str) -> Option<String> {
+/// A repository's key in the tastes, as in `github.com/acme/site`, from any of its URLs.
+pub fn repo_key(url: &str) -> Option<String> {
     https_url(url).map(|https| https.trim_start_matches("https://").trim_end_matches(".git").to_lowercase())
 }
 
@@ -6313,27 +6363,6 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
-    fn workers_stop_at_the_global_cap() {
-        let dir = temp("worker-cap");
-        let config = dir.join("config");
-        std::fs::create_dir_all(&config).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::new(), ..launch() }, Some(config.clone()), None, |_| {});
-        assert_eq!(m.orchestration().max_workers, 100);
-        m.set_orchestration(1).unwrap();
-        assert_eq!(m.orchestration().max_workers, 1);
-        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(config.join("orchestration.json")).unwrap()).is_ok());
-        m.check_worker_cap().unwrap();
-        let worker = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &dir), false, None);
-        assert_eq!(m.worker_count(), 1);
-        let err = m.check_worker_cap().unwrap_err();
-        assert!(err.contains("1 workers are already running"), "{err}");
-        assert!(err.contains("Settings"), "{err}");
-        m.close_tab(&worker);
-        m.check_worker_cap().unwrap();
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
     #[cfg(unix)]
     fn a_delegated_task_keeps_the_budget_it_asked_for() {
         let root = temp("budget");
@@ -7413,7 +7442,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
@@ -7953,7 +7982,7 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
@@ -8078,14 +8107,13 @@ Have another model review a risky change before it goes ahead.";
         std::fs::write(config.join("orchestration.json"), r#"{"style":"economical","max_workers":4}"#).unwrap();
         let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
         assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the old cost style seeded the Capitães");
-        m.set_orchestration(7).unwrap();
         let site = TasteScope::Project { repo: "github.com/acme/site".into() };
         let set = m.set_local_taste(&site, TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
         assert_eq!(serde_json::to_value(&set.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": false } }));
         let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
         assert_eq!(serde_json::to_value(&reset.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
         assert_eq!(m.local_tastes(), reset);
-        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the worker cap's save kept the seeded taste");
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "moving the worker cap kept the seeded taste");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8128,7 +8156,7 @@ Have another model review a risky change before it goes ahead.";
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
@@ -8149,6 +8177,134 @@ Have another model review a risky change before it goes ahead.";
     fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
         let request = crate::delegate::parse_request(&args).unwrap();
         serde_json::from_str(&m.start_delegate(Some(from.to_owned()), None, None, request).unwrap()).unwrap()
+    }
+
+    /// A Captain of the project `app` on a machine whose Captains have `limits`, with the `work`
+    /// account. Returns the machine, its folder and the Captain's tab.
+    #[cfg(unix)]
+    fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
+        let dir = temp(name);
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.set_local_taste(&TasteScope::Captains, limits).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        (m, dir, captain)
+    }
+
+    #[cfg(unix)]
+    fn refused(m: &Machine, from: &str, args: Value) -> String {
+        m.start_delegate(Some(from.to_owned()), None, None, crate::delegate::parse_request(&args).unwrap()).unwrap_err()
+    }
+
+    #[cfg(unix)]
+    fn work(model: Option<&str>, effort: Option<&str>) -> Value {
+        json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": model, "options": { "effort": effort } } })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_call_above_the_tier_or_the_most_effort_is_refused_and_one_without_effort_gets_the_default() {
+        let limits = TastePatch { tier: Some(taste::Tier::Mid), default_effort: Some(taste::Effort::Low), max_effort: Some(taste::Effort::High), ..TastePatch::default() };
+        let (m, dir, captain) = limited_captain("limits-tier", limits);
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-opus-5-5"), None)),
+            "claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working"
+        );
+        assert_eq!(
+            refused(&m, &captain, work(None, None)),
+            "name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working"
+        );
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), Some("max"))),
+            "effort max is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working"
+        );
+        assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "a refused call starts nothing");
+
+        let child = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "low"]), "the default effort: {args:?}");
+        let child = delegate_task(&m, &captain, work(Some("claude-haiku-5-5"), Some("high")))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]), "the effort asked for, at the most: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_worker_past_workers_at_once_is_refused_until_one_ends() {
+        let (m, dir, captain) = limited_captain("limits-parallel", TastePatch { parallel: Some(2), ..TastePatch::default() });
+        let first = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
+            "2 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."
+        );
+        m.task_cancel(Some(captain.clone()), None, first["taskId"].as_str().unwrap(), "not needed").unwrap();
+        assert_eq!(delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["workState"], "working", "an ended worker frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_past_the_time_limit_is_stopped_and_task_status_says_why() {
+        let (m, dir, captain) = limited_captain("limits-time", TastePatch { time_limit_min: Some(30), ..TastePatch::default() });
+        let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" }, "limitMs": 7_200_000 });
+        let task = delegate_task(&m, &captain, asked)["taskId"].as_str().unwrap().to_owned();
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        assert_eq!((status()["limitSecs"].as_u64(), status()["budgetSecs"].as_u64()), (Some(1800), Some(900)), "a longer limitMs is cut to the time limit");
+        m.delegates.enforce_limits(Instant::now() + Duration::from_secs(1801), None);
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after 30 min, its limit")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_past_its_budget_is_stopped_and_task_status_shows_what_it_spent() {
+        let (m, dir, captain) = limited_captain("limits-budget", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
+        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+
+        m.meter_workers();
+        let working = status();
+        let cents = working["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!((working["workState"].as_str(), working["usage"]["tokens_out"].as_u64(), cents), (Some("working"), Some(10_000), Some(15.0)), "{working}");
+        append(&transcript, &[spent("m2", 30_000)]);
+        m.meter_workers();
+        let ended = status();
+        assert_eq!(
+            (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
+            (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_own_worker_is_held_to_the_limits_it_started_under() {
+        let (m, dir, captain) = limited_captain("limits-narrow", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let worker = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["tabId"].as_str().unwrap().to_owned();
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::High), ..TastePatch::default() }).unwrap();
+        assert_eq!(delegate_task(&m, &captain, work(Some("claude-opus-5-5"), None))["workState"], "working", "the Captain has the raised tier");
+        assert_eq!(
+            refused(&m, &worker, work(Some("claude-opus-5-5"), None)),
+            "claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working",
+            "the worker keeps the tier it started under"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -8208,7 +8364,7 @@ Have another model review a risky change before it goes ahead.";
             ]
         );
 
-        assert_eq!(m.worker_count(), 1, "the thread and its task are one worker");
+        assert_eq!(m.delegates.working_cwds(), [tree.clone()], "the thread and its task are one worker");
         let checkout = &m.local_overview().projects[0].checkouts[0];
         assert_eq!((checkout.path.as_str(), checkout.workers), (path.as_str(), 1), "projects() counts the child");
         let agents = m.project_tool(&captain, ProjectTool::Agents).unwrap();
@@ -8232,7 +8388,7 @@ Have another model review a risky change before it goes ahead.";
         let read = reading::read(&m.view(&child).unwrap(), m.thread(&child, 0).and_then(json), reading::DEFAULT_ITEMS);
         assert_eq!(read["conversation"]["items"][0]["text"], "Added --json; cargo test passes.", "{read}");
         assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
-        assert_eq!(m.worker_count(), 1);
+        assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "an ended task no longer counts toward workers at once");
         let _ = std::fs::remove_dir_all(dir);
     }
 

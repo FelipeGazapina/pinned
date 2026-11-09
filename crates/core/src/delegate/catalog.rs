@@ -10,7 +10,8 @@ const CLAUDE_MODELS: &[(&str, &str, Cost)] = &[
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
 
 /// What a model costs to run, coarsely: routing by tier beats stale per-token prices.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Cost {
     /// Haiku and flash models: sweeps, translations, first drafts.
     Low,

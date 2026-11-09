@@ -172,6 +172,80 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
     rows
 }
 
+/// What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct TaskUsage {
+    /// Input tokens, cache reads and cache writes included.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// The tokens priced as the Usage page prices them. None while a model the worker used has no price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    pub wall_ms: u64,
+    /// What the worker's Upstash Box cost, for box work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_usd: Option<f64>,
+}
+
+/// The tokens one transcript used so far, by model and speed, read a little more on each call.
+#[derive(Clone, Debug, Default)]
+pub struct Meter {
+    offset: u64,
+    seen: HashSet<(Option<String>, Option<String>)>,
+    sums: HashMap<(String, Speed), [u64; 4]>,
+}
+
+impl Meter {
+    /// Reads the whole lines `file` gained since the last call.
+    pub fn advance(&mut self, file: &Path) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(file)?;
+        if self.offset > f.metadata()?.len() {
+            *self = Meter::default();
+        }
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut bytes = vec![];
+        f.read_to_end(&mut bytes)?;
+        let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        for raw in bytes[..whole].split(|b| *b == b'\n') {
+            if !raw.windows(7).any(|w| w == b"\"usage\"") {
+                continue;
+            }
+            let Ok(line) = serde_json::from_slice::<Line>(raw) else { continue };
+            let Some(message) = line.message.filter(|_| line.kind == "assistant") else { continue };
+            let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
+            if (message.id.is_some() || line.request.is_some()) && !self.seen.insert((message.id, line.request)) {
+                continue;
+            }
+            let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
+            let sum = self.sums.entry((model, speed)).or_default();
+            for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
+                *total += n;
+            }
+        }
+        self.offset += whole as u64;
+        Ok(())
+    }
+
+    /// The tokens so far, priced with `rates` and the user's `book`. `wall_ms` and `box_usd` are the caller's.
+    pub fn usage(&self, rates: &RateTable, book: &PriceBook) -> TaskUsage {
+        let targets = book.targets();
+        let mut usage = TaskUsage { cost_usd: Some(0.0), ..TaskUsage::default() };
+        for ((model, speed), [input, cached, cache_write, output]) in &self.sums {
+            usage.tokens_in += input + cached + cache_write;
+            usage.tokens_out += output;
+            let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
+            let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
+            price(&mut row, rates, &book.prices);
+            usage.cost_usd = match (usage.cost_usd, row.cost) {
+                (Some(sum), Some(c)) => Some(sum + c.input + c.cache_read + c.cache_write + c.output),
+                _ => None,
+            };
+        }
+        usage
+    }
+}
+
 /// The user's prices and model mappings on a machine, as T3 Code keeps them in its server settings.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct PriceBook {
@@ -543,6 +617,28 @@ mod tests {
 
     fn assistant(id: &str, request: &str, session: &str, at: &str, model: &str, usage: Value) -> String {
         json!({ "type": "assistant", "timestamp": at, "sessionId": session, "requestId": request, "message": { "id": id, "model": model, "role": "assistant", "content": [], "usage": usage } }).to_string()
+    }
+
+    #[test]
+    fn a_meter_prices_what_a_transcript_gained_and_counts_each_message_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let usage = json!({ "input_tokens": 1000, "cache_read_input_tokens": 10_000, "cache_creation_input_tokens": 0, "output_tokens": 2000 });
+        let first = [assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "claude-opus-5-5", usage.clone()), assistant("m1", "r1", "s", "2026-11-09T10:00:01Z", "claude-opus-5-5", usage.clone())];
+        std::fs::write(&file, format!("{}\n{}\n{{\"type\":\"assistant\",\"message\":{{\"usage\"", first[0], first[1])).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let once = meter.usage(&table(), &PriceBook::default());
+        assert_eq!((once.tokens_in, once.tokens_out), (11_000, 2000), "the repeated block and the half line count nothing");
+        assert!((once.cost_usd.unwrap() - 0.06).abs() < 1e-9, "1000 x $5/M + 10000 x $0.5/M + 2000 x $25/M is $0.06, got {:?}", once.cost_usd);
+
+        let mut more = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut more, format!("\n{}\n", assistant("m2", "r2", "s", "2026-11-09T10:01:00Z", "glm-5.3", usage)).as_bytes()).unwrap();
+        meter.advance(&file).unwrap();
+        let twice = meter.usage(&table(), &PriceBook::default());
+        assert_eq!((twice.tokens_in, twice.tokens_out, twice.cost_usd), (22_000, 4000, None), "a model with no price leaves the cost unknown");
+        let priced = PriceBook { prices: HashMap::from([("glm-5.3".to_owned(), Price { input: 1.0, output: 2.0, cache_read: Some(0.1), cache_write: None })]), ..PriceBook::default() };
+        assert!((meter.usage(&table(), &priced).cost_usd.unwrap() - 0.066).abs() < 1e-9, "the user's own price counts");
     }
 
     #[test]

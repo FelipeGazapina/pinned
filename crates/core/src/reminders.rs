@@ -290,7 +290,7 @@ fn delegation_tools() -> Vec<Value> {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values." },
+                                            "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values. Left out, the project's default effort applies; above its most effort, the call is refused." },
                                             "reasoning_effort": { "type": "string", "description": "Same as effort." },
                                         },
                                     },
@@ -312,8 +312,8 @@ fn delegation_tools() -> Vec<Value> {
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
-                    "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of limitMs when that is shorter. It must be below limitMs. Time counts only while the machine is awake." },
-                    "limitMs": { "type": "number", "description": "When pinned cancels the child, in milliseconds. The default is 28800000, eight hours, whatever budgetMs is. Time counts only while the machine is awake." },
+                    "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
+                    "limitMs": { "type": "number", "description": "When pinned cancels the child, in milliseconds. The default and the most is the project's time limit in Settings › Way of working, eight hours unless changed; a longer one is cut to it. Time counts only while the machine is awake." },
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["inherit", "full-access", "auto"], "description": "How wide the child may act. inherit, or omitting it, keeps this session's mode. Anything wider than this session is rejected. A bypassed session can hand the child auto." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
