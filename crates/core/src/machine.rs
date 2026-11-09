@@ -4,10 +4,10 @@ use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,7 @@ const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
+const NOT_LINKED: &str = "this machine is not linked to a hub";
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -317,7 +318,10 @@ impl Tab {
         }
     }
 
-    fn view(&self, id: &str) -> TabView {
+    /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
+    /// from the global orchestrator started.
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>) -> TabView {
+        let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
@@ -337,7 +341,8 @@ impl Tab {
             session: self.claude_session.clone(),
             interrupted: self.interrupted,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
-            role: role_of(&self.env).map(|(role, _)| role),
+            orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
+            role: role.map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
         }
@@ -425,6 +430,8 @@ pub struct Machine {
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
     /// holding `tabs`.
     sent: Mutex<global::Ledger>,
+    /// The ledger's projects in flight, which a tab's view reads while a hand-off holds `sent`.
+    turns: global::Turns,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -434,6 +441,8 @@ pub struct Machine {
     sync_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[allow(clippy::type_complexity)]
     hub: Mutex<Option<Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>>>,
+    /// This machine's id on the hub, from the hub's hello. Empty until the first sign-in.
+    hub_id: Mutex<crate::wire::MachineId>,
 }
 
 pub trait SelfUpdate: Send + Sync {
@@ -528,6 +537,7 @@ impl Machine {
         let load = models.map(|models| -> memory::Loader { Arc::new(move || Ok(Arc::new(model2vec::Model2Vec::load(&model2vec::fetch(&models)?)?) as Arc<dyn memory::Embedder>)) });
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
+        let sent = global::Ledger::load(dir.as_deref());
         let home = home();
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
@@ -569,7 +579,8 @@ impl Machine {
             orchestration_dir: dir.clone(),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
-            sent: Mutex::new(global::Ledger::load(dir.as_deref())),
+            turns: sent.turns(),
+            sent: Mutex::new(sent),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -577,6 +588,7 @@ impl Machine {
             gate: Mutex::new(Gate::default()),
             sync_waker: Mutex::new(None),
             hub: Mutex::new(None),
+            hub_id: Mutex::default(),
         })
     }
 
@@ -1155,13 +1167,15 @@ impl Machine {
 
     /// Every tab, in the order they opened.
     pub fn tabs(&self) -> Vec<TabView> {
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id)).collect();
+        let turns = self.turns.lock().unwrap().clone();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
 
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
-        self.tab(tab, |t| t.view(tab))
+        let turns = self.turns.lock().unwrap().clone();
+        self.tab(tab, |t| t.view(tab, &turns))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -1443,6 +1457,10 @@ impl Machine {
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
             prompt.push(crate::device::AGENT_PROMPT.to_owned());
         }
+        let settings = self.global_settings();
+        if global::is_global(&env) {
+            prompt.push(global::prompt(&settings.name, &crate::account::hostname()));
+        }
         if let Some((role, _)) = role_of(&env) {
             if !role.disallowed_tools().is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
@@ -1452,6 +1470,7 @@ impl Machine {
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
                 prompt.push(self.orchestration.lock().unwrap().hint());
+                prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
         if !prompt.is_empty() {
@@ -1917,6 +1936,10 @@ impl Machine {
             Handoff::Delivered { .. } | Handoff::Started { .. } => Progress::InFlight,
         };
         sent.record(global::Sent { request_id: request_id.to_owned(), sender, project, handoff: handoff.clone(), progress, at: unix_now() });
+        drop(sent);
+        if progress == Progress::InFlight {
+            self.emit_tabs();
+        }
         Ok(handoff)
     }
 
@@ -2021,44 +2044,150 @@ impl Machine {
     /// Whether `machine`, an id or a name from `projects`, is this machine. Without the hub's id
     /// for it, only its name matches.
     fn is_this_machine(&self, machine: &str) -> bool {
-        machine.trim().eq_ignore_ascii_case(&crate::account::hostname())
+        let machine = machine_named(machine);
+        let id = self.hub_id.lock().unwrap();
+        (!id.is_empty() && machine == *id) || machine.eq_ignore_ascii_case(&crate::account::hostname())
     }
 
-    /// Every project of the account for the global orchestrator's `projects` tool. The node-local
-    /// unit fills this in.
+    /// Every project of the account for the global orchestrator's `projects` tool: the hub's view
+    /// of every machine, or this machine's alone while it is not linked or the hub can't answer.
     fn projects_overview(&self) -> Result<global::Overview, String> {
-        Err("projects is not available yet".into())
+        match self.call_hub(HubCall::Overview) {
+            Ok(overview) => serde_json::from_value(overview).map_err(|e| format!("the hub's overview did not read: {e}")),
+            Err(e) if e == NOT_LINKED || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
+            Err(e) => Err(e),
+        }
     }
 
-    /// What waits on the user across the account's machines, for the `waiting` tool. The node-local
-    /// unit fills this in.
+    /// This machine alone, under its hub id once it has one, so its keys and links match the hub's.
+    fn local_overview(&self) -> global::Overview {
+        let (projects, tabs) = (self.list_projects(), self.tabs());
+        let name = crate::account::hostname();
+        let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| name.clone());
+        global::overview(&[global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }])
+    }
+
+    /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
-        Err("waiting is not available yet".into())
+        Ok(self.projects_overview()?.waiting)
     }
 
-    /// The latest replies of `project`'s Capitão, for the `read_captain` tool. The node-local unit
-    /// fills this in, and the hub-bridge unit reaches a Capitão on another machine.
-    fn read_captain(&self, _project: &str, _machine: Option<&str>) -> Result<String, String> {
-        Err("read_captain is not available yet".into())
+    /// The latest replies of `project`'s Capitão, for the `read_captain` tool, as the hub's MCP
+    /// `read_orchestrator` answers them. A Capitão on another machine is read through the hub.
+    fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String> {
+        let Some(path) = self.local_project(project, machine) else {
+            let (machine, path) = self.remote_checkout(project, machine)?;
+            return text_json(self.call_hub(HubCall::ReadCaptain { machine, path }).map_err(needs_update)?);
+        };
+        let path = path.display().to_string();
+        let tabs = self.tabs();
+        let mut out = match global::captain_tab(&tabs, &path) {
+            Some(tab) if tab.running || tab.session.is_some() => reading::read(tab, self.thread(&tab.id, 0).and_then(json), reading::DEFAULT_ITEMS),
+            _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
+        };
+        out["project"] = json!(path);
+        text_json(out)
     }
 
-    /// Hands a message to a Capitão on another machine through `HubCall::Relay`. The hub-bridge
-    /// unit fills this in.
-    fn route_remote(&self, project: &str, _machine: Option<&str>, _text: &str, _request_id: &str, _sender: &str) -> Result<Handoff, String> {
-        Err(format!("{project} is not a project on this machine, and sending to a Capitão on another machine is not available yet"))
+    /// Hands a message to a Capitão on another machine through `HubCall::Relay`, under this
+    /// machine's busy policy, since this machine hosts the orchestrator that sends it.
+    fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String> {
+        let (target, path) = self.remote_checkout(project, machine)?;
+        let to = global::RelayTo::Captain { machine: target, path, text: text.to_owned(), sender: sender.to_owned(), busy: Some(self.global_settings().busy) };
+        let answer = self.call_hub(HubCall::Relay { request_id: request_id.to_owned(), to }).map_err(needs_update)?;
+        serde_json::from_value(answer).map_err(|e| format!("the hub answered the relay with something unreadable: {e}"))
+    }
+
+    /// The machine id and folder of `project` on another machine. `project` is a key, a repo or a
+    /// folder from the hub's overview, or `<machine>:<path>`. A machine, there or in `machine`, is
+    /// an id or a name, with or without `@`. Without the hub's overview only an id names it.
+    fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(crate::wire::MachineId, String), String> {
+        let asked = project.trim();
+        let (project, machine) = match asked.split_once(':') {
+            Some((m, path)) if !is_absolute_anywhere(asked) && is_absolute_anywhere(path) => (path, Some(machine.unwrap_or(m))),
+            _ => (asked, machine),
+        };
+        let machine = machine.map(machine_named);
+        let named = machine.filter(|_| is_absolute_anywhere(project));
+        let overview = self.call_hub(HubCall::Overview).and_then(|v| serde_json::from_value::<global::Overview>(v).map_err(|e| e.to_string()));
+        let overview = match overview {
+            Ok(overview) => overview,
+            Err(e) => {
+                return named.map(|m| (m.to_owned(), project.to_owned())).ok_or_else(|| {
+                    format!("{asked} is not a project on this machine, and the hub can't list the other machines' projects ({e}): name it as <machine id>:<path>")
+                });
+            }
+        };
+        let is = |m: &str, id: &str, name: &str| m == id || m.eq_ignore_ascii_case(name);
+        let checkouts: Vec<&global::OverviewCheckout> = overview
+            .projects
+            .iter()
+            .flat_map(|p| p.checkouts.iter().map(move |c| (p, c)))
+            .filter(|(p, c)| p.key == project || p.repo.as_deref() == Some(project) || c.path == project)
+            .map(|(_, c)| c)
+            .filter(|c| machine.is_none_or(|m| is(m, &c.machine, &c.machine_name)))
+            .collect();
+        let online: Vec<&global::OverviewCheckout> = checkouts.iter().copied().filter(|c| c.online).collect();
+        let chosen = match (checkouts.as_slice(), online.as_slice()) {
+            ([], _) => {
+                // A folder the overview doesn't list, on a machine named by id or name.
+                let Some(m) = named else { return Err(format!("{asked} is not a project on {}", machine.unwrap_or("any machine of the account"))) };
+                let id = overview.machines.iter().find(|known| is(m, &known.id, &known.name)).map_or(m, |known| known.id.as_str());
+                return Ok((id.to_owned(), project.to_owned()));
+            }
+            ([only], _) | (_, [only]) => *only,
+            _ => {
+                let names: Vec<&str> = checkouts.iter().map(|c| c.machine_name.as_str()).collect();
+                return Err(format!("{asked} is on {}: pass machine to pick one", names.join(", ")));
+            }
+        };
+        Ok((chosen.machine.clone(), chosen.path.clone()))
     }
 
     /// Sends a Capitão's report up to the account's global orchestrator: `deliver_report` when this
-    /// machine hosts it, else `HubCall::Relay`. `answers` are the request ids the report ends. The
-    /// node-local unit fills this in.
-    fn report_up(&self, _captain: &str, _project: &Path, _text: String, _answers: Vec<String>) -> Result<Handoff, String> {
-        Err("reporting to the global orchestrator is not available yet".into())
+    /// machine hosts it, else `HubCall::Relay`, whose hub fills in this machine's id and name. The
+    /// id is the hub's for this machine, so the chat links the report to the Capitão's thread.
+    /// `answers` are the request ids the report ends.
+    fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String> {
+        let report = CaptainReport {
+            machine: self.hub_id.lock().unwrap().clone(),
+            machine_name: crate::account::hostname(),
+            project: project.file_name().map_or_else(|| project.display().to_string(), |n| n.to_string_lossy().into_owned()),
+            path: project.display().to_string(),
+            tab: captain.to_owned(),
+            text,
+            answers,
+        };
+        // Its own namespace, so a report's id never meets the id of a message the orchestrator sent.
+        let request_id = format!("report:{:016x}", fresh_boot());
+        if self.global_settings().host {
+            return self.deliver_report(&request_id, &report);
+        }
+        let handoff = self.call_hub(HubCall::Relay { request_id, to: global::RelayTo::Orchestrator { report } })?;
+        serde_json::from_value(handoff).map_err(|e| format!("the hub's answer did not read: {e}"))
     }
 
-    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. Under
-    /// `ReportPolicy::Auto` the node-local unit takes `Ledger::answer(project)` and sends the last
-    /// reply up with `report_up`.
-    fn captain_turn_ended(&self, _captain: &str, _project: &Path, _event: &AgentEvent) {}
+    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. The
+    /// orchestrator's messages that started the turn are answered by it, and under
+    /// `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator with their ids.
+    fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent) {
+        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
+        if answers.is_empty() || self.global_settings().reports != global::ReportPolicy::Auto {
+            return;
+        }
+        let text = match event.status {
+            AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
+            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(sem resposta)".into()), REPORT_CHARS, "read_captain has the whole message"),
+        };
+        // Up to the hub it may wait a minute, which the hook that ended the turn must not.
+        let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            if let Err(e) = machine.report_up(&captain, &project, text, answers) {
+                eprintln!("pinned: the Capitão {captain} of {} could not report to the global orchestrator: {e}", project.display());
+            }
+        });
+    }
 
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
@@ -2194,7 +2323,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id)).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new())).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -2220,21 +2349,22 @@ impl Machine {
         lines.join("\n")
     }
 
+    /// The last text the tab's session said, from its transcript.
+    fn last_reply(&self, tab: &str) -> Option<String> {
+        let page = thread::read(&self.transcript(tab).ok()?, 0).ok()?;
+        page.items.into_iter().rev().find_map(|item| match item {
+            thread::Item::Text { text, .. } => Some(text),
+            _ => None,
+        })
+    }
+
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
-            AgentStatus::Done => {
-                let said = self.transcript(worker).ok().and_then(|file| thread::read(&file, 0).ok()).and_then(|page| {
-                    page.items.into_iter().rev().find_map(|item| match item {
-                        thread::Item::Text { text, .. } => Some(text),
-                        _ => None,
-                    })
-                });
-                format!("finished. Its last message:\n\n{}", truncate(&said.unwrap_or_else(|| "(none)".into()), REPORT_CHARS))
-            }
+            AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
             // Claude says it waits for input a while after every finished turn too.
             AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
             AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),
@@ -2400,14 +2530,18 @@ impl Machine {
         *self.hub.lock().unwrap() = Some(hub);
     }
 
+    /// Remembers this machine's id from the hub's hello, so a project named by it is local.
+    pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId) {
+        *self.hub_id.lock().unwrap() = id;
+    }
+
     /// Asks the hub, blocking up to 60 seconds for the answer. Never call it while holding a Machine
     /// lock.
-    #[allow(dead_code)] // The global orchestrator's later units call it.
     pub(crate) fn call_hub(&self, call: HubCall) -> Result<Value, String> {
         let hub = self.hub.lock().unwrap().clone();
         match hub {
             Some(hub) => hub(call),
-            None => Err("this machine is not linked to a hub".into()),
+            None => Err(NOT_LINKED.into()),
         }
     }
 
@@ -2641,7 +2775,7 @@ impl Machine {
                     machine.record_event(event.clone());
                     // After the event: a Stop hook that hands a request over continues the turn, and
                     // the turn that just ended did not answer it.
-                    machine.sent.lock().unwrap().typed(&typed);
+                    machine.mark_typed(&typed);
                     if !notices.is_empty() && event.status == AgentStatus::Done {
                         if let Some(tab) = &event.tab {
                             let _ = machine.tab(tab, |t| t.turn_pending = Some(Instant::now()));
@@ -2922,6 +3056,13 @@ impl Machine {
         Ok(())
     }
 
+    /// The queued messages `typed` started their Capitão's turn, which clients then see working.
+    fn mark_typed(&self, typed: &[String]) {
+        if self.sent.lock().unwrap().typed(typed) {
+            self.emit_tabs();
+        }
+    }
+
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
             return;
@@ -2932,7 +3073,7 @@ impl Machine {
             self.delegates.release_reports(tab);
         } else {
             let typed = self.delegates.drop_claimed_reports(tab);
-            self.sent.lock().unwrap().typed(&typed);
+            self.mark_typed(&typed);
         }
     }
 
@@ -3359,7 +3500,7 @@ impl Machine {
         if query.trim().chars().count() < 2 {
             return vec![];
         }
-        let sessions: Vec<(TabId, Account, String, u64)> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.account.clone(), t.claude_session.clone()?, t.view(id).updated.unwrap_or(0)))).collect();
+        let sessions: Vec<(TabId, Account, String, u64)> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.account.clone(), t.claude_session.clone()?, t.updated.unwrap_or(0)))).collect();
         let mut found: Vec<(ThreadMatch, u64)> = sessions
             .into_iter()
             .filter_map(|(tab, account, session, updated)| {
@@ -3443,6 +3584,27 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// A machine as a tool names it: an id or a name, with or without the `@` of a tag.
+fn machine_named(machine: &str) -> &str {
+    machine.trim().trim_start_matches('@')
+}
+
+/// Whether `path` is absolute on macOS, Linux or Windows. A folder on another machine follows that
+/// machine's rules, not this one's.
+fn is_absolute_anywhere(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/') || path.starts_with(r"\\") || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+}
+
+/// The hub's error, or which side needs an update when it is an older hub's or machine's refusal.
+fn needs_update(e: String) -> String {
+    if crate::link::is_unknown_command(&e) {
+        "o hub ou a máquina precisa atualizar o pinned".to_owned()
+    } else {
+        e
+    }
+}
+
 /// A tool's answer as one line of JSON, which the session reads and the chat can render.
 fn text_json<T: Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -3455,12 +3617,14 @@ fn canonical(path: &str) -> PathBuf {
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
 
-/// Most of a worker's last message an orchestrator is sent; the rest stays in the worker's thread.
+/// Most of a worker's last message an orchestrator is sent, or of a Capitão's last message the
+/// global orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
 
-fn truncate(text: &str, max: usize) -> String {
+/// `text` cut to `max` characters, with a note that says where the rest is.
+fn truncate(text: &str, max: usize, rest: &str) -> String {
     match text.char_indices().nth(max) {
-        Some((cut, _)) => format!("{}\n[cut short: the whole message is in the worker's thread]", &text[..cut]),
+        Some((cut, _)) => format!("{}\n[cut short: {rest}]", &text[..cut]),
         None => text.to_owned(),
     }
 }
@@ -6775,7 +6939,8 @@ while True:
         m.record_event(hook(&tab, AgentStatus::Done));
         let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
-        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1", "r-2", "r-3"], "the drained messages started the turn in flight");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-2", "r-3"], "the drained messages started the next turn");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered), "the turn r-1 started ended");
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(std::fs::read(&file).unwrap(), both);
@@ -6832,7 +6997,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
@@ -6922,15 +7087,103 @@ while True:
         assert_eq!(sent["outcome"], json!("iniciado"));
         assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orquestrador] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
-        assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and sending to a Capitão on another machine is not available yet".into()));
-        assert_eq!(tool(&global, r#""name":"projects""#), Err("projects is not available yet".into()));
+        assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into()));
         assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, &send.replace("r-1", "r-3")), Err("only the global orchestrator has this tool".into()));
         assert_eq!(tool(&plain, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("only a project's Capitão reports to the global orchestrator".into()));
         let capitao = sent["tab"].as_str().unwrap();
-        assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("reporting to the global orchestrator is not available yet".into()));
+        assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("this machine is not linked to a hub".into()), "a machine that hosts no orchestrator reports through the hub");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn send_to_captain_relays_a_project_on_another_machine_and_keeps_one_named_by_this_machines_id_here() {
+        let dir = temp("global-relay");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project).display().to_string();
+        let overview: Arc<Mutex<Option<Value>>> = Arc::default();
+        let relayed: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let (seen_overview, seen_relays) = (overview.clone(), relayed.clone());
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Overview => seen_overview.lock().unwrap().clone().ok_or_else(|| "this hub runs pinned 0.17.19, which can't answer that yet".to_owned()),
+            relay @ HubCall::Relay { .. } => {
+                let mut relays = seen_relays.lock().unwrap();
+                relays.push(serde_json::to_value(relay).unwrap());
+                Ok(json!({ "outcome": "na_fila", "tab": "tab-b-1", "position": relays.len() }))
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let relay = |request_id: &str, machine: &str, path: &str| {
+            json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orquestrador", "busy": "queue" } })
+        };
+
+        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
+        assert_eq!(m.send_to_captain("/w/site", Some("m-book"), "Ship it.", "r-2"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 2 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-3"), Err("github.com/o/site is not a project on this machine, and the hub can't list the other machines' projects (this hub runs pinned 0.17.19, which can't answer that yet): name it as <machine id>:<path>".into()));
+        let mine = format!("m-mini:{path}");
+        assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
+        assert_eq!(*relayed.lock().unwrap(), [relay("r-1", "m-book", "/w/site"), relay("r-2", "m-book", "/w/site"), relay("r-4", "m-mini", &path)]);
+
+        m.set_hub_id("m-mini".into());
+        let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
+        assert_eq!(started(&claude, here.tab())[7], "[Orquestrador] Ship it.");
+        assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
+
+        let checkout = |machine: &str, name: &str, online: bool| json!({ "machine": machine, "machine_name": name, "online": online, "path": "/w/site", "captain": "livre" });
+        let site = |checkouts: Vec<Value>| {
+            let machines = [("m-book", "MacBook"), ("m-old", "iMac"), ("m-air", "Air")].map(|(id, name)| json!({ "id": id, "name": name, "online": true }));
+            json!({ "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": checkouts }], "waiting": [], "machines": machines })
+        };
+        *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-old", "iMac", false)]));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-6"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 4 }));
+        *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-air", "Air", true)]));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-7"), Err("github.com/o/site is on MacBook, Air: pass machine to pick one".into()));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("air"), "Ship it.", "r-8"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 5 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("@MacBook"), "Ship it.", "r-9"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 6 }));
+        assert_eq!(m.send_to_captain("Air:/w/site", None, "Ship it.", "r-10"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 7 }));
+        assert_eq!(m.send_to_captain("@imac:/w/new", None, "Ship it.", "r-11"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 8 }), "a folder the overview doesn't list yet");
+        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-12"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 9 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("@Studio"), "Ship it.", "r-13"), Err("github.com/o/site is not a project on Studio".into()));
+        let targets: Vec<(Value, Value)> = relayed.lock().unwrap()[3..].iter().map(|r| (r["to"]["machine"].clone(), r["to"]["path"].clone())).collect();
+        let to = |machine: &str, path: &str| (json!(machine), json!(path));
+        assert_eq!(targets, [to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-old", "/w/new"), to("m-book", "/w/site")]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_captain_reads_a_capitao_on_another_machine_through_the_hub() {
+        let dir = temp("global-read");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let asked: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let seen = asked.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Overview => Ok(json!({
+                "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-book", "machine_name": "MacBook", "online": true, "path": "/w/site", "captain": "trabalhando", "captain_tab": "tab-b-1" }] }],
+                "waiting": [],
+                "machines": [{ "id": "m-book", "name": "MacBook", "online": true }, { "id": "m-old", "name": "iMac", "online": true }],
+            })),
+            HubCall::ReadCaptain { machine, path } => {
+                seen.lock().unwrap().push(json!([machine, path]));
+                match machine.as_str() {
+                    "m-old" => Err("this hub runs pinned 0.17.19, which can't answer that: unknown variant `read_captain`".into()),
+                    _ => Ok(json!({ "state": "working", "next": "it is working; read again in a while", "title": "Ship the form", "conversation": { "items": [], "cursor": 3, "reset": false }, "project": path })),
+                }
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let read = m.read_captain("github.com/o/site", None).map(|text| serde_json::from_str::<Value>(&text).unwrap());
+        assert_eq!(read, Ok(json!({ "state": "working", "next": "it is working; read again in a while", "title": "Ship the form", "conversation": { "items": [], "cursor": 3, "reset": false }, "project": "/w/site" })));
+        let notes = dir.join("notes").display().to_string();
+        assert_eq!(m.read_captain(&notes, Some("@imac")), Err("o hub ou a máquina precisa atualizar o pinned".into()), "a folder the overview doesn't list, on a machine named by name");
+        assert_eq!(m.read_captain(r"m-win:C:\w\site", None).map(|text| serde_json::from_str::<Value>(&text).unwrap()["project"].clone()), Ok(json!(r"C:\w\site")), "a Windows folder, from any machine");
+        assert_eq!(m.read_captain("m-book:/w/api", None).map(|text| serde_json::from_str::<Value>(&text).unwrap()["project"].clone()), Ok(json!("/w/api")), "a Unix folder, from any machine");
+        assert_eq!(*asked.lock().unwrap(), [json!(["m-book", "/w/site"]), json!(["m-old", notes]), json!(["m-win", r"C:\w\site"]), json!(["m-book", "/w/api"])]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6946,8 +7199,140 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open."]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orquestrador", &crate::account::hostname())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A machine whose projects' sessions run under the `work` account, so their transcripts live
+    /// in the test's config folder.
+    #[cfg(unix)]
+    fn work_machine(dir: &Path, claude: &Path, sock: &Path) -> Arc<Machine> {
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), sock: sock.to_owned(), ..launch() }, Some(config), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn said(dir: &Path, session: &str, text: &str) {
+        let folder = dir.join("config/accounts/work/projects/-site");
+        std::fs::create_dir_all(&folder).unwrap();
+        let lines = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orquestrador] Ship the form."}}"#.to_owned(),
+            json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-11-09T10:05:00Z", "message": { "content": [{ "type": "text", "text": text }] } }).to_string(),
+        ];
+        std::fs::write(folder.join(format!("{session}.jsonl")), lines.map(|l| l + "\n").concat()).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_message_from_the_global_orchestrator_comes_back_as_the_capitaos_report_when_its_turn_ends() {
+        let dir = temp("global-e2e");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let tool = |tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{global_tab}","tool":{{{tool}}}}}"#));
+        let host = crate::account::hostname();
+        // As the link does on the hub's hello; the hub itself is down, so every view is this machine's.
+        m.set_hub_id("m-mini".into());
+        let projects = |captain: &str, tab: &str| {
+            let checkout = json!({ "machine": "m-mini", "machine_name": host, "online": true, "version": env!("CARGO_PKG_VERSION"), "path": path, "captain": captain, "captain_tab": tab, "workers": 0 });
+            let machine = json!({ "id": "m-mini", "name": host, "online": true, "version": env!("CARGO_PKG_VERSION") });
+            json!({ "projects": [{ "key": format!("m-mini:{path}"), "name": "site", "checkouts": [checkout] }], "waiting": [], "machines": [machine] })
+        };
+        let overview = || serde_json::from_str::<Value>(&tool(r#""name":"projects""#).unwrap()).unwrap();
+
+        let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
+        let capitao = sent["tab"].as_str().unwrap().to_owned();
+        assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
+        assert_eq!(started(&claude, &capitao)[7], "[Orquestrador] Ship the form.");
+        assert_eq!(overview(), projects("trabalhando", &capitao), "the message started its turn before any hook said so");
+
+        said(&dir, "s1", "The form validates now. PR #12 is open.");
+        let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
+        ask(&sock, &done).unwrap();
+        let report = format!("[pinned] Capitão site ({host}) [m-mini {capitao}]: The form validates now. PR #12 is open.");
+        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orquestrador", &host)], "the report started the global orchestrator");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+
+        assert_eq!(overview(), projects("livre", &capitao));
+        assert_eq!(tool(r#""name":"waiting""#), Ok("[]".into()));
+
+        let read: Value = serde_json::from_str(&tool(&format!(r#""name":"read_captain","project":"m-mini:{path}""#)).unwrap()).unwrap();
+        let conversation = json!([
+            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orquestrador] Ship the form." },
+            { "kind": "text", "at": "2026-11-09T10:05:00Z", "text": "The form validates now. PR #12 is open." },
+        ]);
+        assert_eq!((&read["state"], &read["project"], &read["conversation"]["items"]), (&json!("done"), &json!(path), &conversation));
+        assert_eq!(
+            tool(r#""name":"read_captain","project":"github.com/o/elsewhere""#),
+            Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into())
+        );
+
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        m.start_claude(&plain, 80, 24).unwrap();
+        assert_eq!(started(&claude, &plain), [&path, "", "", "--settings", "s", "--plugin-dir", "p"], "a plain thread got a system prompt");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_off_the_host_reports_through_the_hub_and_tool_only_reports_nothing_by_itself() {
+        let dir = temp("global-relay");
+        let (site, api) = (dir.join("site"), dir.join("api"));
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::create_dir_all(&api).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        let relayed = Arc::new(Mutex::new(vec![]));
+        let hub = relayed.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Relay { .. } => {
+                hub.lock().unwrap().push(serde_json::to_value(&call).unwrap());
+                Ok(json!({ "outcome": "entregue", "tab": "tab-g-1" }))
+            }
+            _ => Err("this hub runs pinned 0.17.19, which can't answer that yet: the global orchestrator's relay is not on the hub".into()),
+        }));
+        let path = m.open_project(site.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let host = crate::account::hostname();
+        let relays = || {
+            let calls = relayed.lock().unwrap().clone();
+            calls.into_iter().map(|mut call| {
+                assert!(call["request_id"].as_str().unwrap().starts_with("report:"), "a report's id may meet a message's: {call}");
+                call["request_id"] = json!("report:*");
+                call
+            }).collect::<Vec<_>>()
+        };
+
+        let capitao = enqueue(&m, &path, "Ship the form.", "r-1").unwrap()["tab"].as_str().unwrap().to_owned();
+        started(&claude, &capitao);
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        assert_eq!(m.project_tool(&capitao, ProjectTool::TellOrchestrator { text: "Which form?".into() }), Ok(r#"{"outcome":"entregue","tab":"tab-g-1"}"#.into()));
+        said(&dir, "s1", "Shipped.");
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || relayed.lock().unwrap().len() == 2);
+        let report = |text: &str, answers: Value| json!({ "cmd": "relay", "request_id": "report:*", "to": { "kind": "orchestrator", "report": { "machine": "", "machine_name": host, "project": "site", "path": path, "tab": capitao, "text": text, "answers": answers } } });
+        let mut asked = report("Which form?", json!([]));
+        asked["to"]["report"].as_object_mut().unwrap().remove("answers");
+        assert_eq!(relays(), [asked, report("Shipped.", json!(["r-1"]))]);
+        assert_eq!(m.projects_overview().map(|o| o.projects.len()), Ok(1), "the hub's refusal did not fall back to this machine");
+
+        m.set_global_settings(global::Settings { reports: global::ReportPolicy::ToolOnly, ..global::Settings::default() }).unwrap();
+        let api_path = api.display().to_string();
+        let other = enqueue(&m, &api_path, "Bump the API.", "r-2").unwrap()["tab"].as_str().unwrap().to_owned();
+        started(&claude, &other);
+        m.record_event(hook(&other, AgentStatus::Done));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(relayed.lock().unwrap().len(), 2, "a tool-only Capitão reported by itself");
+        assert_eq!(m.sent.lock().unwrap().find("r-2").map(|s| s.progress), Some(Progress::Answered));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7023,7 +7408,7 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
@@ -7071,7 +7456,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
@@ -7556,7 +7941,7 @@ while True:
         wait_for("the reports", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
-        assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
+        assert_eq!(truncate("añb", 2, "the whole message is in the worker's thread"), "añ\n[cut short: the whole message is in the worker's thread]");
         let _ = std::fs::remove_dir_all(root);
     }
 

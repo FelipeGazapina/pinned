@@ -155,10 +155,11 @@ function captainState(states) {
 }
 
 /** The account's projects and machines as tags see them. `groups` is the sidebar's
- * `projectGroups()` (grouped by repo with Project grouping on), `directory` is
+ * `projectGroups(true)` (grouped by repo whatever the sidebar's Project grouping says), `directory` is
  * `machineDirectory()`, `phase(tab)` is `phaseOf`, and `repoAt(machine, path)` the repo a folder
- * reported. A group holding only the global orchestrator's own folder is not a project. */
-function tagCatalog({ groups, directory, phase, repoAt, name = "Orquestrador" }) {
+ * reported. `workers(tab)`, when given, adds each host's running worker count to its entry. A
+ * group holding only the global orchestrator's own folder is not a project. */
+function tagCatalog({ groups, directory, phase, repoAt, name = "Orquestrador", workers }) {
   const nameOf = (id) => (id === directory.localId ? directory.localName : directory.names[id] ?? "machine");
   const machineOf = (id) => ({ slug: tagSlug(nameOf(id)), name: nameOf(id), online: directory.online[id] === true });
   const projects = [];
@@ -169,7 +170,9 @@ function tagCatalog({ groups, directory, phase, repoAt, name = "Orquestrador" })
       if (hosts.some((m) => m.id === machine)) continue;
       const captains = group.tabs.filter((tab) => tab.machine === machine && tab.view.role === "orchestrator");
       const busy = captains.some((tab) => !["done", "idle"].includes(phase(tab)));
-      hosts.push({ id: machine, ...machineOf(machine), captain: !captains.length ? "nenhum" : busy ? "trabalhando" : "livre" });
+      const host = { id: machine, ...machineOf(machine), captain: !captains.length ? "nenhum" : busy ? "trabalhando" : "livre" };
+      if (workers) host.workers = captains.reduce((n, tab) => n + (Number(workers(tab)) || 0), 0);
+      hosts.push(host);
     }
     const repo = group.checkouts.map((c) => repoAt(c.machine, c.path)).find(Boolean) ?? "";
     projects.push({ slug: tagSlug(group.name), name: group.name, repo, machines: hosts });

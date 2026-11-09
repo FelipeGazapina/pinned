@@ -3,11 +3,13 @@ async function showGeneral() {
   settingsPage.innerHTML = `<h2>General</h2>
     ${await featuresSettingsHtml()}
     ${await orchestrationSettingsHtml()}
+    ${await globalOrchestratorSettingsHtml()}
     ${sidebarSettingsHtml()}
     ${sendShortcutHtml()}
     ${browserSettingsHtml()}`;
   bindFeaturesSettings();
   bindOrchestrationSettings();
+  bindGlobalOrchestratorSettings();
   bindSidebarSettings();
   bindSendShortcut();
   bindBrowserSettings();

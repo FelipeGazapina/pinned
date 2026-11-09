@@ -3,10 +3,13 @@
 //! runs in `~/.pinned/orquestrador`, a folder no project list holds, so that folder's memory is the
 //! account's global memory.
 
-use crate::agent::{AgentStatus, ROLE_ENV};
-use crate::wire::{MachineId, TabId, TabView};
+use crate::agent::{AgentStatus, Role, ROLE_ENV};
+use crate::history;
+use crate::wire::{MachineId, ProjectView, TabId, TabView};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// `PINNED_ROLE` of the global orchestrator's tab. It is not a `Role`, so `TabView.role` never
 /// carries it to an older app.
@@ -168,17 +171,29 @@ pub struct Sent {
     pub at: u64,
 }
 
+/// The projects whose Capitão runs a turn that a message from the orchestrator started.
+pub type Turns = Arc<Mutex<HashSet<PathBuf>>>;
+
 /// Every message handed on this machine, newest last, saved with each change.
 pub struct Ledger {
     file: Option<PathBuf>,
     sent: Vec<Sent>,
+    /// What `sent` holds in flight, shared so a tab's view reads it without the ledger's lock,
+    /// which a hand-off holds while it starts the tab.
+    turns: Turns,
 }
 
 impl Ledger {
     pub fn load(dir: Option<&Path>) -> Self {
         let file = dir.map(|d| d.join(LEDGER_FILE));
         let sent = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-        Ledger { file, sent }
+        let ledger = Ledger { file, sent, turns: Turns::default() };
+        ledger.count_turns();
+        ledger
+    }
+
+    pub fn turns(&self) -> Turns {
+        self.turns.clone()
     }
 
     pub fn find(&self, request_id: &str) -> Option<&Sent> {
@@ -190,19 +205,21 @@ impl Ledger {
         if self.sent.len() > LEDGER_KEEP {
             self.sent.drain(..self.sent.len() - LEDGER_KEEP);
         }
-        self.save();
+        self.changed();
     }
 
     /// The queued messages with these request ids were typed: the turn they start is in flight.
-    pub fn typed(&mut self, request_ids: &[String]) {
+    /// Whether any was.
+    pub fn typed(&mut self, request_ids: &[String]) -> bool {
         let mut changed = false;
         for sent in self.sent.iter_mut().filter(|s| s.progress == Progress::Queued && request_ids.contains(&s.request_id)) {
             sent.progress = Progress::InFlight;
             changed = true;
         }
         if changed {
-            self.save();
+            self.changed();
         }
+        changed
     }
 
     pub fn queued_on(&self, tab: &str) -> usize {
@@ -227,9 +244,18 @@ impl Ledger {
             answered.push(sent.clone());
         }
         if !answered.is_empty() {
-            self.save();
+            self.changed();
         }
         answered
+    }
+
+    fn count_turns(&self) {
+        *self.turns.lock().unwrap() = self.sent.iter().filter(|s| s.progress == Progress::InFlight).map(|s| s.project.clone()).collect();
+    }
+
+    fn changed(&self) {
+        self.count_turns();
+        self.save();
     }
 
     fn save(&self) {
@@ -288,6 +314,21 @@ pub struct Overview {
     pub projects: Vec<OverviewProject>,
     /// What waits on the user across the account's machines.
     pub waiting: Vec<Waiting>,
+    /// Every machine of the account, with or without projects.
+    #[serde(default)]
+    pub machines: Vec<OverviewMachine>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct OverviewMachine {
+    pub id: MachineId,
+    pub name: String,
+    pub online: bool,
+    #[serde(default)]
+    pub version: String,
+    /// Why its projects may be missing or old, such as `precisa atualizar o pinned`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
 }
 
 /// One project, with every machine that has a checkout of it.
@@ -328,7 +369,8 @@ pub enum CaptainState {
     /// idle notification after a finished turn leaves it idle.
     #[serde(rename = "livre")]
     Idle,
-    /// Running a turn, or asking the user mid-turn: a message queues.
+    /// Running a turn, which a message from the orchestrator may have started before its first
+    /// hook, or asking the user mid-turn: a message queues.
     #[serde(rename = "trabalhando")]
     Working,
     /// No Capitão tab, or the machine is offline: a message opens one where the machine is online.
@@ -340,7 +382,9 @@ impl CaptainState {
     pub fn of(captain: Option<&TabView>) -> CaptainState {
         match captain {
             None => CaptainState::Missing,
-            Some(tab) if tab.running && (tab.status == Some(AgentStatus::Working) || tab.status == Some(AgentStatus::NeedsInput) && tab.interrupted) => CaptainState::Working,
+            Some(tab) if tab.running && (tab.orchestrator_turn || tab.status == Some(AgentStatus::Working) || tab.status == Some(AgentStatus::NeedsInput) && tab.interrupted) => {
+                CaptainState::Working
+            }
             Some(_) => CaptainState::Idle,
         }
     }
@@ -371,6 +415,111 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+}
+
+/// What one machine holds, as `overview` reads it: the node's own lists, or what the hub last heard.
+pub struct MachineSnapshot<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub online: bool,
+    pub version: &'a str,
+    pub projects: &'a [ProjectView],
+    pub tabs: &'a [TabView],
+    /// Why its projects may be missing or old.
+    pub problem: Option<&'a str>,
+}
+
+/// The project's Capitão among `tabs`: the lowest-numbered orchestrator tab working in `path`.
+pub fn captain_tab<'a>(tabs: &'a [TabView], path: &str) -> Option<&'a TabView> {
+    tabs.iter().filter(|t| t.role == Some(Role::Orchestrator) && t.cwd == path).min_by_key(|t| t.opened)
+}
+
+/// Every project on `machines`, one entry per repo however many machines have it, and what waits
+/// on the user there. An offline machine's checkouts are listed with no Capitão, and nothing of it
+/// waits, since its tabs are not live.
+pub fn overview(machines: &[MachineSnapshot]) -> Overview {
+    let mut projects: Vec<OverviewProject> = vec![];
+    let mut waiting = vec![];
+    for machine in machines {
+        let tabs = if machine.online { machine.tabs } else { &[] };
+        for project in machine.projects {
+            let captain = captain_tab(tabs, &project.path);
+            let workers = tabs.iter().filter(|t| t.running && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            let checkout = OverviewCheckout {
+                machine: machine.id.to_owned(),
+                machine_name: machine.name.to_owned(),
+                online: machine.online,
+                version: machine.version.to_owned(),
+                path: project.path.clone(),
+                captain: CaptainState::of(captain),
+                captain_tab: captain.map(|t| t.id.clone()),
+                workers: workers as u32,
+            };
+            let key = project.repo.clone().unwrap_or_else(|| format!("{}:{}", machine.id, project.path));
+            match projects.iter_mut().find(|p| p.key == key) {
+                Some(listed) => listed.checkouts.push(checkout),
+                None => projects.push(OverviewProject { key, name: project.name.clone(), repo: project.repo.clone(), checkouts: vec![checkout] }),
+            }
+        }
+        for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
+            let kind = match tab.status {
+                Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => WaitingKind::NeedsInput,
+                Some(AgentStatus::Failed) => WaitingKind::Failed,
+                _ => continue,
+            };
+            let folder = history::project_of(Path::new(&tab.cwd));
+            waiting.push(Waiting {
+                machine: machine.id.to_owned(),
+                machine_name: machine.name.to_owned(),
+                tab: tab.id.clone(),
+                kind,
+                project: machine.projects.iter().find(|p| Path::new(&p.path) == folder).map(|p| p.path.clone()),
+                title: tab.title.clone(),
+                message: tab.message.clone(),
+                since: tab.updated,
+            });
+        }
+    }
+    let machines = machines
+        .iter()
+        .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned) })
+        .collect();
+    Overview { projects, waiting, machines }
+}
+
+/// The global orchestrator's system prompt. `name` is its configured name, `machine` the machine it
+/// runs on.
+pub fn prompt(name: &str, machine: &str) -> String {
+    format!(
+        "Você é o {name}, o orquestrador global do Felipe no pinned: o chat acima de todos os projetos dele, em todas as máquinas. Você roda na máquina {machine}, numa pasta que não é projeto.
+
+Você nunca faz trabalho de projeto: não lê nem edita arquivos de projeto, não roda comandos neles e não inicia workers. Todo pedido de projeto vai para o Capitão daquele projeto com send_to_captain. O Capitão é a sessão que lidera o projeto; ele faz o trabalho e te reporta.
+
+Para cada pedido:
+1. Chame projects() primeiro e escolha o projeto pelo texto do Felipe. Use a key que projects() lista como project.
+2. #projeto no texto força o projeto, e @máquina força a máquina. Cada marca vale só para o parágrafo em que aparece: um texto com parágrafos para projetos diferentes vira uma mensagem para cada Capitão.
+3. Quando o mesmo repo está em várias máquinas, prefira a máquina com um Capitão rodando (livre ou trabalhando), depois a sua própria máquina ({machine}), depois a primeira online, e passe machine em send_to_captain. Se ainda houver dúvida, pergunte ao Felipe antes de enviar qualquer coisa.
+4. Use um request_id novo em cada mensagem. Repita um request_id só para reenviar a mesma mensagem depois de um erro.
+5. send_to_captain responde entregue (digitado agora), na_fila (o Capitão está ocupado e lê quando terminar), iniciado (o Capitão começou com a mensagem) ou ocupado (tente de novo mais tarde). Conte ao Felipe em uma frase.
+
+Os relatórios dos Capitães chegam como mensagens que começam com \"[pinned] Capitão <projeto> (<máquina>)\". Resuma cada um para o Felipe em poucas linhas: o que foi feito, o que falta e o que precisa dele. read_captain(project) lê as últimas respostas de um Capitão, e waiting() lista o que espera o Felipe em todas as máquinas.
+
+Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou projects() lista uma máquina com problem, diga ao Felipe numa frase simples qual máquina precisa atualizar o pinned ou não respondeu, sem o texto do erro.
+
+Quando uma resposta termina com uma pergunta fechada ao Felipe, a última linha traz só as opções, separadas por \" | \", assim:
+Opções: Sim | Ainda não
+
+Guarde fatos duráveis sobre o Felipe e os projetos dele (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget."
+    )
+}
+
+/// What a project's Capitão is told about the global orchestrator `name`, on top of its own prompt.
+pub fn captain_prompt(name: &str, reports: ReportPolicy) -> String {
+    let end = match reports {
+        ReportPolicy::Auto => "Your last reply of such a turn goes back to it by itself, so end that turn with what you did, what is left and what needs the user.",
+        ReportPolicy::ToolOnly => "Nothing goes back to it by itself: when you finish its request, report with tell_orchestrator.",
+    };
+    format!("A message that starts with \"[{name}] \" comes from the global orchestrator, the user's chat above every project. Do that work as you would the user's. Mid-work, use tell_orchestrator for a question it must answer or news it must hear now. {end}")
 }
 
 /// Where a relayed message goes, and what it carries.
@@ -444,22 +593,128 @@ mod tests {
         assert_eq!(CaptainState::of(Some(&notified)), CaptainState::Idle, "Claude Code's idle notification after a finished turn");
         assert_eq!(CaptainState::of(Some(&tab(true, Some(AgentStatus::Done)))), CaptainState::Idle);
         assert_eq!(CaptainState::of(Some(&tab(false, Some(AgentStatus::Working)))), CaptainState::Idle, "a stopped Capitão starts on the next message");
+        assert_eq!(CaptainState::of(Some(&tab(true, None))), CaptainState::Idle, "a running Capitão that no message started");
+        let started = TabView { orchestrator_turn: true, ..tab(true, None) };
+        assert_eq!(CaptainState::of(Some(&started)), CaptainState::Working, "an orchestrator message started it, before its first hook");
+        assert_eq!(CaptainState::of(Some(&TabView { running: false, ..started })), CaptainState::Idle, "it stopped mid-turn");
         assert_eq!(serde_json::to_value([CaptainState::Idle, CaptainState::Working, CaptainState::Missing]).unwrap(), serde_json::json!(["livre", "trabalhando", "nenhum"]));
+    }
+
+    fn view(id: &str, cwd: &str, role: Option<Role>, running: bool, status: Option<AgentStatus>) -> TabView {
+        let mut tab: TabView = serde_json::from_value(serde_json::json!({ "id": id, "cwd": cwd, "bypass": false, "running": running, "status": status, "title": null, "message": null, "resume_at": null, "connector": null, "opened": id.rsplit('-').next().unwrap().parse::<u64>().unwrap() })).unwrap();
+        tab.role = role;
+        tab
+    }
+
+    fn project(path: &str, repo: Option<&str>) -> ProjectView {
+        ProjectView { path: path.into(), name: path.rsplit('/').next().unwrap().into(), repo: repo.map(Into::into), account: "default".into() }
+    }
+
+    #[test]
+    fn the_same_repo_on_two_machines_is_one_project_with_a_checkout_on_each() {
+        let mini = [project("/Users/f/site", Some("github.com/o/site"))];
+        let mini_tabs = [
+            view("tab-a-3", "/Users/f/site", Some(Role::Orchestrator), true, Some(AgentStatus::Working)),
+            view("tab-a-5", "/Users/f/site", Some(Role::Orchestrator), true, Some(AgentStatus::Done)),
+            view("tab-a-4", "/Users/f/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)),
+            view("tab-a-6", "/Users/f/site", Some(Role::Worker), true, None),
+            view("tab-a-7", "/Users/f/site/.claude/worktrees/pinned-2", Some(Role::Worker), false, Some(AgentStatus::Done)),
+            view("tab-a-8", "/Users/f/site", None, true, Some(AgentStatus::Working)),
+        ];
+        let book = [project("/Users/felipe/code/site", Some("github.com/o/site"))];
+        let machines = [
+            MachineSnapshot { id: "m-mini", name: "Mac mini", online: true, version: "0.17.19", projects: &mini, tabs: &mini_tabs, problem: None },
+            MachineSnapshot { id: "m-book", name: "MacBook", online: true, version: "0.17.18", projects: &book, tabs: &[], problem: Some("precisa atualizar o pinned") },
+        ];
+        assert_eq!(
+            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::json!({
+                "projects": [{
+                    "key": "github.com/o/site",
+                    "name": "site",
+                    "repo": "github.com/o/site",
+                    "checkouts": [
+                        { "machine": "m-mini", "machine_name": "Mac mini", "online": true, "version": "0.17.19", "path": "/Users/f/site", "captain": "trabalhando", "captain_tab": "tab-a-3", "workers": 2 },
+                        { "machine": "m-book", "machine_name": "MacBook", "online": true, "version": "0.17.18", "path": "/Users/felipe/code/site", "captain": "nenhum", "workers": 0 },
+                    ],
+                }],
+                "waiting": [],
+                "machines": [
+                    { "id": "m-mini", "name": "Mac mini", "online": true, "version": "0.17.19" },
+                    { "id": "m-book", "name": "MacBook", "online": true, "version": "0.17.18", "problem": "precisa atualizar o pinned" },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_folder_without_an_origin_is_keyed_by_its_machine_and_an_offline_machine_has_no_capitao_or_waiting() {
+        let notes = [project("/w/notes", None), project("/w/site", Some("github.com/o/site"))];
+        let tabs = [view("tab-b-1", "/w/notes", Some(Role::Orchestrator), true, Some(AgentStatus::Done)), view("tab-b-2", "/w/site", None, true, Some(AgentStatus::Failed))];
+        let machines = [MachineSnapshot { id: "m-1", name: "Linux box", online: false, version: "0.17.10", projects: &notes, tabs: &tabs, problem: None }];
+        assert_eq!(
+            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::json!({
+                "projects": [
+                    { "key": "m-1:/w/notes", "name": "notes", "checkouts": [{ "machine": "m-1", "machine_name": "Linux box", "online": false, "version": "0.17.10", "path": "/w/notes", "captain": "nenhum", "workers": 0 }] },
+                    { "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-1", "machine_name": "Linux box", "online": false, "version": "0.17.10", "path": "/w/site", "captain": "nenhum", "workers": 0 }] },
+                ],
+                "waiting": [],
+                "machines": [{ "id": "m-1", "name": "Linux box", "online": false, "version": "0.17.10" }],
+            })
+        );
+    }
+
+    #[test]
+    fn waiting_holds_questions_mid_turn_and_failures_but_not_the_idle_notice_or_the_orchestrators_own_tab() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let question = TabView { interrupted: true, title: Some("Fix the form".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794234244), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let idle_notice = TabView { interrupted: false, message: Some("Claude is waiting for your input".into()), ..view("tab-c-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::NeedsInput)) };
+        let failed = TabView { message: Some("API Error: 500".into()), updated: Some(1794234300), ..view("tab-c-3", "/tmp/scratch", None, false, Some(AgentStatus::Failed)) };
+        let own = TabView { orchestrator_global: true, interrupted: true, ..view("tab-c-4", "/home/f/.pinned/orquestrador", None, true, Some(AgentStatus::NeedsInput)) };
+        let tabs = [idle_notice, question, failed, own];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.19", projects: &site, tabs: &tabs, problem: None }];
+        assert_eq!(
+            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::json!({
+                "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-1", "machine_name": "MacBook", "online": true, "version": "0.17.19", "path": "/w/site", "captain": "livre", "captain_tab": "tab-c-1", "workers": 1 }] }],
+                "waiting": [
+                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-2", "kind": "needs_input", "project": "/w/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244 },
+                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-3", "kind": "failed", "message": "API Error: 500", "since": 1794234300 },
+                ],
+                "machines": [{ "id": "m-1", "name": "MacBook", "online": true, "version": "0.17.19" }],
+            })
+        );
+    }
+
+    #[test]
+    fn the_capitao_hears_how_its_turn_goes_back_to_the_orchestrator_under_each_policy() {
+        assert_eq!(captain_prompt("Almirante", ReportPolicy::Auto), "A message that starts with \"[Almirante] \" comes from the global orchestrator, the user's chat above every project. Do that work as you would the user's. Mid-work, use tell_orchestrator for a question it must answer or news it must hear now. Your last reply of such a turn goes back to it by itself, so end that turn with what you did, what is left and what needs the user.");
+        assert!(captain_prompt("Almirante", ReportPolicy::ToolOnly).ends_with("Nothing goes back to it by itself: when you finish its request, report with tell_orchestrator."));
+        assert!(prompt("Comandante", "mini").starts_with("Você é o Comandante, o orquestrador global do Felipe no pinned"));
     }
 
     #[test]
     fn the_ledger_moves_a_queued_message_in_flight_then_answered_and_survives_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::load(Some(dir.path()));
-        let sent = |id: &str, handoff, progress| Sent { request_id: id.into(), sender: "Orquestrador".into(), project: "/p".into(), handoff, progress, at: 1 };
-        ledger.record(sent("r1", Handoff::Queued { tab: "t".into(), position: 1 }, Progress::Queued));
-        ledger.record(sent("r2", Handoff::Delivered { tab: "t".into() }, Progress::InFlight));
+        let turns = ledger.turns();
+        let in_turn = || turns.lock().unwrap().iter().cloned().collect::<Vec<PathBuf>>();
+        let sent = |id: &str, project: &str, handoff, progress| Sent { request_id: id.into(), sender: "Orquestrador".into(), project: project.into(), handoff, progress, at: 1 };
+        ledger.record(sent("r1", "/p", Handoff::Queued { tab: "t".into(), position: 1 }, Progress::Queued));
+        ledger.record(sent("r0", "/q", Handoff::Queued { tab: "u".into(), position: 1 }, Progress::Queued));
+        assert_eq!(in_turn(), Vec::<PathBuf>::new(), "a queued message starts no turn");
+        ledger.record(sent("r2", "/p", Handoff::Delivered { tab: "t".into() }, Progress::InFlight));
+        assert_eq!(in_turn(), [PathBuf::from("/p")]);
         assert_eq!(ledger.queued_on("t"), 1);
-        ledger.typed(&["r1".into()]);
+        assert_eq!((ledger.typed(&["r1".into()]), ledger.typed(&["r1".into()])), (true, false));
         let ledger = Ledger::load(Some(dir.path()));
         assert_eq!(ledger.in_flight(Path::new("/p")).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r1", "r2"]);
+        let turns = ledger.turns();
+        assert_eq!(turns.lock().unwrap().iter().cloned().collect::<Vec<PathBuf>>(), [PathBuf::from("/p")], "a reload knows the turn in flight");
         let mut ledger = ledger;
         assert_eq!(ledger.answer(Path::new("/p")).len(), 2);
+        assert!(turns.lock().unwrap().is_empty(), "the answered turn is over");
         assert_eq!(ledger.answer(Path::new("/p")).len(), 0, "an answered message reports once");
         assert_eq!(ledger.find("r1").map(|s| s.progress), Some(Progress::Answered));
     }
