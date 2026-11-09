@@ -3,8 +3,10 @@
 //! with it.
 
 use crate::agent::AgentStatus;
+use crate::thread;
 use crate::wire::TabView;
 use serde_json::{json, Value};
+use std::path::Path;
 
 /// How many conversation items a read returns when not told.
 pub const DEFAULT_ITEMS: usize = 20;
@@ -74,6 +76,14 @@ pub fn conversation(page: &Value, limit: usize) -> Value {
         .unwrap_or_default();
     let skip = items.len().saturating_sub(limit);
     json!({ "items": items[skip..], "cursor": page["next"], "reset": page["reset"].as_bool().unwrap_or(false) })
+}
+
+/// The end of the transcript `file` as a `Call::Thread` page, reaching back far enough to hold its
+/// last `limit` conversation items when its last 8 MiB have them.
+pub fn end_of(file: &Path, limit: usize) -> Result<Value, String> {
+    let enough = |page: &thread::Page| serde_json::to_value(page).is_ok_and(|page| conversation(&page, limit)["items"].as_array().is_some_and(|items| items.len() >= limit));
+    let page = thread::read_end(file, enough).map_err(|e| format!("could not read the transcript: {e}"))?;
+    serde_json::to_value(page).map_err(|e| e.to_string())
 }
 
 /// A read of `tab`: its state, what to do next, its title, the question it asks the user, and the

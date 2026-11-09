@@ -292,6 +292,30 @@ fn is_command(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| word.starts_with('/') && !word[1..].contains('/'))
 }
 
+/// The items in the last whole lines of `file`, read from as far back as `enough` needs: the window
+/// grows from 256 KiB until `enough` holds, it reaches the start, or it is a page long. `read` from
+/// the start stops a page in, so it never reaches the end of a longer transcript.
+pub fn read_end(file: &Path, enough: impl Fn(&Page) -> bool) -> std::io::Result<Page> {
+    let len = std::fs::metadata(file)?.len();
+    let mut window = 1 << 18;
+    loop {
+        let from = match len.checked_sub(window + 1) {
+            // Starts at the first line that begins inside the window.
+            Some(before) => {
+                let mut f = std::fs::File::open(file)?;
+                f.seek(SeekFrom::Start(before))?;
+                before + rest_of_line(&mut f)?.unwrap_or(len - before)
+            }
+            None => 0,
+        };
+        let page = read(file, from)?;
+        if from == 0 || window >= READ_LIMIT || enough(&page) {
+            return Ok(page);
+        }
+        window = (window * 4).min(READ_LIMIT);
+    }
+}
+
 /// The list of the last `TodoWrite` call on an assistant line of the main conversation.
 fn todos_of(line: &Value) -> Option<Todos> {
     if line["type"] != "assistant" {
@@ -976,6 +1000,28 @@ mod tests {
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
         assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }, "a line still being written waits");
+    }
+
+    #[test]
+    fn the_end_of_a_transcript_longer_than_a_page_holds_its_true_last_reply() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let reply = |uuid: &str, text: &str| format!(r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"t","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#);
+        let filler = reply("old", &"x".repeat(1 << 20));
+        for _ in 0..10 {
+            writeln!(file, "{filler}").unwrap();
+        }
+        writeln!(file, r#"{{"type":"user","uuid":"ask","timestamp":"t","message":{{"content":"what is running?"}}}}"#).unwrap();
+        writeln!(file, "{}", reply("last", "Two Slack threads.")).unwrap();
+        assert!(std::fs::metadata(file.path()).unwrap().len() > READ_LIMIT);
+        let last_text = |page: &Page| page.items.iter().rev().find_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None });
+        assert_eq!(last_text(&read(file.path(), 0).unwrap()).map(|t| t.len()), Some(1 << 20), "a read from the start stops a page in, at an old reply");
+
+        let texts = |page: Page| page.items.into_iter().map(|i| if let Item::User { text, .. } | Item::Text { text, .. } = i { text.chars().take(20).collect() } else { String::new() }).collect::<Vec<String>>();
+        assert_eq!(texts(read_end(file.path(), |p| p.items.len() >= 2).unwrap()), ["what is running?", "Two Slack threads."], "the last 256 KiB hold both");
+        let three = read_end(file.path(), |p| p.items.len() >= 3).unwrap();
+        assert_eq!(texts(three), [&["x".repeat(20), "x".repeat(20), "x".repeat(20)][..], &["what is running?".into(), "Two Slack threads.".into()]].concat(), "4 MiB back, it starts at the first whole line");
+        let all = read_end(file.path(), |_| false).unwrap();
+        assert_eq!(all.items.len(), 9, "it grows no wider than a page");
     }
 
     #[test]
