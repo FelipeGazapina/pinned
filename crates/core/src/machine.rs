@@ -26,6 +26,7 @@ const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
+const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -1895,6 +1896,9 @@ impl Machine {
         if text.is_empty() {
             return Err("the message is empty".into());
         }
+        if canonical(path) == self.global_folder() {
+            return Err(format!("{path} is the global orchestrator's folder, which has no Capitão"));
+        }
         let settings = self.global_settings();
         let mut sent = self.sent.lock().unwrap();
         if let Some(earlier) = sent.find(request_id) {
@@ -2057,7 +2061,7 @@ impl Machine {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
         match tool {
-            ProjectTool::Delegate { .. } | ProjectTool::Agents if global => Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()),
+            ProjectTool::Delegate { .. } | ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
             ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
             ProjectTool::Projects => {
@@ -2737,6 +2741,11 @@ impl Machine {
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
+        if let Some(tab) = caller.tab.as_deref() {
+            if self.tab(tab, |t| global::is_global(&t.env))? {
+                return Err(NO_PROJECT_WORK.into());
+            }
+        }
         self.check_worker_cap()?;
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
@@ -6907,6 +6916,51 @@ while True:
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
         assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open."]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_that_claude_code_calls_idle_after_its_turn_is_free_and_takes_a_message_now() {
+        let dir = temp("enqueue-idle-notice");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        let state = || global::CaptainState::of(Some(&m.view(&tab).unwrap()));
+
+        m.record_event(hook(&tab, AgentStatus::NeedsInput));
+        assert_eq!(state(), global::CaptainState::Idle, "the idle notification a minute after the turn");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        m.record_event(hook(&tab, AgentStatus::NeedsInput));
+        assert_eq!(state(), global::CaptainState::Working, "a permission prompt mid-turn");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrators_folder_gets_no_capitao_and_its_tab_starts_no_worker() {
+        let dir = temp("global-nocap");
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, dir.join("missing-claude"))]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let folder = config.join("home/.pinned/orquestrador").display().to_string();
+
+        assert_eq!(enqueue(&m, &folder, "Ship it.", "r-1"), Err(format!("{folder} is the global orchestrator's folder, which has no Capitão")));
+        assert_eq!(m.list_projects().len(), 0, "the global folder became a project");
+        assert_eq!(m.tabs().iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [global.as_str()], "a Capitão opened in the global folder");
+
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        let delegate = serde_json::to_string(&Message::Delegate { tab: Some(global.clone()), task: None, tool: None, request: Box::new(request) }).unwrap();
+        assert_eq!(ask(&sock, &delegate), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
+        assert!(m.delegates.running().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

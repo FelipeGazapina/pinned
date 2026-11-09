@@ -23054,12 +23054,12 @@
             "description": "Whether a message to the project's Capitão would be typed now.",
             "oneOf": [
               {
-                "description": "Idle, finished, failed or stopped: a message is typed now or starts it.",
+                "description": "Idle, finished, failed or stopped: a message is typed now or starts it. Claude Code's\nidle notification after a finished turn leaves it idle.",
                 "type": "string",
                 "const": "livre"
               },
               {
-                "description": "Working or waiting on the user: a message queues.",
+                "description": "Running a turn, or asking the user mid-turn: a message queues.",
                 "type": "string",
                 "const": "trabalhando"
               },
@@ -23237,12 +23237,12 @@
             "description": "Whether a message to the project's Capitão would be typed now.",
             "oneOf": [
               {
-                "description": "Idle, finished, failed or stopped: a message is typed now or starts it.",
+                "description": "Idle, finished, failed or stopped: a message is typed now or starts it. Claude Code's\nidle notification after a finished turn leaves it idle.",
                 "type": "string",
                 "const": "livre"
               },
               {
-                "description": "Working or waiting on the user: a message queues.",
+                "description": "Running a turn, or asking the user mid-turn: a message queues.",
                 "type": "string",
                 "const": "trabalhando"
               },

@@ -324,10 +324,11 @@ pub struct OverviewCheckout {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptainState {
-    /// Idle, finished, failed or stopped: a message is typed now or starts it.
+    /// Idle, finished, failed or stopped: a message is typed now or starts it. Claude Code's
+    /// idle notification after a finished turn leaves it idle.
     #[serde(rename = "livre")]
     Idle,
-    /// Working or waiting on the user: a message queues.
+    /// Running a turn, or asking the user mid-turn: a message queues.
     #[serde(rename = "trabalhando")]
     Working,
     /// No Capitão tab, or the machine is offline: a message opens one where the machine is online.
@@ -339,7 +340,7 @@ impl CaptainState {
     pub fn of(captain: Option<&TabView>) -> CaptainState {
         match captain {
             None => CaptainState::Missing,
-            Some(tab) if tab.running && matches!(tab.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) => CaptainState::Working,
+            Some(tab) if tab.running && (tab.status == Some(AgentStatus::Working) || tab.status == Some(AgentStatus::NeedsInput) && tab.interrupted) => CaptainState::Working,
             Some(_) => CaptainState::Idle,
         }
     }
@@ -434,11 +435,13 @@ mod tests {
     }
 
     #[test]
-    fn a_captain_is_working_only_while_its_session_runs_a_turn_or_asks() {
-        let tab = |running, status| TabView { running, status, ..serde_json::from_value(serde_json::json!({ "id": "t", "cwd": "/p", "bypass": false, "running": false, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap() };
+    fn a_captain_is_working_only_while_its_session_runs_a_turn_or_asks_mid_turn() {
+        let tab = |running, status| TabView { running, status, interrupted: true, ..serde_json::from_value(serde_json::json!({ "id": "t", "cwd": "/p", "bypass": false, "running": false, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap() };
         assert_eq!(CaptainState::of(None), CaptainState::Missing);
         assert_eq!(CaptainState::of(Some(&tab(true, Some(AgentStatus::Working)))), CaptainState::Working);
-        assert_eq!(CaptainState::of(Some(&tab(true, Some(AgentStatus::NeedsInput)))), CaptainState::Working);
+        assert_eq!(CaptainState::of(Some(&tab(true, Some(AgentStatus::NeedsInput)))), CaptainState::Working, "it asks the user mid-turn");
+        let notified = TabView { interrupted: false, ..tab(true, Some(AgentStatus::NeedsInput)) };
+        assert_eq!(CaptainState::of(Some(&notified)), CaptainState::Idle, "Claude Code's idle notification after a finished turn");
         assert_eq!(CaptainState::of(Some(&tab(true, Some(AgentStatus::Done)))), CaptainState::Idle);
         assert_eq!(CaptainState::of(Some(&tab(false, Some(AgentStatus::Working)))), CaptainState::Idle, "a stopped Capitão starts on the next message");
         assert_eq!(serde_json::to_value([CaptainState::Idle, CaptainState::Working, CaptainState::Missing]).unwrap(), serde_json::json!(["livre", "trabalhando", "nenhum"]));
