@@ -891,6 +891,39 @@ function retryUploadImages() {
 function userHtml(user, t, tab, first) {
   const by = sentBy(tab, user, first);
   if (by === "automation") return automationHtml(user, t);
+  if (globalLane(tab)) {
+    const reports = reportBlocks(user.text);
+    if (reports.length) return globalReportsHtml(user, t, tab, first, by, reports);
+  }
+  return userBubbleHtml(user, t, tab, first, by);
+}
+
+/** The global orchestrator's own lane, drawn only in its tab: report rows, quick replies, read
+ * aloud. Guarded by typeof so the plain timeline, and the sandbox that tests it without
+ * composer-tags.js, keep the ordinary path. */
+const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isGlobalOrchestratorTab(tab);
+
+/** A prompt that carries Captain reports: the sender's own words above, if any, then one row per
+ * report, or one fold that opens to them while the settings group reports. */
+function globalReportsHtml(user, t, tab, first, by, reports) {
+  const mine = user.text.slice(0, reports[0].start).trim();
+  const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
+  const rows = reports.map((report) => reportRowHtml(report, user.at)).join("");
+  if (globalSettings.group_reports !== false && reports.length > 1) {
+    const key = `reports:${user.id}`;
+    const open = t.open.has(key);
+    return `${lead}<div class="reports"><button type="button" class="report-fold" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="label">${esc(reportFoldLabel(reports))}</span>${icon("chevron-down", "chev")}</button>${open ? rows : ""}</div>`;
+  }
+  return `${lead}<div class="reports">${rows}</div>`;
+}
+
+/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread. */
+function reportRowHtml(report, at) {
+  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" title="Open this thread">Capitão ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
+}
+
+/** The prompt bubble as every other thread draws it. */
+function userBubbleHtml(user, t, tab, first, by) {
   const cited = citationsIn(user.text);
   if (cited) user = { ...user, text: cited.text, citations: cited.citations };
   const key = `full:${user.id}`;
@@ -942,9 +975,14 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
   // A live turn reads top-down while it runs: what claude already said comes before the work in
   // progress and the agents, so the orchestrator's plan leads instead of trailing the cards.
-  const said = shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("");
+  // A global orchestrator's answer hides its quick-reply line; only the latest offers it as buttons.
+  const quick = !live && globalLane(tab) && turn.answer ? quickReplyOf(turn.answer.text) : null;
+  const answerShown = quick ? { ...turn.answer, text: quick.text } : turn.answer;
+  const saidSteps = quick ? shown.map((s) => (s === turn.answer ? answerShown : s)) : shown;
+  const said = saidSteps.map((s) => shownHtml(s, cwd, t, live ? null : answerShown, t.editable === true)).join("");
+  const replies = quick && latest ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
   return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? said : ""}${fold}${agentCardsHtml(tab, turn, latest)}
-    ${live ? "" : said}
+    ${live ? "" : said}${replies}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
 }
@@ -1061,10 +1099,11 @@ function renderThread() {
   const box = !sub && boxSoon(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsOf(t.items);
+  if (globalLane(tab) && !sub) speakGlobalTexts(tab, turns);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalSettings.group_reports : null]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1721,6 +1760,16 @@ threadView.addEventListener("click", (e) => {
   }
   const boxAdd = e.target.closest("[data-box-add]");
   if (boxAdd) return extendBoxFunds(active, Number(boxAdd.dataset.boxAdd));
+  const reply = e.target.closest("[data-reply]");
+  if (reply) {
+    prompt.value = reply.dataset.reply;
+    return send();
+  }
+  const reportThread = e.target.closest("[data-report-tab]");
+  if (reportThread) {
+    revealTab(reportThread.dataset.reportMachine, reportThread.dataset.reportTab).catch((e) => tell(`Couldn't open that thread: ${esc(e)}`, 6000));
+    return;
+  }
   const dialogKey = e.target.closest("[data-dialog-key]");
   if (dialogKey) {
     dialogKey.closest(".dialog-card").focus({ preventScroll: true });
