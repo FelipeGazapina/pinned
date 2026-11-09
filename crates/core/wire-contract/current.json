@@ -2,6 +2,7 @@
   "version": "current",
   "routes": [
     "POST /api/signup",
+    "GET /api/signup",
     "POST /api/login",
     "POST /api/logout",
     "POST /api/password",
@@ -4504,6 +4505,49 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
                 ]
               },
               {
@@ -11201,6 +11245,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -15004,6 +15091,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -18768,6 +18898,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -21140,6 +21313,13 @@
           },
           "password": {
             "type": "string"
+          },
+          "invite": {
+            "description": "The invite code a hub in `invite` mode asks a new account for. Sign in ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21158,6 +21338,13 @@
           },
           "password": {
             "type": "string"
+          },
+          "invite": {
+            "description": "The invite code a hub in `invite` mode asks a new account for. Sign in ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -24272,6 +24459,148 @@
         ]
       }
     },
+    "Invites": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Invites",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/InviteView"
+            }
+          }
+        },
+        "required": [
+          "signup",
+          "pending"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          },
+          "InviteView": {
+            "description": "An invite code nobody has used yet, named by its first characters.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "expires_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "hint",
+              "created_at",
+              "expires_at"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Invites",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/InviteView"
+            }
+          }
+        },
+        "required": [
+          "signup",
+          "pending"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          },
+          "InviteView": {
+            "description": "An invite code nobody has used yet, named by its first characters.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "expires_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "hint",
+              "created_at",
+              "expires_at"
+            ]
+          }
+        }
+      }
+    },
     "LinearAccount": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -24774,6 +25103,56 @@
             ]
           }
         }
+      }
+    },
+    "NewInvite": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "NewInvite",
+        "description": "An invite code, shown this once: the hub keeps only its hash.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "expires_at"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "NewInvite",
+        "description": "An invite code, shown this once: the hub keeps only its hash.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "expires_at"
+        ]
       }
     },
     "Overview": {
@@ -29088,6 +29467,80 @@
                   "channel",
                   "thread"
                 ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "SignupInfo": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SignupInfo",
+        "description": "`GET /api/signup` answers this, before anyone signs in.",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          }
+        },
+        "required": [
+          "signup"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SignupInfo",
+        "description": "`GET /api/signup` answers this, before anyone signs in.",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          }
+        },
+        "required": [
+          "signup"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
               }
             ]
           }

@@ -1,0 +1,67 @@
+{
+  "machines": [
+    "bruno-node"
+  ],
+  "tabs": [
+    {
+      "machine": "bruno-node",
+      "cwd": "$SWEEP_DIR/home-b/work/delta",
+      "title": null
+    },
+    {
+      "machine": "bruno-node",
+      "cwd": "$SWEEP_DIR/home-b/work/epsilon",
+      "title": null
+    },
+    {
+      "machine": "bruno-node",
+      "cwd": "$SWEEP_DIR/home-b/.pinned/orquestrador",
+      "title": null
+    }
+  ],
+  "overview": {
+    "projects": [
+      {
+        "key": "github.com/bruno/delta",
+        "name": "delta",
+        "repo": "github.com/bruno/delta",
+        "checkouts": [
+          {
+            "machine": "c7f22e66-799d-4e6c-b0b3-3ab196e2eddb",
+            "machine_name": "bruno-node",
+            "online": true,
+            "version": "0.17.20",
+            "path": "$SWEEP_DIR/home-b/work/delta",
+            "captain": "nenhum",
+            "workers": 0
+          }
+        ]
+      },
+      {
+        "key": "github.com/bruno/epsilon",
+        "name": "epsilon",
+        "repo": "github.com/bruno/epsilon",
+        "checkouts": [
+          {
+            "machine": "c7f22e66-799d-4e6c-b0b3-3ab196e2eddb",
+            "machine_name": "bruno-node",
+            "online": true,
+            "version": "0.17.20",
+            "path": "$SWEEP_DIR/home-b/work/epsilon",
+            "captain": "nenhum",
+            "workers": 0
+          }
+        ]
+      }
+    ],
+    "waiting": [],
+    "machines": [
+      {
+        "id": "c7f22e66-799d-4e6c-b0b3-3ab196e2eddb",
+        "name": "bruno-node",
+        "online": true,
+        "version": "0.17.20"
+      }
+    ]
+  }
+}

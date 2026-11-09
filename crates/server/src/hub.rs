@@ -1,5 +1,6 @@
 use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
+use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
@@ -8,7 +9,7 @@ use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
+    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -74,6 +75,7 @@ pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 pub struct Hub {
     pub db: Db,
     pub public_url: String,
+    pub signup: Signup,
     pub boxes: Boxes,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
@@ -151,10 +153,10 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 }
 
 impl Hub {
-    pub fn new(db: Db, public_url: String, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
+    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
@@ -372,6 +374,21 @@ impl Hub {
                 let (code, expires_at) = self.db.create_pair_code(account.id).await?;
                 let command = format!("curl -fsSL {}/install.sh | sh -s -- {code}", self.public_url);
                 return json(PairCode { code, expires_at, command });
+            }
+            HubCall::CreateInvite => {
+                if self.signup != Signup::Invite {
+                    return Err("this hub takes no invites: anyone may sign up, or only its first account".into());
+                }
+                return json(self.db.create_invite(account.id).await?);
+            }
+            HubCall::Invites => return json(Invites { signup: self.signup, pending: self.db.invites(account.id).await? }),
+            HubCall::RevokeInvite { id } => {
+                let unknown = || format!("this account has no unused invite {id}");
+                let invite = Uuid::parse_str(&id).map_err(|_| unknown())?;
+                if !self.db.revoke_invite(account.id, invite).await? {
+                    return Err(unknown());
+                }
+                return Ok(Value::Null);
             }
             HubCall::GetSettings => (json(c().await?.get_settings()), false),
             HubCall::ConnectLinear { key } => (json(c().await?.connect_linear(&key).await?), true),

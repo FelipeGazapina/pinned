@@ -1,4 +1,4 @@
-use pinned_core::account::{self, Credentials};
+use pinned_core::account::{self, Credentials, Signup};
 use pinned_core::link;
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::reminders;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open] [--learning-db <postgres url>]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -86,10 +86,11 @@ impl Args {
 
 fn hub(args: &[String]) -> Result<(), String> {
     let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db"], 0)?;
-    let open_signup = match args.flags.get("signup").map(String::as_str) {
-        None | Some("first") => false,
-        Some("open") => true,
-        Some(other) => return Err(format!("--signup takes first or open, not {other}\n{USAGE}")),
+    let signup = match args.flags.get("signup").map(String::as_str) {
+        None | Some("first") => Signup::First,
+        Some("open") => Signup::Open,
+        Some("invite") => Signup::Invite,
+        Some(other) => return Err(format!("--signup takes first, open or invite, not {other}\n{USAGE}")),
     };
     let config = pinned_server::Config {
         db: args.required("db")?,
@@ -98,7 +99,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         downloads: args.required("downloads")?.into(),
         public_url: args.flags.get("public-url").cloned(),
         key_file: args.flags.get("key-file").map_or_else(|| args.config_dir().join("hub.key"), PathBuf::from),
-        open_signup,
+        signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
         box_policy: pinned_server::boxes::Policy::default(),
         learning_db: args.flags.get("learning-db").cloned(),

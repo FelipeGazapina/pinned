@@ -8,14 +8,19 @@ function showAccount() {
         <label>Hub <input name="hub" value="${esc(load("hub-url") ?? DEFAULT_HUB)}" spellcheck="false" autocomplete="off"></label>
         <label>Email <input name="email" type="email" autocomplete="username"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password"></label>
+        <label hidden>Invite code, to create an account <input name="invite" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
         <p class="error" id="account-error"></p>
         <div class="actions"><button type="button" class="secondary" data-action="create-account">Create account</button>
           <button class="primary">Sign in</button></div>
       </form>`;
-    settingsPage.querySelector(".sign-in").onsubmit = (e) => {
+    const form = settingsPage.querySelector(".sign-in");
+    form.onsubmit = (e) => {
       e.preventDefault();
       signInApp(false);
     };
+    const askInvite = async () => (form.invite.parentElement.hidden = (await signupMode(form.hub.value.trim().replace(/\/+$/, ""))) !== "invite");
+    form.hub.onchange = askInvite;
+    askInvite();
     return;
   }
   // Redrawing would take the password being typed away.
@@ -42,12 +47,98 @@ function showAccount() {
       <label>New password <input name="password" type="password" autocomplete="new-password" minlength="8"></label>
       <p class="error" id="password-error"></p><p class="hint" id="password-done"></p>
       <div class="actions"><button class="primary">Change password</button></div>
-    </form>`;
+    </form>
+    ${invitesHtml()}`;
   settingsPage.querySelector(".new-password").onsubmit = (e) => {
     e.preventDefault();
     changePassword(e.target);
   };
+  if (invitesUi.of !== account) invitesUi = { of: account, signup: null, pending: [], made: null, error: "", loading: false };
+  if (state === "online" && invitesUi.signup === null && !invitesUi.loading) loadInvites();
 }
+
+// Whether the hub at `hubUrl` asks a new account for an invite code; null when it can't say.
+async function signupMode(hubUrl) {
+  try {
+    const res = await fetch(`${hubUrl}/api/signup`);
+    return res.ok ? (await res.json()).signup : null;
+  } catch {
+    return null;
+  }
+}
+
+let invitesUi = { of: null, signup: null, pending: [], made: null, error: "", loading: false };
+
+async function loadInvites() {
+  invitesUi.loading = true;
+  try {
+    const { signup, pending } = await hub.hub({ cmd: "invites" });
+    Object.assign(invitesUi, { signup, pending });
+  } catch {
+    // An older hub has no invites.
+    invitesUi.signup = "none";
+  }
+  invitesUi.loading = false;
+  if (settingsOpen() && page === "account") showAccount();
+}
+
+const inviteDate = (unix) => new Date(unix * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+
+function invitesHtml() {
+  if (invitesUi.signup !== "invite") return "";
+  const { made, pending, error } = invitesUi;
+  const rows = pending
+    .map(
+      (invite) => `<div class="machine-row" data-invite="${esc(invite.id)}">
+        <div class="who"><b>${esc(invite.hint)}-…</b><span class="hint">Created ${esc(inviteDate(invite.created_at))} · expires ${esc(inviteDate(invite.expires_at))}</span></div>
+        <button class="secondary danger" data-action="revoke-invite">Revoke</button></div>`,
+    )
+    .join("");
+  return `<div class="card invites">
+      <div class="card-head"><div><b>Invite someone</b>
+        <div class="hint">A code lets one person create their own account on this hub, with their own machines and sessions. It works once, for 7 days.</div></div></div>
+      ${
+        made
+          ? `<p>Send this code to the person you invite. It is shown only now.</p>
+             <div class="row command"><code>${esc(made.code)}</code><button class="secondary" data-action="copy-invite">Copy</button></div>`
+          : ""
+      }
+      ${rows ? `<p class="hint">Codes not used yet</p><div class="machine-list">${rows}</div>` : ""}
+      <p class="error">${esc(error)}</p>
+      <div class="actions start"><button class="${made ? "secondary" : "primary"}" data-action="create-invite">Create an invite code</button></div>
+    </div>`;
+}
+
+async function inviteAction(call) {
+  invitesUi.error = "";
+  try {
+    return await hub.hub(call);
+  } catch (e) {
+    invitesUi.error = String(e);
+  } finally {
+    await loadInvites();
+  }
+}
+
+Object.assign(actions, {
+  async "create-invite"() {
+    invitesUi.made = (await inviteAction({ cmd: "create_invite" })) ?? invitesUi.made;
+    showAccount();
+  },
+  async "revoke-invite"(button) {
+    const id = button.closest("[data-invite]").dataset.invite;
+    if (invitesUi.made?.id === id) invitesUi.made = null;
+    await inviteAction({ cmd: "revoke_invite", id });
+  },
+  async "copy-invite"(button) {
+    try {
+      await navigator.clipboard.writeText(invitesUi.made.code);
+      button.textContent = "Copied";
+    } catch {
+      getSelection().selectAllChildren(button.previousElementSibling);
+    }
+  },
+});
 
 const NOTIFICATIONS = {
   default: ["Off", "Hear when a session finishes or needs you while pinned is in the background or on another tab."],
@@ -108,7 +199,7 @@ async function signInApp(create) {
   error.textContent = "";
   for (const b of form.querySelectorAll("button")) b.disabled = true;
   try {
-    const signedIn = await invoke("sign_in", { hub: hubUrl, email, password, create });
+    const signedIn = await invoke("sign_in", { hub: hubUrl, email, password, create, invite: form.invite.value.trim() || null });
     save("hub-url", hubUrl);
     connectHub(signedIn);
     showAccount();
@@ -309,19 +400,21 @@ function showLogin(reason = "") {
   document.body.dataset.page = "login";
   loginForm.querySelector(".error").textContent = reason;
   loginForm.email.focus();
+  signupMode("").then((mode) => (loginForm.invite.hidden = mode !== "invite"));
 }
 
 async function loginWeb(create) {
   const error = loginForm.querySelector(".error");
   const email = loginForm.email.value.trim();
   const password = loginForm.password.value;
+  const invite = create ? loginForm.invite.value.trim() : "";
   if (!email || !password) return (error.textContent = "Fill in your email and password.");
   error.textContent = "";
   try {
     const res = await fetch(`/api/${create ? "signup" : "login"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(invite ? { email, password, invite } : { email, password }),
     });
     const text = await res.text();
     let body = {};
@@ -330,7 +423,7 @@ async function loginWeb(create) {
     } catch {}
     if (!res.ok) throw body.error ?? (text || res.statusText);
     save("hub-token", body.token);
-    loginForm.password.value = "";
+    loginForm.password.value = loginForm.invite.value = "";
     delete document.body.dataset.page;
     connectHub({ hub: location.origin, user_token: body.token, machine_id: null, email: body.account?.email ?? email });
   } catch (e) {
