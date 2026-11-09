@@ -70,6 +70,7 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 |---|---|---|
 | `Relay` | `{"cmd":"relay","request_id":"r-1","to":{RelayTo}}` | `Handoff` from the target machine |
 | `Overview` | `{"cmd":"overview"}` | `Overview` |
+| `ReadCaptain` | `{"cmd":"read_captain","machine":"<machine id>","path":"/w/site"}` | what the node's own `read_captain` answers: `reading::read` of the Capitão with `project` set to `path`, or `{"state":"not_started",...}` when the project has no Capitão that runs or has a conversation, or `{"state":"offline",...}` |
 
 `RelayTo` is tagged by `kind`:
 
@@ -78,12 +79,19 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 {"kind":"orchestrator","report":{CaptainReport}}
 ```
 
-- `captain` direction: the hub must take it only from the machine that hosts the account's global orchestrator, then call `Call::Enqueue { path, text, request_id, sender, busy }` on `machine`.
-- `orchestrator` direction: the hub must take it only from a machine whose tab `report.tab` is a Capitão (`role == orchestrator`) with `cwd == report.path`. It fills `report.machine` and `report.machine_name` from the sending socket, finds the host machine, and calls `Call::OrchestratorReport { request_id, report }` there.
-- How the hub finds the host is the hub-bridge unit's choice. `Call::GlobalOrchestratorSettings` on each online machine answers `host`.
-- Today the hub refuses both, from a machine (`http.rs` `machine_frame`, which routes them to `hub_call`) and from a client (`hub.rs` `hub_call`), with `hub::not_yet(call)`:
-  `this hub runs pinned <v>, which can't answer that yet: the global orchestrator's relay is not on the hub`.
-  `is_unknown_command` is true for it and for an older hub's `this hub runs pinned <v>, which can't answer that: unknown variant ...`. Test: `crates/server/tests/hub.rs` `a_node_reads_the_hubs_refusal_of_the_global_orchestrator_calls_as_an_unknown_command`.
+`crates/server/src/relay.rs` `serve` answers all three. `http.rs` `machine_frame` passes the sending machine as the source, and `hub.rs` `hub_call` passes a signed-in client. A client may call any machine of the account anyway, so the source checks below apply only to a machine.
+
+- `captain` direction: the hub takes it only from the machine that hosts the account's global orchestrator, then calls `Call::Enqueue { path, text, request_id, sender, busy }` on `machine` under `Hub::hold_captain`.
+- `orchestrator` direction: the hub takes it only from a machine whose tab `report.tab` is a Capitão (`role == orchestrator`) with `cwd == report.path`. It fills `report.machine` and `report.machine_name` from the sending socket, finds the host machine, and calls `Call::OrchestratorReport { request_id, report }` there.
+- `Overview` and `ReadCaptain`: the hub takes them only from the host, as `captain` relays. A refused machine reads `<name> does not host the global orchestrator (<host> does), so it can't list the account's projects` (or `read a Capitão`, or `send to a Capitão`).
+- The host is the one online machine whose `Call::GlobalOrchestratorSettings` answers `host: true`, asked each time and never cached. No host, two hosts and a silent machine each get their own error.
+- `Overview` builds one `MachineSnapshot` per machine the account has, in the order they joined, and returns `global_orchestrator::overview` of them:
+  - Tabs are what each machine last reported (`MachineEvent::Tabs`). The hub asks `Call::Tabs` only of a machine that has reported none yet.
+  - Each online machine is asked `Call::ListProjects` and `Call::GlobalOrchestratorSettings` at once, all machines in parallel, waiting at most 5 s (`LOOK_WAIT`).
+  - A machine that refuses either with an unknown command is listed with `problem: "precisa atualizar o pinned"`, and its projects still list when `ListProjects` answered. A machine that does not answer in time gets `problem: "não respondeu"`, and another refusal its text. Neither fails the call.
+  - The hub keeps each machine's last project list in memory (`Account::listed`). A machine that does not answer, and an offline machine, show those projects, an offline one with `online: false` and `captain: "nenhum"`.
+- `ReadCaptain` reads the tabs as `Overview` does, finds the Capitão with `captain_tab`, and reads its conversation with `Call::Thread { from: 0 }` (`reading::DEFAULT_ITEMS` items). Every node answers both calls, so a machine too old for the relay can still be read.
+- An older hub answers any of them with `this hub runs pinned <v>, which can't answer that: unknown variant ...`, and `is_unknown_command` is true for it. The node falls back to this machine alone for `projects` and `waiting`, and answers `o hub ou a máquina precisa atualizar o pinned` for `send_to_captain` and `read_captain` (`needs_update`). Test: `a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command`.
 - `Link::call_hub` waits at most 60 s. The session socket waits 70 s for `projects`, `send_to_captain`, `read_captain`, `waiting` and `tell_orchestrator` (`reminders.rs` `send`), 10 s for other tools.
 
 ## 5. Reply and payload types (`crates/core/src/global_orchestrator.rs`)
@@ -125,12 +133,19 @@ Tagged by `outcome`. Every variant carries the tab it went to.
   "waiting": [{
     "machine": "<id>", "machine_name": "MacBook", "tab": "tab-2b-7", "kind": "needs_input",
     "project": "/Users/f/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244
-  }]
+  }],
+  "machines": [
+    { "id": "<id>", "name": "Mac mini", "online": true, "version": "0.17.19" },
+    { "id": "<id>", "name": "iMac", "online": true, "version": "0.17.10", "problem": "precisa atualizar o pinned" }
+  ]
 }
 ```
 
 - `key` is `repo` when the project has an origin, else `<machine id>:<path>`. Tools take it as `project`.
-- `captain` is `CaptainState`: `"livre"` (idle, done, failed or stopped: a message types now or starts it; also needs-input with `interrupted` false, which is Claude Code's idle notification after a finished turn), `"trabalhando"` (running with status working, or needs-input with `interrupted` true, a question mid-turn: a message queues), `"nenhum"` (no Capitão tab, or the machine is offline). `CaptainState::of(Option<&TabView>)` computes it. Use it on the hub and the node alike.
+- `captain` is `CaptainState`: `"livre"` (idle, done, failed or stopped: a message types now or starts it; also needs-input with `interrupted` false, which is Claude Code's idle notification after a finished turn), `"trabalhando"` (running with status working, or with `TabView.orchestrator_turn`, or needs-input with `interrupted` true, a question mid-turn: a message queues), `"nenhum"` (no Capitão tab, or the machine is offline). `CaptainState::of(Option<&TabView>)` computes it. Use it on the hub and the node alike.
+- `TabView.orchestrator_turn` (`#[serde(default)]`, omitted when false) is true on a Capitão while its ledger holds a message `in_flight` for its project (`Ledger::turns`). It covers the window between `iniciado` and the Capitão's first hook, when the tab runs with no status and a second message answers `na_fila`. The node sends its tabs again after each ledger change that starts such a turn (`enqueue_to_captain` on `entregue` or `iniciado`, `mark_typed`). `record_event` sends them after the turn-end answer clears it.
+- `machines` (`#[serde(default)]`) lists every machine of the account, with or without projects. `problem` says why its projects may be missing or old.
+- A node that is not linked, or whose hub is too old, answers `projects` with itself alone, under its hub id once the link's hello gave one, else its hostname.
 - `WaitingKind` is `"needs_input"` or `"failed"`. Adding a kind, such as a ready PR, is an additive enum change.
 
 ## 6. Session tools
@@ -153,14 +168,18 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 | Tool | Arguments | Result (tool text) |
 |---|---|---|
 | `projects` | none | `Overview` as one line of JSON |
-| `send_to_captain` | `project` (key from `projects`, or a folder on this machine), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name; pass it when `projects` lists the project on more than one machine) | `Handoff` as one line of JSON |
-| `read_captain` | `project`, `machine` (optional) | text with the latest replies |
+| `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine) | `Handoff` as one line of JSON |
+| `read_captain` | `project`, `machine` (optional), as `send_to_captain` takes them | the read as one line of JSON, from this machine or through `HubCall::ReadCaptain` |
 | `waiting` | none | `Vec<Waiting>` as one line of JSON |
 | `tell_orchestrator` | `text` | `Handoff` as one line of JSON |
 
 `ProjectTool` variants (`crates/core/src/agent.rs`): `Projects`, `SendToCaptain { project, message, request_id, machine: Option }`, `ReadCaptain { project, machine: Option }`, `Waiting`, `TellOrchestrator { text }`.
 
-`send_to_captain` resolution today (`send_to_captain`, `local_project`): when `machine` is absent or names this machine (`is_this_machine`), and `project` is a known project folder, `<this machine>:<path>`, or the `repo` of a local project, the message goes to `enqueue_to_captain` here. Otherwise it goes to `route_remote`.
+Resolution, for `send_to_captain` and `read_captain` alike:
+
+1. `local_project`: when `machine` is absent or names this machine (`is_this_machine`: its hub id or its hostname, with or without `@`), and `project` is a known project folder, `<this machine>:<path>`, or the `repo` of a local project, it is this machine's.
+2. Otherwise `remote_checkout` asks the hub for `Overview`. `<machine>:<path>` splits into a folder and a machine, and a `machine` argument wins over the prefix. It keeps the checkouts whose project `key` or `repo`, or whose own `path`, is `project`, on the named machine (its id, or its name in any case). One checkout, or one online checkout among several, wins. Several online checkouts ask for `machine`. A folder the overview does not list goes to the named machine, its name turned into its id through `machines`.
+3. Without the hub's overview only `<machine id>:<path>`, or an absolute path with `machine`, names a checkout.
 
 ## 7. The delivery primitive and the ledger
 
@@ -214,22 +233,23 @@ Opções: Sim | Ainda não
 
 - UI: when the last non-empty line of an assistant message matches `/^Opções: (.+)$/`, split the capture on ` | `, hide the line, and render one button per option. A click types that option's text as the user's message.
 
-## 9. Seams and the unit that fills each
+## 9. Seams and the unit that filled each
 
-All in `crates/core/src/machine.rs` unless noted. Today each returns the error shown, or does nothing.
+All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 
-| Seam | Signature | Today | Fills it |
+| Seam | Signature | Built by | What it does |
 |---|---|---|---|
-| `projects_overview` | `fn projects_overview(&self) -> Result<global::Overview, String>` | `projects is not available yet` | node-local: hub `Overview` when linked, else this node alone. Calls the hub through the hub-bridge handle. |
-| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | `waiting is not available yet` | node-local. A needs-input tab with `interrupted` false is Claude Code's idle notification, not a question: leave it out. |
-| `read_captain` | `fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String>` | `read_captain is not available yet` | node-local for this node. Reuse the hub MCP's `read_orchestrator` logic (`crates/server/src/mcp.rs`). hub-bridge for another machine. |
-| `route_remote` | `fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String>` | `<project> is not a project on this machine, and sending to a Capitão on another machine is not available yet` | hub-bridge: resolve the checkout from `Overview`, send `HubCall::Relay { to: captain }`, and turn `is_unknown_command` into "that machine or the hub needs an update". |
-| `report_up` | `fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String>` | `reporting to the global orchestrator is not available yet` | node-local: build `CaptainReport`; `deliver_report` when `settings.host`, else `HubCall::Relay { to: orchestrator }` (hub-bridge handle). |
-| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | no-op. `record_event` calls it on Done or Failed of a Capitão, before the tab's queue drains. | node-local: under `ReportPolicy::Auto`, `self.sent.lock().unwrap().answer(project)`, read the last reply as `report_worker` does, `report_up(.., answers)`. |
-| `is_this_machine` | `fn is_this_machine(&self, machine: &str) -> bool` | hostname match only | hub-bridge: remember the id from `ToMachine::Hello` and match it too. |
-| hub handle | `Machine::set_hub(Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>)` and `Machine::call_hub(HubCall) -> Result<Value, String>` | installed by `link::spawn`; `Err("this machine is not linked to a hub")` when unlinked | done in the foundation |
-| `hub::not_yet` arms | `crates/server/src/hub.rs` `hub_call` | refuse | hub-bridge: implement `Relay` and `Overview`, with the source checks in `crates/server/src/http.rs` `machine_frame`. Extract the MCP's `message_orchestrator` code into a shared function. |
-| global prompt | `launch_tab` | none | node-local: when `global::is_global(env)`, append the global orchestrator's prompt (routing rules, `#projeto` and `@máquina` tags, the quick-reply line). Add a Capitão prompt line about `[<name>]` messages and `tell_orchestrator`. |
+| `projects_overview` | `fn projects_overview(&self) -> Result<global::Overview, String>` | node-local, remote-reach | The hub's `Overview` when linked. This machine alone (`local_overview`, under its hub id) while unlinked or when the hub is too old. |
+| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local | `projects_overview().waiting`. A needs-input tab with `interrupted` false is Claude Code's idle notice and stays out. |
+| `read_captain` | `fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String>` | node-local, remote-reach | `reading::read` of the Capitão here, or `HubCall::ReadCaptain` to the machine `remote_checkout` finds. |
+| `route_remote` | `fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String>` | hub-bridge, remote-reach | `HubCall::Relay { to: captain }` to the checkout `remote_checkout` finds, under this machine's busy policy. |
+| `remote_checkout` | `fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(MachineId, String), String>` | hub-bridge, remote-reach | Section 6 resolution, steps 2 and 3. |
+| `report_up` | `fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String>` | node-local, remote-reach | Builds `CaptainReport` with this machine's hub id, then `deliver_report` when `settings.host`, else `HubCall::Relay { to: orchestrator }`. |
+| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | node-local | `Ledger::answer(project)`, then under `ReportPolicy::Auto` the last reply goes up through `report_up` on its own thread. |
+| `is_this_machine` | `fn is_this_machine(&self, machine: &str) -> bool` | hub-bridge | Matches the id from `ToMachine::Hello` (`set_hub_id`) or the hostname, with or without `@`. |
+| hub handle | `Machine::set_hub(...)`, `Machine::call_hub(HubCall)` | foundation | Installed by `link::spawn`. `Err("this machine is not linked to a hub")` when unlinked. |
+| hub calls | `crates/server/src/relay.rs` `serve` | hub-bridge (`Relay`), remote-reach (`Overview`, `ReadCaptain`) | Section 4. |
+| global prompt | `launch_tab` | node-local | The global orchestrator's prompt, and the Capitão's line about `[<name>]` messages and `tell_orchestrator`. |
 
 ## 10. Files each later unit mainly touches
 
@@ -239,6 +259,7 @@ All in `crates/core/src/machine.rs` unless noted. Today each returns the error s
 | hub-bridge | `crates/server/src/http.rs`, `crates/server/src/hub.rs`, `crates/server/src/mcp.rs`, `crates/core/src/link.rs`, the remote seams in `machine.rs` (`route_remote`, `is_this_machine`, the hub handle), `crates/server/tests/hub.rs` |
 | UI-chat | `ui/gui-sidebar.js` (fixed Orquestrador row from `orchestrator_global`, "Esperando você (N)"), the timeline files (report grouping by the header in section 8, quick-reply buttons) |
 | UI-settings | the settings page (`ui/gui-orchestration.js` or a new file: `Call::GlobalOrchestratorSettings` / `SetGlobalOrchestratorSettings` on each machine, one `host`), the projects page, the memory panel (`ui/gui-surfaces.js`: `Call::Memory*` with `path` = the global tab's `cwd`) |
+| remote-reach | `crates/server/src/relay.rs` (`Overview`, `ReadCaptain`), `crates/server/src/hub.rs` (`Account::listed`, `tabs_of`), `crates/core/src/machine.rs` (`remote_checkout`, `read_captain`, `local_overview`, `report_up`, `mark_typed`), `crates/core/src/global_orchestrator.rs` (`Ledger::turns`, `Overview.machines`), `crates/core/src/wire.rs` (`TabView.orchestrator_turn`, `HubCall::ReadCaptain`) |
 
 `machine.rs` is shared by node-local and hub-bridge. Each fills only its own seams to keep merges clean.
 
@@ -253,10 +274,14 @@ All in `crates/core/src/machine.rs` unless noted. Today each returns the error s
 
 - A Capitão running with no conversation that the user is looking at is relaunched with the message as its first prompt. Nothing is lost, because it has no conversation, but its screen restarts.
 - When a Capitão tab is closed while a message waits in its queue, the message stays queued for a tab that is gone until a later restart rebinds it by session. The ledger keeps it `queued`.
-- Without a running global tab on the host, a report starts it with the report as the first prompt, and the global prompt applies only once node-local adds it.
+- Without a running global tab on the host, a report starts it with the report as the first prompt.
 - A Capitão that `hand_to` starts with the message as its first prompt (`iniciado`) keeps that message only in its launch arguments until its first hook gives it a Claude session. When pinned quits in that window, for example while a folder-trust dialog waits, the tab is not saved, the message is lost, and the ledger still answers `iniciado` for its `request_id`. A message queued in the same window (`queue_request` with no session) stays bound to the dead tab id, like the closed-tab case above.
 - A stopped Capitão restored with `Continue from where you left off.` as its launch prompt loses that prompt when `hand_to` starts it on a message. Nothing is lost from the conversation. The node starts restored tabs at once, so the window is short.
-- `local_project` prefers this machine when `machine` is absent. The global prompt must tell the orchestrator to pass `machine` when `projects` lists more than one checkout, per the routing rule (running Capitão, then own machine, then first online).
+- `local_project` prefers this machine when `machine` is absent. The global prompt tells the orchestrator to pass `machine` when `projects` lists more than one checkout, per the routing rule (running Capitão, then own machine, then first online).
+- A Capitão whose session ends mid-turn with no Done or Failed hook keeps its message `in_flight`. Once it runs again it reads `trabalhando`, and a message it started still makes the next one queue, until its next turn ends.
+- The hub keeps each machine's project list in memory only. After a hub restart, an offline machine is in `machines` with no projects until it comes online and an overview lists them.
+- Every `projects`, `waiting`, and `send_to_captain` or `read_captain` for another machine runs one overview: two calls to each online machine, plus `Call::Tabs` for one that has not reported tabs. Calls queue behind a machine's other calls, so a busy machine may show its last project list with `não respondeu`.
+- A report delivered on the host carries the host's hostname as `machine_name`, and a relayed one the hub's name for the machine. They differ when the machine was renamed on the hub.
 
 ## PR
 
