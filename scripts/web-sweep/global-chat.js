@@ -132,7 +132,7 @@ async function launchBrowser(errors) {
       await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
       await cdp.send("Emulation.setUserAgentOverride", { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1" });
     } else {
-      await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     }
     return {
       cdp,
@@ -264,7 +264,7 @@ const sendText = (page, text) => page.evaluate((t) => {
 
     // The reports name real tabs, so their Captains open real threads.
     const keys = {};
-    for (const name of ["site", "pinned"]) {
+    for (const name of ["site", "pinned", "api"]) {
       fs.mkdirSync(path.join(WORK, name), { recursive: true });
       keys[name] = await page.evaluate(async ({ machine, dir }) => {
         const open = tabs.find((t) => t.machine === machine && t.view.cwd === dir);
@@ -339,9 +339,30 @@ const sendText = (page, text) => page.evaluate((t) => {
     check(s.row.endsWith("all projects 1"), `the orchestrator's row does not count the one waiting thread: ${s.row}`);
     check(!s.threadRows.includes(globalKey), "the global tab joined the thread list");
     check(await page.evaluate((k) => tabByKey(k).view.status === "needs-input" && !tabByKey(k).view.interrupted, keys.pinned), "the pinned Captain left its idle notice");
+
+    // A turn that ends asking the user still waits once Claude Code's idle notice follows it, as
+    // monorepo-photoshot's "PR #254" did, and so does a failure.
+    await page.evaluate((k) => activate(tabByKey(k)), keys.pinned);
+    await sendText(page, "asks");
+    await waitFor("the asked question", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 2));
+    await waitFor("the idle notice after the question", () => page.evaluate((k) => tabByKey(k).view.status === "needs-input", keys.pinned));
+    const asked = await page.evaluate((k) => tabByKey(k).view, keys.pinned);
+    console.log("asked:", JSON.stringify({ status: asked.status, interrupted: asked.interrupted ?? false, message: asked.message, question: asked.question }));
+    check(!asked.interrupted && asked.question === "Should I cut the release now?", "the pinned Captain's question did not survive its idle notice");
+    check(await page.evaluate(() => document.querySelectorAll(".waiting-row").length === 2), "the idle notice took the question off the list");
+    await page.evaluate((k) => activate(tabByKey(k)), keys.api);
+    await sendText(page, "spent");
+    await waitFor("the failure", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 3));
+    await page.evaluate(() => activate(tabs.find(isGlobalOrchestratorTab)));
+    s = await page.evaluate(state);
+    console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
+    check(s.waitingHead === "Waiting on you 3", `head: ${s.waitingHead}`);
+    check(s.row.endsWith("all projects 3"), `the orchestrator's row does not count three waiting threads: ${s.row}`);
+    const kinds = await page.evaluate(() => [...document.querySelectorAll(".waiting-row")].map((r) => `${r.querySelector(".dot").classList[1]} ${r.querySelector(".where").innerText.split(" · ")[0]}`).sort());
+    check(JSON.stringify(kinds) === JSON.stringify(["failed api", "question pinned", "question site"]), `rows: ${JSON.stringify(kinds)}`);
     await page.screenshot(path.join(SCREENS, "global-chat-waiting.png"));
 
-    await page.click(".waiting-row");
+    await page.click(`.waiting-row[data-waiting="${keys.site}"]`);
     await waitFor("the question's thread to open", () => page.evaluate((k) => active?.key === k, keys.site));
 
     // Read aloud stays silent on a desktop even with the setting on.
@@ -385,6 +406,14 @@ const sendText = (page, text) => page.evaluate((t) => {
     check(JSON.stringify(phoneSpoken) === JSON.stringify([{ text: "Li os relatórios dos dois Capitães.", lang: "pt-BR" }]), `spoken: ${JSON.stringify(phoneSpoken)}`);
     await waitFor("the phone's quick replies", () => phone.evaluate(() => document.querySelectorAll(".quick-reply").length === 2));
     await phone.screenshot(path.join(SCREENS, "global-chat-phone.png"));
+
+    // The next turn of a thread that asked, or that failed, takes it off the list.
+    for (const name of ["pinned", "api"]) {
+      await page.evaluate((k) => activate(tabByKey(k)), keys[name]);
+      await sendText(page, "ok");
+    }
+    await waitFor("the answered threads to leave the list", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 1));
+    check(await page.evaluate((k) => !tabByKey(k).view.question, keys.pinned), "the pinned Captain kept its question after the next turn");
 
     // The sidebar tree: the orchestrator's row with its count, Waiting on you, then each project
     // with its Captain, the Captain's workers under it, and the project's plain threads.

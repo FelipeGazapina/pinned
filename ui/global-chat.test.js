@@ -64,14 +64,12 @@ test("read aloud says the words without code blocks and without the Opções lin
   assert.equal(speechTextOf("Opções: Sim"), "");
 });
 
-test("a thread waits on Felipe for a question mid-turn or a failure, not for an idle notice", () => {
-  assert.equal(waitingKindOf({ status: "needs-input", interrupted: true }, false), "question");
-  assert.equal(waitingKindOf({ status: "needs-input", interrupted: false }, true), "question");
-  assert.equal(waitingKindOf({ status: "needs-input", interrupted: false }, false), null);
-  assert.equal(waitingKindOf({ status: "failed" }, false), "failed");
-  assert.equal(waitingKindOf({ status: "working", interrupted: true }, false), null);
-  assert.equal(waitingKindOf({ status: "done" }, false), null);
-  assert.equal(waitingKindOf(null, false), null);
+const waitingCases = JSON.parse(readFileSync(new URL("../crates/core/src/waiting_cases.json", import.meta.url), "utf8"));
+
+test("a thread waits on the user in exactly the cases the orchestrator's waiting() counts", () => {
+  const got = waitingCases.cases.map((c) => [c.case, waitingKindOf({ ...waitingCases.base, ...c.view })]);
+  assert.deepEqual(got, waitingCases.cases.map((c) => [c.case, c.waits]));
+  assert.equal(waitingKindOf(null), null);
 });
 
 test("the settings cache starts as the contracts default them", () => {

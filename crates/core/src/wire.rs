@@ -129,6 +129,10 @@ pub struct TabView {
     /// news and the global orchestrator's requests.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: u32,
+    /// What the session's last finished turn asked the user, read from its last reply. Cleared when
+    /// the next turn starts or fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1178,6 +1182,7 @@ mod tests {
             orchestrator_global: false,
             orchestrator_turn: false,
             queued: 0,
+            question: None,
         }
     }
 

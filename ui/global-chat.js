@@ -54,14 +54,17 @@ function speechTextOf(text) {
   return kept.join(" ").replace(/\s+/g, " ").trim();
 }
 
-/** Why a thread waits on Felipe: `question` for a question mid-turn (needs-input with a live menu
- * or interrupted), `failed` for a failure. A thread Claude Code is merely done with is not waiting,
- * which is the idle notice: needs-input without a menu and without interrupted. */
-function waitingKindOf(view, hasMenu) {
-  if (!view) return null;
+/** Why a thread waits on the user, as the orchestrator's `waiting()` counts it
+ * (`global_orchestrator::waiting_kind`): `needs_input` for a question or an approval mid-turn, or a
+ * finished turn whose last reply asked the user something (`question`), and `failed` for a failure.
+ * Claude Code's idle notice alone asks nothing, and the global orchestrator's own tab never waits.
+ * `crates/core/src/waiting_cases.json` holds the cases both follow. */
+function waitingKindOf(view) {
+  if (!view || view.orchestrator_global) return null;
   if (view.status === "failed") return "failed";
-  if (view.status === "needs-input" && (hasMenu || view.interrupted === true)) return "question";
-  return null;
+  if (view.status === "needs-input" && view.running && view.interrupted) return "needs_input";
+  if (view.status === "working") return null;
+  return view.question ? "needs_input" : null;
 }
 
 /** The settings as the contracts default them; a machine's answer or a save only overrides what

@@ -1,0 +1,21 @@
+{
+  "about": "Whether a thread waits on the user. global_orchestrator::waiting_kind (Rust) and waitingKindOf (ui/global-chat.js) both read these cases in their tests, so the orchestrator's waiting() tool and the sidebar's Waiting on you list agree. Each view is a TabView laid over base.",
+  "base": { "id": "tab-1-2", "cwd": "/w/site", "bypass": true, "running": true, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 2 },
+  "cases": [
+    { "case": "a question mid-turn", "view": { "status": "needs-input", "interrupted": true, "message": "Claude needs your input" }, "waits": "needs_input" },
+    { "case": "an approval mid-turn", "view": { "status": "needs-input", "interrupted": true, "message": "Claude needs your permission to use Bash" }, "waits": "needs_input" },
+    { "case": "a turn that failed", "view": { "status": "failed" }, "waits": "failed" },
+    { "case": "a turn a usage limit stopped", "view": { "status": "failed", "interrupted": true, "resume_at": 1794240000 }, "waits": "failed" },
+    { "case": "a turn that ended asking the user, then Claude Code's idle notice, as monorepo-photoshot's \"PR #254\"", "view": { "status": "needs-input", "interrupted": false, "message": "Claude is waiting for your input", "question": "Falta só a sua decisão: coloco na revisão para o Leandro a ideia de consultar a e-Rede antes de cobrar de novo?" }, "waits": "needs_input" },
+    { "case": "a turn that ended asking the user, before the idle notice", "view": { "status": "done", "question": "Quer que eu faça a release?" }, "waits": "needs_input" },
+    { "case": "a thread restored after a restart whose last turn asked the user", "view": { "status": null, "question": "Quer que eu faça a release?" }, "waits": "needs_input" },
+    { "case": "a stopped thread whose last turn asked the user", "view": { "running": false, "status": "done", "question": "Quer que eu faça a release?" }, "waits": "needs_input" },
+    { "case": "Claude Code's idle notice after a turn that asked nothing, as personal-harness's \"Protótipo de design do plano\"", "view": { "status": "needs-input", "interrupted": false, "message": "Claude is waiting for your input" }, "waits": null },
+    { "case": "a turn that ended asking nothing", "view": { "status": "done" }, "waits": null },
+    { "case": "a running turn", "view": { "status": "working", "interrupted": true }, "waits": null },
+    { "case": "a running turn after one that asked", "view": { "status": "working", "interrupted": true, "question": "Quer que eu faça a release?" }, "waits": null },
+    { "case": "a question on a session that stopped", "view": { "running": false, "status": "needs-input", "interrupted": true, "message": "Claude needs your input" }, "waits": null },
+    { "case": "the global orchestrator's own question mid-turn", "view": { "orchestrator_global": true, "status": "needs-input", "interrupted": true, "message": "Claude needs your input" }, "waits": null },
+    { "case": "the global orchestrator's own turn that ended asking", "view": { "orchestrator_global": true, "status": "done", "question": "Mando para o Capitão?" }, "waits": null }
+  ]
+}

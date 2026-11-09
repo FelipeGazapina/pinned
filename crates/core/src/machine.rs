@@ -284,6 +284,8 @@ struct Tab {
     updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// What the last finished turn asked the user, until the next turn starts or fails.
+    question: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
@@ -360,6 +362,7 @@ impl Tab {
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
+            question: self.question.clone(),
         }
     }
 
@@ -2107,7 +2110,10 @@ impl Machine {
         let path = path.display().to_string();
         let tabs = self.tabs();
         let mut out = match global::captain_tab(&tabs, &path) {
-            Some(tab) if tab.running || tab.session.is_some() => reading::read(tab, self.thread(&tab.id, 0).and_then(json), reading::DEFAULT_ITEMS),
+            Some(tab) if tab.running || tab.session.is_some() => {
+                let from = self.transcript(&tab.id).map_or(0, |file| thread::last_page(&file));
+                reading::read(tab, self.thread(&tab.id, from).and_then(json), reading::DEFAULT_ITEMS)
+            }
             _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
         };
         out["project"] = json!(path);
@@ -2340,13 +2346,15 @@ impl Machine {
         lines.join("\n")
     }
 
-    /// The last text the tab's session said, from its transcript.
+    /// The last text the tab's session wrote in its latest turn, from its transcript.
     fn last_reply(&self, tab: &str) -> Option<String> {
-        let page = thread::read(&self.transcript(tab).ok()?, 0).ok()?;
-        page.items.into_iter().rev().find_map(|item| match item {
-            thread::Item::Text { text, .. } => Some(text),
-            _ => None,
-        })
+        thread::last_reply(&self.transcript(tab).ok()?).ok()?
+    }
+
+    /// Keeps what the tab's finished turn asked the user, which makes it wait on the user.
+    fn note_question(&self, tab: &str) {
+        let question = self.last_reply(tab).as_deref().and_then(global::question_in);
+        let _ = self.tab(tab, |t| t.question = question);
     }
 
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
@@ -2677,6 +2685,10 @@ impl Machine {
             }
         }
         let ids: Vec<TabId> = restored.into_iter().map(|(id, _)| id).collect();
+        // A turn that asked before the restart still waits on the user.
+        for id in ids.iter().filter(|id| self.tab(id, |t| !t.interrupted).unwrap_or(false)) {
+            self.note_question(id);
+        }
         self.emit_tabs();
         // A resumed session reports no new id, so its transcript is read here.
         for id in &ids {
@@ -3351,6 +3363,9 @@ impl Machine {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
+            if event.status == AgentStatus::Done {
+                self.note_question(tab);
+            }
             match role {
                 Some((Role::Worker, project)) => {
                     if !self.settle_thread_task(tab, &event) {
@@ -3405,6 +3420,7 @@ impl Machine {
             updated: None,
             title: None,
             message: None,
+            question: None,
             held: vec![],
             turn_pending: None,
             draft: Draft::default(),
@@ -3561,6 +3577,9 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            if event.status != AgentStatus::NeedsInput {
+                t.question = None;
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -7491,6 +7510,135 @@ while True:
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(relayed.lock().unwrap().len(), 2, "a tool-only Capitão reported by itself");
         assert_eq!(m.sent.lock().unwrap().find("r-2").map(|s| s.progress), Some(Progress::Answered));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn append_transcript(dir: &Path, session: &str, lines: &[Value]) {
+        use std::io::Write;
+        let folder = dir.join("config/accounts/work/projects/-site");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("{session}.jsonl"))).unwrap();
+        file.write_all(lines.iter().map(|l| format!("{l}\n")).collect::<String>().as_bytes()).unwrap();
+    }
+
+    /// A turn's lines: the prompt, then the reply, or a tool call when it wrote no text.
+    #[cfg(unix)]
+    fn turn_lines(n: u32, prompt: &str, reply: Option<&str>) -> Vec<Value> {
+        let at = format!("2026-11-09T16:{n:02}:00Z");
+        let said = match reply {
+            Some(text) => json!({ "type": "text", "text": text }),
+            None => json!({ "type": "tool_use", "id": format!("t{n}"), "name": "Bash", "input": { "command": "ls" } }),
+        };
+        vec![
+            json!({ "type": "user", "uuid": format!("u{n}"), "timestamp": at, "message": { "content": prompt } }),
+            json!({ "type": "assistant", "uuid": format!("a{n}"), "timestamp": at, "message": { "content": [said] } }),
+        ]
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_report_reaches_the_global_orchestrator_once_however_long_the_capitaos_transcript() {
+        let dir = temp("report-once");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+
+        // The transcript passed one 8 MiB page long ago, and its first page ends on an old reply.
+        let padding = "x".repeat(64 << 10);
+        let mut old = turn_lines(0, "Earlier.", Some("OLD reply."));
+        old.extend((0..140).map(|i| json!({ "type": "user", "uuid": format!("p{i}"), "timestamp": "2026-11-09T15:00:00Z", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t0", "content": padding }] } })));
+        append_transcript(&dir, "s1", &old);
+
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let global_idle = || m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+        global_idle();
+        let reports = || -> Vec<String> {
+            read_pty(&inbox).split("\x1b[200~").skip(1).map(|pasted| pasted.split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r").to_owned()).collect()
+        };
+        let mut n = 0;
+        let mut turn = |request_id: Option<&str>, reply: Option<&str>| {
+            n += 1;
+            let prompt = match request_id {
+                Some(id) => {
+                    assert_eq!(enqueue(&m, &path, id, id).unwrap()["outcome"], "entregue");
+                    format!("[Orquestrador] {id}")
+                }
+                None => "Felipe asks directly.".to_owned(),
+            };
+            m.record_event(hook(&capitao, AgentStatus::Working));
+            append_transcript(&dir, "s1", &turn_lines(n, &prompt, reply));
+            m.record_event(hook(&capitao, AgentStatus::Done));
+        };
+
+        turn(Some("r-1"), Some("Reply one."));
+        wait_for("the first report", || reports().len() == 1);
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        global_idle();
+        turn(None, Some("Reply two."));
+        turn(Some("r-3"), None);
+        wait_for("the second report", || reports().len() == 2);
+        global_idle();
+        turn(Some("r-4"), Some("Reply four."));
+        wait_for("the third report", || reports().len() == 3);
+        global_idle();
+
+        let delivered = m.sent.lock().unwrap().in_flight(&m.global_folder());
+        let first = CaptainReport { machine: String::new(), machine_name: crate::account::hostname(), project: "site".into(), path: path.clone(), tab: capitao.clone(), text: "Reply one.".into(), answers: vec!["r-1".into()] };
+        let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
+        assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reports(), ["Reply one.", "(sem resposta)", "Reply four."], "each turn's own reply, each once");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
+        assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
+        let dir = temp("waits-question");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
+        let asks = |question: &str| vec![(global::WaitingKind::NeedsInput, Some(question.to_owned()))];
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(1, "Merge the fix.", Some("Merged. Quer que eu faça a release?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"));
+        m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook(&tab, AgentStatus::NeedsInput) });
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"), "Claude Code's idle notice a minute later");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(waiting(&m), [], "the user answered");
+        append_transcript(&dir, "s1", &turn_lines(2, "Sim.", Some("Released v0.17.21.")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), [], "a turn that asked nothing");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(3, "And #89?", Some("O #89 conflita com o main. Fecho o #89?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        drop(m);
+        let restarted = work_machine(&dir, &claude, &sock);
+        assert_eq!(restarted.restore_tabs().len(), 1);
+        assert_eq!(waiting(&restarted), asks("Fecho o #89?"), "the question outlives a restart");
         let _ = std::fs::remove_dir_all(dir);
     }
 

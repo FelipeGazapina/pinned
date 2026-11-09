@@ -537,6 +537,9 @@ function submit() {
   } else if (line === "options") {
     wrote([{ type: "text", text: "Li os relatórios dos dois Capitães.\n\nOpções: Sim | Ainda não" }]);
     out("options\r\n");
+  } else if (line === "asks") {
+    wrote([{ type: "text", text: "Merged PR #91 into main.\n\nShould I cut the release now?" }]);
+    out("asks\r\n");
   } else {
     wrote([{ type: "text", text: `echo: ${line}` }]);
     out(`echo: ${line}\r\n`);
@@ -544,7 +547,7 @@ function submit() {
   // A brief marked [hold] keeps its turn working, as a worker still at it.
   if (line !== "/ask" && !line.includes("[hold]")) hook("Stop");
   // Claude Code's idle notice: a finished turn later fires Notification, which is not a question.
-  if (line === "idle") hook("Notification", { message: "Claude is waiting for your input" });
+  if (line === "idle" || line === "asks") hook("Notification", { message: "Claude is waiting for your input" });
   line = "";
   prompt();
 }
