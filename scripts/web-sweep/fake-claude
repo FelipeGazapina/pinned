@@ -606,7 +606,7 @@ function answerEffort(key) {
   } else return;
   drawEffort();
 }
-const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.2"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
 let modelMenu = 0;
 function drawModels() {
   drawScreen([

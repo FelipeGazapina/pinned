@@ -4,8 +4,10 @@ const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CLAUDE_MODELS: &[(&str, &str, Cost)] = &[
     ("claude-opus-5-5", "Opus 5.5", Cost::High),
     ("claude-sonnet-5-5", "Sonnet 5.5", Cost::Mid),
-    ("claude-fable-5-1", "Fable 5.1", Cost::Mid),
+    ("claude-fable-5-2", "Fable 5.2", Cost::Mid),
     ("claude-haiku-5-5", "Haiku 5.5", Cost::Low),
+    // Left Claude Code's /model menu; listed so briefs and threads that name it still run.
+    ("claude-fable-5-1", "Fable 5.1 (legacy)", Cost::Mid),
 ];
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
 

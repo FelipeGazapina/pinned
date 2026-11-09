@@ -846,6 +846,48 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn claude_lists_fable_5_2_and_keeps_fable_5_1_as_legacy() {
+        let accounts = vec![ListedAccount {
+            id: "claude".into(),
+            provider: Provider::Claude,
+            name: "Claude Code".into(),
+            signed_in: true,
+            bin_found: true,
+            limited: false,
+            models: provider_models(Provider::Claude),
+            constraints: vec![],
+        }];
+        let parent = Inherited { account: "claude".into(), model: None, access: Access::Auto };
+        let value = capabilities(&parent, &accounts, None);
+        let listed: Vec<(&str, &str, &str)> = value["providers"][0]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["id"].as_str().unwrap(), m["label"].as_str().unwrap(), m["cost"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("claude-opus-5-5", "Opus 5.5", "high"),
+                ("claude-sonnet-5-5", "Sonnet 5.5", "mid"),
+                ("claude-fable-5-2", "Fable 5.2", "mid"),
+                ("claude-haiku-5-5", "Haiku 5.5", "low"),
+                ("claude-fable-5-1", "Fable 5.1 (legacy)", "mid"),
+            ]
+        );
+        let ids = |search| {
+            capabilities(&parent, &accounts, Some(search))["providers"][0]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("fable"), ["claude-fable-5-2", "claude-fable-5-1"]);
+        assert_eq!(ids("claude-fable-5-1"), ["claude-fable-5-1"]);
+    }
+
+    #[test]
     fn the_three_streams_end_on_their_final_text() {
         let cursor = replay(Provider::Cursor, &fixture("cursor.jsonl"));
         assert_eq!(
