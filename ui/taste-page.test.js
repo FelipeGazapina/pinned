@@ -13,14 +13,15 @@ const unesc = (text) => text.replace(/&#(\d+);/g, (_, code) => String.fromCharCo
 
 /** The page in a vm: `answer(cmd, args)` plays the backend, and each control is found in the HTML
  * the page last drew, so a click only reaches what a user could see. */
-function page({ answer = () => tastesWith(), projects = {} } = {}) {
+function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = async () => "tab-1" } = {}) {
   const listeners = {};
   const drawn = [];
   const calls = [];
+  const opened = [];
   const timers = [];
   const context = {
     document: { body: { dataset: { page: "taste" } }, activeElement: null },
-    pageView: { addEventListener: (type, fn) => (listeners[type] = fn), contains: () => false, querySelector: () => null, querySelectorAll: () => [] },
+    pageView: { addEventListener: (type, fn) => (listeners[type] = [...(listeners[type] ?? []), fn]), contains: () => false, querySelector: () => null, querySelectorAll: () => [] },
     SHELL_PAGES: {},
     setPage: (html) => drawn.push(html),
     headHtml: (title, rest = "") => `<header><h1>${title}</h1>${rest}</header>`,
@@ -31,7 +32,17 @@ function page({ answer = () => tastesWith(), projects = {} } = {}) {
       return answer(cmd, args);
     },
     onlineMachines: () => Object.keys(projects),
-    callOn: async (machine) => projects[machine],
+    machines: new Map(Object.keys(projects).map((id) => [id, { view: { online: true, name: id } }])),
+    machineName: (id) => id,
+    globalHostMachine: () => Object.keys(projects)[0] ?? "mm",
+    globalSettings: { name: "Atlas" },
+    callOn: async (machine, call) => {
+      if (call.cmd === "skills") return skills[machine] ?? null;
+      if (call.cmd === "open_taste_chat") return (opened.push([machine, JSON.parse(JSON.stringify(call))]), chat(machine, call));
+      return projects[machine];
+    },
+    revealTab: async (machine, id) => ({ machine, id }),
+    startTab: (tab) => opened.push(["start", tab]),
     CLAUDE_MODELS: [
       { slug: "claude-opus-5-5", name: "Claude Opus 5.5" },
       { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
@@ -45,7 +56,9 @@ function page({ answer = () => tastesWith(), projects = {} } = {}) {
     clearTimeout: () => {},
   };
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("gui-taste.js")}`, context);
+  const skillsSrc = read("gui-skills.js").split("\n");
+  const line = (start) => skillsSrc.find((l) => l.startsWith(start));
+  vm.runInContext(`${line("const baseName = ")}\n${line("const scopeLabel = ")}\n${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("gui-taste.js")}`, context);
   const html = () => drawn.at(-1);
   const control = (pattern) => {
     const tag = [...html().matchAll(/<(?:button|select|input|form)\b[^>]*>/g)].map((m) => m[0]).find((t) => pattern.test(t));
@@ -54,19 +67,22 @@ function page({ answer = () => tastesWith(), projects = {} } = {}) {
     return { dataset, disabled: /\sdisabled[\s>]/.test(tag) };
   };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const fire = (type, event) => listeners[type].forEach((fn) => fn(event));
   return {
     context,
     calls,
+    opened,
     timers,
     html,
     control,
     settle,
     show: async () => (context.SHELL_PAGES.taste.show(), settle()),
-    click: async (pattern) => (listeners.click({ target: { closest: () => control(pattern) } }), settle()),
-    pick: (attr, value) => listeners.change({ target: { value, dataset: {}, matches: (sel) => sel === `[${attr}]` } }),
-    pickEffort: async (target) => (listeners.change({ target }), settle()),
-    type: (value) => listeners.input({ target: { value, matches: (sel) => sel === "[data-note-input]" } }),
-    submit: () => listeners.submit({ target: { matches: (sel) => sel === "[data-note-form]" }, preventDefault() {} }),
+    click: async (pattern) => (fire("click", { target: { closest: () => control(pattern) } }), settle()),
+    pick: (attr, value) => fire("change", { target: { value, matches: (sel) => sel === `[${attr}]` } }),
+    pickEffort: async (target) => (fire("change", { target }), settle()),
+    type: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-note-input]" } }),
+    submit: () => fire("submit", { target: { matches: (sel) => sel === "[data-note-form]" }, preventDefault() {} }),
+    submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
   };
 }
 
@@ -120,21 +136,92 @@ test("an edit flashes the lines it changed, makes the profile Custom and shows t
   assert.doesNotMatch(p.html(), /taste-foot/, "back to the saved tastes, nothing to save");
 });
 
-test("a project tab marks each field inherited or changed here, and Reset inherits again", async () => {
+test("a project tab marks only the fields changed there, and Reset inherits again", async () => {
   const p = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 5 } } }) });
   await p.show();
   await p.click(/data-act="scope" data-kind="project"/);
   let html = p.html();
   assert.match(html, /<span class="taste-quiet">Inherits from Captains \(all\)\.<\/span>/);
   assert.match(html, /<span>Workers at once<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="parallel"/);
-  assert.match(html, /<span>Strategy<\/span><span class="taste-tag">inherited<\/span>/);
+  assert.equal(html.match(/changed here/g).length, 1, "only the project's own field is tagged");
+  assert.doesNotMatch(html, /inherited/);
+  assert.match(html, /<div class="taste-label"><span>Strategy<\/span><\/div>/);
   assert.equal(lines(html)[0], "Run up to 5 workers at once.");
   await p.click(/data-act="reset" data-field="parallel"/);
   html = p.html();
-  assert.match(html, /<span>Workers at once<\/span><span class="taste-tag">inherited<\/span>/);
+  assert.match(html, /<div class="taste-label"><span>Workers at once<\/span><\/div>/);
+  assert.doesNotMatch(html, /changed here/);
   assert.equal(lines(html)[0], "* Run up to 3 workers at once.");
   assert.match(html, /aria-pressed="true"[^>]*>Captain site</, "an offline project's tab stays open once its patch is gone");
   assert.match(html, /Unsaved changes/);
+});
+
+test("the orchestrator's own name heads the page and its preview", async () => {
+  const p = page();
+  await p.show();
+  assert.match(p.html(), /<p class="taste-sub">How the Atlas and the Captains split work, pick models and ask for your input.<\/p>/);
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.match(p.html(), /<h2>What the Atlas receives<\/h2>/);
+});
+
+test("Chat to adjust opens a thread on the tab's scope, in the project's folder when it has one", async () => {
+  const p = page({ projects: { mm: [{ path: "/p/scratch", name: "scratch" }], mb: [{ path: "/q/site", name: "site", repo: SITE }] } });
+  await p.show();
+  assert.match(p.html(), /<button type="button" class="outline taste-chat" data-act="chat"><svg data-icon="message-square"><\/svg>Chat to adjust<\/button>/);
+  await p.click(/class="outline taste-chat"/);
+  await p.click(/data-act="scope" data-kind="project"/);
+  await p.click(/class="outline taste-chat"/);
+  assert.deepEqual(p.opened, [
+    ["mm", { cmd: "open_taste_chat", scope: { kind: "captains" } }],
+    ["start", { machine: "mm", id: "tab-1" }],
+    ["mb", { cmd: "open_taste_chat", scope: { kind: "project", repo: SITE }, path: "/q/site" }],
+    ["start", { machine: "mb", id: "tab-1" }],
+  ]);
+});
+
+test("Chat to adjust on a machine that predates it asks to update that machine", async () => {
+  const p = page({ projects: { mm: [] }, chat: async () => Promise.reject(new Error("unknown variant `open_taste_chat`")) });
+  await p.show();
+  await p.click(/class="outline taste-chat"/);
+  assert.match(p.html(), /<span class="taste-error" role="alert">Update pinned on mm to chat about the way of working.<\/span>/);
+  assert.doesNotMatch(p.html(), /Opening…/);
+});
+
+test("Skills lists each skill with where it lives, toggles it, and adds one the machines have", async () => {
+  const p = page({
+    answer: () => tastesWith({ captains: { ...balanced, skills: [{ name: "tdd", enabled: true }] } }),
+    projects: { mm: [] },
+    skills: { mm: { copies: [
+      { key: "tdd", scope: { kind: "personal" }, description: "Write the failing test first." },
+      { key: "deploy", scope: { kind: "plugin", plugin: "ops" }, description: "Ship it." },
+    ] } },
+  });
+  await p.show();
+  let html = p.html();
+  assert.match(html, /<code>tdd<\/code><span class="taste-chip">Personal<\/span><\/span><span class="taste-skill-about">Write the failing test first.<\/span>/);
+  assert.match(html, /aria-checked="true" aria-label="Use the tdd skill" data-act="skill" data-skill="0"/);
+  assert.match(html, /data-act="adding">Add skill<\/button><button type="button" class="taste-link" data-act="chat">Create by chatting<\/button>/);
+  await p.click(/aria-label="Use the tdd skill"/);
+  assert.match(p.html(), /aria-checked="false" aria-label="Use the tdd skill"/);
+  await p.click(/data-act="adding"/);
+  assert.match(p.html(), /<select data-skill-pick><option value="deploy">deploy<\/option><\/select>/, "only skills not on the list yet");
+  p.submitSkill("deploy");
+  html = p.html();
+  assert.doesNotMatch(html, /data-skill-form/);
+  assert.match(html, /<code>deploy<\/code><span class="taste-chip">Plugin ops<\/span>/);
+  assert.match(html, /aria-checked="true" aria-label="Use the deploy skill"/);
+});
+
+test("a session's change reaches the open page without a reload", async () => {
+  let stored = tastesWith();
+  const p = page({ answer: () => stored });
+  await p.show();
+  assert.equal(lines(p.html())[0], "Run up to 3 workers at once.");
+  stored = tastesWith({ captains: { ...balanced, parallel: 2 } });
+  p.context.tastesChanged();
+  await p.settle();
+  assert.equal(lines(p.html())[0], "Run up to 2 workers at once.");
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
 });
 
 test("Save sends the changes in order, takes the last answer and shows the toast", async () => {
@@ -291,7 +378,7 @@ test("a project tab marks a limit changed here, and the orchestrator tab keeps o
   let html = p.html();
   assert.match(html, /<span>Box budget<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="box_budget_cents"/);
   assert.match(html, /<output aria-live="polite">US\$ 3.00<\/output>/);
-  assert.match(html, /<span>Model tier<\/span><span class="taste-tag">inherited<\/span>/);
+  assert.match(html, /<div class="taste-label"><span>Model tier<\/span><\/div>/, "an inherited limit carries no tag");
   await p.click(/data-act="scope" data-kind="orchestrator"/);
   html = p.html();
   assert.match(html, /The orchestrator starts no workers itself\. Each Captain follows the limits under Captains \(all\) or its project\./);

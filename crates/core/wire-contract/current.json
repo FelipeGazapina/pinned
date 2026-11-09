@@ -913,6 +913,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -3002,6 +3025,53 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -6496,53 +6566,6 @@
               }
             ]
           },
-          "TasteScope": {
-            "oneOf": [
-              {
-                "description": "The global orchestrator.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "orchestrator"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "Every project's Capitão.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "captains"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "project"
-                  },
-                  "repo": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "repo"
-                ]
-              }
-            ]
-          },
           "TastePatch": {
             "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
             "type": "object",
@@ -7907,6 +7930,29 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
                 ]
               },
               {
@@ -9975,6 +10021,53 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -13381,53 +13474,6 @@
               }
             ]
           },
-          "TasteScope": {
-            "oneOf": [
-              {
-                "description": "The global orchestrator.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "orchestrator"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "Every project's Capitão.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "captains"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "project"
-                  },
-                  "repo": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "repo"
-                ]
-              }
-            ]
-          },
           "TastePatch": {
             "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
             "type": "object",
@@ -14338,6 +14384,19 @@
                   "kind",
                   "scopes"
                 ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -14520,6 +14579,10 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
@@ -18400,6 +18463,19 @@
                   "kind",
                   "scopes"
                 ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -18582,6 +18658,10 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
@@ -31294,6 +31374,10 @@
             "format": "uint32",
             "minimum": 0
           },
+          "taste_chat": {
+            "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+            "type": "boolean"
+          },
           "question": {
             "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
             "type": [
@@ -31623,6 +31707,10 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0
+          },
+          "taste_chat": {
+            "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+            "type": "boolean"
           },
           "question": {
             "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
@@ -33111,6 +33199,10 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
                 "type": [
@@ -33451,6 +33543,19 @@
                 "required": [
                   "kind",
                   "scopes"
+                ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -35626,6 +35731,10 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
                 "type": [
@@ -35957,6 +36066,19 @@
                 "required": [
                   "kind",
                   "scopes"
+                ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -38657,6 +38779,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -40748,6 +40893,53 @@
               "text"
             ]
           },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -42770,6 +42962,29 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
                 ]
               },
               {
@@ -44838,6 +45053,53 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
             ]
           },
           "GlobalOrchestratorSettings": {

@@ -120,6 +120,12 @@ pub enum ProjectTool {
     },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
+    /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
+    TasteGet { scope: String },
+    /// A taste chat's: `Tastes::set` on the account's tastes, then `TasteGet`.
+    TasteSet { scope: String, patch: crate::taste::TastePatch },
+    /// A taste chat's: `Tastes::reset` on the account's tastes, then `TasteGet`.
+    TasteReset { scope: String, field: crate::taste::TasteField },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";

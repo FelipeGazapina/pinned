@@ -10,6 +10,7 @@
 //! session. `Limits` is that group, resolved.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -688,6 +689,98 @@ impl Tastes {
         self.captains.check()?;
         self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())
     }
+}
+
+impl TasteScope {
+    /// `orchestrator`, `captains` or `project:<repo>`, as the taste tools name a scope.
+    pub fn parse(text: &str) -> Result<TasteScope, String> {
+        match text.trim() {
+            "orchestrator" => Ok(TasteScope::Orchestrator),
+            "captains" => Ok(TasteScope::Captains),
+            other => match other.strip_prefix("project:").map(str::trim) {
+                Some(repo) if !repo.is_empty() => Ok(TasteScope::Project { repo: repo.to_owned() }),
+                _ => Err(format!("unknown scope {other:?}: use orchestrator, captains or project:<repo>, as in project:github.com/acme/site")),
+            },
+        }
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            TasteScope::Orchestrator => "orchestrator".into(),
+            TasteScope::Captains => "captains".into(),
+            TasteScope::Project { repo } => format!("project:{repo}"),
+        }
+    }
+
+    /// Who the scope's sessions are, as the Way of working page names its tab.
+    pub fn label(&self) -> String {
+        match self {
+            TasteScope::Orchestrator => "the global orchestrator".into(),
+            TasteScope::Captains => "every project's Captain (Captains (all))".into(),
+            TasteScope::Project { repo } => format!("the Captain of the project {repo}"),
+        }
+    }
+}
+
+/// What `taste_get` answers about one scope.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct ScopeView {
+    pub scope: String,
+    pub profile: Profile,
+    /// Every knob as the scope's sessions get it.
+    pub effective: Taste,
+    /// What the scope sets itself: a project's own fields, or the whole taste of the others.
+    pub own: Value,
+    /// A project inherits each knob it leaves out from here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherits_from: Option<String>,
+    /// The text the scope's sessions start with.
+    pub brief: String,
+}
+
+impl Tastes {
+    pub fn view(&self, scope: &TasteScope) -> ScopeView {
+        let effective = self.resolve(scope);
+        let own = match scope {
+            TasteScope::Orchestrator => serde_json::to_value(&self.orchestrator),
+            TasteScope::Captains => serde_json::to_value(&self.captains),
+            TasteScope::Project { repo } => serde_json::to_value(self.projects.get(repo).cloned().unwrap_or_default()),
+        }
+        .unwrap_or_default();
+        ScopeView {
+            scope: scope.name(),
+            profile: effective.profile(),
+            brief: effective.brief(),
+            own,
+            inherits_from: matches!(scope, TasteScope::Project { .. }).then(|| TasteScope::Captains.name()),
+            effective,
+        }
+    }
+}
+
+/// `PINNED_ROLE` of a thread opened to adjust the way of working by talking. It is not a `Role`, so
+/// an older app shows it as a plain thread.
+pub const CHAT_ROLE: &str = "taste-chat";
+
+pub fn chat_env() -> Vec<(String, String)> {
+    vec![(crate::agent::ROLE_ENV.to_owned(), CHAT_ROLE.to_owned())]
+}
+
+pub fn is_chat(env: &[(String, String)]) -> bool {
+    env.iter().any(|(k, v)| k == crate::agent::ROLE_ENV && v == CHAT_ROLE)
+}
+
+/// The first prompt of a thread that adjusts `scope`'s way of working.
+pub fn chat_prompt(scope: &TasteScope) -> String {
+    let name = scope.name();
+    format!(
+        "Help me adjust the way of working of {who} in pinned (scope {name}).
+
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none). The Way of working page shows each change as soon as it lands, and new sessions start with it.
+
+Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
+        who = scope.label(),
+    )
 }
 
 /// The tastes in `dir`'s `taste.json`. Without one, an `orchestration.json` from before tastes

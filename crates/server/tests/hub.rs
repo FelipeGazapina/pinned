@@ -868,7 +868,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     assert_eq!(link.call_hub(HubCall::GetTastes), Ok(stored.clone()), "a machine reads the account's taste");
     assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Ok(json!(false)), "a later machine can't replace the account's taste");
     let change = HubCall::SetTaste { scope: TasteScope::Captains, patch: TastePatch { parallel: Some(2), ..TastePatch::default() } };
-    assert_eq!(link.call_hub(change), Err("a machine may only forward a workflow session's callbacks".into()));
+    assert_eq!(link.call_hub(change), Err("only a machine with a Chat to adjust thread open may change the way of working".into()));
 
     let folder = dir.join("app");
     std::fs::create_dir_all(&folder).unwrap();
@@ -876,6 +876,60 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     node.machine.start_claude(captain.as_str().unwrap(), 80, 24).unwrap();
     let kept = || std::fs::read(dir.join("taste.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     assert_eq!(kept(), Some(stored), "the Capitão's start kept the account's taste for when the hub can't answer");
+}
+
+#[test]
+fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts() {
+    let hub = TestHub::start("taste_chat");
+    let url = hub.url.clone();
+    let start = |email: &str, name: &str| {
+        let (token, account) = account::signup(&url, email, "correct horse").unwrap();
+        let mut client = Client::connect(&url, &token);
+        client.wait("hello", |f| f["type"] == "hello");
+        let dir = temp(&format!("taste-chat-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        client.wait_machines(&[(name, true)]);
+        (client, node, dir)
+    };
+    let (mut ana, ana_node, ana_dir) = start("ana@acme.dev", "ana-mac");
+    let (mut bob, bob_node, bob_dir) = start("bob@acme.dev", "bob-mac");
+    let get = || json!({ "cmd": "get_tastes" });
+    let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+    let open_chat = |node: &Node, client: &mut Client| {
+        let tab = node.machine.call(Call::OpenTasteChat { scope: site.clone(), path: None }).unwrap().as_str().unwrap().to_owned();
+        client.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && t["taste_chat"] == true));
+        tab
+    };
+    let set = |parallel: u32| json!({ "name": "taste_set", "scope": "project:github.com/acme/site", "patch": { "parallel": parallel } });
+    let read = json!({ "name": "taste_get", "scope": "project:github.com/acme/site" });
+
+    let plain = ana_node.machine.open_tab(Some(ana_dir.display().to_string()), false).unwrap();
+    assert_eq!(session_tool(&ana_dir, &plain, set(2)), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
+    assert_eq!(ana_node.link.as_ref().unwrap().call_hub(HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(2), ..TastePatch::default() } }), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "a machine with no chat open can't");
+
+    let chat = open_chat(&ana_node, &mut ana);
+    let after = session_tool(&ana_dir, &chat, set(2)).unwrap();
+    assert_eq!((&after["own"], &after["effective"]["parallel"]), (&json!({ "parallel": 2 }), &json!(2)));
+    ana.wait("the page's cue to read again", |f| f["type"] == "event" && f["event"] == json!({ "kind": "tastes-changed" }));
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read sees the session's change");
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()));
+
+    let bobs_set = HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(7), ..TastePatch::default() } };
+    assert_eq!(bob_node.link.as_ref().unwrap().call_hub(bobs_set), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "ana's open chat lets no machine of bob's change a taste");
+    let bob_chat = open_chat(&bob_node, &mut bob);
+    let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
+    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
+    session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
+    assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()), "bob's set changed ana's taste");
+    let reset = session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "parallel" })).unwrap();
+    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+    assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
 
 struct Through<'a>(&'a Link);
@@ -4152,4 +4206,90 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
         Err("mac does not host the global orchestrator (mini does), so it can't read a session".into())
     );
     assert_eq!(session_tool(&fleet.mac_dir, &captain, json!({ "name": "sessions" })), Err("only the global orchestrator has this tool".into()));
+}
+
+/// Pairs a node for `client`'s account into `dir`, hosting that account's global orchestrator, and
+/// answers its machine id and the global orchestrator's tab.
+fn hosting_node(url: &str, client: &mut Client, name: &str, dir: &Path) -> (Node, String, String) {
+    let code = client.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    account::pair(url, &code, name, "linux").unwrap().save(dir).unwrap();
+    let creds = Credentials::load(dir).unwrap();
+    let id = creds.machine_id.clone();
+    let node = Node::start(dir, creds);
+    client.wait_machines(&[(name, true)]);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    client.call(&id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = client.call(&id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    (node, id, global)
+}
+
+#[test]
+fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_another_account() {
+    let hub = TestHub::start("iso_sessions");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_dir, bob_dir) = (temp("iso_sessions-ana"), temp("iso_sessions-bob"));
+    let (_ana_node, ana_m, ana_global) = hosting_node(&url, &mut ana, "ana-mini", &ana_dir);
+    let (bob_node, bob_m, bob_global) = hosting_node(&url, &mut bob, "bob-mac", &bob_dir);
+    for project in [ana_dir.join("secret-project"), bob_dir.join("own-project")] {
+        std::fs::create_dir_all(project).unwrap();
+    }
+    let ana_thread = running_tab(&mut ana, &ana_m, &ana_dir.join("secret-project").display().to_string());
+    hook(&ana_dir, json!({ "kind": "agent", "status": "working", "tab": ana_thread }));
+    hook(&ana_dir, json!({ "kind": "agent", "status": "needs-input", "tab": ana_thread, "message": "Ship the unreleased pricing page?" }));
+    let bob_thread = running_tab(&mut bob, &bob_m, &bob_dir.join("own-project").display().to_string());
+    hook(&bob_dir, json!({ "kind": "agent", "status": "working", "tab": bob_thread }));
+    hook(&bob_dir, json!({ "kind": "agent", "status": "needs-input", "tab": bob_thread, "message": "Rename the button?" }));
+
+    let ana_tool = |tool: Value| session_tool(&ana_dir, &ana_global, tool);
+    let bob_tool = |tool: Value| session_tool(&bob_dir, &bob_global, tool);
+    let waits_in = |sessions: &Value, tab: &str| sessions["sessions"].as_array().unwrap().iter().any(|s| s["id"] == tab && s["state"] == "waiting_on_input");
+    wait_for("ana's thread waiting on her in her own sessions()", || waits_in(&ana_tool(json!({ "name": "sessions" })).unwrap(), ana_thread.as_str()));
+    wait_for("bob's thread waiting on him in his own sessions()", || waits_in(&bob_tool(json!({ "name": "sessions" })).unwrap(), bob_thread.as_str()));
+    let anas = ana_tool(json!({ "name": "waiting" })).unwrap().to_string();
+    assert!(anas.contains(&ana_thread) && anas.contains("unreleased pricing"), "ana's own waiting() has her thread: {anas}");
+
+    let ana_marks = [ana_m.as_str(), "ana-mini", ana_thread.as_str(), ana_global.as_str(), "secret-project", "unreleased pricing"];
+    let nothing_of_ana = |from: &str, answer: &Value| {
+        let text = answer.to_string();
+        for mark in ana_marks {
+            assert!(!text.contains(mark), "{from} names ana's {mark:?}: {text}");
+        }
+    };
+    for args in [json!({ "name": "sessions" }), json!({ "name": "sessions", "machine": ana_m }), json!({ "name": "sessions", "machine": "ana-mini" }), json!({ "name": "sessions", "project": "secret-project" })] {
+        let listed = bob_tool(args.clone()).unwrap();
+        nothing_of_ana(&format!("bob's {args}"), &listed);
+        let machines: Vec<&str> = listed["machines"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(machines, [bob_m.as_str()], "bob's {args} lists his own machine alone");
+    }
+    let mine: Vec<Value> = bob_tool(json!({ "name": "sessions" })).unwrap()["sessions"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect();
+    assert_eq!(mine, [json!(bob_thread)], "bob's sessions() is his own thread, not his global orchestrator's tab nor anything of ana's");
+    let waiting = bob_tool(json!({ "name": "waiting" })).unwrap();
+    nothing_of_ana("bob's waiting()", &waiting);
+    let waits: Vec<&str> = waiting.as_array().unwrap().iter().map(|w| w["tab"].as_str().unwrap()).collect();
+    assert_eq!(waits, [bob_thread.as_str()], "bob's waiting() is his own question alone");
+
+    // Ana's tabs and machine read as tabs and machines that do not exist, from the tool and from bob's machine straight to the hub.
+    let unknown_tab = |tab: &str| Err(format!("no online machine of this account has a session {tab}"));
+    let unknown_machine = |machine: &str| Err(format!("this account has no machine {machine}"));
+    let made_up = uuid::Uuid::new_v4().to_string();
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0" })), unknown_tab("tab-0-0"));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": made_up })), unknown_machine(&made_up));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": "Studio" })), unknown_machine("Studio"));
+    let bob_link = bob_node.link.as_ref().unwrap();
+    for tab in [ana_thread.as_str(), ana_global.as_str()] {
+        assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab })), unknown_tab(tab));
+        assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: None, items: None }), unknown_tab(tab));
+        for machine in [ana_m.as_str(), "ana-mini", "@ana-mini"] {
+            let named = machine.trim_start_matches('@');
+            assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab, "machine": machine })), unknown_machine(named), "{tab} on {machine}");
+            assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: Some(named.to_owned()), items: Some(5) }), unknown_machine(named), "{tab} on {machine}");
+        }
+    }
+    let overview = bob_link.call_hub(HubCall::Overview).unwrap();
+    nothing_of_ana("bob's machine's overview", &overview);
+    assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
+    let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
+    assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
 }
