@@ -154,16 +154,18 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 
 | Seat | Tools |
 |---|---|
-| Global orchestrator | reminders (when on) + `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`. No delegation tools, no `delegate`, no `agents`. |
+| Global orchestrator | reminders (when on) + `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`. No delegation tools, no `agents`. |
 | Capitão | everything a plain thread sees + `tell_orchestrator` |
 | Anyone else | exactly what they saw before |
 
-`permissions()` lists all ten project tools, so each is pre-allowed. `Machine::project_tool` enforces the same rules, because the socket takes any tool name:
+`permissions()` lists all nine project tools, so each is pre-allowed. `Machine::project_tool` enforces the same rules, because the socket takes any tool name:
 
 - `projects`, `send_to_captain`, `read_captain`, `waiting` from another tab: `only the global orchestrator has this tool`.
-- `delegate`, `agents` from the global tab: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`.
+- `agents` from the global tab: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`.
 - `tell_orchestrator` from a non-Capitão: `only a project's Capitão reports to the global orchestrator`.
-- `Message::Delegate` from the global tab (`start_delegate`, the `delegate_task` path) is refused with the same text as `delegate`, so no headless child runs in the global folder.
+- `Message::Delegate` from the global tab (`start_delegate`, the `delegate_task` path) is refused with the same text as `agents`, so no child runs in the global folder.
+
+`delegate_task` is the one delegation tool; the old `delegate` tool is gone, with no alias. A child called from a tab is a worker thread: a tab with `Role::Worker` env and `spawned_by` the caller, linked to its task (`Task::thread`). A Claude Code account runs the child in that tab's own session (`Thread::runs`), with the request's model, `--effort` and access; the task ends with the tab's first `Done` (summary = its last reply) or `Failed`, and `task_cancel`, the limit and quit stop it by the session's pid. Cursor and Codex children run headless; their tab stays unstarted with status `working` and shows the task's card, then takes the task's end state and resumes its conversation. Closing the parent leaves a child thread running; closing the child thread cancels its task.
 
 | Tool | Arguments | Result (tool text) |
 |---|---|---|

@@ -5,6 +5,11 @@ Object.assign(ICON_PATHS, {
 /** The agents claude spawned in the thread, as the last page listed them. An older pinned lists none. */
 const agentsOf = (tab) => threadOf(tab).agents ?? [];
 const runningAgents = (tab) => agentsOf(tab).filter((a) => a.state === "running");
+/** The worker threads `tab` started that are still at work, as far down as `depth` threads. */
+const workingChildren = (tab, depth = 8) =>
+  depth ? tabs.filter((t) => t.machine === tab.machine && t.view.spawned_by === tab.view.id && t !== tab && (statusOf(t) === "working" || workingChildren(t, depth - 1).length || runningAgents(t).length)) : [];
+/** How many of the thread's agents and worker threads are at work. */
+const busyUnder = (tab) => runningAgents(tab).length + workingChildren(tab).length;
 const agentsWorking = (n) => `${n} ${n === 1 ? "agent" : "agents"} working`;
 
 /** Keeps a page's agents on the thread, and answers whether that changes what the cards show. */
@@ -26,8 +31,9 @@ const startedAt = (tab, agent) => {
   const started = Date.parse(agent.started ?? "");
   return Number.isFinite(started) ? started : spawnedAt(threadOf(tab), agent);
 };
-/** When the earliest running agent started, in ms, or NaN. */
-const delegatedSince = (tab) => Math.min(...runningAgents(tab).map((a) => startedAt(tab, a)).filter(Number.isFinite));
+/** When the earliest running agent or worker thread started, in ms, or NaN. */
+const delegatedSince = (tab) =>
+  Math.min(...[...runningAgents(tab).map((a) => startedAt(tab, a)), ...workingChildren(tab).map((t) => (t.view.updated ?? NaN) * 1000)].filter(Number.isFinite));
 /** The last thing the thread or one of its agents did, in unix seconds. */
 const lastActivity = (tab) => Math.max(tab.view.updated ?? 0, ...agentsOf(tab).map((a) => Date.parse(a.updated) / 1000 || 0));
 
@@ -113,6 +119,6 @@ function delegatedStrip(tab) {
 function agentsFooterHtml(tab) {
   if (phaseOf(tab) !== "delegating") return "";
   const since = delegatedSince(tab);
-  return `<div class="agents-working">${icon("loader-circle")}<span class="shimmer">${agentsWorking(runningAgents(tab).length)}</span>
+  return `<div class="agents-working">${icon("loader-circle")}<span class="shimmer">${agentsWorking(busyUnder(tab))}</span>
     ${Number.isFinite(since) ? `<span class="ticker" data-since="${since}">${duration(Date.now() - since)}</span>` : ""}</div>`;
 }

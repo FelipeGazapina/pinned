@@ -444,7 +444,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
             let captain = captain_tab(tabs, &project.path);
-            let workers = tabs.iter().filter(|t| t.running && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            let workers = tabs.iter().filter(|t| (t.running || t.status == Some(AgentStatus::Working)) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
             let checkout = OverviewCheckout {
                 machine: machine.id.to_owned(),
                 machine_name: machine.name.to_owned(),

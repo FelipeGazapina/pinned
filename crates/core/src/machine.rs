@@ -231,6 +231,17 @@ impl Screen {
     }
 }
 
+/// A child `delegate_task` starts from the tab `from`, as the worker thread that shows it.
+struct ThreadChild<'a> {
+    from: &'a str,
+    task: &'a str,
+    title: &'a str,
+    cwd: &'a Path,
+    /// The worktree the thread owns and drops when it closes.
+    made: Option<PathBuf>,
+    model: Option<String>,
+}
+
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -260,10 +271,13 @@ struct Tab {
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
     made: Option<PathBuf>,
-    /// The tab that spawned this worker with the delegate tool, or whose delegated task this tab
+    /// The tab that started this worker with `delegate_task`, or whose delegated task this tab
     /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
     /// once this tab is closed.
     spawned_by: Option<TabId>,
+    /// The `delegate_task` task this worker thread shows. Its first finished turn ends the task
+    /// when the tab runs it; a headless child's thread follows the task instead.
+    task: Option<String>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
@@ -1436,6 +1450,10 @@ impl Machine {
     }
 
     fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        // A headless child's thread has no session of its own while the child works.
+        if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        }
         let prepared = self.tab(tab, |t| {
             if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
                 return None;
@@ -1779,6 +1797,9 @@ impl Machine {
         let path = self.launch.path_env.clone();
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
+        }
+        if let Some(task) = self.thread_task(tab, false) {
+            let _ = self.delegates.cancel_tree(&task, "its thread was closed", path.as_deref());
         }
         let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
@@ -2197,8 +2218,7 @@ impl Machine {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
         match tool {
-            ProjectTool::Delegate { .. } | ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
-            ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
+            ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
             ProjectTool::Projects => {
                 only_global()?;
@@ -2289,39 +2309,6 @@ impl Machine {
             return Err(format!("{running} workers are already running, the most this machine starts at once. Raise it under Settings, or wait for one to finish."));
         }
         Ok(())
-    }
-
-    /// Opens a worker tab on `project` under `from`, in a new worktree when the project is a git
-    /// repository, starts it on `task`, and says which tab it is.
-    fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>, tools: Vec<String>) -> Result<String, String> {
-        self.check_worker_cap()?;
-        let task = crate::delegate::granted_brief(&task, &tools);
-        let bypass = self.tab(from, |t| t.bypass)?;
-        let account = self.account_for(None, project)?;
-        let made = project.join(".git").exists().then(|| branches::new_worktree(project, self.launch.path_env.as_deref())).transpose()?;
-        let cwd = made.clone().unwrap_or_else(|| project.to_owned());
-        // A thread is titled after its prompt's first line, so the title leads the prompt.
-        let prompt = title.as_ref().map_or_else(|| task.clone(), |t| format!("{t}\n\n{task}"));
-        // A prompt starting with a dash would read as an option.
-        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
-        let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
-        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
-        self.tab(&id, |t| {
-            t.made = made.clone();
-            t.spawned_by = Some(from.to_owned());
-        })?;
-        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
-            self.close_tab(&id);
-            if let Some(made) = made {
-                branches::drop_worktree(&made, self.launch.path_env.as_deref());
-            }
-            return Err(e);
-        }
-        if title.is_some() {
-            self.tab(&id, |t| t.title = title)?;
-            self.emit_tabs();
-        }
-        Ok(format!("Started worker {id} in {}. You get a message when it finishes or needs input.", cwd.display()))
     }
 
     /// The workers `from` sees, one per line, each indented under the worker that started it:
@@ -2857,7 +2844,20 @@ impl Machine {
 
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
-        self.delegates.status(&caller, id).map(|value| value.to_string())
+        let mut status = self.delegates.status(&caller, id)?;
+        // A thread's own session runs the child, so its steps are in the thread's transcript.
+        if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
+            status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+        }
+        Ok(status.to_string())
+    }
+
+    /// The task the tab's thread shows, while that task is still working. `runs` asks only for
+    /// one the tab's own session runs.
+    fn thread_task(&self, tab: &str, runs: bool) -> Option<String> {
+        let task = self.tab(tab, |t| t.task.clone()).ok().flatten()?;
+        let info = self.delegates.get(&task)?;
+        (!info.state.terminal() && (!runs || info.thread.is_some_and(|thread| thread.runs))).then_some(task)
     }
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
@@ -2978,6 +2978,11 @@ impl Machine {
             effort = None;
         }
         self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        // A child called from a tab is a worker thread under it. Claude Code runs in that thread's
+        // own session; Cursor and Codex report no turns to pinned, so they run headless and the
+        // thread shows their steps.
+        let from = caller.tab.clone();
+        let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
                 Ok(dir) => {
@@ -2985,7 +2990,7 @@ impl Machine {
                         return self.delegates.started_json(&task.id).map(|value| value.to_string());
                     }
                     cwd = dir;
-                    self.delegates.place(&task.id, cwd.clone(), true);
+                    self.delegates.place(&task.id, cwd.clone(), !runs_in_thread);
                 }
                 Err(error) => {
                     self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
@@ -2997,6 +3002,13 @@ impl Machine {
             return self.delegates.started_json(&task.id).map(|value| value.to_string());
         }
         let brief = crate::delegate::granted_brief(&request.task, &request.tools);
+        if let Some(from) = from.as_deref() {
+            let child = ThreadChild { from, task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
+            if runs_in_thread {
+                return self.run_in_thread(child, account, effort.as_deref(), access, &brief);
+            }
+            self.watch_thread(child, account.clone());
+        }
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
@@ -3042,6 +3054,133 @@ impl Machine {
         }
         self.arm_delegate_pass();
         self.delegates.started_json(&task.id).map(|value| value.to_string())
+    }
+
+    /// Opens the worker thread a delegated Claude Code child runs in: a Worker tab under `from`,
+    /// on `account` with the task's model, effort and access, started on the brief. The task ends
+    /// with the thread's first finished turn.
+    fn run_in_thread(&self, child: ThreadChild, account: Account, effort: Option<&str>, access: crate::delegate::Access, brief: &str) -> Result<String, String> {
+        use crate::delegate::Access;
+        // A thread is titled after its prompt's first line, so the title leads the prompt.
+        let prompt = if brief.lines().next().is_some_and(|line| line.trim() == child.title) { brief.to_owned() } else { format!("{}\n\n{brief}", child.title) };
+        // A prompt starting with a dash would read as an option.
+        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
+        let mut launch = vec!["--name".to_owned(), child.title.to_owned()];
+        if let Some(effort) = effort {
+            launch.extend(["--effort".to_owned(), effort.to_owned()]);
+        }
+        match access {
+            Access::Full => {}
+            Access::Auto => launch.extend(["--permission-mode".to_owned(), "auto".to_owned()]),
+            Access::ReadOnly => launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]),
+        }
+        launch.push(prompt);
+        let id = self.add_child_tab(&child, account, launch, access == Access::Full);
+        let _ = self.tab(&id, |t| {
+            t.made = child.made.clone();
+            if access == Access::ReadOnly {
+                t.permission_mode = Some("plan".into());
+            }
+        });
+        self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
+        if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
+            self.close_tab(&id);
+            return Err(error);
+        }
+        // Cancel, the limit and quit stop the task by this pid, which is the thread's session.
+        // A new session clears the title, so it is set again.
+        if let Some(pid) = self.tab(&id, |t| {
+            t.title = Some(child.title.to_owned());
+            t.session.as_ref().and_then(pty::Session::pid)
+        }).ok().flatten() {
+            self.delegates.remember_pid(child.task, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+        self.delegates.started_json(child.task).map(|value| value.to_string())
+    }
+
+    /// Opens the worker thread that shows a headless child under `from`. It does not start while
+    /// the child works; it then resumes the child's conversation, when there is one.
+    fn watch_thread(&self, child: ThreadChild, account: Account) {
+        let id = self.add_child_tab(&child, account, vec![], false);
+        let _ = self.tab(&id, |t| t.status = Some(AgentStatus::Working));
+        self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id, runs: false });
+        self.emit_tabs();
+    }
+
+    fn add_child_tab(&self, child: &ThreadChild, account: Account, launch: Vec<String>, bypass: bool) -> TabId {
+        let project = self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd));
+        let id = self.add_tab(child.cwd.to_owned(), account, launch, role_env(Role::Worker, &project), bypass, None);
+        let _ = self.tab(&id, |t| {
+            t.spawned_by = Some(child.from.to_owned());
+            t.task = Some(child.task.to_owned());
+            t.title = Some(child.title.to_owned());
+            t.model = child.model.clone();
+        });
+        id
+    }
+
+    /// A worker thread's turn ended. When the tab runs a task still working, that ends it, and
+    /// the task's notice tells the spawner. Returns false when the news is the worker's to report.
+    fn settle_thread_task(&self, tab: &str, event: &AgentEvent) -> bool {
+        let Ok(Some(task)) = self.tab(tab, |t| t.task.clone()) else { return false };
+        let Some(info) = self.delegates.get(&task) else { return false };
+        if info.state.terminal() || !info.thread.as_ref().is_some_and(|thread| thread.runs) {
+            return false;
+        }
+        let error = match event.status {
+            AgentStatus::Done => None,
+            AgentStatus::Failed => Some(event.message.clone().unwrap_or_else(|| "the turn failed".into())),
+            _ => return false,
+        };
+        if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
+            self.delegates.set_conversation(&task, session);
+        }
+        let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
+        match parent {
+            Some(parent) if self.tabs.lock().unwrap().contains_key(&parent) => {
+                self.maybe_deliver(&parent);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The last steps of a thread's conversation, as `task_status` lists them.
+    fn thread_steps(&self, tab: &str) -> Vec<thread::Item> {
+        let Some(page) = self.transcript(tab).ok().and_then(|file| thread::read(&file, 0).ok()) else { return vec![] };
+        let skip = page.items.len().saturating_sub(crate::delegate::STEP_KEEP);
+        page.items.into_iter().skip(skip).collect()
+    }
+
+    /// A headless child's thread follows its task: it shows the end, then resumes the child's
+    /// conversation when opened. Its worktree becomes the thread's.
+    fn follow_headless_threads(&self) {
+        let watched: Vec<(String, String)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.status == Some(AgentStatus::Working) && t.session.is_none()).filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect();
+        let mut changed = false;
+        for (tab, task) in watched {
+            let Some(info) = self.delegates.get(&task) else { continue };
+            if !info.state.terminal() || info.thread.as_ref().is_none_or(|thread| thread.runs) {
+                continue;
+            }
+            let failed = matches!(info.state, crate::delegate::WorkState::Failed | crate::delegate::WorkState::Cancelled);
+            let launch = info.conversation.as_deref().map(|id| crate::delegate::resume_args(info.provider, id)).unwrap_or_default();
+            let made = (info.isolated && info.conversation.is_some()).then(|| info.cwd.clone());
+            let _ = self.tab(&tab, |t| {
+                t.status = Some(if failed { AgentStatus::Failed } else { AgentStatus::Done });
+                t.message = info.error.clone();
+                t.updated = Some(unix_now());
+                t.launch = launch;
+                t.made = made;
+            });
+            changed = true;
+        }
+        if changed {
+            self.emit_tabs();
+        }
     }
 
     fn parent_idle(&self, tab: &str) -> bool {
@@ -3116,6 +3255,7 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.follow_headless_threads();
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
@@ -3182,6 +3322,9 @@ impl Machine {
     /// Opens a finished delegated task's conversation as a thread nested under `tab`, its owner.
     fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
         use crate::delegate::Access;
+        if let Some(thread) = self.delegates.get(task).and_then(|t| t.thread).filter(|thread| self.tabs.lock().unwrap().contains_key(&thread.tab)) {
+            return Ok(thread.tab);
+        }
         let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
         let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
         let bypass = info.access == Access::Full;
@@ -3209,7 +3352,11 @@ impl Machine {
             let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
             match role {
-                Some((Role::Worker, project)) => self.report_worker(tab, &project, &event, before),
+                Some((Role::Worker, project)) => {
+                    if !self.settle_thread_task(tab, &event) {
+                        self.report_worker(tab, &project, &event, before);
+                    }
+                }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
                 _ => {}
             }
@@ -3252,6 +3399,7 @@ impl Machine {
             model: None,
             made: None,
             spawned_by: None,
+            task: None,
             turn: None,
             status: None,
             updated: None,
@@ -3288,6 +3436,9 @@ impl Machine {
         }
         self.end_session(tab);
         let _ = self.tab(tab, |t| t.session = None);
+        if let Some(task) = self.thread_task(tab, true) {
+            self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
+        }
         self.emit(Event::Exit { tab: tab.to_owned() });
         self.emit_tabs();
     }
@@ -6118,21 +6269,20 @@ echo '{"type":"result","result":"ok"}'
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
-        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
-        m.start_delegate(Some(tab), None, None, request).unwrap();
-        wait_for("plan argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
-        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
-        assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The access flags the child thread a `delegate_task` from `tab` starts with.
     #[cfg(unix)]
     fn argv_of(m: &Machine, tab: &str, argv: &Path) -> Vec<String> {
         let _ = std::fs::remove_file(argv);
         let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
         m.start_delegate(Some(tab.to_owned()), None, None, request).unwrap();
         wait_for("child argv", || std::fs::read(argv).is_ok_and(|bytes| !bytes.is_empty()));
-        String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect()
+        let lines: Vec<String> = String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        let mode = lines.windows(2).find(|w| w[0] == "--permission-mode").map(|w| w.to_vec()).unwrap_or_default();
+        lines.iter().filter(|arg| *arg == "--dangerously-skip-permissions").cloned().chain(mode).collect()
     }
 
     #[cfg(unix)]
@@ -6158,8 +6308,8 @@ echo '{"type":"result","result":"ok"}'
         let argv = root.join("argv");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
-        let full = ["-p", "look", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
-        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        let full = ["--dangerously-skip-permissions"].map(str::to_owned).to_vec();
+        let plan = ["--permission-mode", "plan"].map(str::to_owned).to_vec();
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), full);
         m.write_input(&tab, b"\x1b[Z").unwrap();
@@ -6196,8 +6346,7 @@ echo '{"type":"result","result":"ok"}'
         .unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
         let tab = m.restore_tabs().pop().expect("the plan session restored");
-        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
-        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7097,7 +7246,7 @@ while True:
         assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orchestrator] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
         assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into()));
-        assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
+        assert_eq!(tool(&global, r#""name":"agents""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, &send.replace("r-1", "r-3")), Err("only the global orchestrator has this tool".into()));
@@ -7471,57 +7620,149 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A Claude Code that answers its sign-in check, records each tab's folder, role, project,
+    /// account home and arguments, then stays up as that tab's session.
+    #[cfg(unix)]
+    fn thread_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
+        let request = crate::delegate::parse_request(&args).unwrap();
+        serde_json::from_str(&m.start_delegate(Some(from.to_owned()), None, None, request).unwrap()).unwrap()
+    }
+
     #[test]
     #[cfg(unix)]
-    fn an_orchestrator_delegates_to_workers_each_in_its_own_worktree() {
+    fn a_captains_delegate_task_is_a_worker_thread_on_the_account_model_and_effort_it_names() {
+        let dir = temp("child-thread");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let claude = thread_claude(&dir);
+        let config = dir.join("config");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+
+        let reply = delegate_task(&m, &captain, json!({
+            "task": "Add a --json flag to the CLI.",
+            "title": "JSON output",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5", "options": { "effort": "high" } },
+            "isolation": "worktree",
+        }));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        assert_eq!((reply["workState"].as_str(), reply["providerInstanceId"].as_str(), reply["model"].as_str()), (Some("working"), Some("work"), Some("claude-sonnet-5-5")));
+        let view = m.view(&child).unwrap();
+        assert_eq!(
+            (view.role, view.spawned_by.as_deref(), view.account.as_str(), view.title.as_deref(), view.running),
+            (Some(Role::Worker), Some(captain.as_str()), "work", Some("JSON output"), true),
+            "the child is a running worker thread under the Captain"
+        );
+        let args = started(&claude, &child);
+        let tree = PathBuf::from(&args[0]);
+        assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
+        assert_eq!(reply["cwd"].as_str(), Some(args[0].as_str()));
+        assert_eq!(
+            args[1..],
+            [
+                "worker",
+                &path,
+                &config.join("accounts/work").display().to_string(),
+                "--settings",
+                "s",
+                "--plugin-dir",
+                "p",
+                "--name",
+                "JSON output",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "auto",
+                "JSON output\n\nAdd a --json flag to the CLI.",
+                "--model",
+                "claude-sonnet-5-5",
+                "--append-system-prompt",
+                Role::Worker.prompt(),
+            ]
+        );
+
+        assert_eq!(m.worker_count(), 1, "the thread and its task are one worker");
+        let checkout = &m.local_overview().projects[0].checkouts[0];
+        assert_eq!((checkout.path.as_str(), checkout.workers), (path.as_str(), 1), "projects() counts the child");
+        let agents = m.project_tool(&captain, ProjectTool::Agents).unwrap();
+        assert_eq!(agents, format!("{child}: JSON output (starting) in {}", tree.display()));
+        assert!(m.thread(&captain, 0).unwrap().agents.is_empty(), "the child shows as a thread, not as a card on the Captain");
+        let caller = |tab: &str| m.task_status(Some(tab.to_owned()), None, &task).map(|s| serde_json::from_str::<Value>(&s).unwrap());
+        assert_eq!(caller(&captain).unwrap()["workState"], "working");
+
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(transcripts.join("s-child.jsonl"), assistant_line("Added --json; cargo test passes.")).unwrap();
+        m.record_event(AgentEvent { cwd: Some(args[0].clone()), session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+
+        let status = caller(&captain).unwrap();
+        assert_eq!(
+            (status["workState"].as_str(), status["summary"].as_str(), status["error"].as_str(), status["tabId"].as_str(), status["conversationId"].as_str()),
+            (Some("result_available"), Some("Added --json; cargo test passes."), None, Some(child.as_str()), Some("s-child"))
+        );
+        assert_eq!(status["recentSteps"][0]["text"], "Added --json; cargo test passes.");
+        let read = reading::read(&m.view(&child).unwrap(), m.thread(&child, 0).and_then(json), reading::DEFAULT_ITEMS);
+        assert_eq!(read["conversation"]["items"][0]["text"], "Added --json; cargo test passes.", "{read}");
+        assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
+        assert_eq!(m.worker_count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_thread_fans_out_to_worker_threads_and_agents_lists_the_tree() {
         let dir = temp("delegate");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         git(&project, &["init", "-q", "-b", "main"]);
         git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
-        let claude = recording_claude(&dir);
-        let sock = dir.join("pinned.sock");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
-        m.listen(|_| Err("not the machine's".into())).unwrap();
-        let path = project.display().to_string();
+        let claude = thread_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project.clone()).display().to_string();
         let orchestrator = m.open_orchestrator(&path).unwrap();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
-        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
-        let delegate = r#""name":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
-        let worker_of = |reply: &str| reply.strip_prefix("Started worker ").and_then(|r| r.split(' ').next()).unwrap().to_owned();
+        let child = |from: &str, args: Value| delegate_task(&m, from, args)["tabId"].as_str().unwrap().to_owned();
 
-        // A plain thread fans out to workers the same way the orchestrator does.
-        let reply = tool(&plain, delegate).unwrap();
-        let worker = worker_of(&reply);
-        let args = started(&claude, &worker);
-        let tree = PathBuf::from(&args[0]);
-        assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
-        assert!(tree.file_name().unwrap().to_str().unwrap().starts_with("pinned-"));
-        assert_eq!(reply, format!("Started worker {worker} in {}. You get a message when it finishes or needs input.", tree.display()));
-        assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "JSON output\n\nAdd a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
-        assert!(!args.iter().any(|arg| arg == "--disallowedTools"), "a worker launch removed the sub-agent tool: {args:?}");
-        let view = m.view(&worker).unwrap();
-        assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
-
-        let second = worker_of(&tool(&orchestrator, r#""name":"delegate","task":"- Fix the README typo.""#).unwrap());
+        let worker = child(&plain, json!({ "task": "Add a --json flag to the CLI.", "title": "JSON output", "isolation": "worktree" }));
+        let tree = started(&claude, &worker)[0].clone();
+        let second = child(&orchestrator, json!({ "task": "- Fix the README typo.", "isolation": "worktree" }));
         let args = started(&claude, &second);
-        assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
-        assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
-
-        let nested = worker_of(&tool(&worker, r#""name":"delegate","task":"Test the flag.","title":"Flag tests""#).unwrap());
+        assert_ne!(args[0], tree, "two workers share a checkout");
+        assert_eq!(args[args.len() - 3], "\n- Fix the README typo.", "a brief starting with a dash reads as an option");
+        let nested = child(&worker, json!({ "task": "Test the flag.", "title": "Flag tests", "isolation": "worktree" }));
         let nested_tree = started(&claude, &nested)[0].clone();
-        assert_ne!(nested_tree, tree.display().to_string(), "a nested worker shares its parent's checkout");
+        assert_ne!(nested_tree, tree, "a nested worker shares its parent's checkout");
         assert_eq!(m.view(&nested).unwrap().spawned_by, Some(worker.clone()));
         assert_eq!(m.view(&worker).unwrap().spawned_by, Some(plain.clone()));
         assert_eq!(m.view(&second).unwrap().spawned_by, Some(orchestrator.clone()));
-        let agents = r#""name":"agents""#;
+        let agents = |tab: &str| m.project_tool(tab, ProjectTool::Agents);
         assert_eq!(
-            tool(&orchestrator, agents),
-            Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
+            agents(&orchestrator),
+            Ok(format!("{worker}: JSON output (starting) in {tree}\n  {nested}: Flag tests (starting) in {nested_tree}\n{second}: - Fix the README typo. (starting) in {}", args[0]))
         );
-        assert_eq!(tool(&plain, agents), Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}", tree.display())));
-        assert_eq!(tool(&worker, agents), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
-        assert_eq!(tool(&nested, agents), Ok("No workers yet.".into()));
+        assert_eq!(agents(&plain), Ok(format!("{worker}: JSON output (starting) in {tree}\n  {nested}: Flag tests (starting) in {nested_tree}")));
+        assert_eq!(agents(&worker), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
+        assert_eq!(agents(&nested), Ok("No workers yet.".into()));
+
+        m.close_tab(&plain);
+        assert!(m.view(&worker).unwrap().running, "closing the spawner leaves its worker thread running");
+        let task = m.tab(&nested, |t| t.task.clone()).unwrap().unwrap();
+        m.close_tab(&nested);
+        assert_eq!(m.delegates.get(&task).map(|t| (t.state, t.error)), Some((crate::delegate::WorkState::Cancelled, Some("its thread was closed".into()))));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -3,7 +3,7 @@
 #![cfg(unix)]
 
 use pinned_core::accounts::Provider;
-use pinned_core::agent::{SOCK_ENV, TAB_ENV, TASK_ENV};
+use pinned_core::agent::{AgentStatus, Role, SOCK_ENV, TAB_ENV, TASK_ENV};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::reminders;
 use serde_json::{json, Value};
@@ -148,6 +148,18 @@ esac"#,
     assert_eq!(body["summary"], "DONE");
     assert_eq!(body["providerInstanceId"], "cursor");
     let id = body["taskId"].as_str().unwrap();
+    let thread = body["tabId"].as_str().unwrap();
+    let view = machine.view(thread).unwrap();
+    assert_eq!(
+        (view.role, view.spawned_by.as_deref(), view.title.as_deref(), view.running),
+        (Some(Role::Worker), Some(tab.as_str()), Some("say done"), false),
+        "a headless Cursor child is a worker thread that does not run a session of its own"
+    );
+    let start = std::time::Instant::now();
+    while machine.view(thread).unwrap().status != Some(AgentStatus::Done) {
+        assert!(start.elapsed() < Duration::from_secs(5), "the thread never took the task's end");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     let status = rpc(
         true,
