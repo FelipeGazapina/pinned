@@ -888,31 +888,14 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
 }
 
 #[test]
-fn a_node_reads_the_hubs_refusal_of_the_global_orchestrator_overview_as_an_unknown_command() {
+fn a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command() {
     let hub = TestHub::start("global_orchestrator");
     let url = hub.url.clone();
-    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let dir = temp("global-orchestrator");
-    let (machine, machine_token) = account::register_machine(&url, &token, "mini", "macos").unwrap();
-    let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token: machine_token.clone() };
-    creds.save(&dir).unwrap();
-    let mut node = Node::start(&dir, creds);
-    wait_for("the machine online", || node.online());
-    let link = node.link.as_ref().unwrap();
-    let version = env!("CARGO_PKG_VERSION");
-
-    let overview = link.call_hub(HubCall::Overview).unwrap_err();
-    assert_eq!(overview, format!("this hub runs pinned {version}, which can't answer that yet: the global orchestrator's overview is not on the hub"));
-    assert!(link::is_unknown_command(&overview));
-    let mut client = Client::connect(&url, &token);
-    client.wait("hello", |f| f["type"] == "hello");
-    assert_eq!(client.hub(json!({ "cmd": "overview" })), Err(overview));
-
-    // An older hub knows neither call, and a node reads its answer the same way.
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, machine_token) = account::register_machine(&url, &token, "mini", "macos").unwrap();
     let older = machine_result(&url, &machine_token, json!({ "cmd": "relay_from_a_later_app" })).unwrap_err();
-    assert!(older.starts_with(&format!("this hub runs pinned {version}, which can't answer that: unknown variant `relay_from_a_later_app`")), "{older}");
+    assert!(older.starts_with(&format!("this hub runs pinned {}, which can't answer that: unknown variant `relay_from_a_later_app`", env!("CARGO_PKG_VERSION"))), "{older}");
     assert!(link::is_unknown_command(&older));
-    node.kill();
 }
 
 #[test]
@@ -3145,6 +3128,14 @@ fn wait_launch(dir: &Path, tab: &str, line: &str) {
     wait_for(&format!("{tab} to start on {line:?}"), || launches(dir, tab).lines().any(|l| l == line));
 }
 
+/// Makes `dir` a checkout whose origin is `remote`.
+fn origin(dir: &Path, remote: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    for args in [&["init", "-q"][..], &["remote", "add", "origin", remote]] {
+        assert!(std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+    }
+}
+
 fn captain(machine: &str, path: &str, text: &str) -> HubCall {
     HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orquestrador".into(), busy: None } }
 }
@@ -3239,5 +3230,110 @@ fn a_machine_too_old_for_the_relay_is_named_for_an_update() {
     fleet.client.wait_machines(&[("mac", true), ("mini", true), ("old", true)]);
     let sent = fleet.send_to_captain(&format!("{}:/w/site", machine.id), "Ship it.", "r-1");
     assert_eq!(sent, Err("old precisa atualizar o pinned".into()));
-    assert_eq!((old.calls("global_orchestrator_settings"), old.calls("enqueue")), (1, 1));
+    assert_eq!((old.calls("global_orchestrator_settings"), old.calls("enqueue")), (2, 1), "the overview and the relay each asked whether it hosts");
+}
+
+#[test]
+fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_without_failing() {
+    let mut fleet = Fleet::start("overview");
+    let (mac, mini) = (fleet.mac_id.clone(), fleet.mini_id.clone());
+    let mini_site = fleet.mini_dir.join("site");
+    origin(Path::new(&fleet.site), "git@github.com:acme/site.git");
+    origin(&mini_site, "https://github.com/acme/site.git");
+    fleet.mac.machine.open_project(PathBuf::from(&fleet.site));
+    let mini_site = fleet.mini.machine.open_project(mini_site).display().to_string();
+    let (old, old_token) = account::register_machine(&fleet.hub.url, &fleet.token, "old", "linux").unwrap();
+    let raw = RawMachine::start(&fleet.hub.url, &old_token, |call| match call["cmd"].as_str().unwrap() {
+        "list_projects" => RawReply::Ok(json!([{ "path": "/srv/notes", "name": "notes", "account": "claude" }])),
+        "tabs" => RawReply::Ok(json!([])),
+        cmd => RawReply::Err(format!("this machine runs pinned 0.17.0, which can't answer that: unknown variant `{cmd}`")),
+    });
+    fleet.client.wait_machines(&[("mac", true), ("mini", true), ("old", true)]);
+    // A node lists its projects by when they were opened, which ties within a second.
+    let by_key = |mut overview: Value| {
+        overview["projects"].as_array_mut().unwrap().sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+        overview
+    };
+    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(by_key);
+    let checkout = |machine: &str, name: &str, online: bool, version: &str, path: &str| {
+        json!({ "machine": machine, "machine_name": name, "online": online, "version": version, "path": path, "captain": "nenhum", "workers": 0 })
+    };
+    let site = |mac_online: bool| {
+        json!({ "key": "github.com/acme/site", "name": "site", "repo": "github.com/acme/site", "checkouts": [
+            checkout(&mac, "mac", mac_online, "0.0.0-test", &fleet.site),
+            checkout(&mini, "mini", true, "0.0.0-test", &mini_site),
+        ] })
+    };
+    let notes = json!({ "key": format!("{}:/srv/notes", old.id), "name": "notes", "checkouts": [checkout(&old.id, "old", true, "test", "/srv/notes")] });
+    // Each node's own folder is a project too, with no origin.
+    let home = |id: &str, name: &str, online: bool, dir: &Path| {
+        let dir = dir.display().to_string();
+        json!({ "key": format!("{id}:{dir}"), "name": Path::new(&dir).file_name().unwrap().to_str().unwrap(), "checkouts": [checkout(id, name, online, "0.0.0-test", &dir)] })
+    };
+    let machine = |id: &str, name: &str, online: bool, version: &str| json!({ "id": id, "name": name, "online": online, "version": version });
+    let old_machine = json!({ "id": old.id, "name": "old", "online": true, "version": "test", "problem": "precisa atualizar o pinned" });
+
+    assert_eq!(
+        projects(),
+        Ok(by_key(json!({
+            "projects": [site(true), home(&mac, "mac", true, &fleet.mac_dir), home(&mini, "mini", true, &fleet.mini_dir), notes],
+            "waiting": [],
+            "machines": [machine(&mac, "mac", true, "0.0.0-test"), machine(&mini, "mini", true, "0.0.0-test"), old_machine],
+        })))
+    );
+    assert_eq!((raw.calls("list_projects"), raw.calls("global_orchestrator_settings"), raw.calls("tabs")), (1, 1, 1), "the hub asked for the tabs only of the machine that never reported them");
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    assert_eq!(mac_link.call_hub(HubCall::Overview), Err("mac does not host the global orchestrator (mini does), so it can't list the account's projects".into()));
+    let signed_in = by_key(fleet.client.hub(json!({ "cmd": "overview" })).unwrap());
+    assert_eq!(signed_in["projects"][3], site(true), "a signed-in client reads it too");
+
+    drop(raw);
+    fleet.mac.kill();
+    fleet.client.wait_machines(&[("mac", false), ("mini", true), ("old", false)]);
+    let offline = json!({ "key": format!("{}:/srv/notes", old.id), "name": "notes", "checkouts": [checkout(&old.id, "old", false, "test", "/srv/notes")] });
+    assert_eq!(
+        projects(),
+        Ok(by_key(json!({
+            "projects": [site(false), home(&mac, "mac", false, &fleet.mac_dir), home(&mini, "mini", true, &fleet.mini_dir), offline],
+            "waiting": [],
+            "machines": [machine(&mac, "mac", false, "0.0.0-test"), machine(&mini, "mini", true, "0.0.0-test"), machine(&old.id, "old", false, "test")],
+        }))),
+        "an offline machine keeps the projects it listed last, with no Capitão"
+    );
+}
+
+#[test]
+fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_at_once_and_reads_it() {
+    let fleet = Fleet::start("reach");
+    let mac = fleet.mac_id.clone();
+    origin(Path::new(&fleet.site), "git@github.com:acme/site.git");
+    origin(&fleet.mini_dir.join("site"), "git@github.com:acme/site.git");
+    fleet.mac.machine.open_project(PathBuf::from(&fleet.site));
+    fleet.mini.machine.open_project(fleet.mini_dir.join("site"));
+    let tool = |tool: Value| session_tool(&fleet.mini_dir, &fleet.global, tool);
+
+    let sent = tool(json!({ "name": "send_to_captain", "project": "github.com/acme/site", "machine": "@mac", "message": "Ship the form.", "request_id": "r-1" })).unwrap();
+    let capitao = sent["tab"].as_str().unwrap().to_owned();
+    assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
+    wait_launch(&fleet.mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    let overview = tool(json!({ "name": "projects" })).unwrap();
+    let site = overview["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site").unwrap();
+    let on_mac = site["checkouts"].as_array().unwrap().iter().find(|c| c["machine"] == mac).unwrap();
+    assert_eq!(
+        (&on_mac["machine"], &on_mac["captain"], &on_mac["captain_tab"]),
+        (&json!(mac), &json!("trabalhando"), &json!(capitao)),
+        "before its first hook, the Capitão a message started is working"
+    );
+    let queued = tool(json!({ "name": "send_to_captain", "project": format!("mac:{}", fleet.site), "message": "Also the footer.", "request_id": "r-2" }));
+    assert_eq!(queued, Ok(json!({ "outcome": "na_fila", "tab": capitao, "position": 1 })), "a send agrees with the overview");
+
+    let read = tool(json!({ "name": "read_captain", "project": "github.com/acme/site", "machine": "mac" })).unwrap();
+    assert_eq!(read, json!({ "state": "starting", "next": "it is starting, and may be showing the user a startup prompt; read again in a minute", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "project": fleet.site }));
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    assert_eq!(
+        mac_link.call_hub(HubCall::ReadCaptain { machine: mac.clone(), path: fleet.site.clone() }),
+        Err("mac does not host the global orchestrator (mini does), so it can't read a Capitão".into())
+    );
+    let elsewhere = tool(json!({ "name": "read_captain", "project": format!("{mac}:{}", fleet.mac_dir.display()) })).unwrap();
+    assert_eq!(elsewhere, json!({ "state": "not_started", "next": "message it to start it", "project": fleet.mac_dir.display().to_string() }), "a folder with no Capitão, named by machine id");
 }

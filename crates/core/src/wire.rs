@@ -121,6 +121,10 @@ pub struct TabView {
     /// `role` is empty, so an older app shows it as a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrator_global: bool,
+    /// The tab is a Capitão running a turn that a message from the global orchestrator started,
+    /// which it may not have reported yet: a message to it queues.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub orchestrator_turn: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -916,6 +920,9 @@ pub enum HubCall {
     /// `global_orchestrator::Overview`: the account's projects on every machine, and what waits on
     /// the user.
     Overview,
+    /// From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as
+    /// `reading::read` answers them, with `project` set to `path`.
+    ReadCaptain { machine: MachineId, path: String },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1161,6 +1168,7 @@ mod tests {
             role: None,
             spawned_by: None,
             orchestrator_global: false,
+            orchestrator_turn: false,
         }
     }
 
@@ -1212,6 +1220,10 @@ mod tests {
             json!({ "type": "call", "id": 10, "call": { "cmd": "relay", "request_id": "report-1", "to": { "kind": "orchestrator", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } } } }),
         );
         round_trip(ClientFrame::Hub { id: 3, call: HubCall::Overview }, json!({ "type": "hub", "id": 3, "call": { "cmd": "overview" } }));
+        round_trip(
+            MachineFrame::Call { id: 11, call: HubCall::ReadCaptain { machine: "m2".into(), path: "/w/site".into() } },
+            json!({ "type": "call", "id": 11, "call": { "cmd": "read_captain", "machine": "m2", "path": "/w/site" } }),
+        );
     }
 
     #[test]

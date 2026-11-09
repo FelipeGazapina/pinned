@@ -7,7 +7,7 @@ use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
+    Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -88,6 +88,9 @@ pub struct Account {
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
     updates: Mutex<HashMap<MachineId, UpdateStatus>>,
+    /// Each machine's projects as it last listed them, so the global orchestrator's overview still
+    /// shows them while it is offline or slow to answer.
+    projects: Mutex<HashMap<MachineId, Vec<ProjectView>>>,
 }
 
 #[derive(Default)]
@@ -140,12 +143,6 @@ fn frame<T: Serialize>(frame: &T) -> String {
     serde_json::to_string(frame).unwrap()
 }
 
-/// What the hub answers a global orchestrator call it can't serve yet. It reads as an unknown
-/// command, as an older hub's answer does, so a machine treats both alike.
-pub fn not_yet(call: &str) -> String {
-    format!("this hub runs pinned {}, which can't answer that yet: the global orchestrator's {call} is not on the hub", env!("CARGO_PKG_VERSION"))
-}
-
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
@@ -187,7 +184,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -483,8 +480,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            HubCall::Relay { request_id, to } => return crate::relay::relay(self, account, crate::relay::Source::Client, request_id, to).await,
-            HubCall::Overview => return Err(not_yet("overview")),
+            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
         };
         if changed {
             self.watch(account).await?;
@@ -652,6 +648,21 @@ impl Account {
     /// The tab as the online `machine` last reported it.
     pub fn tab(&self, machine: &str, tab: &str) -> Option<TabView> {
         self.live.lock().unwrap().machines.get(machine)?.tabs().iter().find(|t| t.id == tab).cloned()
+    }
+
+    /// The tabs the online `machine` last reported, or None when it is offline or has not yet.
+    pub fn tabs_of(&self, machine: &str) -> Option<Vec<TabView>> {
+        self.live.lock().unwrap().machines.get(machine)?.tabs.clone()
+    }
+
+    /// The projects `machine` listed, kept for when it can't list them.
+    pub fn listed(&self, machine: &str, projects: Vec<ProjectView>) {
+        self.projects.lock().unwrap().insert(machine.to_owned(), projects);
+    }
+
+    /// The projects `machine` listed last, or none if it never did since the hub started.
+    pub fn last_listed(&self, machine: &str) -> Vec<ProjectView> {
+        self.projects.lock().unwrap().get(machine).cloned().unwrap_or_default()
     }
 
     /// What a box's machine shows of the session of `connector` on `subject`.
@@ -992,7 +1003,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], Outbox::new().0, vec![]);
         }
@@ -1013,7 +1024,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
