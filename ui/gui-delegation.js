@@ -34,7 +34,7 @@ function delegationGroupHtml(title, key, groups) {
   const outcome = key === "by_outcome";
   const rows = groups
     .map((g) => {
-      const hints = delegationHints(g, outcome ? "" : g.label)
+      const hints = delegationHints(g, outcome || !g.key ? "" : g.label, key)
         .map((h) => `<li>${esc(h.text)} <span class="delegation-tune">→ ${esc(h.field)}</span></li>`)
         .join("");
       return `<li class="delegation-row">

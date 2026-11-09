@@ -47,6 +47,22 @@ async function signIn(page) {
   return waitFor("the sweep node", () => page.evaluate(() => [...machines.entries()].find(([, m]) => m.view.online && m.view.name === "sweep-node")?.[0]));
 }
 
+/** Viewport shots down the section, from its heading: `<name>-1.png`, `-2.png`, … */
+async function shots(page, name) {
+  await page.evaluate(() => document.querySelector(".delegation-head").scrollIntoView({ block: "start" }));
+  for (let i = 1; i <= 4; i++) {
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: path.join(SCREENS, `${name}-${i}.png`) });
+    const more = await page.evaluate(() => {
+      const section = document.querySelector(".taste-section.delegation").getBoundingClientRect();
+      if (section.bottom <= window.innerHeight) return false;
+      document.querySelector(".delegation-head").closest(".page-body")?.scrollBy(0, window.innerHeight - 160);
+      return true;
+    });
+    if (!more) break;
+  }
+}
+
 const delegator = (kind, project) => ({ kind, tab: "tab-1", ...(project ? { project: `github.com/example/${project}`, project_name: project } : {}) });
 
 /** One finished task, `ago` ms before now, that ran `minutes`. */
@@ -80,10 +96,11 @@ function record(n, { model, provider = "claude", account = "claude", by, outcome
   page.on("pageerror", (e) => errors.push(String(e)));
   const node = await signIn(page);
   await page.evaluate(() => setMode("gui"));
-  const tab = await page.evaluate(async (node) => {
-    const dir = (await callOn(node, { cmd: "list_projects" }))[0].path;
-    return openRemote(node, dir, false).then(() => tabs.find((t) => t.machine === node).id);
-  }, node);
+  const alpha = require("fs").realpathSync(path.join(DIR, "home", "work", "alpha"));
+  const tab = await page.evaluate(async ({ node, dir }) => {
+    await openRemote(node, dir, false);
+    return tabs.find((t) => t.machine === node && t.view.cwd === dir).view.id;
+  }, { node, dir: alpha });
 
   const opus = "claude-opus-5-5", sonnet = "claude-sonnet-5-5", glm = "glm-5.3", grok = "grok-4.7", luna = "gpt-6-luna";
   const seeds = [
@@ -107,7 +124,7 @@ function record(n, { model, provider = "claude", account = "claude", by, outcome
   const machine = psql(`select id from machines where account = '${account}' and name = 'sweep-node'`);
   for (const r of seeds) {
     const value = JSON.stringify({ ...r, machine, machine_name: "sweep-node" }).replace(/'/g, "''");
-    psql(`insert into delegation_tasks (account, machine, id, ended, record) values ('${account}', '${machine}', '${r.id}', ${r.ended}, '${value}') on conflict do nothing`);
+    psql(`insert into delegation_tasks (account, machine, id, ended, record) values ('${account}', '${machine}', '${r.id}', ${r.ended}, '${value}') on conflict (account, machine, id) do update set ended = excluded.ended, record = excluded.record`);
   }
   check(Number(psql(`select count(*) from delegation_tasks where account = '${account}'`)) === seeds.length, `${seeds.length} records seeded`);
 
@@ -119,10 +136,7 @@ function record(n, { model, provider = "claude", account = "claude", by, outcome
   const hints = await page.$$eval(".delegation-hints li", (els) => els.map((el) => el.textContent));
   console.log(hints.join("\n"));
   check(hints.includes("3 of 6 claude-opus-5-5 tasks hit the time limit → Time limit") || hints.some((h) => /claude-opus-5-5 tasks hit the time limit → Time limit/.test(h)), "the Opus row names the time limit it would tune");
-  const section = page.locator(".taste-section.delegation");
-  await section.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(SCREENS, "delegation-desktop-dark.png") });
-  await section.screenshot({ path: path.join(SCREENS, "delegation-section-dark.png") });
+  await shots(page, "delegation-desktop-dark");
 
   await page.click('[data-act="delegation-days"][data-days="30"]');
   await waitFor("30 days", () => page.evaluate(() => document.querySelector(".delegation-tiles dd")?.textContent === "15"));
@@ -134,9 +148,7 @@ function record(n, { model, provider = "claude", account = "claude", by, outcome
   await waitFor("7 days again", () => page.evaluate(() => document.querySelector(".delegation-tiles dd")?.textContent === "13"));
 
   await page.emulateMedia({ colorScheme: "light" });
-  await section.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(SCREENS, "delegation-desktop-light.png") });
-  await section.screenshot({ path: path.join(SCREENS, "delegation-section-light.png") });
+  await shots(page, "delegation-desktop-light");
 
   await page.click(`.delegation-link[data-tab="${tab}"]`);
   await waitFor("the thread", () => page.evaluate(() => document.body.dataset.page !== "taste"), 5000).catch(() => {});
@@ -150,10 +162,7 @@ function record(n, { model, provider = "claude", account = "claude", by, outcome
     await p.evaluate(() => setMode("gui"));
     await p.evaluate(() => openPage("taste"));
     await waitFor("the metrics on the phone", () => p.isVisible(".delegation-tiles"));
-    const s = p.locator(".taste-section.delegation");
-    await s.scrollIntoViewIfNeeded();
-    await p.screenshot({ path: path.join(SCREENS, `delegation-phone-${scheme}.png`) });
-    await s.screenshot({ path: path.join(SCREENS, `delegation-phone-section-${scheme}.png`) });
+    await shots(p, `delegation-phone-${scheme}`);
     const wide = await p.evaluate(() => document.scrollingElement.scrollWidth > window.innerWidth + 1 || [...document.querySelectorAll(".delegation *")].some((el) => el.getBoundingClientRect().right > window.innerWidth + 1));
     check(!wide, `no horizontal overflow on the phone (${scheme})`);
     await phone.close();

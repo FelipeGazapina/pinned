@@ -48,16 +48,18 @@ function delegationSpend(g) {
 
 /** The hints under one breakdown row, each naming the Delegation limits field it would tune:
  * a limit that stopped tasks, a failure rate of half or more, and box spend. `noun` names the
- * row's tasks, like "claude-opus-5-5" or "Captain site", or nothing for an outcome row. */
-function delegationHints(g, noun) {
+ * row's tasks, like "claude-opus-5-5" or "Captain site", or nothing. An outcome row shows only
+ * which limits stopped its tasks; box spend shows under models and projects, where it differs. */
+function delegationHints(g, noun, breakdown = "by_model") {
   const hints = [];
   const tasks = noun ? `${noun} tasks` : "tasks";
   for (const [limit, count] of Object.entries(g.limits ?? {})) {
     const field = DELEGATION_LIMIT_FIELDS[limit] ?? "Delegation limits";
     hints.push({ text: `${count} of ${g.runs} ${tasks} hit the ${limit} limit`, field });
   }
+  if (breakdown === "by_outcome") return hints;
   if (g.runs >= 2 && g.failed * 2 >= g.runs) hints.push({ text: `${g.failed} of ${g.runs} ${tasks} failed`, field: "Tier" });
-  if (g.box_usd > 0) hints.push({ text: `${delegationUsd(g.box_usd)} on boxes over ${delegationMinutes(g.box_ms)}`, field: "Upstash Box budget" });
+  if (g.box_usd > 0 && (breakdown === "by_model" || breakdown === "by_project")) hints.push({ text: `${delegationUsd(g.box_usd)} on boxes over ${delegationMinutes(g.box_ms)}`, field: "Upstash Box budget" });
   return hints;
 }
 
@@ -68,7 +70,7 @@ function delegationTiles(t) {
     { label: "Done", value: `${t.done} · ${delegationPercent(t.done, t.runs)}` },
     { label: "Median time", value: t.runs ? delegationMinutes(t.median_wall_ms) : "–" },
     { label: "Spend", value: delegationSpend(t), note: t.box_usd ? `${delegationUsd(t.cost_usd)} agents · ${delegationUsd(t.box_usd)} boxes` : t.priced < t.runs ? `${t.runs - t.priced} with no price` : "" },
-    { label: "Tokens", value: `${delegationTokens(t.tokens_in)} in · ${delegationTokens(t.tokens_out)} out` },
+    { label: "Tokens in / out", value: `${delegationTokens(t.tokens_in)} / ${delegationTokens(t.tokens_out)}` },
     { label: "Accepted / redone", value: `${t.accepted} / ${t.redone}` },
   ];
 }

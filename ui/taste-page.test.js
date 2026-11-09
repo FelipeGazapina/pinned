@@ -429,7 +429,7 @@ test("delegation metrics show totals, a hint per breakdown naming the limit it t
     "Done: 2 · 40%",
     "Median time: 30 min",
     "Spend: $10.00",
-    "Tokens: 2.4M in · 52k out",
+    "Tokens in / out: 2.4M / 52k",
     "Accepted / redone: 1 / 1",
   ]);
   const hints = [...html.matchAll(/<li>([^<]+) <span class="delegation-tune">→ ([^<]+)<\/span><\/li>/g)].map(([, text, field]) => `${unesc(text)} → ${unesc(field)}`);

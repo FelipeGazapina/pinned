@@ -2,6 +2,7 @@
 .taste-section.delegation.loading :is(.delegation-tiles, .delegation-grid) { opacity: 0.5; transition: opacity 150ms 150ms; }
 .delegation-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; }
 .delegation .delegation-error { color: var(--g-error); }
+.delegation .taste-hint { margin: 0; color: var(--g-muted); font-size: 12px; }
 
 .delegation-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
 .delegation-tiles > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 10px 14px; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.03); }
