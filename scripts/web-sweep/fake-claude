@@ -531,6 +531,8 @@ function submit() {
     out(`echo: ${line}\r\n`);
   }
   if (line !== "/ask") hook("Stop");
+  // Claude Code's idle notice: a finished turn later fires Notification, which is not a question.
+  if (line === "idle") hook("Notification", { message: "Claude is waiting for your input" });
   line = "";
   prompt();
 }
