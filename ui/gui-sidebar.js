@@ -59,7 +59,7 @@ try {
 const isFolded = (tab) => foldedThreads.has(threadKey(tab));
 const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
 onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
-Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
+Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
 /** What ⌘⇧T brings back, newest last, as T3 Code's closed views: `{ thread }` for a closed thread and
@@ -298,6 +298,64 @@ function snoozeLimitStops() {
   }
 }
 
+/** The fixed rows above the projects: the global orchestrator's own row, then the threads waiting
+ * on Felipe. The row names the orchestrator as its settings do and its host machine under that,
+ * and carries the settings page's Projects link when that page is loaded. Empty while no machine
+ * can hold the conversation. */
+function globalSidebarTop() {
+  askGlobalSettings();
+  const host = globalHostMachine();
+  if (!host) return [];
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "global-row";
+  row.dataset.globalOpen = "true";
+  const projects = typeof openGlobalProjects === "function" ? `<span class="projects link" role="button" tabindex="0" data-global-projects>Projetos</span>` : "";
+  row.innerHTML = `${icon("bot")}<span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))}</span></span>${projects}`;
+  const waiting = globalWaitingRows();
+  if (!waiting.length) return [row];
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "settled-head waiting-head";
+  head.dataset.shelf = "waiting";
+  head.dataset.open = ui.waitingOpen;
+  head.innerHTML = `<span>Esperando você</span><span class="count">${waiting.length}</span><span class="line"></span>${icon("chevron-down")}`;
+  return [row, head, ...(ui.waitingOpen ? waiting : [])];
+}
+
+/** Every thread on every machine that waits on Felipe, newest first: a question mid-turn or a
+ * failure, each with its kind, its title and where it is. */
+function globalWaitingRows() {
+  return tabs
+    .map((tab) => ({ tab, kind: waitingKindOf(tab.view, !!tab.menu) }))
+    .filter((w) => w.kind)
+    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
+    .map(({ tab, kind }) => {
+      const row = document.createElement("div");
+      row.className = "waiting-row";
+      row.dataset.waiting = tab.key;
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.innerHTML = `<span class="kind ${kind}">${kind}</span><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}</span>`;
+      return row;
+    });
+}
+
+/** Selects the host's global orchestrator tab, or asks the host to open one and selects that. The
+ * tab starts when its first message is sent, as every other new tab does. */
+async function openGlobalChat() {
+  const host = globalHostMachine();
+  if (!host) return tell("No machine is online to open the orchestrator on.", 4000);
+  if (narrow(768)) toggleSidebar(false);
+  try {
+    const open = tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
+    const tab = open ?? await revealTab(host, await callOn(host, { cmd: "open_global_orchestrator" }));
+    activate(tab);
+  } catch (e) {
+    tell(`Couldn't open the orchestrator: ${esc(e)}`, 6000);
+  }
+}
+
 function renderSidebar() {
   if (document.activeElement?.matches("#thread-list input.rename") || rowDrag?.started) return;
   snoozeLimitStops();
@@ -310,12 +368,13 @@ function renderSidebar() {
   const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
   projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
-  const inScope = tabs.filter((t) => !ui.project || projectKeyOf(t) === ui.project);
+  const inScope = tabs.filter((t) => (!ui.project || projectKeyOf(t) === ui.project) && !isGlobalOrchestratorTab(t));
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
-  const rows = needle ? searchRows(inScope, needle) : shelfRows(inScope);
+  const top = globalSidebarTop();
+  const rows = [...top, ...(needle ? searchRows(inScope, needle) : shelfRows(inScope))];
   threadList.replaceChildren(...rows);
-  if (!rows.length) threadList.innerHTML = `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
+  if (rows.length === top.length) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
@@ -1194,6 +1253,18 @@ function editTitle(tab, input) {
 }
 
 threadList.addEventListener("click", (e) => {
+  const projectsLink = e.target.closest("[data-global-projects]");
+  if (projectsLink && typeof openGlobalProjects === "function") return openGlobalProjects();
+  if (e.target.closest("[data-global-open]")) return openGlobalChat();
+  const waiting = e.target.closest(".waiting-row");
+  if (waiting) {
+    const tab = tabByKey(waiting.dataset.waiting);
+    if (tab) {
+      activate(tab);
+      if (narrow(768)) toggleSidebar(false);
+    }
+    return;
+  }
   const head = e.target.closest(".settled-head");
   if (head) {
     const shelf = head.dataset.shelf;
@@ -1240,7 +1311,7 @@ threadList.addEventListener("contextmenu", (e) => {
   showMenu(rowMenuItems(tab), at);
 });
 threadList.addEventListener("keydown", (e) => {
-  const row = e.target.closest(".thread-row");
+  const row = e.target.closest(".thread-row, .waiting-row");
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     row.click();
@@ -1532,6 +1603,7 @@ function projectListsPending() {
 function projectGroups() {
   const threads = [];
   for (const tab of tabs) {
+    if (isGlobalOrchestratorTab(tab)) continue;
     const path = projectPathOf(tab);
     threads.push({ machine: tab.machine, path, name: projectName(tab), repo: projectRepos.get(`${tab.machine}:${path}`) || null, thread: tab });
   }

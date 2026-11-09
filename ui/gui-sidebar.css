@@ -266,3 +266,30 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 #side-update[data-state="available"] .glyph::after { content: ""; position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%;
   background: currentColor; box-shadow: 0 0 0 2px var(--g-control); }
 #side-update[data-state="downloading"] { box-shadow: inset 0 0 0 1.5px rgb(var(--g-side-fg-rgb) / 0.22); }
+
+/* The global orchestrator's fixed row above the projects. */
+.global-row { flex: none; display: flex; align-items: center; gap: 8px; width: 100%; margin: 2px 0 4px; padding: 8px 10px; border-radius: 8px;
+  text-align: left; font: inherit; color: var(--g-fg); background: rgb(var(--g-primary-rgb) / 0.1); }
+.global-row:hover { background: rgb(var(--g-primary-rgb) / 0.16); }
+.global-row > .i { width: 16px; height: 16px; flex: none; color: var(--g-primary); }
+.global-row .names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.global-row .name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.global-row .host { font-size: 11px; color: var(--g-side-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.global-row .projects { flex: none; padding: 2px 6px; border-radius: 6px; font-size: 11px; font-weight: 500; color: var(--g-primary); }
+.global-row .projects:hover { background: rgb(var(--g-primary-rgb) / 0.18); }
+
+/* The threads waiting on Felipe, right under the orchestrator's row. */
+.settled-head.waiting-head { color: var(--g-warning-fg); }
+.settled-head.waiting-head:hover { color: var(--g-warning); }
+.settled-head.waiting-head .line { background: rgb(var(--g-warning-rgb) / 0.2); }
+.settled-head.waiting-head .count { flex: none; min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.18); }
+.waiting-row { flex: none; display: flex; align-items: center; gap: 8px; height: 34px; margin: 1px 0; padding: 0 10px; border-radius: 8px;
+  cursor: pointer; outline: none; }
+.waiting-row:hover, .waiting-row:focus-visible { background: var(--g-row-hover); }
+.waiting-row:focus-visible { box-shadow: inset 0 0 0 2px rgb(var(--g-ink-rgb) / 0.2); }
+.waiting-row .kind { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.waiting-row .kind.pergunta { color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
+.waiting-row .kind.falha { color: var(--g-error); background: rgb(var(--g-error-rgb) / 0.14); }
+.waiting-row .l2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: rgb(var(--g-fg-rgb) / 0.9); }
+.waiting-row .where { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.8); }
