@@ -688,6 +688,20 @@ mod tests {
     }
 
     #[test]
+    fn waiting_counts_exactly_the_cases_the_sidebar_shares() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("waiting_cases.json")).unwrap();
+        let verdict = |case: &serde_json::Value| {
+            let mut view = cases["base"].clone();
+            view.as_object_mut().unwrap().extend(case["view"].as_object().unwrap().clone());
+            let tab: TabView = serde_json::from_value(view).unwrap();
+            let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.21", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
+            (case["case"].clone(), serde_json::to_value(overview(&machines).waiting.first().map(|w| w.kind)).unwrap())
+        };
+        let cases_list = cases["cases"].as_array().unwrap();
+        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone())).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn the_capitao_hears_how_its_turn_goes_back_to_the_orchestrator_under_each_policy() {
         assert_eq!(captain_prompt("Almirante", ReportPolicy::Auto), "A message that starts with \"[Almirante] \" comes from the global orchestrator, the user's chat above every project. Do that work as you would the user's. Mid-work, use tell_orchestrator for a question it must answer or news it must hear now. Your last reply of such a turn goes back to it by itself, so end that turn with what you did, what is left and what needs the user.");
         assert!(captain_prompt("Almirante", ReportPolicy::ToolOnly).ends_with("Nothing goes back to it by itself: when you finish its request, report with tell_orchestrator."));
