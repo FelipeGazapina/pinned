@@ -157,11 +157,17 @@ impl Hub {
         Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
     }
 
-    /// The lock for `key`. Locks nobody holds are dropped as others are taken, so the map stays small.
-    pub fn agent_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.agent_locks.lock().unwrap();
-        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-        locks.entry(key.to_owned()).or_default().clone()
+    /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
+    /// MCP's `message_orchestrator` and the global orchestrator's relay alike. Two messages at once
+    /// would both see it stopped and start it twice. Locks nobody holds are dropped as others are
+    /// taken, so the map stays small.
+    pub async fn hold_captain(&self, account: &Account, machine: &str, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.agent_locks.lock().unwrap();
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+            locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
+        };
+        lock.lock_owned().await
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -477,7 +483,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            HubCall::Relay { .. } => return Err(not_yet("relay")),
+            HubCall::Relay { request_id, to } => return crate::relay::relay(self, account, crate::relay::Source::Client, request_id, to).await,
             HubCall::Overview => return Err(not_yet("overview")),
         };
         if changed {
@@ -632,6 +638,20 @@ impl Account {
 
     pub fn is_online(&self, machine: &str) -> bool {
         self.live.lock().unwrap().machines.contains_key(machine)
+    }
+
+    /// The id and name of every online machine.
+    pub fn online(&self) -> Vec<(MachineId, String)> {
+        self.live.lock().unwrap().machines.iter().map(|(id, m)| (id.clone(), m.name.clone())).collect()
+    }
+
+    pub fn name_of(&self, machine: &str) -> Option<String> {
+        self.live.lock().unwrap().machines.get(machine).map(|m| m.name.clone())
+    }
+
+    /// The tab as the online `machine` last reported it.
+    pub fn tab(&self, machine: &str, tab: &str) -> Option<TabView> {
+        self.live.lock().unwrap().machines.get(machine)?.tabs().iter().find(|t| t.id == tab).cloned()
     }
 
     /// What a box's machine shows of the session of `connector` on `subject`.

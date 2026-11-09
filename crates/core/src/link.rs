@@ -4,7 +4,7 @@ use crate::account::Credentials;
 use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
 use crate::{skills, sync};
-use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
+use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, MachineId, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -337,7 +337,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     };
     sink.send(text(&auth)).await.map_err(transport)?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
-    accept_hello(hello)?;
+    machine.set_hub_id(accept_hello(hello)?);
     if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
         return std::future::pending().await;
     }
@@ -414,9 +414,14 @@ fn transport(error: tokio_tungstenite::tungstenite::Error) -> Fault {
     Fault::Transport(error.to_string())
 }
 
-fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), Fault> {
+/// This machine's id, from the hub's hello.
+fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<MachineId, Fault> {
+    if let Some(Ok(Frame::Text(t))) = &hello {
+        if let Ok(ToMachine::Hello { machine }) = serde_json::from_str::<ToMachine>(t) {
+            return Ok(machine.id);
+        }
+    }
     match hello {
-        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
         Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
             Err(Fault::Refused("the hub does not know this machine's token: pair it again".into()))
         }
