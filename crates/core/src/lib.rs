@@ -33,6 +33,7 @@ pub mod projects;
 pub mod prwatch;
 pub mod pty;
 pub mod pulls;
+pub mod reading;
 pub mod reminders;
 pub mod scaffold;
 pub mod scripts;

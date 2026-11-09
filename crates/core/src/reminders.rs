@@ -371,8 +371,8 @@ fn reminder_tools() -> Vec<Value> {
 /// memory tools; one outside a project is told it has no memory.
 fn project_tools() -> [(Audience, serde_json::Value); 10] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
-    let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, or its folder on this machine." });
-    let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects. Pass it whenever projects lists the project on more than one machine." });
+    let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
+    let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
     [
         (Audience::Spawners, serde_json::json!({
             "name": "delegate",
@@ -428,7 +428,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 10] {
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({
             "name": "projects",
-            "description": "List every project of the account as JSON: its key, name and repo, each machine that has it (online or not, with its pinned version), its Capitão's state there (livre, trabalhando or nenhum) and how many workers run. Call it to pick the project and machine before send_to_captain.",
+            "description": "List every project of the account as JSON: its key, name and repo, each machine that has it (online or not, with its pinned version), its Capitão's state there (livre, trabalhando or nenhum) and how many workers run, then every machine of the account with any problem, such as one that needs to update pinned. Call it to pick the project and machine before send_to_captain.",
             "inputSchema": no_args,
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({

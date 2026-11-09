@@ -610,12 +610,12 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
-                // import into an account with no connectors yet, sync its projects, and relay what the
-                // global orchestrator and the Capitães say, which `relay` checks against this socket.
-                if let HubCall::Relay { request_id, to } = call {
-                    let result = crate::relay::relay(&hub, &account, crate::relay::Source::Machine(&machine), request_id, to).await;
+                // import into an account with no connectors yet, sync its projects, and serve the global
+                // orchestrator and the Capitães, which `relay` checks against this socket.
+                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) {
+                    let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
                     if let Err(e) = &result {
-                        eprintln!("pinned-server: machine {machine}'s relay failed: {e}");
+                        eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
                     }
                     return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
                 }
@@ -640,7 +640,6 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     {
                         hub.hub_call(&account, call).await
                     }
-                    None if matches!(call, HubCall::Overview) => hub.hub_call(&account, call).await,
                     None => Err("a machine may only forward a workflow session's callbacks".into()),
                 };
                 if let Err(e) = &result {

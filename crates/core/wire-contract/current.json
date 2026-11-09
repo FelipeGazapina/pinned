@@ -4825,6 +4825,27 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as\n`reading::read` answers them, with `project` set to `path`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "path"
+                ]
               }
             ]
           },
@@ -11057,6 +11078,27 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as\n`reading::read` answers them, with `project` set to `path`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "path"
+                ]
               }
             ]
           },
@@ -13081,6 +13123,10 @@
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
                 "type": "boolean"
+              },
+              "orchestrator_turn": {
+                "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -14406,6 +14452,27 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as\n`reading::read` answers them, with `project` set to `path`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "path"
                 ]
               }
             ]
@@ -16391,6 +16458,10 @@
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
                 "type": "boolean"
+              },
+              "orchestrator_turn": {
+                "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -17691,6 +17762,27 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as\n`reading::read` answers them, with `project` set to `path`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "path"
                 ]
               }
             ]
@@ -22965,11 +23057,20 @@
             "items": {
               "$ref": "#/$defs/Waiting"
             }
+          },
+          "machines": {
+            "description": "Every machine of the account, with or without projects.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/OverviewMachine"
+            },
+            "default": []
           }
         },
         "required": [
           "projects",
-          "waiting"
+          "waiting",
+          "machines"
         ],
         "$defs": {
           "OverviewProject": {
@@ -23059,7 +23160,7 @@
                 "const": "livre"
               },
               {
-                "description": "Running a turn, or asking the user mid-turn: a message queues.",
+                "description": "Running a turn, which a message from the orchestrator may have started before its first\nhook, or asking the user mid-turn: a message queues.",
                 "type": "string",
                 "const": "trabalhando"
               },
@@ -23129,6 +23230,37 @@
               "needs_input",
               "failed"
             ]
+          },
+          "OverviewMachine": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "online": {
+                "type": "boolean"
+              },
+              "version": {
+                "type": "string",
+                "default": ""
+              },
+              "problem": {
+                "description": "Why its projects may be missing or old, such as `precisa atualizar o pinned`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "online",
+              "version"
+            ]
           }
         }
       },
@@ -23150,6 +23282,14 @@
             "items": {
               "$ref": "#/$defs/Waiting"
             }
+          },
+          "machines": {
+            "description": "Every machine of the account, with or without projects.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/OverviewMachine"
+            },
+            "default": []
           }
         },
         "required": [
@@ -23242,7 +23382,7 @@
                 "const": "livre"
               },
               {
-                "description": "Running a turn, or asking the user mid-turn: a message queues.",
+                "description": "Running a turn, which a message from the orchestrator may have started before its first\nhook, or asking the user mid-turn: a message queues.",
                 "type": "string",
                 "const": "trabalhando"
               },
@@ -23311,6 +23451,36 @@
             "enum": [
               "needs_input",
               "failed"
+            ]
+          },
+          "OverviewMachine": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "online": {
+                "type": "boolean"
+              },
+              "version": {
+                "type": "string",
+                "default": ""
+              },
+              "problem": {
+                "description": "Why its projects may be missing or old, such as `precisa atualizar o pinned`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "online"
             ]
           }
         }
@@ -27658,6 +27828,10 @@
           "orchestrator_global": {
             "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
             "type": "boolean"
+          },
+          "orchestrator_turn": {
+            "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -27918,6 +28092,10 @@
           },
           "orchestrator_global": {
             "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+            "type": "boolean"
+          },
+          "orchestrator_turn": {
+            "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
             "type": "boolean"
           }
         },
@@ -28452,6 +28630,10 @@
               },
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
+              },
+              "orchestrator_turn": {
+                "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
               }
             },
@@ -30898,6 +31080,10 @@
               },
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
+              },
+              "orchestrator_turn": {
+                "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
               }
             },
