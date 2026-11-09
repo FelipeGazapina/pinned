@@ -1,0 +1,88 @@
+{
+  "machines": [
+    "sweep-node"
+  ],
+  "tabs": [
+    {
+      "machine": "sweep-node",
+      "cwd": "$SWEEP_DIR/home/work/alpha",
+      "title": null
+    },
+    {
+      "machine": "sweep-node",
+      "cwd": "$SWEEP_DIR/home/work/beta",
+      "title": null
+    },
+    {
+      "machine": "sweep-node",
+      "cwd": "$SWEEP_DIR/home/work/gamma",
+      "title": null
+    },
+    {
+      "machine": "sweep-node",
+      "cwd": "$SWEEP_DIR/home/.pinned/orquestrador",
+      "title": null
+    }
+  ],
+  "overview": {
+    "projects": [
+      {
+        "key": "github.com/example/beta",
+        "name": "beta",
+        "repo": "github.com/example/beta",
+        "checkouts": [
+          {
+            "machine": "37602cc9-6c8b-48d0-b310-5b6f57057d6a",
+            "machine_name": "sweep-node",
+            "online": true,
+            "version": "0.17.20",
+            "path": "$SWEEP_DIR/home/work/beta",
+            "captain": "nenhum",
+            "workers": 0
+          }
+        ]
+      },
+      {
+        "key": "github.com/example/gamma",
+        "name": "gamma",
+        "repo": "github.com/example/gamma",
+        "checkouts": [
+          {
+            "machine": "37602cc9-6c8b-48d0-b310-5b6f57057d6a",
+            "machine_name": "sweep-node",
+            "online": true,
+            "version": "0.17.20",
+            "path": "$SWEEP_DIR/home/work/gamma",
+            "captain": "nenhum",
+            "workers": 0
+          }
+        ]
+      },
+      {
+        "key": "github.com/example/alpha",
+        "name": "alpha",
+        "repo": "github.com/example/alpha",
+        "checkouts": [
+          {
+            "machine": "37602cc9-6c8b-48d0-b310-5b6f57057d6a",
+            "machine_name": "sweep-node",
+            "online": true,
+            "version": "0.17.20",
+            "path": "$SWEEP_DIR/home/work/alpha",
+            "captain": "nenhum",
+            "workers": 0
+          }
+        ]
+      }
+    ],
+    "waiting": [],
+    "machines": [
+      {
+        "id": "37602cc9-6c8b-48d0-b310-5b6f57057d6a",
+        "name": "sweep-node",
+        "online": true,
+        "version": "0.17.20"
+      }
+    ]
+  }
+}
