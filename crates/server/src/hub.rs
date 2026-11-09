@@ -483,7 +483,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            HubCall::Relay { .. } => return Err(not_yet("relay")),
+            HubCall::Relay { request_id, to } => return crate::relay::relay(self, account, crate::relay::Source::Client, request_id, to).await,
             HubCall::Overview => return Err(not_yet("overview")),
         };
         if changed {
@@ -638,6 +638,20 @@ impl Account {
 
     pub fn is_online(&self, machine: &str) -> bool {
         self.live.lock().unwrap().machines.contains_key(machine)
+    }
+
+    /// The id and name of every online machine.
+    pub fn online(&self) -> Vec<(MachineId, String)> {
+        self.live.lock().unwrap().machines.iter().map(|(id, m)| (id.clone(), m.name.clone())).collect()
+    }
+
+    pub fn name_of(&self, machine: &str) -> Option<String> {
+        self.live.lock().unwrap().machines.get(machine).map(|m| m.name.clone())
+    }
+
+    /// The tab as the online `machine` last reported it.
+    pub fn tab(&self, machine: &str, tab: &str) -> Option<TabView> {
+        self.live.lock().unwrap().machines.get(machine)?.tabs().iter().find(|t| t.id == tab).cloned()
     }
 
     /// What a box's machine shows of the session of `connector` on `subject`.
