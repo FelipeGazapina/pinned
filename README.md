@@ -78,7 +78,7 @@ asked of each worker, and when a worker finishes or needs input, pinned tells th
 which reports what was done or found and what happens next. The news always reaches home:
 when the orchestrator has no running session yet, it waits in a queue and is typed once the
 session is idle. Any thread in a project can fan out the same way: it keeps its own
-file tools and can still start workers with the delegate tool, and a worker's news goes back
+file tools and can still start workers with the `delegate_task` tool, and a worker's news goes back
 to the thread that started it while no orchestrator runs.
 
 The orchestrator needs a Claude Code account.
@@ -311,10 +311,13 @@ delegate unless you add pinned to Cursor's MCP config. `cursor-agent` only loads
 servers from `~/.cursor/mcp.json`, and pinned does not write that file. A Claude or
 Codex session can hand a task to another signed-in account. Ask for it in the session.
 
-pinned shows the child as a card on the turn. The card shows working, done, failed, or
-cancelled, and the error text when it failed. **Cancel** is on the card while the child is
-working. **Open as thread** appears when the child has finished and has a conversation to
-resume.
+A child called from a thread is a worker thread nested under it in the sidebar, counted with
+the project's workers. A Claude Code or OpenCode Go child runs in that thread, on the account,
+model and effort the call names, so you can open it and follow it while it works. The task ends
+with the thread's first finished turn, and its summary is that turn's last reply. Cursor and
+Codex report no turns to pinned, so their child runs headless: its thread shows the child's
+steps while it works, with **Cancel**, and resumes its conversation once it has finished. A
+child called outside a thread, as from the CLI, runs headless with no thread.
 
 The child sees only the task you give it. It does not see the session's history. A separate
 checkout is `isolation: "worktree"`. The default stays in the session's checkout.
@@ -323,8 +326,9 @@ The default returns at once. pinned types a notice into the session when the chi
 and the session is live, its status is Done, no submit is waiting, and the input line is
 empty. Otherwise the card's **Send to session** types that notice now. End the turn instead
 of polling. A wait returns the result in that call, including the summary. If the wait times
-out, the child keeps running and the notice still comes. A child's own delegate calls always
-wait, so a grandchild's result goes back to the child and is not typed into the original session.
+out, the child keeps running and the notice still comes. A worker thread starts workers of
+its own the same way. A headless child's own `delegate_task` calls always wait, so a
+grandchild's result goes back to the child and is not typed into the original session.
 
 A child cannot be given a wider mode than the session. A bypassed session can hand a child
 `auto`. `plan` is read-only. Omit the model on a different provider to use that provider's

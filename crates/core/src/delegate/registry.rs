@@ -99,8 +99,49 @@ impl Delegates {
 
     /// How many tasks are still working. The orchestrator's global worker cap counts these
     /// plus its live worker threads.
+    /// A child with a thread is counted as that worker tab instead.
     pub fn active_count(&self) -> usize {
-        self.tasks.lock().unwrap().iter().filter(|task| task.state == WorkState::Working).count()
+        self.tasks.lock().unwrap().iter().filter(|task| task.state == WorkState::Working && task.thread.is_none()).count()
+    }
+
+    /// Ties the task to the pinned thread that shows it.
+    pub fn link_thread(&self, id: &str, thread: Thread) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.thread = Some(thread);
+        }
+    }
+
+    pub fn set_conversation(&self, id: &str, conversation: String) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.conversation = Some(conversation);
+        }
+    }
+
+    pub fn get(&self, id: &str) -> Option<Task> {
+        self.tasks.lock().unwrap().iter().find(|task| task.id == id).cloned()
+    }
+
+    /// Ends a task whose thread's session is the child: its turn ended with `summary`, or failed
+    /// with `error`. Returns the parent tab when the notice is ready. The session stays open as
+    /// the thread, so nothing is killed.
+    pub fn settle_thread(&self, id: &str, summary: Option<String>, error: Option<String>, steps: Vec<Item>, path: Option<&str>) -> Option<String> {
+        let (ready, dirs) = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let index = tasks.iter().position(|task| task.id == id && task.state == WorkState::Working)?;
+            self.forget_pid(id);
+            if !steps.is_empty() {
+                tasks[index].steps = steps;
+            }
+            let failed = error.is_some();
+            let dirs = close(&mut tasks, index, HeldExit { summary, error, failed });
+            let parent = tasks[index].parent.clone();
+            (chain_ready(&tasks, id).then(|| root_tab(&tasks, parent)).flatten(), dirs)
+        };
+        for dir in dirs {
+            crate::branches::drop_worktree(&dir, path);
+        }
+        self.persist();
+        ready
     }
 
     /// The same caller and `clientRequestId` returns the task already started.
@@ -386,6 +427,7 @@ impl Delegates {
                     "model": task.model,
                     "workState": task.state.as_str(),
                     "cwd": task.cwd.display().to_string(),
+                    "tabId": task.thread.as_ref().map(|thread| thread.tab.clone()),
                     "next": next_line(task),
                 })
             }
@@ -710,7 +752,10 @@ impl Delegates {
         let tasks = self.tasks.lock().unwrap();
         tasks
             .iter()
-            .filter(|task| root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab))
+            .filter(|task| match &task.thread {
+                Some(thread) => !thread.runs && thread.tab == tab,
+                None => root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab),
+            })
             .map(|task| Subagent {
                 id: task.id.clone(),
                 tool: task.tool.clone().unwrap_or_default(),
@@ -727,7 +772,7 @@ impl Delegates {
                 error: task.error.clone(),
                 conversation: task.conversation.clone(),
                 steps: task.steps.clone(),
-                undelivered: task.state.terminal() && !task.delivered && matches!(&task.parent, Parent::Tab(_)),
+                undelivered: task.state.terminal() && !task.delivered && matches!(&task.parent, Parent::Tab(_)) && task.thread.is_none(),
             })
             .collect()
     }
@@ -799,6 +844,7 @@ impl Delegates {
             .iter()
             .filter(|task| {
                 !task.state.terminal()
+                    && task.thread.is_none()
                     && root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab)
             })
             .map(|task| task.id.clone())
@@ -995,6 +1041,7 @@ fn status_json(task: &Task) -> Value {
         "endedBy": task.ended_by,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
+        "tabId": task.thread.as_ref().map(|thread| thread.tab.clone()),
     });
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
@@ -1092,7 +1139,8 @@ fn notice_line(task: &Task) -> String {
         _ => "result available".into(),
     };
     let note = task.ended_by.as_deref().map(|how| format!(" {how}.")).unwrap_or_default();
-    format!("[pinned] Delegated task {} \"{}\" ({who}) finished: {outcome}.{note} Call task_status with taskId \"{}\".", task.id, task.title, task.id)
+    let thread = task.thread.as_ref().map(|thread| format!(" Its thread is {}.", thread.tab)).unwrap_or_default();
+    format!("[pinned] Delegated task {} \"{}\" ({who}) finished: {outcome}.{note}{thread} Call task_status with taskId \"{}\".", task.id, task.title, task.id)
 }
 
 fn card_state(state: WorkState) -> subagents::State {
@@ -1200,6 +1248,7 @@ fn fresh(new: NewTask) -> Task {
         parent_session: None,
         ended_by: None,
         run: Run::default(),
+        thread: None,
     }
 }
 
@@ -1326,6 +1375,7 @@ impl SavedTask {
             parent_session: self.parent_session,
             ended_by: self.ended_by,
             run: Run { budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
+            thread: None,
         }
     }
 }
@@ -1437,7 +1487,7 @@ fn chain_ready(tasks: &[Task], id: &str) -> bool {
 
 fn allows(tasks: &[Task], id: &str, caller: &Caller) -> bool {
     let Some(task) = tasks.iter().find(|task| task.id == id) else { return false };
-    if caller.key() == task.caller_key {
+    if caller.key() == task.caller_key || task.thread.as_ref().is_some_and(|thread| caller.tab.as_deref() == Some(thread.tab.as_str())) {
         return true;
     }
     let mut parent = task.parent.clone();

@@ -235,7 +235,7 @@ function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
-  if (phase === "delegating") return { icon: "bot", text: agentsWorking(runningAgents(tab).length), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
+  if (phase === "delegating") return { icon: "bot", text: agentsWorking(busyUnder(tab)), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };

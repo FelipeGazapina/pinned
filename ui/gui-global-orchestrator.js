@@ -175,12 +175,12 @@ const CAPTAIN_STATE_LABELS = { trabalhando: "Working", livre: "Idle", nenhum: "N
 const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
 
 /** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
- * session, by project slug and machine id. */
+ * session or a headless child at work, by project slug and machine id. */
 function runningWorkers() {
   const by = new Map();
   for (const group of projectGroups(true)) {
     const counts = new Map();
-    for (const tab of group.tabs) if (tab.view.role === "worker" && tab.view.running) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
+    for (const tab of group.tabs) if (tab.view.role === "worker" && (tab.view.running || tab.view.status === "working")) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
     by.set(tagSlug(group.name), counts);
   }
   return by;

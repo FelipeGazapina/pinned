@@ -117,10 +117,10 @@ function hookPhase(tab) {
   if (/permission/i.test(message)) return "working";
   return /waiting for your input/i.test(message) ? "done" : "input";
 }
-/** Agents outlive the turn that spawned them, so the thread is in progress while one runs. */
+/** Agents and worker threads outlive the turn that started them, so the thread is in progress while one runs. */
 function phaseOf(tab) {
   const phase = hookPhase(tab);
-  return ["done", "idle"].includes(phase) && runningAgents(tab).length ? "delegating" : phase;
+  return ["done", "idle"].includes(phase) && busyUnder(tab) ? "delegating" : phase;
 }
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);

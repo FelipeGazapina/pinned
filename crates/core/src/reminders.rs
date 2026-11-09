@@ -241,7 +241,7 @@ enum Audience {
 
 fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
     // The Capitão, a plain thread and a worker all fan out to workers the same way, so all get
-    // delegate and agents. A delegated child never starts more workers. The global orchestrator
+    // delegate_task and agents. A delegated child never starts more workers. The global orchestrator
     // does no project work: it hands every request to a Capitão.
     let spawner = delegate::delegate_block(child).is_none();
     let global = seat == Seat::GlobalOrchestrator;
@@ -271,7 +271,7 @@ fn delegation_tools() -> Vec<Value> {
         }),
         json!({
             "name": DELEGATE_TOOL,
-            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child. A reply while the child still runs background work is not its answer: the task keeps working, this session gets one notice, and task_status holds the reply so far. When the task ends, pinned stops the child, the processes under it and every background shell it started, including a server the task asked it to leave running, so start a long-lived server yourself. A process that a foreground command leaves behind with & can outlive the task.",
+            "description": "Start a worker: a child agent on a signed-in account, with the model and effort target names. Called from a pinned thread, the worker is a thread nested under this one, in its own worktree with isolation \"worktree\", that the user can open and steer; the answer names its tabId, and agents lists it. The task ends with the worker's first finished turn, and its summary is that turn's last reply. Claude Code runs in the thread itself; Cursor and Codex run headless and the thread shows their steps. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child. A reply while the child still runs background work is not its answer: the task keeps working, this session gets one notice, and task_status holds the reply so far. When a headless task ends, pinned stops the child, the processes under it and every background shell it started, including a server the task asked it to leave running, so start a long-lived server yourself. A process that a foreground command leaves behind with & can outlive the task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -369,23 +369,11 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 10] {
+fn project_tools() -> [(Audience, serde_json::Value); 9] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
     [
-        (Audience::Spawners, serde_json::json!({
-            "name": "delegate",
-            "description": "Start a worker thread on a task. It works in its own git worktree when the project is a repository, and you get a message when it finishes or needs input. Returns the worker's tab id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task": { "type": "string", "description": "A self-contained brief: the goal, the files involved, the constraints, and how to verify the result." },
-                    "title": { "type": "string", "description": "A few words naming the task, shown on the worker's thread." },
-                },
-                "required": ["task"],
-            },
-        })),
         (Audience::Spawners, serde_json::json!({
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
@@ -1006,14 +994,13 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        assert_eq!(names(false), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
+        assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, [&delegation[..], &["delegate", "agents"], &memory].concat());
+        assert_eq!(on_a_node, [&delegation[..], &["agents"], &memory].concat());
         assert_eq!(
             permissions()[7..],
             [
-                "mcp__pinned__delegate",
                 "mcp__pinned__agents",
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
@@ -1030,7 +1017,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `tell_orchestrator`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }
 
@@ -1061,7 +1048,8 @@ fn restore_var(name: &str, value: Option<String>) {
     fn a_worker_is_offered_the_delegate_tools_and_a_child_is_not() {
         let plain = offered(None, None);
         assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
-        assert!(plain.contains(&"delegate".to_owned()) && plain.contains(&"agents".to_owned()), "{plain:?}");
+        assert!(plain.contains(&"agents".to_owned()), "{plain:?}");
+        assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
         assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &["tell_orchestrator".to_owned()]].concat());
@@ -1079,7 +1067,7 @@ fn restore_var(name: &str, value: Option<String>) {
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "delegate", "agents"], &memory].concat();
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "agents"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
