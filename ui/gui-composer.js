@@ -1814,7 +1814,7 @@ function renderMirror() {
   const chips = tab ? liveChips(tab) : {};
   const lines = prompt.value.split("\n");
   const blocks = promptBlocks(lines);
-  const catalog = isGlobalOrchestratorTab(tab) ? composerTagCatalog() : null;
+  const catalog = isGlobalOrchestratorTab(tab) && prompt.value.trim() ? composerTagCatalog() : null;
   renderTagRoute(catalog);
   const tagging = !!catalog && hasTags(prompt.value);
   const known = tagging && { project: new Set(catalog.projects.map((p) => p.slug)), machine: new Set(catalog.machines.map((m) => m.slug)) };
@@ -1864,6 +1864,7 @@ document.getElementById("composer-footer").after(tagRoute);
 let tagHi = 0;
 let tagList = [];
 let tagDismissed = false;
+let tagRouteHtml = "";
 
 /** Every project of the account grouped as the sidebar groups them, and every machine, named
  * as the hub names them. */
@@ -1873,6 +1874,7 @@ function composerTagCatalog() {
   return tagCatalog({ groups: projectGroups(), directory, phase: phaseOf, repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) });
 }
 
+/** Hides the tag popover and forgets its options. */
 function closeTagPopover() {
   tagPopover.hidden = true;
   tagList = [];
@@ -1895,6 +1897,7 @@ function showTagPopover() {
   tagPopover.querySelector(".highlight")?.scrollIntoView({ block: "nearest" });
 }
 
+/** Puts the chosen tag in place of the partial one at the caret, as typing it would. */
 function insertComposerTag(slug) {
   const next = insertTagText(prompt.value, prompt.selectionStart, slug);
   if (!next) return;
@@ -1903,9 +1906,11 @@ function insertComposerTag(slug) {
   prompt.dispatchEvent(new Event("input"));
 }
 
+/** The popover's share of a keydown; true when it took the key. */
 function tagKey(e) {
   if (tagPopover.hidden || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return false;
-  const step = tagPopoverKey(e.key, { open: true, count: tagList.length, hi: tagHi });
+  const typed = tagTokenAt(prompt.value, prompt.selectionStart)?.query === tagList[tagHi]?.slug;
+  const step = tagPopoverKey(e.key, { open: true, count: tagList.length, hi: tagHi, typed });
   tagHi = step.hi;
   if (step.action === "move") showTagPopover();
   if (step.action === "insert") insertComposerTag(tagList[tagHi].slug);
@@ -1925,7 +1930,12 @@ function renderTagRoute(catalog) {
   const rows = catalog ? routePreview(prompt.value, catalog) : [];
   if (!rows.length) closeTagPopover();
   tagRoute.hidden = !rows.length;
-  tagRoute.innerHTML = composerRoutingHtml(rows, esc);
+  // Rebuilt only when it changes: renderComposer runs on every render, and a button swapped
+  // under a press loses the click.
+  const html = composerRoutingHtml(rows, esc);
+  if (html === tagRouteHtml) return;
+  tagRouteHtml = html;
+  tagRoute.innerHTML = html;
   tagRoute.querySelectorAll("[data-machine]").forEach((button) => {
     button.onclick = () => {
       prompt.value = tagParagraph(prompt.value, Number(button.closest("[data-index]").dataset.index), button.dataset.machine);

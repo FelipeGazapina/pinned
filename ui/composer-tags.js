@@ -24,6 +24,7 @@ function tagSlug(name) {
  * `a#b` are not tags. The popover, the paint and the routing all read tags with it. */
 const TAG_WORD = /(?<!\S)[#@][A-Za-z0-9-]+/g;
 
+/** Whether the text holds any tag, so a tab without one keeps the plain textarea. */
 function hasTags(text) {
   return /(?<!\S)[#@][A-Za-z0-9-]/.test(String(text ?? ""));
 }
@@ -123,10 +124,11 @@ function insertTagText(text, caret, slug) {
 
 /** What a key does to the popover: arrows move the highlight, Enter and Tab insert the
  * highlighted option, Esc closes. While it is closed, or with nothing to insert, every key
- * stays the composer's. */
-function tagPopoverKey(key, { open, count, hi }) {
+ * stays the composer's. `typed` says the highlighted tag is already typed out in full; Enter then
+ * stays the composer's too, as it does for a typed slash command, so `no #site` sends. */
+function tagPopoverKey(key, { open, count, hi, typed = false }) {
   const none = { handled: false, hi, action: "none" };
-  if (!open) return none;
+  if (!open || (key === "Enter" && typed)) return none;
   if (key === "ArrowDown" || key === "ArrowUp") {
     const step = key === "ArrowDown" ? 1 : -1;
     return { handled: true, hi: count ? (hi + step + count) % count : 0, action: "move" };
@@ -187,6 +189,7 @@ function tagLineHtml(line, known, esc) {
   }).join("");
 }
 
+/** The popover's rows for a token: a heading, then each option with what it inserts. */
 function composerTagPopoverHtml(token, options, hi, esc) {
   const project = token.sign === "#";
   const heading = `<p class="heading">${project ? "Projetos" : "Máquinas"}</p>`;
@@ -201,6 +204,7 @@ function composerTagPopoverHtml(token, options, hi, esc) {
   }).join("");
 }
 
+/** The routing preview: one row per paragraph, with machine buttons on an ambiguous one. */
 function composerRoutingHtml(rows, esc) {
   return rows.map((row) => {
     const choices = row.kind === "ambiguous" ? `<span class="choices">${row.choices.map((slug) => `<button type="button" data-machine="${esc(slug)}">@${esc(slug)}</button>`).join("")}</span>` : "";

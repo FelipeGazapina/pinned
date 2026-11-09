@@ -175,6 +175,13 @@ const state = () => ({
   check((await read()).popover === null, "the ordinary tab opened the machine list");
   await page.screenshot({ path: path.join(DIR, "composer-tags-plain.png") });
 
+  // Last, since the turn it starts makes the node resend the tab's view without the flag.
+  await open(keys.orch);
+  await page.keyboard.type("olha o #pinned");
+  check((await read()).highlight === "pinned", "the typed tag is not highlighted");
+  await page.keyboard.press("Enter");
+  await waitFor("Enter to send a message that ends in a typed tag", () => page.evaluate(() => prompt.value === ""));
+
   await browser.close();
   check(!errors.length, `page errors:\n${errors.slice(0, 5).join("\n")}`);
   console.log("composer tags: every check passed");

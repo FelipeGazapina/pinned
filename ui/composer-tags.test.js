@@ -182,6 +182,8 @@ test("popover keys move, insert and close only while it is open", () => {
   assert.deepEqual(tagPopoverKey("Enter", { open: true, count: 0, hi: 0 }), { handled: false, hi: 0, action: "none" });
   assert.deepEqual(tagPopoverKey("Enter", { open: false, count: 3, hi: 0 }), { handled: false, hi: 0, action: "none" });
   assert.deepEqual(tagPopoverKey("a", { open: true, count: 3, hi: 0 }), { handled: false, hi: 0, action: "none" });
+  assert.deepEqual(tagPopoverKey("Enter", { open: true, count: 1, hi: 0, typed: true }), { handled: false, hi: 0, action: "none" });
+  assert.deepEqual(tagPopoverKey("Tab", { open: true, count: 1, hi: 0, typed: true }), { handled: true, hi: 0, action: "insert" });
 });
 
 test("# filters projects by slug and @ filters machines by slug or name", () => {
