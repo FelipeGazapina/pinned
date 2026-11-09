@@ -610,8 +610,8 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
-                // import into an account with no connectors yet, sync its projects, and serve the global
-                // orchestrator and the Capitães, which `relay` checks against this socket.
+                // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
+                // and serve the global orchestrator and the Capitães, which `relay` checks against this socket.
                 if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) {
                     let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
                     if let Err(e) = &result {
@@ -631,11 +631,19 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 let result = match work {
                     Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
                     Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
-                    // An app's first sign-in moves its own connectors in, which only an empty account takes,
-                    // and every machine keeps its projects' files in step with the account's.
+                    // An app's first sign-in moves its own connectors and tastes in, which only an empty account
+                    // takes, every machine keeps its projects' files in step with the account's, and a Capitão
+                    // or the global orchestrator starts with the account's tastes.
                     None if matches!(
                         call,
-                        HubCall::Import { .. } | HubCall::ShareProject { .. } | HubCall::SyncList { .. } | HubCall::SyncPush { .. } | HubCall::SyncPull { .. } | HubCall::SyncMarkExecutable { .. }
+                        HubCall::Import { .. }
+                            | HubCall::ImportTastes { .. }
+                            | HubCall::GetTastes
+                            | HubCall::ShareProject { .. }
+                            | HubCall::SyncList { .. }
+                            | HubCall::SyncPush { .. }
+                            | HubCall::SyncPull { .. }
+                            | HubCall::SyncMarkExecutable { .. }
                     ) =>
                     {
                         hub.hub_call(&account, call).await

@@ -3,6 +3,7 @@ use crate::db::{self, Db};
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
+use pinned_core::taste::Tastes;
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
@@ -91,6 +92,8 @@ pub struct Account {
     /// Each machine's projects as it last listed them, so the global orchestrator's overview still
     /// shows them while it is offline or slow to answer.
     projects: Mutex<HashMap<MachineId, Vec<ProjectView>>>,
+    /// Held across a taste's read, change and write, so two changes at once both land.
+    tastes: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -184,7 +187,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -481,12 +484,34 @@ impl Hub {
                 return Ok(Value::Null);
             }
             call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
+            HubCall::GetTastes => return json(self.db.tastes(account.id).await?.unwrap_or_default()),
+            HubCall::SetTaste { scope, patch } => return self.change_tastes(account, |tastes| tastes.set(&scope, patch)).await,
+            HubCall::ResetTasteField { scope, field } => {
+                let reset = |tastes: &mut Tastes| {
+                    tastes.reset(&scope, field);
+                    Ok(())
+                };
+                return self.change_tastes(account, reset).await;
+            }
+            HubCall::ImportTastes { tastes } => {
+                tastes.check()?;
+                let _held = account.tastes.lock().await;
+                return json(self.db.import_tastes(account.id, &tastes).await?);
+            }
         };
         if changed {
             self.watch(account).await?;
             self.push_settings(account).await;
         }
         answer
+    }
+
+    async fn change_tastes(&self, account: &Account, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Value, String> {
+        let _held = account.tastes.lock().await;
+        let mut tastes = self.db.tastes(account.id).await?.unwrap_or_default();
+        change(&mut tastes)?;
+        self.db.save_tastes(account.id, &tastes).await?;
+        json(tastes)
     }
 
     pub async fn machines(&self, account: &Account) -> Result<Vec<MachineView>, String> {
@@ -1003,7 +1028,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], Outbox::new().0, vec![]);
         }
@@ -1024,7 +1049,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
