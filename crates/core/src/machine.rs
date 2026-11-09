@@ -2086,7 +2086,10 @@ impl Machine {
         let path = path.display().to_string();
         let tabs = self.tabs();
         let mut out = match global::captain_tab(&tabs, &path) {
-            Some(tab) if tab.running || tab.session.is_some() => reading::read(tab, self.thread(&tab.id, 0).and_then(json), reading::DEFAULT_ITEMS),
+            Some(tab) if tab.running || tab.session.is_some() => {
+                let from = self.transcript(&tab.id).map_or(0, |file| thread::last_page(&file));
+                reading::read(tab, self.thread(&tab.id, from).and_then(json), reading::DEFAULT_ITEMS)
+            }
             _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
         };
         out["project"] = json!(path);
@@ -2353,13 +2356,9 @@ impl Machine {
         lines.join("\n")
     }
 
-    /// The last text the tab's session said, from its transcript.
+    /// The last text the tab's session wrote in its latest turn, from its transcript.
     fn last_reply(&self, tab: &str) -> Option<String> {
-        let page = thread::read(&self.transcript(tab).ok()?, 0).ok()?;
-        page.items.into_iter().rev().find_map(|item| match item {
-            thread::Item::Text { text, .. } => Some(text),
-            _ => None,
-        })
+        thread::last_reply(&self.transcript(tab).ok()?).ok()?
     }
 
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
@@ -7432,6 +7431,8 @@ while True:
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(reports(), ["Reply one.", "(sem resposta)", "Reply four."], "each turn's own reply, each once");
         assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
+        assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -9,6 +9,8 @@ const SUMMARY_CHARS: usize = 300;
 /// The biggest image, as base64, that a thread page carries inline.
 const PICTURE_CHARS: usize = 2 << 20;
 const READ_LIMIT: u64 = 8 << 20;
+/// How far from its end `last_reply` reads first: the last reply is nearly always in the last lines.
+const REPLY_LOOK: u64 = 256 << 10;
 /// The line `fork` adds to a copy, naming the session it was copied from.
 pub const FORK_LINE: &str = "pinned-fork";
 
@@ -207,6 +209,38 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
         }
     }
     Ok(Page { items, next, reset: replaced, context, branch, todos })
+}
+
+/// Where the last page of `file` starts, so a read from there holds its latest items however long
+/// it grew. A read from 0 stops after `READ_LIMIT` bytes.
+pub fn last_page(file: &Path) -> u64 {
+    std::fs::metadata(file).map_or(0, |m| m.len().saturating_sub(READ_LIMIT))
+}
+
+/// The last text the assistant wrote, read from the end of `file`, or None when a prompt came after
+/// it, so a turn that wrote nothing never passes for the turn before. A slash command such as the
+/// `/reload-skills` pinned types into an idle session is no prompt.
+pub fn last_reply(file: &Path) -> std::io::Result<Option<String>> {
+    let len = std::fs::metadata(file)?.len();
+    for back in [REPLY_LOOK, READ_LIMIT] {
+        let from = len.saturating_sub(back);
+        for item in read(file, from)?.items.into_iter().rev() {
+            match item {
+                Item::Text { text, .. } => return Ok(Some(text)),
+                Item::User { text, .. } if !is_command(&text) => return Ok(None),
+                _ => {}
+            }
+        }
+        if from == 0 {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// A slash command as `spoken` writes one, `/name args`, unlike a prompt that starts with a path.
+fn is_command(text: &str) -> bool {
+    text.split_whitespace().next().is_some_and(|word| word.starts_with('/') && !word[1..].contains('/'))
 }
 
 /// The list of the last `TodoWrite` call on an assistant line of the main conversation.
@@ -547,6 +581,27 @@ mod tests {
             writeln!(file, "{line}").unwrap();
         }
         read(file.path(), 0).unwrap()
+    }
+
+    #[test]
+    fn the_last_reply_is_the_latest_turns_text_read_from_the_end() {
+        let reply = |lines: &[String]| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            last_reply(file.path()).unwrap()
+        };
+        let user = |text: &str| serde_json::json!({ "type": "user", "uuid": "u", "timestamp": "t", "message": { "content": text } }).to_string();
+        let said = |text: &str| serde_json::json!({ "type": "assistant", "uuid": "a", "timestamp": "t", "message": { "content": [{ "type": "text", "text": text }] } }).to_string();
+        let reload = user("<command-name>/reload-skills</command-name>\n<command-message>reload-skills</command-message>\n<command-args></command-args>");
+        let output = |bytes: usize| serde_json::json!({ "type": "user", "uuid": "r", "timestamp": "t", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "x".repeat(bytes) }] } }).to_string();
+
+        assert_eq!(reply(&[user("Ship it."), said("Shipped."), said("Want the release too?"), reload.clone()]), Some("Want the release too?".into()), "a slash command after the reply");
+        assert_eq!(reply(&[user("Ship it."), said("Shipped."), user("Now the docs.")]), None, "the latest turn wrote nothing yet");
+        assert_eq!(reply(&[said("Shipped."), user("/Users/f/notes.md has the plan, read it")]), None, "a prompt that starts with a path");
+        let long: Vec<String> = [said("Before the tools.")].into_iter().chain((0..5).map(|_| output(100 << 10))).collect();
+        assert_eq!(reply(&long), Some("Before the tools.".into()), "a reply further back than the first look");
     }
 
     #[test]
