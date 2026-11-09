@@ -34,8 +34,8 @@ const waitFor = async (what, fn, timeout = 20000) => {
 };
 
 // Runs in the page: a machine too old for the global calls (online, refusing), an offline one,
-// and a working Captain on alpha with two workers, which the projects page reads. A tabs event
-// from the node replaces a tab's view, so every step re-applies the Captain.
+// and a working Captain on alpha with two running worker tabs, which the projects page counts. A
+// tabs event from the node replaces a tab's view, so every step re-applies them.
 function seed() {
   if (!machines.has("old-mac")) {
     machines.set("old-mac", {
@@ -52,7 +52,10 @@ function seed() {
   const captain = tabs.find((t) => t.machine === window.__captainMachine && t.view.cwd === window.__captainDir);
   if (captain) {
     Object.assign(captain.view, { role: "orchestrator", status: "working" });
-    threadOf(captain).agents = [{ state: "running", name: "w1", steps: [] }, { state: "running", name: "w2", steps: [] }];
+    for (const key of window.__workers ?? []) {
+      const worker = tabByKey(key);
+      if (worker) Object.assign(worker.view, { role: "worker", running: true, spawned_by: captain.view.id });
+    }
   }
 }
 
@@ -79,13 +82,15 @@ function seed() {
   const alpha = folders[0];
 
   // Both nodes open the three work folders, because a node lists only the folders its own app has
-  // opened. The Captain on alpha is on the first node, with two workers running.
+  // opened. The Captain on alpha is on the first node, with two workers running there.
   await page.evaluate(async ({ ids, dirs, captain, dir }) => {
     window.__captainMachine = captain;
     window.__captainDir = dir;
     for (const node of ids) {
       for (const d of dirs) if (!tabs.some((t) => t.machine === node && t.view.cwd === d)) await openRemote(node, d, false);
     }
+    window.__workers = [];
+    for (let i = 0; i < 2; i++) window.__workers.push((await revealTab(captain, await callOn(captain, { cmd: "open_tab", path: dir, bypass: false }))).key);
   }, { ids: nodes.map((n) => n.id), dirs: folders, captain: nodes[0].id, dir: alpha });
   await page.addScriptTag({ content: `${seed};` });
   await waitFor("both nodes' project answers", () =>
@@ -170,7 +175,7 @@ function seed() {
     page.evaluate(() => {
       seed();
       const alphaRow = () => [...document.querySelectorAll(".gp-row")].find((r) => r.querySelector(".gp-name")?.textContent === "alpha");
-      const right = (row) => !!row && row.querySelector(".gp-state").textContent === "working" && row.querySelector(".gp-workers").textContent === "2 workers";
+      const right = (row) => !!row && row.querySelector(".gp-state").textContent === "Working" && row.querySelector(".gp-workers").textContent === "2 workers";
       if (!right(alphaRow())) renderGlobalProjectsPage();
       return right(alphaRow());
     }));
@@ -187,16 +192,16 @@ function seed() {
   });
   console.log("project rows:", JSON.stringify(rows));
   const alphaRow = rows.find((r) => r.name === "alpha");
-  check(alphaRow && alphaRow.state === "working", `alpha row: ${JSON.stringify(alphaRow)}`);
+  check(alphaRow && alphaRow.state === "Working", `alpha row: ${JSON.stringify(alphaRow)}`);
   check(alphaRow.workers === "2 workers", `alpha workers: ${JSON.stringify(alphaRow)}`);
-  // Each machine chip reads "<machine name><captain state>"; alpha lists both nodes.
+  // Each machine chip reads "<machine name><captain state><running workers>"; alpha lists both nodes.
   const alphaHosts = await page.evaluate(() => {
     const row = [...document.querySelectorAll(".gp-row")].find((r) => r.querySelector(".gp-name")?.textContent === "alpha");
     return [...row.querySelectorAll(".gp-machine")].map((b) => b.firstChild.textContent).sort();
   });
   console.log("alpha machines:", JSON.stringify(alphaHosts));
   check(JSON.stringify(alphaHosts) === JSON.stringify(nodes.map((n) => n.name).sort()), `alpha should list ${nodes.map((n) => n.name)}: ${JSON.stringify(alphaHosts)}`);
-  check(alphaRow.machines.includes(`${nodes[0].name}working:on`), `alpha's Captain on ${nodes[0].name}: ${JSON.stringify(alphaRow)}`);
+  check(alphaRow.machines.includes(`${nodes[0].name}Working2 workers:on`), `alpha's Captain and workers on ${nodes[0].name}: ${JSON.stringify(alphaRow)}`);
   // The rows are the account's projects: the three work folders and the offline machine's infra.
   check(JSON.stringify(rows.map((r) => r.name).sort()) === JSON.stringify(["alpha", "beta", "gamma", "infra"]), `unexpected rows: ${JSON.stringify(rows.map((r) => r.name))}`);
   const infraRow = rows.find((r) => r.name === "infra");

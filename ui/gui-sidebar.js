@@ -21,6 +21,7 @@ Object.assign(ICON_PATHS, {
   archive: `<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>`,
   "archive-x": `<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="m9.5 17 5-5"/><path d="m9.5 12 5 5"/>`,
   gear: `<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>`,
+  inbox: `<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`,
   trash: `<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>`,
 });
 
@@ -298,45 +299,51 @@ function snoozeLimitStops() {
   }
 }
 
-/** The fixed rows above the projects: the global orchestrator's own row, then the threads waiting
- * on Felipe. The row names the orchestrator as its settings do and its host machine under that,
- * and carries the settings page's Projects link when that page is loaded. Empty while no machine
- * can hold the conversation. */
+/** The fixed rows above the projects: the global orchestrator's own row, with how many threads
+ * wait on Felipe, then those threads. The row names the orchestrator as its settings do and its host
+ * machine under that. Empty while no machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
   const host = globalHostMachine();
   if (!host) return [];
+  const waiting = globalWaitingRows();
   const row = document.createElement("button");
   row.type = "button";
   row.className = "global-row";
+  row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
   row.dataset.globalOpen = "true";
-  const projects = typeof openGlobalProjects === "function" ? `<span class="projects link" role="button" tabindex="0" data-global-projects>Projetos</span>` : "";
-  row.innerHTML = `${icon("bot")}<span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))}</span></span>${projects}`;
-  const waiting = globalWaitingRows();
+  const count = waiting.length ? `<span class="count" title="${waiting.length} waiting on you">${waiting.length}</span>` : "";
+  row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
   if (!waiting.length) return [row];
   const head = document.createElement("button");
   head.type = "button";
-  head.className = "settled-head waiting-head";
+  head.className = "waiting-head";
   head.dataset.shelf = "waiting";
-  head.dataset.open = ui.waitingOpen;
-  head.innerHTML = `<span>Esperando você</span><span class="count">${waiting.length}</span><span class="line"></span>${icon("chevron-down")}`;
+  head.setAttribute("aria-expanded", ui.waitingOpen);
+  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span><span class="count">${waiting.length}</span>${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
   return [row, head, ...(ui.waitingOpen ? waiting : [])];
 }
 
+/** What each `waitingKindOf` answer reads as, and the tone of its dot. */
+const WAITING_LOOKS = { pergunta: ["Question", "question"], falha: ["Failed", "failed"] };
+
 /** Every thread on every machine that waits on Felipe, newest first: a question mid-turn or a
- * failure, each with its kind, its title and where it is. */
+ * failure, each with its title, where it is and since when. */
 function globalWaitingRows() {
   return tabs
     .map((tab) => ({ tab, kind: waitingKindOf(tab.view, !!tab.menu) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
     .map(({ tab, kind }) => {
+      const [label, tone] = WAITING_LOOKS[kind] ?? [kind, "other"];
       const row = document.createElement("div");
       row.className = "waiting-row";
       row.dataset.waiting = tab.key;
       row.setAttribute("role", "button");
+      row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
       row.tabIndex = 0;
-      row.innerHTML = `<span class="kind ${kind}">${kind}</span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}</span></span>`;
+      const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
+      row.innerHTML = `<span class="dot ${tone}" title="${esc(label)}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
       return row;
     });
 }
@@ -371,10 +378,9 @@ function renderSidebar() {
   const inScope = tabs.filter((t) => (!ui.project || projectKeyOf(t) === ui.project) && !isGlobalOrchestratorTab(t));
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
-  const top = globalSidebarTop();
-  const rows = [...top, ...(needle ? searchRows(inScope, needle) : shelfRows(inScope))];
-  threadList.replaceChildren(...rows);
-  if (rows.length === top.length) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
+  const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
+  threadList.replaceChildren(...globalSidebarTop(), ...list);
+  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
@@ -453,8 +459,8 @@ function shelfRows(list) {
   by.snoozed.sort((a, b) => sideMarks.snoozed[threadKey(a)].until - sideMarks.snoozed[threadKey(b)].until);
   const settledAt = (t) => sideMarks.settled[threadKey(t)] || latestUserAt(t);
   by.settled.sort((a, b) => settledAt(b) - settledAt(a));
-  for (const shelf of [by.active, by.working, by.settled]) shelf.sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
-  const rows = [...by.pinned, ...by.active].flatMap(branch);
+  for (const shelf of [by.working, by.settled]) shelf.sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
+  const rows = [...by.pinned.flatMap(branch), ...projectRows(by.active, kids, branch)];
   let sink = true;
   const shelf = (kind, list, label, open, visible) => {
     if (!list.length) return;
@@ -482,6 +488,40 @@ function shelfRows(list) {
   return rows;
 }
 
+/** The inbox by project under a Projects heading, which opens the projects page when it is loaded:
+ * each project's head, then its Captains with their workers under them, then its other threads.
+ * Projects come in the order of their first thread in `list`. */
+function projectRows(list, kids, branch) {
+  const groups = new Map();
+  for (const tab of list) {
+    const key = projectKeyOf(tab);
+    groups.set(key, [...(groups.get(key) ?? []), tab]);
+  }
+  const page = typeof openGlobalProjects === "function";
+  if (!groups.size && !page) return [];
+  const heading = Object.assign(document.createElement("div"), { className: "side-heading", textContent: "Projects" });
+  if (page) Object.assign(heading, { role: "button", tabIndex: 0, title: "Open the projects page" }).dataset.globalProjects = "";
+  const captainsFirst = (roots) => [...roots].sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
+  return [heading, ...[...groups].flatMap(([key, roots]) => [projectHead(key, roots, kids), ...captainsFirst(roots).flatMap(branch)])];
+}
+/** A project's head: its icon and name, how many messages wait for its threads and how many of its
+ * workers run, and the machines its threads are on. */
+function projectHead(key, roots, kids) {
+  const all = roots.flatMap(function under(tab) {
+    return [tab, ...(kids.get(tab.key) ?? []).flatMap(under)];
+  });
+  const queued = all.reduce((n, t) => n + (t.view.queued ?? 0), 0);
+  const running = all.filter((t) => t.view.role === "worker" && ["working", "delegating"].includes(phaseOf(t))).length;
+  const states = [queued ? `<span class="state queued">${queued} queued</span>` : "", running ? `<span class="state running">${running} running</span>` : ""].join("");
+  const where = [...new Set(all.map((t) => machineName(t.machine)))].join(", ");
+  const name = projectName(roots[0]);
+  const head = document.createElement("div");
+  head.className = "project-head";
+  head.dataset.project = key;
+  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}<span class="where" title="${esc(where)}">${esc(where)}</span>`;
+  return head;
+}
+
 function rowShell(tab, cls) {
   const row = document.createElement("div");
   row.className = `thread-row ${cls}`;
@@ -491,7 +531,7 @@ function rowShell(tab, cls) {
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
-  row.setAttribute("aria-label", isOrchestrator(tab) ? `${threadTitle(tab)}, Capitão` : tab.view.role === "worker" ? `${threadTitle(tab)}, worker` : threadTitle(tab));
+  row.setAttribute("aria-label", isOrchestrator(tab) ? `${threadTitle(tab)}, Captain` : tab.view.role === "worker" ? `${threadTitle(tab)}, worker` : threadTitle(tab));
   return row;
 }
 
@@ -598,7 +638,7 @@ function openLinkedPrs(tab) {
 }
 const isOrchestrator = (tab) => tab.view.role === "orchestrator";
 const roleMark = (tab) =>
-  isOrchestrator(tab) ? `<span class="role">Capitão</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker another thread started">${icon("bot")}</span>` : "";
+  isOrchestrator(tab) ? `<span class="role">Captain</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker another thread started">${icon("bot")}</span>` : "";
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
@@ -1081,7 +1121,7 @@ function rowMenuItems(tab) {
   const session = threadOf(tab).session;
   return [
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
-    { label: `Open the ${project} Capitão`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) },
+    { label: `Open the ${project} Captain`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) },
     isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: bindingLabel("thread.pin"), run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: bindingLabel("thread.pin"), run: () => pin(tab) },
     settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: bindingLabel("thread.settle"), run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
@@ -1265,7 +1305,7 @@ threadList.addEventListener("click", (e) => {
     }
     return;
   }
-  const head = e.target.closest(".settled-head");
+  const head = e.target.closest(".settled-head, .waiting-head");
   if (head) {
     const shelf = head.dataset.shelf;
     ui[`${shelf}Open`] = !ui[`${shelf}Open`];
@@ -1311,7 +1351,7 @@ threadList.addEventListener("contextmenu", (e) => {
   showMenu(rowMenuItems(tab), at);
 });
 threadList.addEventListener("keydown", (e) => {
-  const row = e.target.closest(".thread-row, .waiting-row");
+  const row = e.target.closest(".thread-row, .waiting-row, .side-heading[data-global-projects]");
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     row.click();
@@ -1643,7 +1683,7 @@ function openProjectMenu() {
     list.innerHTML = shown.length
       ? shown.map((g, i) => {
           const where = g.key ? projectWhere(PinnedProjects.sessionOn(g.checkouts, directory)) : "";
-          const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} Capitão">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
+          const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} Captain">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
           return `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}${projectNameMark(g.name)}${where}${gears}</div>`;
         }).join("")
       : `<p class="empty">No matching projects.</p>`;
@@ -1720,7 +1760,7 @@ async function openOrchestrator(machine, path) {
     const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path }));
     if (!tab.view.running) await startTab(tab);
   } catch (e) {
-    tell(`Couldn't open the Capitão: ${esc(e)}`, 6000);
+    tell(`Couldn't open the Captain: ${esc(e)}`, 6000);
   }
 }
 /** A new session in the thread's folder, on its machine, without the picker. */

@@ -584,6 +584,15 @@ impl Delegates {
         self.persist();
     }
 
+    /// How many messages wait to be typed into each tab: worker news and orchestrator requests.
+    pub fn queued(&self) -> HashMap<String, u32> {
+        let mut by_tab = HashMap::new();
+        for report in self.reports.lock().unwrap().iter() {
+            *by_tab.entry(report.tab.clone()).or_default() += 1;
+        }
+        by_tab
+    }
+
     /// Drops the tab's reports that were typed, and returns the orchestrator requests among them.
     pub fn drop_claimed_reports(&self, tab: &str) -> Vec<String> {
         let mut typed = vec![];

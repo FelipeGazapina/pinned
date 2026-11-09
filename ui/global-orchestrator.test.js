@@ -233,7 +233,8 @@ test("without a host the memory says to pick one first", async () => {
 // The projects page: rows out of the catalog, and a machine's chip opening its Captain.
 function projectsPage() {
   const captain = { machine: "mm", view: { id: "cap-1", role: "orchestrator" } };
-  const groups = [{ name: "site", tabs: [captain], checkouts: [] }];
+  const worker = (machine, running) => ({ machine, view: { role: "worker", running } });
+  const groups = [{ name: "site", tabs: [captain, worker("mm", true), worker("mm", true), worker("mm", false), worker("local", true)], checkouts: [] }];
   const catalog = {
     projects: [
       {
@@ -262,12 +263,11 @@ function projectsPage() {
     machineDirectory: () => ({ localId: "local", localName: "This Mac", names: {}, online: {} }),
     phaseOf: () => "working",
     projectRepos: new Map(),
-    runningAgents: () => [{ state: "running" }],
   });
   return { ...harness, captain, catalog, click: harness.click };
 }
 
-test("the projects page lists every project with its machines, Captain and workers", () => {
+test("the projects page lists every project with its machines, Captain and running workers", () => {
   const { context, pages } = projectsPage();
   context.openGlobalProjects();
   context.renderGlobalProjectsPage();
@@ -275,12 +275,13 @@ test("the projects page lists every project with its machines, Captain and worke
   assert.match(html, /<h1>Projects<\/h1>/);
   assert.match(html, /2 projects · 3 machines/);
   assert.match(html, /<span class="gp-name">site<\/span>/);
-  assert.match(html, /<span class="gp-state working">working<\/span>/);
+  assert.match(html, /<span class="gp-state working">Working<\/span>/);
   assert.match(html, /<span class="gp-repo">github.com\/felipe\/site<\/span>/);
-  assert.match(html, /data-project="site" data-machine="mm"/);
-  assert.match(html, /data-project="site" data-machine="local" disabled/);
-  assert.match(html, /<span class="gp-workers">1 worker<\/span>/);
+  assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">2 workers<\/span><\/button>/);
+  assert.match(html, /data-project="site" data-machine="local" disabled title="No Captain on this machine">This Mac<span class="gp-count">1 worker<\/span><\/button>/);
+  assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
   assert.match(html, /<span class="gp-repo">no remote<\/span>/);
+  assert.match(html, /<span class="gp-state none">No Captain<\/span><span class="gp-repo">no remote<\/span><\/div>\s*<div class="gp-side"><button[^>]*>Linux VPS<\/button><span class="gp-workers">—<\/span>/);
 });
 
 test("a project's machine opens its Captain tab when one is open", () => {

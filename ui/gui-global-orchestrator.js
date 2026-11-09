@@ -149,8 +149,8 @@ async function saveGlobalOrchestratorSettings() {
   }
 }
 
-/** The account's projects as the projects page sees them: the tag catalog with each host's running
- * worker count, named by the orchestrator Felipe chose. */
+/** The account's projects as the projects page sees them: the tag catalog, named by the
+ * orchestrator Felipe chose. */
 function globalProjectsCatalog() {
   const directory = machineDirectory();
   directory.localName = machines.get(LOCAL)?.hubView?.name ?? directory.localName;
@@ -160,7 +160,6 @@ function globalProjectsCatalog() {
     phase: phaseOf,
     repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) ?? null,
     name: globalOrchestratorName(),
-    workers: (tab) => runningAgents(tab).length,
   });
 }
 
@@ -171,21 +170,40 @@ function openGlobalProjects() {
 
 SHELL_PAGES["global-projects"] = { show() { renderGlobalProjectsPage(); } };
 
+/** How the page names a `captainState`. */
+const CAPTAIN_STATE_LABELS = { working: "Working", idle: "Idle", none: "No Captain" };
+const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+
+/** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
+ * session, by project slug and machine id. */
+function runningWorkers() {
+  const by = new Map();
+  for (const group of projectGroups(true)) {
+    const counts = new Map();
+    for (const tab of group.tabs) if (tab.view.role === "worker" && tab.view.running) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
+    by.set(tagSlug(group.name), counts);
+  }
+  return by;
+}
+
 function renderGlobalProjectsPage() {
   const catalog = globalProjectsCatalog();
+  const workers = runningWorkers();
   const rows = catalog.projects.map((p) => {
     const state = captainState(p.machines.map((m) => m.captain));
+    const counts = workers.get(p.slug) ?? new Map();
     const machinesHtml = p.machines
       .map((m) => {
-        const captain = m.captain === "none" ? "" : `<span class="gp-captain ${m.captain}">${m.captain}</span>`;
+        const captain = m.captain === "none" ? "" : `<span class="gp-captain ${m.captain}">${CAPTAIN_STATE_LABELS[m.captain]}</span>`;
+        const running = counts.get(m.id) ? `<span class="gp-count">${workersLabel(counts.get(m.id))}</span>` : "";
         const title = m.captain === "none" ? ' title="No Captain on this machine"' : "";
-        return `<button type="button" class="gp-machine${m.online ? "" : " off"}" data-project="${esc(p.slug)}" data-machine="${esc(m.id)}"${m.captain === "none" || !m.online ? " disabled" : ""}${title}>${esc(m.name)}${captain}</button>`;
+        return `<button type="button" class="gp-machine${m.online ? "" : " off"}" data-project="${esc(p.slug)}" data-machine="${esc(m.id)}"${m.captain === "none" || !m.online ? " disabled" : ""}${title}>${esc(m.name)}${captain}${running}</button>`;
       })
       .join("");
-    const running = p.machines.reduce((n, m) => n + (m.workers || 0), 0);
+    const running = [...counts.values()].reduce((n, c) => n + c, 0);
     return `<div class="gp-row">
-      <div class="gp-main"><span class="gp-name">${esc(p.name)}</span><span class="gp-state ${state}">${state}</span><span class="gp-repo">${esc(p.repo || "no remote")}</span></div>
-      <div class="gp-side">${machinesHtml}<span class="gp-workers">${running ? `${running} worker${running > 1 ? "s" : ""}` : "—"}</span></div>
+      <div class="gp-main"><span class="gp-name">${esc(p.name)}</span><span class="gp-state ${state}">${CAPTAIN_STATE_LABELS[state]}</span><span class="gp-repo">${esc(p.repo || "no remote")}</span></div>
+      <div class="gp-side">${machinesHtml}<span class="gp-workers">${running ? workersLabel(running) : "—"}</span></div>
     </div>`;
   });
   setPage(
