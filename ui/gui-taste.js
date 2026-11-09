@@ -3,9 +3,11 @@
  * changed; the logic lives in taste.js. */
 
 /** `saved` is the backend's last answer and `draft` the page's edits over it. `projects` holds
- * every online machine's project list, null until it arrives. `flash` holds the brief lines the
- * last edit changed, drawn highlighted by the next render only. `note` is the note being typed. */
-const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, error: null, saving: false, toast: false, flash: new Set(), note: "" };
+ * every online machine's project list, each project with its `machine`, null until it arrives.
+ * `skills` holds the skills those machines list, by name. `flash` holds the brief lines the last
+ * edit changed, drawn highlighted by the next render only. `note` is the note being typed, and
+ * `adding` whether the add-skill form is open. */
+const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, skills: new Map(), error: null, saving: false, toast: false, flash: new Set(), note: "", adding: false, chatting: false };
 let tasteToastTimer = 0;
 
 const TASTE_FIELD_LABELS = {
@@ -16,6 +18,7 @@ const TASTE_FIELD_LABELS = {
   autonomy: "Autonomy",
   review_diffs: "Review each diff",
   second_opinion: "Second opinion",
+  skills: "Skills",
   context: "Context",
 };
 
@@ -46,9 +49,39 @@ async function tasteFetch() {
 }
 
 async function tasteFetchProjects() {
-  const lists = await Promise.all(onlineMachines().map((m) => callOn(m, { cmd: "list_projects" }).catch(() => [])));
-  tasteUi.projects = lists.flat();
+  const online = onlineMachines();
+  const [lists, listings] = await Promise.all([
+    Promise.all(online.map((m) => callOn(m, { cmd: "list_projects" }).catch(() => []))),
+    Promise.all(online.map((m) => callOn(m, { cmd: "skills" }).catch(() => null))),
+  ]);
+  tasteUi.projects = lists.flatMap((list, i) => list.map((p) => ({ ...p, machine: online[i] })));
+  tasteUi.skills = new Map();
+  for (const listing of listings) for (const c of listing?.copies ?? []) if (!tasteUi.skills.has(c.key)) tasteUi.skills.set(c.key, c);
   tasteRender();
+}
+
+/** Opens a thread whose session adjusts the current tab's scope by talking: in the project's
+ * folder on a machine that has it, else on the orchestrator's machine without a project. */
+async function tasteChat() {
+  const scope = tasteUi.scope;
+  const here = scope.kind === "project" ? (tasteUi.projects ?? []).find((p) => p.repo === scope.repo && machines.get(p.machine)?.view.online) : null;
+  const machine = here?.machine ?? globalHostMachine();
+  if (!machine) {
+    tasteUi.error = "No machine is online to chat on.";
+    return tasteRender();
+  }
+  tasteUi.chatting = true;
+  tasteUi.error = null;
+  tasteRender();
+  try {
+    const id = await callOn(machine, { cmd: "open_taste_chat", scope, ...(here ? { path: here.path } : {}) });
+    tasteUi.chatting = false;
+    await startTab(await revealTab(machine, id));
+  } catch (e) {
+    tasteUi.chatting = false;
+    tasteUi.error = /unknown variant/.test(String(e)) ? `Update pinned on ${machineName(machine)} to chat about the way of working.` : String(e?.message ?? e);
+    tasteRender();
+  }
 }
 
 /** Sends the draft's changes in order. Each answer becomes the saved tastes, so a failure part way
@@ -96,8 +129,7 @@ function tasteMoveRung(key, step) {
 
 /** On a project tab, whether the field is the project's own or the Captains', and the way back. */
 function tasteTagHtml(field) {
-  if (tasteUi.scope.kind !== "project") return "";
-  if (tasteUi.draft.projects?.[tasteUi.scope.repo]?.[field] == null) return `<span class="taste-tag">inherited</span>`;
+  if (tasteUi.scope.kind !== "project" || tasteUi.draft.projects?.[tasteUi.scope.repo]?.[field] == null) return "";
   const back = `Inherit ${TASTE_FIELD_LABELS[field].toLowerCase()} from Captains (all)`;
   return `<span class="taste-tag changed">changed here</span><button type="button" class="taste-reset" data-act="reset" data-field="${field}" aria-label="${back}" title="${back}">Reset</button>`;
 }
@@ -156,6 +188,26 @@ function tastePaceHtml(t) {
   </section>`;
 }
 
+function tasteSkillsHtml(t) {
+  const on = new Set(t.skills.map((s) => s.name));
+  const rows = t.skills.map((s, i) => {
+    const listed = tasteUi.skills.get(s.name);
+    const origin = listed ? scopeLabel(listed.scope) : "Not on an online machine";
+    const label = `Use the ${s.name} skill`;
+    return `<li><span class="taste-skill-text"><span class="taste-skill-name"><code>${esc(s.name)}</code><span class="taste-chip">${esc(origin)}</span></span>${listed?.description ? `<span class="taste-skill-about">${esc(listed.description)}</span>` : ""}</span>
+      <button type="button" class="taste-switch" role="switch" aria-checked="${s.enabled}" aria-label="${esc(label)}" data-act="skill" data-skill="${i}"><span></span></button></li>`;
+  }).join("");
+  const choices = [...tasteUi.skills.keys()].filter((name) => !on.has(name)).sort();
+  const form = tasteUi.adding
+    ? `<form class="taste-skill-form" data-skill-form><label class="taste-label">Skill <select data-skill-pick>${choices.length ? choices.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("") : `<option value="" disabled selected>No other skill on your machines</option>`}</select></label>
+      <span class="taste-skill-actions"><button type="submit" class="primary"${choices.length ? "" : " disabled"}>Add</button><button type="button" class="outline" data-act="unadd">Cancel</button></span></form>`
+    : "";
+  return `<section class="taste-section"><div class="taste-heading-row"><div class="taste-heading"><div class="taste-title"><h2>Skills</h2>${tasteTagHtml("skills")}</div><p>Guides every turn carries.</p></div>
+    <span class="taste-heading-actions"><button type="button" class="outline" data-act="adding">Add skill</button><button type="button" class="taste-link" data-act="chat">Create by chatting</button></span></div>
+    <ul class="taste-skills">${rows}</ul>${form}
+  </section>`;
+}
+
 function tasteContextHtml(t) {
   const notes = t.context.map((note, i) => `<li><span>${esc(note)}</span><button type="button" class="taste-icon" data-act="unnote" data-note="${i}" aria-label="Remove note">${icon("trash-2")}</button></li>`).join("");
   return `<section class="taste-section"><div class="taste-heading"><div class="taste-title"><h2>Context</h2>${tasteTagHtml("context")}</div><p>Notes every turn carries.</p></div>
@@ -169,7 +221,7 @@ function tastePreviewHtml(t) {
   const lines = tasteBrief(t).split("\n").map((line) => `<div class="taste-line${tasteUi.flash.has(line) ? " flash" : ""}">${esc(line)}</div>`).join("");
   const speed = tasteSpeed(t);
   const dots = [0, 1, 2].map((i) => `<span${i < speed ? ' class="on"' : ""}></span>`).join("");
-  return `<aside class="taste-preview"><h2>${tasteUi.scope.kind === "orchestrator" ? "What the orchestrator receives" : "What the Captain receives"}</h2>
+  return `<aside class="taste-preview"><h2>${tasteUi.scope.kind === "orchestrator" ? `What the ${esc(globalSettings.name)} receives` : "What the Captain receives"}</h2>
     <div class="taste-box"><div class="taste-lines">${lines}</div>
       <div class="taste-meters"><div><span>Cost per task</span><span title="A rough estimate from each model's cost tier">${tasteCost(t)}</span></div>
       <div><span>Speed</span><span class="taste-speed" role="img" aria-label="Speed ${speed} of 3">${dots}</span></div></div></div>
@@ -190,8 +242,9 @@ const tasteFocusKey = (el) => (el && pageView.contains(el) ? `${el.tagName}${JSO
 function tasteRender() {
   if (document.body.dataset.page !== "taste") return;
   const toast = tasteUi.toast ? `<span class="taste-toast" role="status">${icon("check")}Saved. New sessions start with it.</span>` : "";
-  const head = headHtml("Way of working", `<span class="spacer"></span>${toast}`);
-  const sub = `<p class="taste-sub">How the orchestrator and the Captains split work, pick models and ask for your input.</p>`;
+  const chat = `<button type="button" class="outline taste-chat" data-act="chat"${tasteUi.chatting ? " disabled" : ""}>${icon("message-square")}${tasteUi.chatting ? "Opening…" : "Chat to adjust"}</button>`;
+  const head = headHtml("Way of working", `<span class="spacer"></span>${toast}${tasteUi.draft ? chat : ""}`);
+  const sub = `<p class="taste-sub">How the ${esc(globalSettings.name)} and the Captains split work, pick models and ask for your input.</p>`;
   if (!tasteUi.draft) {
     setPage(`${head}<div class="page-body"><div class="page-wrap taste">${sub}<p class="taste-state${tasteUi.error ? " error" : ""}">${esc(tasteUi.error ?? "Loading…")}</p></div></div>`);
     return;
@@ -217,7 +270,7 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteContextHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
@@ -239,6 +292,16 @@ const TASTE_ACTS = {
   down: (b) => tasteMoveRung(b.dataset.rung, 1),
   remove: (b) => tasteEditField("ladder", tasteShown().ladder.filter((ref) => tasteRefKey(ref) !== b.dataset.rung)),
   unnote: (b) => tasteEditField("context", tasteShown().context.filter((_, i) => i !== Number(b.dataset.note))),
+  skill: (b) => tasteEditField("skills", tasteShown().skills.map((s, i) => (i === Number(b.dataset.skill) ? { ...s, enabled: !s.enabled } : s))),
+  adding: () => {
+    tasteUi.adding = true;
+    tasteRender();
+  },
+  unadd: () => {
+    tasteUi.adding = false;
+    tasteRender();
+  },
+  chat: () => tasteChat(),
   discard: () => {
     tasteUi.draft = tasteUi.saved;
     tasteUi.error = null;
@@ -261,6 +324,14 @@ pageView.addEventListener("input", (e) => {
   if (document.body.dataset.page === "taste" && e.target.matches("[data-note-input]")) tasteUi.note = e.target.value;
 });
 pageView.addEventListener("submit", (e) => {
+  if (document.body.dataset.page !== "taste" || !e.target.matches("[data-skill-form]")) return;
+  e.preventDefault();
+  const name = e.target.querySelector("[data-skill-pick]").value;
+  if (!name) return;
+  tasteUi.adding = false;
+  tasteEditField("skills", [...tasteShown().skills, { name, enabled: true }]);
+});
+pageView.addEventListener("submit", (e) => {
   if (document.body.dataset.page !== "taste" || !e.target.matches("[data-note-form]")) return;
   e.preventDefault();
   const note = tasteUi.note.trim();
@@ -268,6 +339,11 @@ pageView.addEventListener("submit", (e) => {
   tasteUi.note = "";
   tasteEditField("context", [...tasteShown().context, note]);
 });
+
+/** A taste chat's session changed the tastes: the page reads them again, keeping unsaved edits. */
+function tastesChanged() {
+  if (document.body.dataset.page === "taste") tasteFetch();
+}
 
 SHELL_PAGES.taste = {
   show() {

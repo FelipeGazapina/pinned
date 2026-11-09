@@ -867,7 +867,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     assert_eq!(link.call_hub(HubCall::GetTastes), Ok(stored.clone()), "a machine reads the account's taste");
     assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Ok(json!(false)), "a later machine can't replace the account's taste");
     let change = HubCall::SetTaste { scope: TasteScope::Captains, patch: TastePatch { parallel: Some(2), ..TastePatch::default() } };
-    assert_eq!(link.call_hub(change), Err("a machine may only forward a workflow session's callbacks".into()));
+    assert_eq!(link.call_hub(change), Err("only a machine with a Chat to adjust thread open may change the way of working".into()));
 
     let folder = dir.join("app");
     std::fs::create_dir_all(&folder).unwrap();
@@ -875,6 +875,56 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     node.machine.start_claude(captain.as_str().unwrap(), 80, 24).unwrap();
     let kept = || std::fs::read(dir.join("taste.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     assert_eq!(kept(), Some(stored), "the Capitão's start kept the account's taste for when the hub can't answer");
+}
+
+#[test]
+fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts() {
+    let hub = TestHub::start("taste_chat");
+    let url = hub.url.clone();
+    let start = |email: &str, name: &str| {
+        let (token, account) = account::signup(&url, email, "correct horse").unwrap();
+        let mut client = Client::connect(&url, &token);
+        client.wait("hello", |f| f["type"] == "hello");
+        let dir = temp(&format!("taste-chat-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        client.wait_machines(&[(name, true)]);
+        (client, node, dir)
+    };
+    let (mut ana, ana_node, ana_dir) = start("ana@acme.dev", "ana-mac");
+    let (mut bob, bob_node, bob_dir) = start("bob@acme.dev", "bob-mac");
+    let get = || json!({ "cmd": "get_tastes" });
+    let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+    let open_chat = |node: &Node, client: &mut Client| {
+        let tab = node.machine.call(Call::OpenTasteChat { scope: site.clone(), path: None }).unwrap().as_str().unwrap().to_owned();
+        client.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && t["taste_chat"] == true));
+        tab
+    };
+    let set = |parallel: u32| json!({ "name": "taste_set", "scope": "project:github.com/acme/site", "patch": { "parallel": parallel } });
+    let read = json!({ "name": "taste_get", "scope": "project:github.com/acme/site" });
+
+    let plain = ana_node.machine.open_tab(Some(ana_dir.display().to_string()), false).unwrap();
+    assert_eq!(session_tool(&ana_dir, &plain, set(2)), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
+    assert_eq!(ana_node.link.as_ref().unwrap().call_hub(HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(2), ..TastePatch::default() } }), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "a machine with no chat open can't");
+
+    let chat = open_chat(&ana_node, &mut ana);
+    let after = session_tool(&ana_dir, &chat, set(2)).unwrap();
+    assert_eq!((&after["own"], &after["effective"]["parallel"]), (&json!({ "parallel": 2 }), &json!(2)));
+    ana.wait("the page's cue to read again", |f| f["type"] == "event" && f["event"] == json!({ "kind": "tastes-changed" }));
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read sees the session's change");
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()));
+
+    let bob_chat = open_chat(&bob_node, &mut bob);
+    let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
+    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
+    session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
+    session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "captains", "field": "hard_model" })).unwrap();
+    assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
+    assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's session changed ana's taste");
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
 
 struct Through<'a>(&'a Link);

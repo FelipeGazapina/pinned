@@ -215,6 +215,7 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
 enum Seat {
     GlobalOrchestrator,
     Captain,
+    TasteChat,
     Other,
 }
 
@@ -223,6 +224,7 @@ impl Seat {
         match role {
             _ if child => Seat::Other,
             Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
+            Some(crate::taste::CHAT_ROLE) => Seat::TasteChat,
             Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
             _ => Seat::Other,
         }
@@ -237,6 +239,8 @@ enum Audience {
     Everyone,
     GlobalOrchestrator,
     Captains,
+    /// A thread the Way of working page opened to adjust the account's tastes.
+    TasteChat,
 }
 
 fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
@@ -250,6 +254,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         Audience::Everyone => true,
         Audience::GlobalOrchestrator => global,
         Audience::Captains => seat == Seat::Captain,
+        Audience::TasteChat => seat == Seat::TasteChat,
     };
     let mut tools = if reminders { reminder_tools() } else { vec![] };
     if !global {
@@ -369,10 +374,16 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 11] {
+fn project_tools() -> [(Audience, serde_json::Value); 14] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
+    let scope = serde_json::json!({ "type": "string", "description": "orchestrator (the global orchestrator), captains (every project's Captain) or project:<repo> (one project's Captain, as in project:github.com/acme/site)." });
+    let model = serde_json::json!({
+        "type": "object",
+        "properties": { "model": { "type": "string", "description": "The model's catalog id, as in glm-5.3 or claude-opus-5-5." }, "provider": { "type": "string", "description": "The provider it runs through, when that matters." } },
+        "required": ["model"],
+    });
     [
         (Audience::Spawners, serde_json::json!({
             "name": "agents",
@@ -469,6 +480,48 @@ fn project_tools() -> [(Audience, serde_json::Value); 11] {
                     "items": { "type": "integer", "description": "How many of its last messages and tool calls to read; 20 when left out, at most 50." },
                 },
                 "required": ["id"],
+            },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_get",
+            "description": "Read one scope of the account's way of working as JSON: effective (every field as its sessions get it), own (what the scope sets itself; a project's fields left out inherit from captains), profile, and brief (the text its sessions start with).",
+            "inputSchema": { "type": "object", "properties": { "scope": scope }, "required": ["scope"] },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_set",
+            "description": "Change the fields patch names in one scope of the account's way of working, keeping the rest, and answer taste_get of the scope. A project's field set to the Captains' value inherits again. A change that leaves no model on the ladder or parallel outside 1 to 8 changes nothing and fails. The Way of working page shows the change at once, and sessions started afterwards get it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": scope,
+                    "patch": {
+                        "type": "object",
+                        "properties": {
+                            "strategy": { "type": "string", "enum": ["cheap_with_guidance", "escalate_on_failure", "strongest_first"], "description": "How a worker climbs the ladder: the cheapest rung with a detailed brief, the cheapest rung moving up after two failures, or the hard-work model from the start." },
+                            "ladder": { "type": "array", "items": model, "description": "The models a worker climbs, cheapest first, at least one." },
+                            "hard_model": model,
+                            "parallel": { "type": "integer", "minimum": 1, "maximum": 8, "description": "Workers at once." },
+                            "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
+                            "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
+                            "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
+                            "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
+                            "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
+                        },
+                    },
+                },
+                "required": ["scope", "patch"],
+            },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_reset",
+            "description": "Make a project's field inherit from captains again, or give the orchestrator's or the Captains' field its default back, and answer taste_get of the scope.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": scope,
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context"] },
+                },
+                "required": ["scope", "field"],
             },
         })),
         (Audience::Captains, serde_json::json!({
@@ -655,13 +708,17 @@ fn send(message: &Message) -> Result<String, String> {
         Message::Delegate { .. } => StdDuration::from_secs(120),
         // These may wait on the hub and another machine, which allow a minute.
         Message::Project {
-            tool: ProjectTool::Projects
+            tool:
+                ProjectTool::Projects
                 | ProjectTool::SendToCaptain { .. }
                 | ProjectTool::ReadCaptain { .. }
                 | ProjectTool::Waiting
                 | ProjectTool::Sessions { .. }
                 | ProjectTool::ReadSession { .. }
-                | ProjectTool::TellOrchestrator { .. },
+                | ProjectTool::TellOrchestrator { .. }
+                | ProjectTool::TasteGet { .. }
+                | ProjectTool::TasteSet { .. }
+                | ProjectTool::TasteReset { .. },
             ..
         } => StdDuration::from_secs(70),
         _ => StdDuration::from_secs(10),
@@ -1044,6 +1101,9 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__waiting",
                 "mcp__pinned__sessions",
                 "mcp__pinned__read_session",
+                "mcp__pinned__taste_get",
+                "mcp__pinned__taste_set",
+                "mcp__pinned__taste_reset",
                 "mcp__pinned__tell_orchestrator",
             ]
         );
@@ -1052,7 +1112,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }
 
@@ -1107,6 +1167,8 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
+        assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
+        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
