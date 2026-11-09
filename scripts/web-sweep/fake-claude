@@ -523,6 +523,19 @@ function submit() {
       out(`serving on ${server.address().port}\r\n`);
     });
     wrote([{ type: "text", text: "Started a web server." }]);
+  } else if (fs.existsSync(TASTE_CALLS)) {
+    // The turn makes the way-of-working tool calls the sweep queued, one {name, input} a line.
+    const calls = fs.readFileSync(TASTE_CALLS, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    fs.rmSync(TASTE_CALLS);
+    for (const { name, input } of calls) {
+      try {
+        used(`mcp__pinned__${name}`, input, callPinned(name, input));
+      } catch (e) {
+        used(`mcp__pinned__${name}`, input, e.message, true);
+      }
+    }
+    wrote([{ type: "text", text: `Done: ${calls.map((c) => c.name).join(", ")}.` }]);
+    out(`taste ${calls.length}\r\n`);
   } else if (fs.existsSync(DELEGATE_CALLS)) {
     // The turn makes the delegate_task calls the sweep queued, one JSON arguments object a line.
     const calls = fs.readFileSync(DELEGATE_CALLS, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -846,6 +859,7 @@ process.stdin.on("data", (chunk) => {
 });
 
 const DELEGATE_CALLS = path.join(process.env.HOME, "delegate-calls.jsonl");
+const TASTE_CALLS = path.join(process.env.HOME, "taste-calls.jsonl");
 // A pinned tool call as claude makes it: the server --mcp-config names, run with its env, whose
 // ${VAR} and ${VAR:-} come from this session's own environment.
 function callPinned(name, input) {
