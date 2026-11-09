@@ -3169,7 +3169,8 @@ fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back()
     assert_eq!(queued, json!({ "outcome": "na_fila", "tab": capitao, "position": 1 }));
     let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orquestrador" } });
     assert_eq!(fleet.client.hub(to_site("From the phone.")), Ok(json!({ "outcome": "na_fila", "tab": capitao, "position": 2 })), "a signed-in client relays too");
-    assert_eq!(launches(&mac_dir, &capitao).matches("[Orquestrador]").count(), 1, "the Capitão started once, and nothing was typed into it");
+    let prompts = launches(&mac_dir, &capitao).lines().filter(|l| l.starts_with("[Orquestrador] ")).count();
+    assert_eq!(prompts, 1, "the Capitão started once, and nothing was typed into it");
 
     let mac_link = fleet.mac.link.as_ref().unwrap();
     assert_eq!(
