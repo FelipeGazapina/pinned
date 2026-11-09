@@ -3763,3 +3763,42 @@ fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
     let bobs = hub.runtime.block_on(hub.hub().db.boxes(uuid::Uuid::parse_str(&bob.id).unwrap())).unwrap();
     assert_eq!(bobs.len(), 1, "bob's box row is still there");
 }
+
+#[test]
+fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
+    let hub = TestHub::start("iso_taste");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (_, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, |_| RawReply::Ok(Value::Null));
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let defaults = bob.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    let site = |parallel: u32| json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": parallel } });
+
+    let anas = ana.hub(site(5)).unwrap();
+    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 5);
+    assert_eq!(bob.hub(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "bob's client reads none of ana's tastes");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "nor does bob's machine");
+
+    bob.hub(site(2)).unwrap();
+    bob.hub(json!({ "cmd": "reset_taste_field", "scope": { "kind": "captains" }, "field": "hard_model" })).unwrap();
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })), Ok(anas.clone()), "bob's writes left ana's tastes alone");
+    assert_eq!(ana_raw.ask(json!({ "cmd": "get_tastes" })), Ok(anas.clone()));
+
+    let imported = json!({ "cmd": "import_tastes", "tastes": { "projects": { "github.com/acme/other": { "parallel": 7 } } } });
+    assert_eq!(ana_raw.ask(imported.clone()), Ok(json!(false)), "ana already has tastes, so her machine's import is refused");
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })), Ok(anas));
+    let (carol_token, _, mut carol) = signed_in(&url, "carol@acme.dev");
+    let (_, carol_machine_token) = account::register_machine(&url, &carol_token, "carol-mac", "linux").unwrap();
+    let carol_raw = RawMachine::start(&url, &carol_machine_token, |_| RawReply::Ok(Value::Null));
+    carol.wait_machines(&[("carol-mac", true)]);
+    assert_eq!(carol_raw.ask(imported), Ok(json!(true)), "an account with no tastes takes its machine's");
+    assert_eq!(carol.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"]["github.com/acme/other"]["parallel"], 7);
+    for (who, client) in [("ana", &mut ana), ("bob", &mut bob)] {
+        assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
+    }
+}
