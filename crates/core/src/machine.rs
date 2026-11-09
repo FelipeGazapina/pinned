@@ -7345,6 +7345,96 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
+    fn append_transcript(dir: &Path, session: &str, lines: &[Value]) {
+        use std::io::Write;
+        let folder = dir.join("config/accounts/work/projects/-site");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("{session}.jsonl"))).unwrap();
+        file.write_all(lines.iter().map(|l| format!("{l}\n")).collect::<String>().as_bytes()).unwrap();
+    }
+
+    /// A turn's lines: the prompt, then the reply, or a tool call when it wrote no text.
+    #[cfg(unix)]
+    fn turn_lines(n: u32, prompt: &str, reply: Option<&str>) -> Vec<Value> {
+        let at = format!("2026-11-09T16:{n:02}:00Z");
+        let said = match reply {
+            Some(text) => json!({ "type": "text", "text": text }),
+            None => json!({ "type": "tool_use", "id": format!("t{n}"), "name": "Bash", "input": { "command": "ls" } }),
+        };
+        vec![
+            json!({ "type": "user", "uuid": format!("u{n}"), "timestamp": at, "message": { "content": prompt } }),
+            json!({ "type": "assistant", "uuid": format!("a{n}"), "timestamp": at, "message": { "content": [said] } }),
+        ]
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_report_reaches_the_global_orchestrator_once_however_long_the_capitaos_transcript() {
+        let dir = temp("report-once");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+
+        // The transcript passed one 8 MiB page long ago, and its first page ends on an old reply.
+        let padding = "x".repeat(64 << 10);
+        let mut old = turn_lines(0, "Earlier.", Some("OLD reply."));
+        old.extend((0..140).map(|i| json!({ "type": "user", "uuid": format!("p{i}"), "timestamp": "2026-11-09T15:00:00Z", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t0", "content": padding }] } })));
+        append_transcript(&dir, "s1", &old);
+
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let global_idle = || m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+        global_idle();
+        let reports = || -> Vec<String> {
+            read_pty(&inbox).split("\x1b[200~").skip(1).map(|pasted| pasted.split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r").to_owned()).collect()
+        };
+        let mut n = 0;
+        let mut turn = |request_id: Option<&str>, reply: Option<&str>| {
+            n += 1;
+            let prompt = match request_id {
+                Some(id) => {
+                    assert_eq!(enqueue(&m, &path, id, id).unwrap()["outcome"], "entregue");
+                    format!("[Orquestrador] {id}")
+                }
+                None => "Felipe asks directly.".to_owned(),
+            };
+            m.record_event(hook(&capitao, AgentStatus::Working));
+            append_transcript(&dir, "s1", &turn_lines(n, &prompt, reply));
+            m.record_event(hook(&capitao, AgentStatus::Done));
+        };
+
+        turn(Some("r-1"), Some("Reply one."));
+        wait_for("the first report", || reports().len() == 1);
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        global_idle();
+        turn(None, Some("Reply two."));
+        turn(Some("r-3"), None);
+        wait_for("the second report", || reports().len() == 2);
+        global_idle();
+        turn(Some("r-4"), Some("Reply four."));
+        wait_for("the third report", || reports().len() == 3);
+        global_idle();
+
+        let delivered = m.sent.lock().unwrap().in_flight(&m.global_folder());
+        let first = CaptainReport { machine: String::new(), machine_name: crate::account::hostname(), project: "site".into(), path: path.clone(), tab: capitao.clone(), text: "Reply one.".into(), answers: vec!["r-1".into()] };
+        let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
+        assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reports(), ["Reply one.", "(sem resposta)", "Reply four."], "each turn's own reply, each once");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_capitao_that_claude_code_calls_idle_after_its_turn_is_free_and_takes_a_message_now() {
