@@ -585,9 +585,10 @@ impl Db {
         Ok(n == 1)
     }
 
-    /// The row, or what is left of one this hub cannot read. `None` when no row has this id.
-    pub async fn box_by_id(&self, id: &str) -> Result<Option<Result<BoxRow, Remains>>, String> {
-        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where id = $1"), &[&id]).await.map_err(err)?;
+    /// The account's row, or what is left of one this hub cannot read. `None` when the account has
+    /// no row with this id. The id comes from the account's settings, which its client writes.
+    pub async fn box_by_id(&self, account: Uuid, id: &str) -> Result<Option<Result<BoxRow, Remains>>, String> {
+        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where id = $1 and account = $2"), &[&id, &account]).await.map_err(err)?;
         Ok(row.as_ref().map(box_row))
     }
 
