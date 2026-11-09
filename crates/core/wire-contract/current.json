@@ -13127,6 +13127,12 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
               }
             },
             "required": [
@@ -16462,6 +16468,12 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
               }
             },
             "required": [
@@ -27832,6 +27844,12 @@
           "orchestrator_turn": {
             "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
             "type": "boolean"
+          },
+          "queued": {
+            "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
           }
         },
         "required": [
@@ -28097,6 +28115,12 @@
           "orchestrator_turn": {
             "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
             "type": "boolean"
+          },
+          "queued": {
+            "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
           }
         },
         "required": [
@@ -28635,6 +28659,12 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
               }
             },
             "required": [
@@ -31085,6 +31115,12 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
               }
             },
             "required": [

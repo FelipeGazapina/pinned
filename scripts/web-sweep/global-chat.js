@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Drives the global orchestrator's chat on the real page: the sidebar row, the grouped §8 report
-// rows, the Opções quick replies, Esperando você, and read aloud held back on desktop but spoken
-// on a phone.
+// rows, the Opções quick replies, Waiting on you, read aloud held back on desktop but spoken on a
+// phone, and the sidebar's project tree with the projects page's worker counts.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/global-chat.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
-// Writes global-chat-*.png into scripts/web-sweep/screens/. The stack has one node, so that node
+// Writes global-chat-*.png and sidebar-*.png into scripts/web-sweep/screens/; CARD_SHOT names the
+// card shots' suffix (default "after"). The stack has one node, so that node
 // hosts the orchestrator, and two folders of its own (site, pinned) stand in for the Capitães the
 // reports name. The second tab replays the same account under iPhone emulation for read aloud.
 //
@@ -84,6 +85,14 @@ class Cdp {
     await this.send("Page.navigate", { url });
     await loaded;
   }
+  async shotOf(selector, file) {
+    const box = await this.evaluate((s) => {
+      const r = document.querySelector(s).getBoundingClientRect();
+      return { x: r.left, y: r.top, width: r.width, height: r.height };
+    }, selector);
+    const shot = await this.send("Page.captureScreenshot", { format: "png", clip: { ...box, scale: 1 } });
+    fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
+  }
   // Captured at CSS pixels, so the phone's 3x screen does not triple the committed file.
   async screenshot(file) {
     const { cssLayoutViewport: { clientWidth: width, clientHeight: height } } = await this.send("Page.getLayoutMetrics");
@@ -131,6 +140,8 @@ async function launchBrowser(errors) {
       click: (selector) => cdp.evaluate((s) => document.querySelector(s).click(), selector),
       goto: (url) => cdp.goto(url),
       screenshot: (file) => cdp.screenshot(file),
+      shotOf: (selector, file) => cdp.shotOf(selector, file),
+      size: (width, height) => cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: cdp.scale, mobile: !!phone }),
     };
   };
   return { proc, profile, tab };
@@ -139,7 +150,7 @@ async function launchBrowser(errors) {
 // Runs in the page: everything the assertions read.
 const state = () => ({
   row: document.querySelector(".global-row")?.innerText.replace(/\s+/g, " ").trim() ?? null,
-  projectsLink: !!document.querySelector("[data-global-projects]"),
+  name: globalSettings.name,
   waitingHead: document.querySelector(".waiting-head")?.innerText.replace(/\s+/g, " ").trim() ?? null,
   waitingRows: [...document.querySelectorAll(".waiting-row")].map((r) => r.innerText.replace(/\s+/g, " ").trim()),
   threadRows: [...document.querySelectorAll("#thread-list .thread-row")].map((r) => r.dataset.tab),
@@ -152,6 +163,53 @@ const state = () => ({
   activeGlobal: active ? isGlobalOrchestratorTab(active) : false,
   activeRunning: active?.view.running ?? null,
   touch: touchComposer(),
+});
+
+// Runs in the page: alpha's Captain with a queued message, its two workers (one working, one done),
+// a plain thread on alpha, and a thread on beta asking a question. The node's tabs events replace
+// each view, so the seed wraps renderSidebar and re-applies itself before every render. Every card
+// carries a branch, a PR, stats and skipped permissions, so the card shots show each part.
+function seedTree(keys) {
+  const views = {
+    captain: { title: "Release v0.17.21", status: "working", running: true, queued: 1, bypass: true },
+    w1: { title: "Run the CI on main", role: "worker", status: "working", running: true },
+    w2: { title: "Changelog for v0.17.21", role: "worker", status: "done", running: true },
+    plain: { title: "Tidy the README", status: "done", running: true, bypass: true },
+    waiting: { title: "Which fallback stays?", status: "needs-input", interrupted: true, running: true },
+  };
+  const at = Math.floor(Date.now() / 1000) - 120;
+  const apply = () => {
+    const captain = tabByKey(keys.captain);
+    for (const [name, view] of Object.entries(views)) {
+      const tab = tabByKey(keys[name]);
+      if (!tab) continue;
+      Object.assign(tab.view, view, { updated: at, stats: { active_ms: 4_320_000, cost_usd: 3.42 } }, view.role === "worker" ? { spawned_by: captain?.view.id } : {});
+      const thread = threadOf(tab);
+      thread.workspace = { ...(thread.workspace ?? {}), branch: `sweep/${name}` };
+      const url = `https://github.com/example/alpha/pull/${90 + Object.keys(views).indexOf(name)}`;
+      if (!thread.items.some((i) => i.url === url)) thread.items.push({ kind: "pr", number: Number(url.split("/").pop()), url });
+      prStatuses.set(url, { status: { state: "open", title: views[name].title }, at: Date.now() + 864e5 });
+    }
+  };
+  if (!window.__treeRender) {
+    window.__treeRender = renderSidebar;
+    renderSidebar = () => {
+      apply();
+      window.__treeRender();
+    };
+  }
+  renderSidebar();
+}
+
+// Runs in the page: the sidebar from the top, each element as a token.
+const sidebarTokens = () => [...document.querySelectorAll("#thread-list > *")].map((el) => {
+  if (el.matches(".global-row")) return `orchestrator ${el.querySelector(".count")?.textContent ?? 0}`;
+  if (el.matches(".waiting-head")) return `waiting ${el.querySelector(".count")?.textContent ?? 0}`;
+  if (el.matches(".waiting-row")) return `asks ${el.dataset.waiting}`;
+  if (el.matches(".side-heading")) return `heading ${el.textContent}`;
+  if (el.matches(".project-head")) return `project ${[...el.querySelectorAll(".name, .state, .where")].map((e) => e.textContent).join(" ")}`;
+  if (el.matches(".thread-row")) return `${el.classList.contains("child") ? `  `.repeat(Number(el.style.getPropertyValue("--depth"))) : ""}${el.dataset.tab}`;
+  return el.className;
 });
 
 const login = async (page) => {
@@ -190,8 +248,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("the orchestrator's row", () => page.evaluate(() => !!document.querySelector(".global-row")));
     let s = await page.evaluate(state);
     console.log("the row:", JSON.stringify(s.row));
-    check(s.row === "Orquestrador sweep-node", `row: ${s.row}`);
-    check(!s.projectsLink, "the Projects link shows without the settings page");
+    check(s.row === `${s.name} sweep-node · all projects`, `row: ${s.row}`);
     check(!s.orquestradorProject, "orquestrador is a project in the tree");
 
     await page.click(".global-row");
@@ -276,8 +333,10 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("Esperando você", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
     s = await page.evaluate(state);
     console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
-    check(s.waitingHead === "Esperando você 1", `head: ${s.waitingHead}`);
-    check(s.waitingRows.length === 1 && s.waitingRows[0].startsWith("pergunta") && s.waitingRows[0].endsWith("site · sweep-node"), `rows: ${JSON.stringify(s.waitingRows)}`);
+    check(s.waitingHead === "Waiting on you 1", `head: ${s.waitingHead}`);
+    check(s.waitingRows.length === 1 && /^\/question site · sweep-node · \S+$/.test(s.waitingRows[0]), `rows: ${JSON.stringify(s.waitingRows)}`);
+    check(await page.evaluate(() => !!document.querySelector(".waiting-row .dot.question")), "the question's dot is not the question tone");
+    check(s.row.endsWith("all projects 1"), `the orchestrator's row does not count the one waiting thread: ${s.row}`);
     check(!s.threadRows.includes(globalKey), "the global tab joined the thread list");
     check(await page.evaluate((k) => tabByKey(k).view.status === "needs-input" && !tabByKey(k).view.interrupted, keys.pinned), "the pinned Captain left its idle notice");
     await page.screenshot(path.join(SCREENS, "global-chat-waiting.png"));
@@ -326,6 +385,70 @@ const sendText = (page, text) => page.evaluate((t) => {
     check(JSON.stringify(phoneSpoken) === JSON.stringify([{ text: "Li os relatórios dos dois Capitães.", lang: "pt-BR" }]), `spoken: ${JSON.stringify(phoneSpoken)}`);
     await waitFor("the phone's quick replies", () => phone.evaluate(() => document.querySelectorAll(".quick-reply").length === 2));
     await phone.screenshot(path.join(SCREENS, "global-chat-phone.png"));
+
+    // The sidebar tree: the orchestrator's row with its count, Waiting on you, then each project
+    // with its Captain, the Captain's workers under it, and the project's plain threads.
+    await page.size(1440, 900);
+    const alpha = fs.realpathSync(path.join(WORK, "alpha"));
+    const beta = fs.realpathSync(path.join(WORK, "beta"));
+    const tree = await page.evaluate(async ({ machine, alpha, beta }) => {
+      const opened = async (dir) => (await revealTab(machine, await callOn(machine, { cmd: "open_tab", path: dir, bypass: false }))).key;
+      const captain = (await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path: alpha }))).key;
+      return { captain, w1: await opened(alpha), w2: await opened(alpha), plain: await opened(alpha), waiting: await opened(beta) };
+    }, { machine: node, alpha, beta });
+    await page.evaluate(() => activate(tabs.find(isGlobalOrchestratorTab)));
+    await page.evaluate((src) => (0, eval)(src), `${seedTree}; seedTree(${JSON.stringify(tree)});`);
+    const shot = process.env.CARD_SHOT || "after";
+    await page.shotOf(`.thread-row[data-tab="${tree.captain}"]`, path.join(SCREENS, `sidebar-card-captain-${shot}.png`));
+    await page.shotOf(`.thread-row[data-tab="${tree.plain}"]`, path.join(SCREENS, `sidebar-card-plain-${shot}.png`));
+    const tokens = await page.evaluate(sidebarTokens);
+    console.log("sidebar:", JSON.stringify(tokens, null, 1));
+    const asks = tokens.filter((t) => t.startsWith("asks "));
+    check(asks.length === 2 && asks.includes(`asks ${tree.waiting}`), `waiting rows: ${JSON.stringify(asks)}`);
+    check(tokens[0] === "orchestrator 2" && tokens[1] === "waiting 2", `the orchestrator's count and the waiting head: ${JSON.stringify(tokens.slice(0, 2))}`);
+    const projectsAt = tokens.indexOf("heading Projects");
+    check(projectsAt === 2 + asks.length, `the Projects heading is not right under Waiting on you: ${projectsAt}`);
+    const alphaAt = tokens.indexOf("project alpha 1 queued 1 running sweep-node");
+    check(alphaAt > projectsAt, `alpha's head: ${JSON.stringify(tokens.filter((t) => t.startsWith("project ")))}`);
+    check(JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5)) === JSON.stringify([tree.captain, `  ${tree.w1}`, `  ${tree.w2}`, tree.plain]),
+      `alpha's Captain, its two workers under it, then the plain thread: ${JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5))}`);
+    const betaAt = tokens.indexOf("project beta sweep-node");
+    check(betaAt > projectsAt && tokens[betaAt + 1] === tree.waiting, `beta's head and its waiting thread: ${JSON.stringify(tokens.slice(betaAt, betaAt + 2))}`);
+    const headCount = tokens.filter((t) => t.startsWith("project ")).length;
+    check(new Set(tokens.filter((t) => t.startsWith("project ")).map((t) => t.split(" ")[1])).size === headCount, "a project has two heads");
+    await page.screenshot(path.join(SCREENS, "sidebar-tree.png"));
+
+    // The Projects heading opens the projects page, which counts alpha's two running workers, for
+    // the project and for its checkout.
+    await page.click(".side-heading[data-global-projects]");
+    await waitFor("the projects page", () => page.evaluate(() => shellPage() === "global-projects"));
+    const alphaProject = () => page.evaluate(() => {
+      renderGlobalProjectsPage();
+      const row = [...document.querySelectorAll(".gp-row")].find((r) => r.querySelector(".gp-name")?.textContent === "alpha");
+      return row && { state: row.querySelector(".gp-state").textContent, workers: row.querySelector(".gp-workers").textContent,
+        machines: [...row.querySelectorAll(".gp-machine")].map((b) => b.textContent) };
+    });
+    const alphaRow = await alphaProject();
+    console.log("projects page alpha:", JSON.stringify(alphaRow));
+    check(alphaRow?.state === "Working" && alphaRow.workers === "2 workers", `alpha's row: ${JSON.stringify(alphaRow)}`);
+    check(JSON.stringify(alphaRow.machines) === JSON.stringify(["sweep-nodeWorking2 workers"]), `alpha's checkout: ${JSON.stringify(alphaRow.machines)}`);
+    await page.screenshot(path.join(SCREENS, "sidebar-projects-page.png"));
+
+    // The same tree on a phone, the sidebar open over the chat.
+    const small = await browser.tab(true);
+    await small.goto(HUB);
+    await waitFor("the hub on the phone", () => small.evaluate(() => document.body.dataset.hub === "online"));
+    await small.evaluate((src) => (0, eval)(src), `${seedTree}; seedTree(${JSON.stringify(tree)});`);
+    await small.evaluate(() => toggleSidebar(true));
+    await waitFor("alpha's head on the phone", () => small.evaluate(() => [...document.querySelectorAll(".project-head")].some((h) => /queued/.test(h.innerText))));
+    const phoneTokens = await small.evaluate(sidebarTokens);
+    check(phoneTokens.includes("project alpha 1 queued 1 running sweep-node") && phoneTokens[0] === "orchestrator 2", `phone sidebar: ${JSON.stringify(phoneTokens)}`);
+    await small.screenshot(path.join(SCREENS, "sidebar-tree-phone.png"));
+    await small.evaluate(() => document.querySelector(".project-head").scrollIntoView());
+    await small.screenshot(path.join(SCREENS, "sidebar-tree-phone-projects.png"));
+    await small.evaluate(() => openGlobalProjects());
+    await small.evaluate(() => toggleSidebar(false));
+    await small.screenshot(path.join(SCREENS, "sidebar-projects-page-phone.png"));
 
     check(!errors.length, `page errors:\n${errors.slice(0, 5).join("\n")}`);
     console.log("global chat: every check passed");

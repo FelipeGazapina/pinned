@@ -159,7 +159,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
 test("the section renders one account-wide setting and the machines that cannot take it", async () => {
   const { context } = page({ settings: { mm: { name: "Almirante", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }, older: true });
   const html = await context.globalOrchestratorSettingsHtml();
-  assert.match(html, /<h2 class="looks-title">Orquestrador global<\/h2>/);
+  assert.match(html, /<h2 class="looks-title">Global orchestrator<\/h2>/);
   assert.match(html, /value="Almirante"/);
   assert.match(html, /class="chip go-preset active" data-name="Almirante"/);
   assert.match(html, /class="chip go-host active" data-machine="mm"/);
@@ -168,7 +168,7 @@ test("the section renders one account-wide setting and the machines that cannot 
   assert.match(html, /value="tool_only" selected/);
   assert.match(html, /id="go-read-aloud" checked/);
   assert.doesNotMatch(html, /id="go-group-reports" checked/);
-  assert.match(html, /Memória do Almirante/);
+  assert.match(html, /Almirante's memory/);
   assert.match(html, /MacBook precisa atualizar o pinned/);
   assert.match(html, /Linux VPS está offline; atualiza quando reconectar/);
 });
@@ -195,7 +195,7 @@ test("saving writes the shared fields everywhere and tells the page through the 
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "global-orchestrator-settings");
   assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true });
-  assert.equal(element("go-status").textContent, "Salvo");
+  assert.equal(element("go-status").textContent, "Saved");
   assert.equal(element("go-error").textContent, "");
 });
 
@@ -207,7 +207,7 @@ test("saving refuses a host that cannot take the write, without sending any", as
   context.bindGlobalOrchestratorSettings();
   hosts[0].onclick();
   await element("go-save").onclick();
-  assert.equal(element("go-error").textContent, "Escolha em qual máquina online o orquestrador roda.");
+  assert.equal(element("go-error").textContent, "Choose which online machine runs the orchestrator.");
   assert.equal(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").length, 0);
 });
 
@@ -227,13 +227,15 @@ test("without a host the memory says to pick one first", async () => {
   await context.openGlobalMemory();
   assert.deepEqual(activated, []);
   assert.deepEqual(surfaces, []);
-  assert.match(told[0], /Escolha primeiro em qual máquina o Orquestrador roda/);
+  assert.equal(told[0], "First choose which machine runs Orquestrador, in Settings.");
 });
 
-// The projects page: rows out of the catalog, and a machine's chip opening its Capitão.
+// The projects page: rows out of the catalog, and a machine's chip opening its Captain. Site runs two
+// workers on the Mac mini and one on this Mac; a stopped worker does not count.
 function projectsPage() {
   const captain = { machine: "mm", view: { id: "cap-1", role: "orchestrator" } };
-  const groups = [{ name: "site", tabs: [captain], checkouts: [] }];
+  const worker = (machine, running) => ({ machine, view: { role: "worker", running } });
+  const groups = [{ name: "site", tabs: [captain, worker("mm", true), worker("mm", true), worker("mm", false), worker("local", true)], checkouts: [] }];
   const catalog = {
     projects: [
       {
@@ -262,28 +264,28 @@ function projectsPage() {
     machineDirectory: () => ({ localId: "local", localName: "This Mac", names: {}, online: {} }),
     phaseOf: () => "working",
     projectRepos: new Map(),
-    runningAgents: () => [{ state: "running" }],
   });
   return { ...harness, captain, catalog, click: harness.click };
 }
 
-test("the projects page lists every project with its machines, Capitão and workers", () => {
+test("the projects page lists every project with its machines, Captain and running workers", () => {
   const { context, pages } = projectsPage();
   context.openGlobalProjects();
   context.renderGlobalProjectsPage();
   const html = pages.at(-1);
-  assert.match(html, /<h1>Projetos<\/h1>/);
-  assert.match(html, /2 projetos · 3 máquinas/);
+  assert.match(html, /<h1>Projects<\/h1>/);
+  assert.match(html, /2 projects · 3 machines/);
   assert.match(html, /<span class="gp-name">site<\/span>/);
-  assert.match(html, /<span class="gp-state trabalhando">trabalhando<\/span>/);
+  assert.match(html, /<span class="gp-state trabalhando">Working<\/span>/);
   assert.match(html, /<span class="gp-repo">github.com\/felipe\/site<\/span>/);
-  assert.match(html, /data-project="site" data-machine="mm"/);
-  assert.match(html, /data-project="site" data-machine="local" disabled/);
-  assert.match(html, /<span class="gp-workers">1 worker<\/span>/);
-  assert.match(html, /<span class="gp-repo">sem remote<\/span>/);
+  assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain trabalhando">Working<\/span><span class="gp-count">2 workers<\/span><\/button>/);
+  assert.match(html, /data-project="site" data-machine="local" disabled title="No Captain on this machine">This Mac<span class="gp-count">1 worker<\/span><\/button>/);
+  assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
+  assert.match(html, /<span class="gp-repo">no remote<\/span>/);
+  assert.match(html, /<span class="gp-state nenhum">No Captain<\/span><span class="gp-repo">no remote<\/span><\/div>\s*<div class="gp-side"><button[^>]*>Linux VPS<\/button><span class="gp-workers">—<\/span>/);
 });
 
-test("a project's machine opens its Capitão tab when one is open", () => {
+test("a project's machine opens its Captain tab when one is open", () => {
   const { context, activated, captain, click } = projectsPage();
   context.renderGlobalProjectsPage();
   const chip = { dataset: { project: "site", machine: "mm" }, disabled: false };
