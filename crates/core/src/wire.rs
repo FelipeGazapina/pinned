@@ -295,6 +295,13 @@ pub enum Call {
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
     SetGlobalOrchestratorSettings { settings: global::Settings },
+    /// `reading::read` of the tab's session: its state and the last `items` items of its
+    /// conversation, 20 when not given, read from the end of its transcript however long it is.
+    ReadSession {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
     /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
     /// latest ones for an empty query.
     MemorySearch {
@@ -644,6 +651,7 @@ impl Call {
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
+                | Call::ReadSession { .. }
                 | Call::Workspace { .. }
                 | Call::ProjectHistory { .. }
                 | Call::Diff { .. }
@@ -958,6 +966,15 @@ pub enum HubCall {
     ResetTasteField { scope: TasteScope, field: TasteField },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
+    /// From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on
+    /// the online machine that has that tab, with `id`, `machine` and `machine_name` set.
+    ReadSession {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1280,6 +1297,12 @@ mod tests {
             MachineFrame::Call { id: 11, call: HubCall::ReadCaptain { machine: "m2".into(), path: "/w/site".into() } },
             json!({ "type": "call", "id": 11, "call": { "cmd": "read_captain", "machine": "m2", "path": "/w/site" } }),
         );
+        round_trip(
+            MachineFrame::Call { id: 12, call: HubCall::ReadSession { tab: "tab-2b-7".into(), machine: None, items: Some(5) } },
+            json!({ "type": "call", "id": 12, "call": { "cmd": "read_session", "tab": "tab-2b-7", "items": 5 } }),
+        );
+        let bare: Call = serde_json::from_value(json!({ "cmd": "read_session", "tab": "tab-2b-7" })).unwrap();
+        assert_eq!(bare, Call::ReadSession { tab: "tab-2b-7".into(), items: None });
     }
 
     #[test]

@@ -3802,3 +3802,138 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
         assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
     }
 }
+
+/// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.
+fn running_tab(client: &mut Client, machine: &str, path: &str) -> String {
+    let tab = client.call(machine, json!({ "cmd": "open_tab", "path": path, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.call(machine, json!({ "cmd": "start_claude", "tab": &tab, "cols": 80, "rows": 24 })).unwrap();
+    tab
+}
+
+#[test]
+fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_reads_one_to_its_end() {
+    let mut fleet = Fleet::start("sessions");
+    let (mac, mini) = (fleet.mac_id.clone(), fleet.mini_id.clone());
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let apps = fleet.mac_dir.join("client-apps");
+    origin(&apps, "git@github.com:acme/client-apps.git");
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"];
+    assert!(pinned_core::process::command("git").arg("-C").arg(&apps).args(commit).status().unwrap().success());
+    let apps = fleet.mac.machine.open_project(apps).display().to_string();
+    fleet.mac.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Bloom".into(), auth: None, key: None }).unwrap();
+    fleet.client.call(&mac, json!({ "cmd": "set_project_account", "path": apps, "account": "bloom" })).unwrap();
+
+    let slack = "Someone mentioned you in the Slack thread";
+    let asking = running_tab(&mut fleet.client, &mac, &apps);
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": asking, "title": slack }));
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "needs-input", "tab": asking, "message": "Claude needs your permission to use Bash" }));
+    // A transcript past the 8 MiB a read from its start reaches.
+    let long = running_tab(&mut fleet.client, &mac, &apps);
+    let transcripts = fleet.mac_dir.join("accounts/bloom/projects/client-apps");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let line = |kind: &str, content: Value, at: &str| json!({ "isSidechain": false, "gitBranch": "felipega/fix-and-ops", "type": kind, "message": { "role": kind, "content": content }, "uuid": format!("{kind}-{at}"), "timestamp": at }).to_string();
+    let mut transcript = String::new();
+    for i in 0..10 {
+        transcript += &line("assistant", json!([{ "type": "text", "text": "x".repeat(1 << 20) }]), &format!("2026-11-09T11:0{i}:00.000Z"));
+        transcript.push('\n');
+    }
+    transcript += &format!("{}\n", line("user", json!("what is running?"), "2026-11-09T12:00:00.000Z"));
+    transcript += &format!("{}\n", json!({ "type": "pr-link", "prNumber": 92, "prUrl": "https://github.com/acme/client-apps/pull/92", "prRepository": "acme/client-apps", "timestamp": "2026-11-09T12:05:00.000Z" }));
+    transcript += &format!("{}\n", line("assistant", json!([{ "type": "text", "text": "Two Slack threads wait on you." }]), "2026-11-09T12:10:00.000Z"));
+    assert!(transcript.len() > 8 << 20);
+    std::fs::write(transcripts.join("s-long.jsonl"), transcript).unwrap();
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "done", "tab": long, "session": "s-long", "title": slack }));
+    let new_thread = running_tab(&mut fleet.client, &mac, &apps);
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": apps })).unwrap().as_str().unwrap().to_owned();
+    fleet.client.call(&mac, json!({ "cmd": "start_claude", "tab": &captain, "cols": 80, "rows": 24 })).unwrap();
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": captain }));
+    let request = pinned_core::delegate::parse_request(&json!({ "task": "Lint the app.", "mode": "async" })).unwrap();
+    let delegate = pinned_core::agent::Message::Delegate { tab: Some(captain.clone()), task: None, tool: None, request: Box::new(request) };
+    let mut stream = std::os::unix::net::UnixStream::connect(fleet.mac_dir.join("sock")).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&delegate).unwrap()).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    let started: Value = serde_json::from_str(&serde_json::from_str::<Result<String, String>>(&reply).unwrap().unwrap()).unwrap();
+    let worker = started["tabId"].as_str().unwrap_or_else(|| panic!("no worker thread: {started}")).to_owned();
+    let stopped = fleet.client.call(&mac, json!({ "cmd": "open_tab", "path": fleet.site, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    let failed = running_tab(&mut fleet.client, &mini, &fleet.mini_dir.display().to_string());
+    hook(&fleet.mini_dir, json!({ "kind": "agent", "status": "failed", "tab": failed, "message": "API Error: 500" }));
+
+    let tool = |tool: Value| session_tool(&fleet.mini_dir, &fleet.global, tool);
+    let sessions = |project: Option<&str>| tool(json!({ "name": "sessions", "project": project })).unwrap();
+    wait_for("mac's tabs and the long transcript's tally on the hub", || {
+        let listed = sessions(None);
+        let list = listed["sessions"].as_array().unwrap();
+        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92) && list.iter().any(|s| s["id"] == worker)
+    });
+    let listed = sessions(Some("client-apps"));
+    let list = listed["sessions"].as_array().unwrap().clone();
+    let activity: Vec<u64> = list.iter().filter_map(|s| s["last_activity"].as_u64()).collect();
+    assert!(activity.windows(2).all(|w| w[0] >= w[1]), "newest activity first: {activity:?}");
+    let mut shapes: Vec<Value> = list
+        .into_iter()
+        .map(|mut s| {
+            s.as_object_mut().unwrap().remove("last_activity");
+            s
+        })
+        .collect();
+    shapes.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let project = json!({ "key": "github.com/acme/client-apps", "name": "client-apps", "path": apps });
+    let on_mac = |id: &str, role: &str, state: &str, extra: Value| {
+        let mut session = json!({ "id": id, "machine": mac, "machine_name": "mac", "account": "bloom", "project": project, "role": role, "state": state });
+        session.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        session
+    };
+    let mut expected = vec![
+        on_mac(&asking, "thread", "waiting_on_input", json!({ "title": slack, "message": "Claude needs your permission to use Bash" })),
+        on_mac(&long, "thread", "idle", json!({ "title": slack, "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
+        on_mac(&new_thread, "thread", "idle", json!({})),
+        on_mac(&captain, "captain", "running", json!({})),
+        on_mac(&worker, "worker", "idle", json!({ "captain": captain, "title": "Lint the app." })),
+    ];
+    expected.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    assert_eq!(shapes, expected);
+    let long_session = listed["sessions"].as_array().unwrap().iter().find(|s| s["id"] == long).unwrap().clone();
+    assert_eq!(long_session["last_activity"], 1794226200, "the time of the transcript's last message");
+    assert_eq!(listed["machines"].as_array().unwrap().len(), 2, "every machine of the account");
+
+    let everything = sessions(None);
+    let elsewhere: Vec<(&str, &str, &str, &str)> = everything["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["project"]["name"] != "client-apps")
+        .map(|s| (s["id"].as_str().unwrap(), s["machine_name"].as_str().unwrap(), s["account"].as_str().unwrap(), s["state"].as_str().unwrap()))
+        .collect();
+    let mut elsewhere = elsewhere;
+    elsewhere.sort();
+    let mut expected_elsewhere = vec![(failed.as_str(), "mini", "claude", "error"), (stopped.as_str(), "mac", "claude", "settled")];
+    expected_elsewhere.sort();
+    assert_eq!(elsewhere, expected_elsewhere, "the global orchestrator's own tab is not a session it reports");
+    assert_eq!(tool(json!({ "name": "sessions", "machine": "@MINI" })).unwrap()["sessions"].as_array().unwrap().len(), 1);
+
+    let read = tool(json!({ "name": "read_session", "id": long, "items": 3 })).unwrap();
+    assert_eq!(
+        read,
+        json!({
+            "state": "done", "next": "it may take a message now", "title": slack,
+            "conversation": { "items": [
+                { "kind": "user", "at": "2026-11-09T12:00:00.000Z", "text": "what is running?" },
+                { "kind": "pr", "at": "2026-11-09T12:05:00.000Z", "url": "https://github.com/acme/client-apps/pull/92" },
+                { "kind": "text", "at": "2026-11-09T12:10:00.000Z", "text": "Two Slack threads wait on you." },
+            ], "cursor": read["conversation"]["cursor"], "reset": false },
+            "id": long, "machine": mac, "machine_name": "mac",
+        }),
+        "a loose thread on another machine, read to the true end of a transcript past 8 MiB"
+    );
+    let here = tool(json!({ "name": "read_session", "id": failed })).unwrap();
+    assert_eq!(here, json!({ "state": "failed", "next": "it may take a message now", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "id": failed, "machine": mini, "machine_name": "mini" }));
+    assert_eq!(tool(json!({ "name": "read_session", "id": "tab-0-0" })), Err("no online machine of this account has a session tab-0-0".into()));
+    assert_eq!(tool(json!({ "name": "read_session", "id": long, "machine": "mini" })), Err("mini has no session ".to_owned() + &long));
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    assert_eq!(
+        mac_link.call_hub(HubCall::ReadSession { tab: long.clone(), machine: None, items: None }),
+        Err("mac does not host the global orchestrator (mini does), so it can't read a session".into())
+    );
+    assert_eq!(session_tool(&fleet.mac_dir, &captain, json!({ "name": "sessions" })), Err("only the global orchestrator has this tool".into()));
+}

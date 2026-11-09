@@ -3,8 +3,10 @@
 //! runs in `~/.pinned/orquestrador`, a folder no project list holds, so that folder's memory is the
 //! account's global memory.
 
+use crate::accounts::AccountId;
 use crate::agent::{AgentStatus, Role, ROLE_ENV};
 use crate::history;
+use crate::stats::PrLink;
 use crate::wire::{MachineId, ProjectView, TabId, TabView};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -317,6 +319,10 @@ pub struct Overview {
     /// Every machine of the account, with or without projects.
     #[serde(default)]
     pub machines: Vec<OverviewMachine>,
+    /// Every session on the account's online machines, newest activity first. Absent from a hub
+    /// that predates the `sessions` tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<Session>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -522,7 +528,150 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
         .iter()
         .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned) })
         .collect();
-    Overview { projects, waiting, machines }
+    Overview { projects, waiting, machines, sessions: None }
+}
+
+/// One session of the account, as the global orchestrator's `sessions` tool lists it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Session {
+    /// The tab's id, which `read_session` takes.
+    pub id: TabId,
+    pub machine: MachineId,
+    pub machine_name: String,
+    /// The account the session runs under, such as `claude` or `bloom`.
+    pub account: AccountId,
+    pub project: SessionProject,
+    pub role: SessionRole,
+    /// The Capitão a worker works for: the first Capitão up the tabs that started it, else its
+    /// project's Capitão on that machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captain: Option<TabId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrLink>,
+    pub state: SessionState,
+    /// What it asks the user, or the error that stopped it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Unix seconds of its last message, else of its last status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<u64>,
+}
+
+/// The project a session works in: the project its folder belongs to, a worktree's being its
+/// repository's.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct SessionProject {
+    /// The key `projects` lists, or `<machine id>:<path>` for a folder the machine does not list.
+    pub key: String,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRole {
+    Captain,
+    Worker,
+    /// A thread the user opened, which no Capitão runs.
+    Thread,
+}
+
+/// What a session is doing, from what its machine knows of its tab.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    /// Its session runs a turn: status working, or a message from the global orchestrator started
+    /// it before its first hook.
+    Running,
+    /// Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.
+    Idle,
+    /// It asks the user mid-turn: a question or a permission prompt.
+    WaitingOnInput,
+    /// It stopped on an error, a usage limit included.
+    Error,
+    /// Its session is not running. A message starts it again.
+    Settled,
+}
+
+impl SessionState {
+    pub fn of(tab: &TabView) -> SessionState {
+        match tab.status {
+            Some(AgentStatus::Failed) => SessionState::Error,
+            _ if !tab.running => SessionState::Settled,
+            Some(AgentStatus::NeedsInput) if tab.interrupted => SessionState::WaitingOnInput,
+            Some(AgentStatus::Working) => SessionState::Running,
+            _ if tab.orchestrator_turn => SessionState::Running,
+            _ => SessionState::Idle,
+        }
+    }
+}
+
+impl Session {
+    /// Whether the session is in `project`, a key, name or folder, and on `machine`, an id or a
+    /// name with or without `@`. Names match in any case.
+    pub fn matches(&self, project: Option<&str>, machine: Option<&str>) -> bool {
+        let project_is = |p: &str| self.project.key == p || self.project.path == p || self.project.name.eq_ignore_ascii_case(p);
+        let machine_is = |m: &str| self.machine == m || self.machine_name.eq_ignore_ascii_case(m);
+        project.map(str::trim).is_none_or(project_is) && machine.map(|m| m.trim().trim_start_matches('@')).is_none_or(machine_is)
+    }
+}
+
+/// Every session on the online `machines`, newest activity first. The global orchestrator's own
+/// tab is left out, and an offline machine has none, since its tabs are not live.
+pub fn sessions(machines: &[MachineSnapshot]) -> Vec<Session> {
+    let mut sessions: Vec<Session> = machines.iter().filter(|m| m.online).flat_map(|machine| machine.tabs.iter().filter(|t| !t.orchestrator_global).map(move |tab| session(machine, tab))).collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    sessions
+}
+
+fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
+    let folder = history::project_of(Path::new(&tab.cwd));
+    let listed = machine.projects.iter().find(|p| Path::new(&p.path) == folder);
+    let path = folder.display().to_string();
+    let project = SessionProject {
+        key: listed.and_then(|p| p.repo.clone()).unwrap_or_else(|| format!("{}:{path}", machine.id)),
+        name: listed.map(|p| p.name.clone()).unwrap_or_else(|| folder.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned())),
+        path,
+    };
+    let role = match tab.role {
+        Some(Role::Orchestrator) => SessionRole::Captain,
+        Some(Role::Worker) => SessionRole::Worker,
+        None => SessionRole::Thread,
+    };
+    let captain = (role == SessionRole::Worker).then(|| owning_captain(machine.tabs, tab).or_else(|| captain_tab(machine.tabs, &project.path)).map(|c| c.id.clone())).flatten();
+    let state = SessionState::of(tab);
+    Session {
+        id: tab.id.clone(),
+        machine: machine.id.to_owned(),
+        machine_name: machine.name.to_owned(),
+        account: tab.account.clone(),
+        project,
+        role,
+        captain,
+        title: tab.title.clone().or_else(|| tab.prompt_title.clone()),
+        branch: tab.branch.clone(),
+        pr: tab.pr.clone(),
+        message: tab.message.clone().filter(|_| matches!(state, SessionState::WaitingOnInput | SessionState::Error)),
+        state,
+        last_activity: tab.last_message_at.or(tab.updated),
+    }
+}
+
+/// The first Capitão up the tabs that started `tab`.
+fn owning_captain<'a>(tabs: &'a [TabView], tab: &TabView) -> Option<&'a TabView> {
+    let mut parent = tab.spawned_by.as_deref();
+    for _ in 0..tabs.len() {
+        let up = tabs.iter().find(|t| Some(t.id.as_str()) == parent)?;
+        if up.role == Some(Role::Orchestrator) {
+            return Some(up);
+        }
+        parent = up.spawned_by.as_deref();
+    }
+    None
 }
 
 /// The global orchestrator's system prompt. `name` is its configured name, `machine` the machine it
@@ -540,7 +689,9 @@ Para cada pedido:
 4. Use um request_id novo em cada mensagem. Repita um request_id só para reenviar a mesma mensagem depois de um erro.
 5. send_to_captain responde entregue (digitado agora), na_fila (o Capitão está ocupado e lê quando terminar), iniciado (o Capitão começou com a mensagem) ou ocupado (tente de novo mais tarde). Conte ao Felipe em uma frase.
 
-Os relatórios dos Capitães chegam como mensagens que começam com \"[pinned] Capitão <projeto> (<máquina>)\". Resuma cada um para o Felipe em poucas linhas: o que foi feito, o que falta e o que precisa dele. read_captain(project) lê as últimas respostas de um Capitão, e waiting() lista o que espera o Felipe em todas as máquinas.
+Capitão reports arrive as messages that start with \"[pinned] Capitão <project> (<machine>)\". Sum each one up for Felipe in a few lines: what was done, what is left and what needs Felipe. read_captain(project) reads a Capitão's last replies, and waiting() lists what waits on Felipe on every machine.
+
+To answer what is running in a project or on a machine, such as \"what is running in client-apps?\", call sessions(project) or sessions(machine=...). It lists every session on every machine and account: loose threads Felipe opened, workers and Capitães. projects() counts only a Capitão's workers, so never answer that question from projects() alone. Answer with each session's title, state, branch, PR, machine and account, and call read_session(id) to read the last messages of any session whose title and state don't say enough.
 
 Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou projects() lista uma máquina com problem, diga ao Felipe numa frase simples qual máquina precisa atualizar o pinned ou não respondeu, sem o texto do erro.
 
@@ -757,10 +908,54 @@ mod tests {
     }
 
     #[test]
+    fn sessions_list_loose_threads_workers_and_capitaes_on_every_online_machine_and_account() {
+        let apps = [project("/Users/f/client-apps", Some("github.com/o/client-apps"))];
+        let talk = |tab: TabView, branch: &str, pr: Option<u64>, at| TabView { branch: Some(branch.into()), pr: pr.map(|n| PrLink { number: n, url: format!("https://github.com/o/client-apps/pull/{n}") }), last_message_at: Some(at), ..tab };
+        let on = |account: &str, tab: TabView| TabView { account: account.into(), ..tab };
+        let slack = talk(TabView { title: Some("Someone mentioned you in the Slack thread".into()), ..on("bloom", view("tab-b-2", "/Users/f/client-apps", None, true, Some(AgentStatus::Done))) }, "felipega/fix-and-ops", None, 1794240000);
+        let asking = TabView { interrupted: true, message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794239000), ..on("bloom", view("tab-b-3", "/Users/f/client-apps", None, true, Some(AgentStatus::NeedsInput))) };
+        let new_thread = TabView { title: Some("New thread".into()), ..on("bloom", view("tab-b-4", "/Users/f/client-apps", None, true, None)) };
+        let captain = talk(view("tab-b-5", "/Users/f/client-apps", Some(Role::Orchestrator), true, Some(AgentStatus::Working)), "main", None, 1794230000);
+        let lead = TabView { spawned_by: Some("tab-b-5".into()), ..view("tab-b-6", "/Users/f/client-apps/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)) };
+        let sub = talk(TabView { spawned_by: Some("tab-b-6".into()), ..view("tab-b-7", "/Users/f/client-apps/.claude/worktrees/pinned-2", Some(Role::Worker), true, Some(AgentStatus::Done)) }, "pinned/sub", Some(92), 1794235000);
+        let own = TabView { orchestrator_global: true, ..view("tab-b-8", "/Users/f/.pinned/orquestrador", None, true, Some(AgentStatus::Working)) };
+        let book = [slack, asking, new_thread, captain, lead, sub, own];
+        let old = TabView { prompt_title: Some("Someone mentioned you in the Slack thread".into()), message: Some("API Error: 500".into()), updated: Some(1793800000), ..view("tab-d-1", "/home/f/client-apps", None, false, Some(AgentStatus::Failed)) };
+        let stopped = view("tab-d-2", "/home/f/scratch", None, false, Some(AgentStatus::Done));
+        let dev = [old, stopped];
+        let machines = [
+            MachineSnapshot { id: "m-book", name: "MacBook", online: true, version: "0.17.21", projects: &apps, tabs: &book, problem: None },
+            MachineSnapshot { id: "m-dev", name: "dev", online: true, version: "0.17.20", projects: &[], tabs: &dev, problem: None },
+            MachineSnapshot { id: "m-off", name: "Mac mini", online: false, version: "0.17.21", projects: &apps, tabs: &dev, problem: None },
+        ];
+        let listed = sessions(&machines);
+        let apps_on_book = serde_json::json!({ "key": "github.com/o/client-apps", "name": "client-apps", "path": "/Users/f/client-apps" });
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap(),
+            serde_json::json!([
+                { "id": "tab-b-2", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "title": "Someone mentioned you in the Slack thread", "branch": "felipega/fix-and-ops", "state": "idle", "last_activity": 1794240000 },
+                { "id": "tab-b-3", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "state": "waiting_on_input", "message": "Claude needs your permission to use Bash", "last_activity": 1794239000 },
+                { "id": "tab-b-7", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "worker", "captain": "tab-b-5", "branch": "pinned/sub", "pr": { "number": 92, "url": "https://github.com/o/client-apps/pull/92" }, "state": "idle", "last_activity": 1794235000 },
+                { "id": "tab-b-5", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "captain", "branch": "main", "state": "running", "last_activity": 1794230000 },
+                { "id": "tab-d-1", "machine": "m-dev", "machine_name": "dev", "account": "claude", "project": { "key": "m-dev:/home/f/client-apps", "name": "client-apps", "path": "/home/f/client-apps" }, "role": "thread", "title": "Someone mentioned you in the Slack thread", "state": "error", "message": "API Error: 500", "last_activity": 1793800000 },
+                { "id": "tab-b-4", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "title": "New thread", "state": "idle" },
+                { "id": "tab-b-6", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "worker", "captain": "tab-b-5", "state": "running" },
+                { "id": "tab-d-2", "machine": "m-dev", "machine_name": "dev", "account": "claude", "project": { "key": "m-dev:/home/f/scratch", "name": "scratch", "path": "/home/f/scratch" }, "role": "thread", "state": "settled" },
+            ])
+        );
+        let ids = |project: Option<&str>, machine: Option<&str>| listed.iter().filter(|s| s.matches(project, machine)).map(|s| s.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(Some("Client-Apps"), None), ["tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-d-1", "tab-b-4", "tab-b-6"], "a name matches the project on every machine");
+        assert_eq!(ids(Some("github.com/o/client-apps"), Some("@macbook")), ["tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-b-4", "tab-b-6"]);
+        assert_eq!(ids(Some("m-dev:/home/f/client-apps"), None), ["tab-d-1"]);
+        assert_eq!(ids(None, Some("m-dev")), ["tab-d-1", "tab-d-2"]);
+    }
+
+    #[test]
     fn the_capitao_hears_how_its_turn_goes_back_to_the_orchestrator_under_each_policy() {
         assert_eq!(captain_prompt("Almirante", ReportPolicy::Auto), "A message that starts with \"[Almirante] \" comes from the global orchestrator, the user's chat above every project. Do that work as you would the user's. Mid-work, use tell_orchestrator for a question it must answer or news it must hear now. Your last reply of such a turn goes back to it by itself, so end that turn with what you did, what is left and what needs the user.");
         assert!(captain_prompt("Almirante", ReportPolicy::ToolOnly).ends_with("Nothing goes back to it by itself: when you finish its request, report with tell_orchestrator."));
         assert!(prompt("Comandante", "mini").starts_with("Você é o Comandante, o orquestrador global do Felipe no pinned"));
+        assert!(prompt("Comandante", "mini").contains("such as \"what is running in client-apps?\", call sessions(project) or sessions(machine=...)."));
     }
 
     #[test]

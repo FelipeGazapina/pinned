@@ -1,6 +1,6 @@
-//! The global orchestrator's bridge between machines. Its tab lists every project of the account,
-//! hands a message to a Capitão on another machine and reads one there, and a Capitão reports up
-//! to it. A machine holds a lesser credential than a login, so the hub checks where each call comes
+//! The global orchestrator's bridge between machines. Its tab lists every project and session of
+//! the account, hands a message to a Capitão on another machine and reads a Capitão or any session
+//! there, and a Capitão reports up to it. A machine holds a lesser credential than a login, so the hub checks where each call comes
 //! from: the overview, a message for a Capitão and a read only from the machine that hosts the
 //! global orchestrator, and a report only from a machine whose tab `report.tab` is the Capitão of
 //! `report.path`.
@@ -29,12 +29,13 @@ pub enum Source<'a> {
     Machine(&'a str),
 }
 
-/// Answers the global orchestrator's hub calls: `Relay`, `Overview` and `ReadCaptain`.
+/// Answers the global orchestrator's hub calls: `Relay`, `Overview`, `ReadCaptain` and `ReadSession`.
 pub async fn serve(hub: &Hub, account: &Account, from: Source<'_>, call: HubCall) -> Result<Value, String> {
     match call {
         HubCall::Relay { request_id, to } => relay(hub, account, from, request_id, to).await,
         HubCall::Overview => overview(hub, account, from).await,
         HubCall::ReadCaptain { machine, path } => read_captain(hub, account, from, &machine, path).await,
+        HubCall::ReadSession { tab, machine, items } => read_session(hub, account, from, tab, machine, items).await,
         _ => Err("that is not a global orchestrator call".into()),
     }
 }
@@ -111,7 +112,8 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
         .zip(&seen)
         .map(|(m, (projects, tabs, problem))| MachineSnapshot { id: &m.id, name: &m.name, online: m.online, version: &m.version, projects, tabs, problem: problem.as_deref() })
         .collect();
-    serde_json::to_value(global::overview(&snapshots)).map_err(|e| e.to_string())
+    let overview = global::Overview { sessions: Some(global::sessions(&snapshots)), ..global::overview(&snapshots) };
+    serde_json::to_value(overview).map_err(|e| e.to_string())
 }
 
 /// What one online machine told the overview.
@@ -166,6 +168,40 @@ async fn read_captain(hub: &Hub, account: &Account, from: Source<'_>, machine: &
         }
     };
     out["project"] = json!(path);
+    Ok(out)
+}
+
+/// The last `items` items of the session in tab `tab`, as the node's own `read_session` answers
+/// them: on `machine`, an id or a name, else on the online machine whose tabs hold it. A node too
+/// old for `Call::ReadSession` is read from the start of the transcript, as `read_captain` reads.
+async fn read_session(hub: &Hub, account: &Account, from: Source<'_>, tab: String, machine: Option<String>, items: Option<usize>) -> Result<Value, String> {
+    only_host(hub, account, &from, "read a session").await?;
+    let machines = hub.machines(account).await?;
+    let named = match &machine {
+        Some(m) => Some(machines.iter().find(|known| known.id == *m || known.name.eq_ignore_ascii_case(m)).ok_or_else(|| format!("this account has no machine {m}"))?),
+        None => None,
+    };
+    let mut holders = vec![];
+    for m in machines.iter().filter(|m| m.online && named.is_none_or(|n| n.id == m.id)) {
+        if let Some(view) = tabs(hub, account, &m.id, LOOK_WAIT).await.ok().and_then(|tabs| tabs.into_iter().find(|t| t.id == tab)) {
+            holders.push((m, view));
+        }
+    }
+    let (m, view) = match (holders.len(), named) {
+        (1, _) => holders.remove(0),
+        (0, Some(m)) if !m.online => return Ok(json!({ "id": tab, "machine": m.id, "machine_name": m.name, "state": "offline", "next": reading::next_for("offline") })),
+        (0, Some(m)) => return Err(format!("{} has no session {tab}", m.name)),
+        (0, None) => return Err(format!("no online machine of this account has a session {tab}")),
+        _ => return Err(format!("{} each have a session {tab}: pass machine", holders.iter().map(|(m, _)| m.name.as_str()).collect::<Vec<_>>().join(" and "))),
+    };
+    let mut out = match hub.call_machine(account, &m.id, Call::ReadSession { tab: tab.clone(), items }, RELAY_WAIT).await {
+        Err(Unanswered::Refused(e)) if is_unknown_command(&e) => {
+            let page = hub.call_machine(account, &m.id, Call::Thread { tab: tab.clone(), from: 0 }, RELAY_WAIT).await;
+            reading::read(&view, page.map_err(String::from), items.unwrap_or(reading::DEFAULT_ITEMS))
+        }
+        answer => answer.map_err(String::from)?,
+    };
+    (out["id"], out["machine"], out["machine_name"]) = (json!(tab), json!(m.id), json!(m.name));
     Ok(out)
 }
 

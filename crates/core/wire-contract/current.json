@@ -942,6 +942,31 @@
                 ]
               },
               {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
@@ -4918,6 +4943,37 @@
                   "cmd",
                   "tastes"
                 ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
               }
             ]
           },
@@ -7685,6 +7741,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -11607,6 +11688,37 @@
                   "cmd",
                   "tastes"
                 ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
               }
             ]
           },
@@ -13958,6 +14070,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -14102,6 +14248,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -15414,6 +15578,37 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -17742,6 +17937,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -17879,6 +18108,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -19173,6 +19420,37 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -24803,6 +25081,16 @@
               "$ref": "#/$defs/OverviewMachine"
             },
             "default": []
+          },
+          "sessions": {
+            "description": "Every session on the account's online machines, newest activity first. Absent from a hub\nthat predates the `sessions` tool.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Session"
+            }
           }
         },
         "required": [
@@ -24999,6 +25287,174 @@
               "online",
               "version"
             ]
+          },
+          "Session": {
+            "description": "One session of the account, as the global orchestrator's `sessions` tool lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The tab's id, which `read_session` takes.",
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "account": {
+                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "project": {
+                "$ref": "#/$defs/SessionProject"
+              },
+              "role": {
+                "$ref": "#/$defs/SessionRole"
+              },
+              "captain": {
+                "description": "The Capitão a worker works for: the first Capitão up the tabs that started it, else its\nproject's Capitão on that machine.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/SessionState"
+              },
+              "message": {
+                "description": "What it asks the user, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_activity": {
+                "description": "Unix seconds of its last message, else of its last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "account",
+              "project",
+              "role",
+              "state"
+            ]
+          },
+          "SessionProject": {
+            "description": "The project a session works in: the project its folder belongs to, a worktree's being its\nrepository's.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The key `projects` lists, or `<machine id>:<path>` for a folder the machine does not list.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "path"
+            ]
+          },
+          "SessionRole": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread the user opened, which no Capitão runs.",
+                "type": "string",
+                "const": "thread"
+              }
+            ]
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
+          "SessionState": {
+            "description": "What a session is doing, from what its machine knows of its tab.",
+            "oneOf": [
+              {
+                "description": "Its session runs a turn: status working, or a message from the global orchestrator started\nit before its first hook.",
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "description": "Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.",
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "description": "It asks the user mid-turn: a question or a permission prompt.",
+                "type": "string",
+                "const": "waiting_on_input"
+              },
+              {
+                "description": "It stopped on an error, a usage limit included.",
+                "type": "string",
+                "const": "error"
+              },
+              {
+                "description": "Its session is not running. A message starts it again.",
+                "type": "string",
+                "const": "settled"
+              }
+            ]
           }
         }
       },
@@ -25028,6 +25484,16 @@
               "$ref": "#/$defs/OverviewMachine"
             },
             "default": []
+          },
+          "sessions": {
+            "description": "Every session on the account's online machines, newest activity first. Absent from a hub\nthat predates the `sessions` tool.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Session"
+            }
           }
         },
         "required": [
@@ -25219,6 +25685,174 @@
               "id",
               "name",
               "online"
+            ]
+          },
+          "Session": {
+            "description": "One session of the account, as the global orchestrator's `sessions` tool lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The tab's id, which `read_session` takes.",
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "account": {
+                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "project": {
+                "$ref": "#/$defs/SessionProject"
+              },
+              "role": {
+                "$ref": "#/$defs/SessionRole"
+              },
+              "captain": {
+                "description": "The Capitão a worker works for: the first Capitão up the tabs that started it, else its\nproject's Capitão on that machine.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/SessionState"
+              },
+              "message": {
+                "description": "What it asks the user, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_activity": {
+                "description": "Unix seconds of its last message, else of its last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "account",
+              "project",
+              "role",
+              "state"
+            ]
+          },
+          "SessionProject": {
+            "description": "The project a session works in: the project its folder belongs to, a worktree's being its\nrepository's.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The key `projects` lists, or `<machine id>:<path>` for a folder the machine does not list.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "path"
+            ]
+          },
+          "SessionRole": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread the user opened, which no Capitão runs.",
+                "type": "string",
+                "const": "thread"
+              }
+            ]
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
+          "SessionState": {
+            "description": "What a session is doing, from what its machine knows of its tab.",
+            "oneOf": [
+              {
+                "description": "Its session runs a turn: status working, or a message from the global orchestrator started\nit before its first hook.",
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "description": "Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.",
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "description": "It asks the user mid-turn: a question or a permission prompt.",
+                "type": "string",
+                "const": "waiting_on_input"
+              },
+              {
+                "description": "It stopped on an error, a usage limit included.",
+                "type": "string",
+                "const": "error"
+              },
+              {
+                "description": "Its session is not running. A message starts it again.",
+                "type": "string",
+                "const": "settled"
+              }
             ]
           }
         }
@@ -29545,6 +30179,40 @@
               }
             ]
           },
+          "branch": {
+            "description": "The git branch of the conversation's last message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "description": "The last pull request the conversation opened or worked on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PrLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_message_at": {
+            "description": "Unix seconds of the conversation's last message.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "prompt_title": {
+            "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "role": {
             "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
             "anyOf": [
@@ -29690,6 +30358,24 @@
               }
             }
           },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
@@ -29821,6 +30507,40 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "branch": {
+            "description": "The git branch of the conversation's last message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "description": "The last pull request the conversation opened or worked on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PrLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_message_at": {
+            "description": "Unix seconds of the conversation's last message.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "prompt_title": {
+            "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "role": {
@@ -29960,6 +30680,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -30972,6 +31710,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -31116,6 +31888,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -33435,6 +34225,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -33572,6 +34396,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -36507,6 +37349,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -40598,6 +41465,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {

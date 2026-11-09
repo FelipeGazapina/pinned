@@ -369,7 +369,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 9] {
+fn project_tools() -> [(Audience, serde_json::Value); 11] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -446,6 +446,30 @@ fn project_tools() -> [(Audience, serde_json::Value); 9] {
             "name": "waiting",
             "description": "List as JSON what waits on the user across every machine: threads that ask for input and threads that stopped on an error.",
             "inputSchema": no_args,
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "sessions",
+            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as claude or bloom), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on an error) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Only sessions in this project: its key from projects, its name, or its folder." },
+                    "machine": { "type": "string", "description": "Only sessions on this machine: its id or name, with or without @." },
+                },
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "read_session",
+            "description": "Read any session's state and its last messages, as read_captain reads a Capitão: a loose thread, a worker or a Capitão.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The session's id from sessions." },
+                    "machine": { "type": "string", "description": "The machine sessions lists it on. Optional." },
+                    "items": { "type": "integer", "description": "How many of its last messages and tool calls to read; 20 when left out, at most 50." },
+                },
+                "required": ["id"],
+            },
         })),
         (Audience::Captains, serde_json::json!({
             "name": "tell_orchestrator",
@@ -630,7 +654,16 @@ fn send(message: &Message) -> Result<String, String> {
     let timeout = match message {
         Message::Delegate { .. } => StdDuration::from_secs(120),
         // These may wait on the hub and another machine, which allow a minute.
-        Message::Project { tool: ProjectTool::Projects | ProjectTool::SendToCaptain { .. } | ProjectTool::ReadCaptain { .. } | ProjectTool::Waiting | ProjectTool::TellOrchestrator { .. }, .. } => StdDuration::from_secs(70),
+        Message::Project {
+            tool: ProjectTool::Projects
+                | ProjectTool::SendToCaptain { .. }
+                | ProjectTool::ReadCaptain { .. }
+                | ProjectTool::Waiting
+                | ProjectTool::Sessions { .. }
+                | ProjectTool::ReadSession { .. }
+                | ProjectTool::TellOrchestrator { .. },
+            ..
+        } => StdDuration::from_secs(70),
         _ => StdDuration::from_secs(10),
     };
     let sock = std::env::var(SOCK_ENV).map_err(|_| format!("{SOCK_ENV} is not set: run this inside a pinned tab"))?;
@@ -1009,6 +1042,8 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__send_to_captain",
                 "mcp__pinned__read_captain",
                 "mcp__pinned__waiting",
+                "mcp__pinned__sessions",
+                "mcp__pinned__read_session",
                 "mcp__pinned__tell_orchestrator",
             ]
         );
@@ -1017,7 +1052,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `tell_orchestrator`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }
 
@@ -1071,7 +1106,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
@@ -1082,6 +1117,8 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("send_to_captain", serde_json::json!({ "project": "site", "message": "x" })), Err("send_to_captain: missing field `request_id`".into()));
         assert_eq!(ask("tell_orchestrator", serde_json::json!({ "text": "Halfway." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"tell_orchestrator","text":"Halfway."}}"#.into()));
         assert_eq!(ask("waiting", serde_json::Value::Null), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"waiting"}}"#.into()));
+        assert_eq!(ask("sessions", serde_json::json!({ "project": "client-apps" })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"sessions","project":"client-apps"}}"#.into()));
+        assert_eq!(ask("read_session", serde_json::json!({ "id": "tab-1a-3", "items": 5 })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"read_session","id":"tab-1a-3","items":5}}"#.into()));
     }
 
     #[test]
