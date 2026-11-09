@@ -843,17 +843,18 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
     let opus = json!({ "model": "claude-opus-5-5" });
     let aggressive = json!({
-        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
     });
-    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
-    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 101 } })), Err("parallel workers go from 1 to 100".into()));
     let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
     assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
     client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();

@@ -185,6 +185,9 @@ pub struct TaskUsage {
     /// What the worker's Upstash Box cost, for box work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub box_usd: Option<f64>,
+    /// The box time `box_usd` pays for: since the box's previous task ended, or since it was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_ms: Option<u64>,
 }
 
 /// The tokens one transcript used so far, by model and speed, read a little more on each call.
@@ -225,6 +228,10 @@ impl Meter {
         }
         self.offset += whole as u64;
         Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sums.is_empty()
     }
 
     /// The tokens so far, priced with `rates` and the user's `book`. `wall_ms` and `box_usd` are the caller's.

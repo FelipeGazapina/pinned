@@ -2451,20 +2451,23 @@ impl Machine {
         if threads.is_empty() {
             return;
         }
-        let rates = self.meter_rates();
-        let book = usage::PriceBook::load(self.prices_file().as_deref());
-        let mut used = vec![];
+        let mut read = vec![];
         for (task, session, account) in threads {
             let Some(file) = self.find_transcript(&account, &session) else { continue };
             let mut meters = self.meters.lock().unwrap();
-            let (read, meter) = meters.entry(task.clone()).or_insert_with(|| (session.clone(), usage::Meter::default()));
-            if *read != session {
-                (*read, *meter) = (session, usage::Meter::default());
+            let (of, meter) = meters.entry(task.clone()).or_insert_with(|| (session.clone(), usage::Meter::default()));
+            if *of != session {
+                (*of, *meter) = (session, usage::Meter::default());
             }
-            if meter.advance(&file).is_ok() {
-                used.push((task, meter.usage(&rates, &book)));
+            if meter.advance(&file).is_ok() && !meter.is_empty() {
+                read.push((task, meter.clone()));
             }
         }
+        if read.is_empty() {
+            return;
+        }
+        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
+        let used: Vec<_> = read.into_iter().map(|(task, meter)| (task, meter.usage(&rates, &book))).collect();
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
 
@@ -3351,6 +3354,8 @@ impl Machine {
         if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
             self.delegates.set_conversation(&task, session);
         }
+        // The meter reads a working task only; this reads the turn that just ended before it settles.
+        self.meter_workers();
         let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
         // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
         match parent {
@@ -8281,6 +8286,32 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(
             (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
             (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_last_turn_is_metered_before_its_task_ends() {
+        let (m, dir, captain) = limited_captain("limits-last-turn", TastePatch::default());
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        append(&transcript, &[json!({ "type": "assistant", "requestId": "r1", "message": { "id": "m1", "model": "claude-sonnet-5-5", "content": [{ "type": "text", "text": "Fixed." }], "usage": { "input_tokens": 1000, "output_tokens": 2000 } } })]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        let status: Value = serde_json::from_str(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        let cents = status["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!(
+            (status["workState"].as_str(), status["usage"]["tokens_in"].as_u64(), status["usage"]["tokens_out"].as_u64(), cents),
+            (Some("result_available"), Some(1000), Some(2000), Some(3.0)),
+            "the turn that ended the task counts: {status}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
