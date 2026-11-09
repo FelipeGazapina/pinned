@@ -4,10 +4,10 @@ use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,7 @@ const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
+const NOT_LINKED: &str = "this machine is not linked to a hub";
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -1443,6 +1444,10 @@ impl Machine {
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
             prompt.push(crate::device::AGENT_PROMPT.to_owned());
         }
+        let settings = self.global_settings();
+        if global::is_global(&env) {
+            prompt.push(global::prompt(&settings.name, &crate::account::hostname()));
+        }
         if let Some((role, _)) = role_of(&env) {
             if !role.disallowed_tools().is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
@@ -1452,6 +1457,7 @@ impl Machine {
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
                 prompt.push(self.orchestration.lock().unwrap().hint());
+                prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
         if !prompt.is_empty() {
@@ -2024,22 +2030,41 @@ impl Machine {
         machine.trim().eq_ignore_ascii_case(&crate::account::hostname())
     }
 
-    /// Every project of the account for the global orchestrator's `projects` tool. The node-local
-    /// unit fills this in.
+    /// Every project of the account for the global orchestrator's `projects` tool: the hub's view
+    /// of every machine, or this machine's alone while it is not linked or the hub can't answer.
     fn projects_overview(&self) -> Result<global::Overview, String> {
-        Err("projects is not available yet".into())
+        match self.call_hub(HubCall::Overview) {
+            Ok(overview) => serde_json::from_value(overview).map_err(|e| format!("the hub's overview did not read: {e}")),
+            Err(e) if e == NOT_LINKED || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
+            Err(e) => Err(e),
+        }
     }
 
-    /// What waits on the user across the account's machines, for the `waiting` tool. The node-local
-    /// unit fills this in.
+    fn local_overview(&self) -> global::Overview {
+        let (projects, tabs) = (self.list_projects(), self.tabs());
+        let name = crate::account::hostname();
+        global::overview(&[global::MachineSnapshot { id: &name, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs }])
+    }
+
+    /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
-        Err("waiting is not available yet".into())
+        Ok(self.projects_overview()?.waiting)
     }
 
-    /// The latest replies of `project`'s Capitão, for the `read_captain` tool. The node-local unit
-    /// fills this in, and the hub-bridge unit reaches a Capitão on another machine.
-    fn read_captain(&self, _project: &str, _machine: Option<&str>) -> Result<String, String> {
-        Err("read_captain is not available yet".into())
+    /// The latest replies of `project`'s Capitão, for the `read_captain` tool, as the hub's MCP
+    /// `read_orchestrator` answers them. Only a Capitão on this machine for now.
+    fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String> {
+        let Some(path) = self.local_project(project, machine) else {
+            return Err("reading a Capitão on another machine is not available yet".into());
+        };
+        let path = path.display().to_string();
+        let tabs = self.tabs();
+        let mut out = match global::captain_tab(&tabs, &path) {
+            Some(tab) if tab.running || tab.session.is_some() => reading::read(tab, self.thread(&tab.id, 0).and_then(json), reading::DEFAULT_ITEMS),
+            _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
+        };
+        out["project"] = json!(path);
+        text_json(out)
     }
 
     /// Hands a message to a Capitão on another machine through `HubCall::Relay`. The hub-bridge
@@ -2049,16 +2074,48 @@ impl Machine {
     }
 
     /// Sends a Capitão's report up to the account's global orchestrator: `deliver_report` when this
-    /// machine hosts it, else `HubCall::Relay`. `answers` are the request ids the report ends. The
-    /// node-local unit fills this in.
-    fn report_up(&self, _captain: &str, _project: &Path, _text: String, _answers: Vec<String>) -> Result<Handoff, String> {
-        Err("reporting to the global orchestrator is not available yet".into())
+    /// machine hosts it, else `HubCall::Relay`, whose hub fills in this machine's id and name.
+    /// `answers` are the request ids the report ends.
+    fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String> {
+        let report = CaptainReport {
+            machine: String::new(),
+            machine_name: crate::account::hostname(),
+            project: project.file_name().map_or_else(|| project.display().to_string(), |n| n.to_string_lossy().into_owned()),
+            path: project.display().to_string(),
+            tab: captain.to_owned(),
+            text,
+            answers,
+        };
+        // Its own namespace, so a report's id never meets the id of a message the orchestrator sent.
+        let request_id = format!("report:{:016x}", fresh_boot());
+        if self.global_settings().host {
+            return self.deliver_report(&request_id, &report);
+        }
+        let handoff = self.call_hub(HubCall::Relay { request_id, to: global::RelayTo::Orchestrator { report } })?;
+        serde_json::from_value(handoff).map_err(|e| format!("the hub's answer did not read: {e}"))
     }
 
-    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. Under
-    /// `ReportPolicy::Auto` the node-local unit takes `Ledger::answer(project)` and sends the last
-    /// reply up with `report_up`.
-    fn captain_turn_ended(&self, _captain: &str, _project: &Path, _event: &AgentEvent) {}
+    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. The
+    /// orchestrator's messages that started the turn are answered by it, and under
+    /// `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator with their ids.
+    fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent) {
+        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
+        if answers.is_empty() || self.global_settings().reports != global::ReportPolicy::Auto {
+            return;
+        }
+        let text = match event.status {
+            AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
+            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(sem resposta)".into()), REPORT_CHARS, "read_captain has the whole message"),
+        };
+        // Up to the hub it may wait a minute, which the hook that ended the turn must not.
+        let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            if let Err(e) = machine.report_up(&captain, &project, text, answers) {
+                eprintln!("pinned: the Capitão {captain} of {} could not report to the global orchestrator: {e}", project.display());
+            }
+        });
+    }
 
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
@@ -2220,21 +2277,22 @@ impl Machine {
         lines.join("\n")
     }
 
+    /// The last text the tab's session said, from its transcript.
+    fn last_reply(&self, tab: &str) -> Option<String> {
+        let page = thread::read(&self.transcript(tab).ok()?, 0).ok()?;
+        page.items.into_iter().rev().find_map(|item| match item {
+            thread::Item::Text { text, .. } => Some(text),
+            _ => None,
+        })
+    }
+
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
-            AgentStatus::Done => {
-                let said = self.transcript(worker).ok().and_then(|file| thread::read(&file, 0).ok()).and_then(|page| {
-                    page.items.into_iter().rev().find_map(|item| match item {
-                        thread::Item::Text { text, .. } => Some(text),
-                        _ => None,
-                    })
-                });
-                format!("finished. Its last message:\n\n{}", truncate(&said.unwrap_or_else(|| "(none)".into()), REPORT_CHARS))
-            }
+            AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
             // Claude says it waits for input a while after every finished turn too.
             AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
             AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),
@@ -2402,12 +2460,11 @@ impl Machine {
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Never call it while holding a Machine
     /// lock.
-    #[allow(dead_code)] // The global orchestrator's later units call it.
     pub(crate) fn call_hub(&self, call: HubCall) -> Result<Value, String> {
         let hub = self.hub.lock().unwrap().clone();
         match hub {
             Some(hub) => hub(call),
-            None => Err("this machine is not linked to a hub".into()),
+            None => Err(NOT_LINKED.into()),
         }
     }
 
@@ -3455,12 +3512,14 @@ fn canonical(path: &str) -> PathBuf {
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
 
-/// Most of a worker's last message an orchestrator is sent; the rest stays in the worker's thread.
+/// Most of a worker's last message an orchestrator is sent, or of a Capitão's last message the
+/// global orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
 
-fn truncate(text: &str, max: usize) -> String {
+/// `text` cut to `max` characters, with a note that says where the rest is.
+fn truncate(text: &str, max: usize, rest: &str) -> String {
     match text.char_indices().nth(max) {
-        Some((cut, _)) => format!("{}\n[cut short: the whole message is in the worker's thread]", &text[..cut]),
+        Some((cut, _)) => format!("{}\n[cut short: {rest}]", &text[..cut]),
         None => text.to_owned(),
     }
 }
@@ -6775,7 +6834,8 @@ while True:
         m.record_event(hook(&tab, AgentStatus::Done));
         let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
-        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1", "r-2", "r-3"], "the drained messages started the turn in flight");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-2", "r-3"], "the drained messages started the next turn");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered), "the turn r-1 started ended");
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(std::fs::read(&file).unwrap(), both);
@@ -6832,7 +6892,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
@@ -6923,14 +6983,13 @@ while True:
         assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orquestrador] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
         assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and sending to a Capitão on another machine is not available yet".into()));
-        assert_eq!(tool(&global, r#""name":"projects""#), Err("projects is not available yet".into()));
         assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, &send.replace("r-1", "r-3")), Err("only the global orchestrator has this tool".into()));
         assert_eq!(tool(&plain, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("only a project's Capitão reports to the global orchestrator".into()));
         let capitao = sent["tab"].as_str().unwrap();
-        assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("reporting to the global orchestrator is not available yet".into()));
+        assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("this machine is not linked to a hub".into()), "a machine that hosts no orchestrator reports through the hub");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6946,8 +7005,130 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open."]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orquestrador", &crate::account::hostname())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A machine whose projects' sessions run under the `work` account, so their transcripts live
+    /// in the test's config folder.
+    #[cfg(unix)]
+    fn work_machine(dir: &Path, claude: &Path, sock: &Path) -> Arc<Machine> {
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), sock: sock.to_owned(), ..launch() }, Some(config), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn said(dir: &Path, session: &str, text: &str) {
+        let folder = dir.join("config/accounts/work/projects/-site");
+        std::fs::create_dir_all(&folder).unwrap();
+        let lines = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orquestrador] Ship the form."}}"#.to_owned(),
+            json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-11-09T10:05:00Z", "message": { "content": [{ "type": "text", "text": text }] } }).to_string(),
+        ];
+        std::fs::write(folder.join(format!("{session}.jsonl")), lines.map(|l| l + "\n").concat()).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_message_from_the_global_orchestrator_comes_back_as_the_capitaos_report_when_its_turn_ends() {
+        let dir = temp("global-e2e");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let tool = |tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{global_tab}","tool":{{{tool}}}}}"#));
+        let host = crate::account::hostname();
+
+        let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
+        let capitao = sent["tab"].as_str().unwrap().to_owned();
+        assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
+        assert_eq!(started(&claude, &capitao)[7], "[Orquestrador] Ship the form.");
+
+        said(&dir, "s1", "The form validates now. PR #12 is open.");
+        let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
+        ask(&sock, &done).unwrap();
+        let report = format!("[pinned] Capitão site ({host}) [- {capitao}]: The form validates now. PR #12 is open.");
+        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orquestrador", &host)], "the report started the global orchestrator");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+
+        let overview: Value = serde_json::from_str(&tool(r#""name":"projects""#).unwrap()).unwrap();
+        let checkout = json!({ "machine": host, "machine_name": host, "online": true, "version": env!("CARGO_PKG_VERSION"), "path": path, "captain": "livre", "captain_tab": capitao, "workers": 0 });
+        assert_eq!(overview, json!({ "projects": [{ "key": format!("{host}:{path}"), "name": "site", "checkouts": [checkout] }], "waiting": [] }));
+        assert_eq!(tool(r#""name":"waiting""#), Ok("[]".into()));
+
+        let read: Value = serde_json::from_str(&tool(&format!(r#""name":"read_captain","project":"{host}:{path}""#)).unwrap()).unwrap();
+        let conversation = json!([
+            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orquestrador] Ship the form." },
+            { "kind": "text", "at": "2026-11-09T10:05:00Z", "text": "The form validates now. PR #12 is open." },
+        ]);
+        assert_eq!((&read["state"], &read["project"], &read["conversation"]["items"]), (&json!("done"), &json!(path), &conversation));
+        assert_eq!(tool(r#""name":"read_captain","project":"github.com/o/elsewhere""#), Err("reading a Capitão on another machine is not available yet".into()));
+
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        m.start_claude(&plain, 80, 24).unwrap();
+        assert_eq!(started(&claude, &plain), [&path, "", "", "--settings", "s", "--plugin-dir", "p"], "a plain thread got a system prompt");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_off_the_host_reports_through_the_hub_and_tool_only_reports_nothing_by_itself() {
+        let dir = temp("global-relay");
+        let (site, api) = (dir.join("site"), dir.join("api"));
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::create_dir_all(&api).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        let relayed = Arc::new(Mutex::new(vec![]));
+        let hub = relayed.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Relay { .. } => {
+                hub.lock().unwrap().push(serde_json::to_value(&call).unwrap());
+                Ok(json!({ "outcome": "entregue", "tab": "tab-g-1" }))
+            }
+            _ => Err("this hub runs pinned 0.17.19, which can't answer that yet: the global orchestrator's relay is not on the hub".into()),
+        }));
+        let path = m.open_project(site.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let host = crate::account::hostname();
+        let relays = || {
+            let calls = relayed.lock().unwrap().clone();
+            calls.into_iter().map(|mut call| {
+                assert!(call["request_id"].as_str().unwrap().starts_with("report:"), "a report's id may meet a message's: {call}");
+                call["request_id"] = json!("report:*");
+                call
+            }).collect::<Vec<_>>()
+        };
+
+        let capitao = enqueue(&m, &path, "Ship the form.", "r-1").unwrap()["tab"].as_str().unwrap().to_owned();
+        started(&claude, &capitao);
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        assert_eq!(m.project_tool(&capitao, ProjectTool::TellOrchestrator { text: "Which form?".into() }), Ok(r#"{"outcome":"entregue","tab":"tab-g-1"}"#.into()));
+        said(&dir, "s1", "Shipped.");
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || relayed.lock().unwrap().len() == 2);
+        let report = |text: &str, answers: Value| json!({ "cmd": "relay", "request_id": "report:*", "to": { "kind": "orchestrator", "report": { "machine": "", "machine_name": host, "project": "site", "path": path, "tab": capitao, "text": text, "answers": answers } } });
+        let mut asked = report("Which form?", json!([]));
+        asked["to"]["report"].as_object_mut().unwrap().remove("answers");
+        assert_eq!(relays(), [asked, report("Shipped.", json!(["r-1"]))]);
+        assert_eq!(m.projects_overview().map(|o| o.projects.len()), Ok(1), "the hub's refusal did not fall back to this machine");
+
+        m.set_global_settings(global::Settings { reports: global::ReportPolicy::ToolOnly, ..global::Settings::default() }).unwrap();
+        let api_path = api.display().to_string();
+        let other = enqueue(&m, &api_path, "Bump the API.", "r-2").unwrap()["tab"].as_str().unwrap().to_owned();
+        started(&claude, &other);
+        m.record_event(hook(&other, AgentStatus::Done));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(relayed.lock().unwrap().len(), 2, "a tool-only Capitão reported by itself");
+        assert_eq!(m.sent.lock().unwrap().find("r-2").map(|s| s.progress), Some(Progress::Answered));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7023,7 +7204,7 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
@@ -7071,7 +7252,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
@@ -7556,7 +7737,7 @@ while True:
         wait_for("the reports", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
-        assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
+        assert_eq!(truncate("añb", 2, "the whole message is in the worker's thread"), "añ\n[cut short: the whole message is in the worker's thread]");
         let _ = std::fs::remove_dir_all(root);
     }
 

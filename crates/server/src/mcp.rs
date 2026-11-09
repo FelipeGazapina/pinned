@@ -15,7 +15,9 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pinned_core::agent::{AgentStatus, Role, CONNECTOR_ENV};
+use pinned_core::agent::CONNECTOR_ENV;
+use pinned_core::global_orchestrator::captain_tab;
+use pinned_core::reading::{self, next_for, state_of, DEFAULT_ITEMS};
 use pinned_core::wire::{AgentProject, Call, RunSpec, TabView};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -33,8 +35,6 @@ const CALL_WAIT: Duration = Duration::from_secs(30);
 /// How many sessions one agent may start in an hour, so a looping agent can't fill a machine.
 const STARTS_PER_HOUR: i64 = 10;
 const MAX_TEXT: usize = 20_000;
-const ITEM_TEXT: usize = 4000;
-const DEFAULT_ITEMS: usize = 20;
 const MAX_ITEMS: usize = 100;
 
 pub async fn not_offered() -> Response {
@@ -338,27 +338,6 @@ async fn tabs(ctx: &Ctx<'_>, machine: &str) -> Result<Vec<TabView>, String> {
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
-/// What a tab's session is doing, in the words the tools use, and what it asks the user.
-fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
-    if !tab.running {
-        return ("ended", None);
-    }
-    let message = tab.message.clone();
-    let state = match tab.status {
-        None => "starting",
-        Some(AgentStatus::Working) => "working",
-        Some(AgentStatus::Done) => "done",
-        Some(AgentStatus::Failed) => "failed",
-        // Claude reports a permission menu and a question the same way; only an idle notice is no question.
-        Some(AgentStatus::NeedsInput) => match message.as_deref().unwrap_or("") {
-            m if m.to_lowercase().contains("permission") => "needs_permission",
-            m if m.to_lowercase().contains("waiting for your input") => "done",
-            _ => "waiting_for_input",
-        },
-    };
-    (state, message.filter(|_| matches!(state, "needs_permission" | "waiting_for_input")))
-}
-
 /// Typed text ends with Enter, which picks the highlighted option of any menu on screen: a
 /// permission prompt, a question, or a startup dialog such as folder trust or a project's MCP
 /// servers. So text goes in only once a hook said the session is idle at its prompt. A session
@@ -367,64 +346,11 @@ fn may_type(state: &str) -> bool {
     matches!(state, "done" | "failed")
 }
 
-fn next_for(state: &str) -> &'static str {
-    match state {
-        "starting" => "it is starting, and may be showing the user a startup prompt; read again in a minute",
-        "working" => "it is working; read again in a while",
-        "done" | "failed" => "it may take a message now",
-        "needs_permission" | "waiting_for_input" => "the user has to answer it in Pinned; tell them, then read again later",
-        "ended" => "the session ended; start a new one for more work",
-        "offline" => "its machine is offline; try again later",
-        "not_started" => "message it to start it",
-        _ => "read it again later",
-    }
-}
-
-fn truncated(text: &str) -> String {
-    match text.char_indices().nth(ITEM_TEXT) {
-        Some((at, _)) => format!("{}… [cut]", &text[..at]),
-        None => text.to_owned(),
-    }
-}
-
-/// The conversation items worth an agent's context: what was said and which tools ran. Reasoning
-/// and tool output stay out, since tool output can hold whatever a file held.
-fn conversation(page: &Value, limit: usize) -> Value {
-    let items: Vec<Value> = page["items"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let kind = item["kind"].as_str()?;
-                    let at = item["at"].clone();
-                    match kind {
-                        "user" | "steer" | "text" | "error" | "note" => Some(json!({ "kind": kind, "at": at, "text": truncated(item["text"].as_str().unwrap_or("")) })),
-                        "tool" => Some(json!({ "kind": "tool", "at": at, "name": item["name"], "summary": truncated(item["summary"].as_str().unwrap_or("")) })),
-                        "pr" => Some(json!({ "kind": "pr", "at": at, "url": item["url"] })),
-                        _ => None,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let skip = items.len().saturating_sub(limit);
-    json!({ "items": items[skip..], "cursor": page["next"], "reset": page["reset"].as_bool().unwrap_or(false) })
-}
-
 async fn read_tab(ctx: &Ctx<'_>, machine: &str, tab: &TabView, args: &Value) -> Value {
-    let (state, question) = state_of(tab);
     let limit = args["limit"].as_u64().map_or(DEFAULT_ITEMS, |l| (l as usize).clamp(1, MAX_ITEMS));
     let from = args["cursor"].as_u64().unwrap_or(0);
-    let mut out = json!({ "state": state, "next": next_for(state), "title": tab.title });
-    if let Some(question) = question {
-        out["question"] = json!(question);
-    }
-    match ctx.hub.call_machine(&ctx.account, machine, Call::Thread { tab: tab.id.clone(), from }, CALL_WAIT).await {
-        Ok(page) => out["conversation"] = conversation(&page, limit),
-        Err(e) => out["conversation_error"] = json!(unanswered(e)),
-    }
-    out
+    let page = ctx.hub.call_machine(&ctx.account, machine, Call::Thread { tab: tab.id.clone(), from }, CALL_WAIT).await;
+    reading::read(tab, page.map_err(unanswered), limit)
 }
 
 async fn list_projects(ctx: &Ctx<'_>) -> Result<Value, String> {
@@ -715,7 +641,7 @@ async fn list_sessions(ctx: &Ctx<'_>) -> Result<Value, String> {
 }
 
 fn orchestrator_tab<'a>(tabs: &'a [TabView], project: &AgentProject) -> Option<&'a TabView> {
-    tabs.iter().filter(|t| t.role == Some(Role::Orchestrator) && t.cwd == project.path).min_by_key(|t| t.opened)
+    captain_tab(tabs, &project.path)
 }
 
 async fn message_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, String> {
@@ -797,6 +723,8 @@ async fn read_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinned_core::agent::AgentStatus;
+    use pinned_core::reading::conversation;
     use pinned_core::wire::Program;
 
     fn tab(status: Option<AgentStatus>, message: Option<&str>, running: bool) -> TabView {
