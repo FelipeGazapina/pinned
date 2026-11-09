@@ -132,6 +132,7 @@ function loadPromptKey({ promptValue, coarse, fine, isMac = true, rows = [], men
       prompt.value = `${pick} `;
     },
     deleteChip: () => false,
+    tagKey: () => false,
     promptCodeKey: () => false,
     sendAndNewThread: () => sent.push(`new-thread ${prompt.value}`),
     send: () => sent.push(prompt.value),

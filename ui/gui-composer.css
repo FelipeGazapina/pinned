@@ -59,6 +59,44 @@
 #prompt-mirror .sigil { position: relative; color: transparent; }
 #prompt-mirror .sigil .i { position: absolute; left: 50%; top: 50%; width: 1em; height: 1em; transform: translate(-50%, -50%); }
 #prompt-mirror .chip:not(.mention) .sigil .i { color: color-mix(in oklab, var(--chip) 40%, var(--g-fg)); }
+#prompt-mirror .tag { border-radius: 4px; }
+#prompt-mirror .tag.project { color: var(--g-info); background: rgb(var(--g-info-rgb) / 0.16); }
+#prompt-mirror .tag.machine { color: var(--g-success); background: color-mix(in srgb, var(--g-success) 16%, transparent); }
+#prompt-mirror .tag.unknown { color: var(--g-error); background: rgb(var(--g-error-rgb) / 0.16); }
+
+#tag-popover { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 10; max-height: 292px; overflow: auto; padding: 4px;
+  border-radius: 12px; background: var(--g-popover); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px var(--g-shadow); }
+#tag-popover[hidden] { display: none; }
+#tag-popover .heading { margin: 0; padding: 4px 10px 2px; font-size: 11px; font-weight: 600; color: var(--g-muted); }
+#tag-popover button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px; border: 0; border-radius: 8px; text-align: left; }
+#tag-popover button:is(.highlight, :hover) { background: var(--g-hover); }
+#tag-popover button[data-offline="true"] { opacity: 0.55; }
+#tag-popover .sigil { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+#tag-popover .sigil.project { color: var(--g-info); background: rgb(var(--g-info-rgb) / 0.16); }
+#tag-popover .sigil.machine { color: var(--g-success); background: color-mix(in srgb, var(--g-success) 16%, transparent); }
+#tag-popover .text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+#tag-popover :is(.name, .about) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tag-popover .name { font-size: 13px; font-weight: 600; color: var(--g-fg); }
+#tag-popover .about { font-size: 12px; color: var(--g-muted); }
+#tag-popover .about .off { opacity: 0.55; }
+#tag-popover .state { flex: none; font-size: 12px; color: var(--g-muted); }
+#tag-popover .state.trabalhando { color: var(--g-warning); }
+#tag-popover .state.livre { color: var(--g-success); }
+#tag-popover .none { margin: 0; padding: 8px 10px; font-size: 13px; color: var(--g-muted); }
+
+#tag-route { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+#tag-route[hidden] { display: none; }
+#tag-route .route { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--g-border); font-size: 12px; }
+#tag-route .preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
+#tag-route .where { flex: none; color: var(--g-fg); }
+#tag-route .route.untagged .where { color: var(--g-muted); }
+#tag-route .route.ambiguous { border-color: rgb(var(--g-warning-rgb) / 0.4); }
+#tag-route .route.ambiguous .where { color: var(--g-warning); }
+#tag-route .route.unknown { border-color: rgb(var(--g-error-rgb) / 0.4); }
+#tag-route .route.unknown .where { color: var(--g-error); font-weight: 600; }
+#tag-route .choices { display: flex; gap: 4px; flex: none; }
+#tag-route .choices button { height: 22px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--g-success) 40%, transparent); border-radius: 6px;
+  background: color-mix(in srgb, var(--g-success) 12%, transparent); color: var(--g-success); font-size: 12px; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) { left: 0; right: 0; bottom: calc(100% + 6px); max-height: 288px; overflow: auto; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) button { flex-direction: row; align-items: center; gap: 8px; padding: 6px 10px; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) button.highlight { background: var(--g-hover); }

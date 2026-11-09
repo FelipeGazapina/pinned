@@ -827,9 +827,12 @@ prompt.addEventListener("input", () => {
   }
   autosize();
   showTrigger();
+  tagDismissed = false;
+  showTagPopover();
 });
 prompt.addEventListener("keydown", (e) => {
   if (e.isComposing || e.keyCode === 229) return;
+  if (tagKey(e)) return e.preventDefault();
   if (isTrigger() && triggerKey(e)) return e.preventDefault();
   if (deleteChip(e)) return e.preventDefault();
   if (promptCodeKey(e)) return e.preventDefault();
@@ -1664,7 +1667,8 @@ const TRIGGER_EMPTY = { slash: "No matching command.", mention: "No matching fil
 async function showTrigger() {
   const tab = active;
   const trigger = tab && !tab.menu && !blockAt(prompt.value.split("\n"), caretLine(prompt.value, prompt.selectionStart)) && triggerAt();
-  if (!trigger) {
+  // In the global orchestrator `@` and `#` are machines and projects, which the tag popover lists.
+  if (!trigger || (isGlobalOrchestratorTab(tab) && ["mention", "pr"].includes(trigger.kind))) {
     if (isTrigger()) composerMenu.hidden = true;
     return;
   }
@@ -1810,7 +1814,12 @@ function renderMirror() {
   const chips = tab ? liveChips(tab) : {};
   const lines = prompt.value.split("\n");
   const blocks = promptBlocks(lines);
-  const on = (Object.keys(chips).length > 0 || blocks.length > 0) && composer.dataset.composing !== "true";
+  const catalog = isGlobalOrchestratorTab(tab) && prompt.value.trim() ? composerTagCatalog() : null;
+  renderTagRoute(catalog);
+  const tagging = !!catalog && hasTags(prompt.value);
+  const known = tagging && { project: new Set(catalog.projects.map((p) => p.slug)), machine: new Set(catalog.machines.map((m) => m.slug)) };
+  const paint = (text) => (tagging ? tagLineHtml(text, known, esc) : esc(text));
+  const on = (Object.keys(chips).length > 0 || blocks.length > 0 || tagging) && composer.dataset.composing !== "true";
   composer.dataset.chips = on;
   if (!on) {
     mirror.innerHTML = "";
@@ -1824,12 +1833,12 @@ function renderMirror() {
       const chip = chips[m[2]];
       if (!chip) continue;
       const at = m.index + m[1].length;
-      html += esc(text.slice(last, at));
+      html += paint(text.slice(last, at));
       const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
       html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
       last = at + m[2].length;
     }
-    return `<div class="pl">${html}${esc(text.slice(last)) || "\u200b"}</div>`;
+    return `<div class="pl">${html}${paint(text.slice(last)) || "\u200b"}</div>`;
   };
   let html = "";
   let next = 0;
@@ -1847,6 +1856,96 @@ function renderMirror() {
   renderBlockPickers(blocks);
 }
 document.addEventListener("highlighter", () => active && renderMirror());
+
+const tagPopover = Object.assign(document.createElement("div"), { id: "tag-popover", hidden: true });
+composer.querySelector(".box").append(tagPopover);
+const tagRoute = Object.assign(document.createElement("div"), { id: "tag-route", hidden: true });
+document.getElementById("composer-footer").after(tagRoute);
+let tagHi = 0;
+let tagList = [];
+let tagDismissed = false;
+let tagRouteHtml = "";
+
+/** Every project of the account grouped as the sidebar groups them, and every machine, named
+ * as the hub names them. */
+function composerTagCatalog() {
+  const directory = machineDirectory();
+  directory.localName = machines.get(LOCAL)?.hubView?.name ?? directory.localName;
+  return tagCatalog({ groups: projectGroups(), directory, phase: phaseOf, repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) });
+}
+
+/** Hides the tag popover and forgets its options. */
+function closeTagPopover() {
+  tagPopover.hidden = true;
+  tagList = [];
+}
+
+/** `#` or `@` at the caret lists projects or machines above the composer, in the global
+ * orchestrator tab only. Esc keeps it closed until the text changes. */
+function showTagPopover() {
+  const token = !tagDismissed && isGlobalOrchestratorTab(active) ? tagTokenAt(prompt.value, prompt.selectionStart) : null;
+  if (!token) return closeTagPopover();
+  if (tagPopover.hidden) tagHi = 0;
+  tagList = tagOptions(token, composerTagCatalog());
+  tagHi = Math.min(tagHi, Math.max(0, tagList.length - 1));
+  tagPopover.innerHTML = composerTagPopoverHtml(token, tagList, tagHi, esc);
+  tagPopover.hidden = false;
+  tagPopover.querySelectorAll("button").forEach((button, i) => {
+    button.onmousedown = (e) => e.preventDefault();
+    button.onclick = () => insertComposerTag(tagList[i].slug);
+  });
+  tagPopover.querySelector(".highlight")?.scrollIntoView({ block: "nearest" });
+}
+
+/** Puts the chosen tag in place of the partial one at the caret, as typing it would. */
+function insertComposerTag(slug) {
+  const next = insertTagText(prompt.value, prompt.selectionStart, slug);
+  if (!next) return;
+  prompt.value = next.text;
+  prompt.setSelectionRange(next.caret, next.caret);
+  prompt.dispatchEvent(new Event("input"));
+}
+
+/** The popover's share of a keydown; true when it took the key. */
+function tagKey(e) {
+  if (tagPopover.hidden || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return false;
+  const typed = tagTokenAt(prompt.value, prompt.selectionStart)?.query === tagList[tagHi]?.slug;
+  const step = tagPopoverKey(e.key, { open: true, count: tagList.length, hi: tagHi, typed });
+  tagHi = step.hi;
+  if (step.action === "move") showTagPopover();
+  if (step.action === "insert") insertComposerTag(tagList[tagHi].slug);
+  if (step.action === "close") {
+    tagDismissed = true;
+    closeTagPopover();
+  }
+  return step.handled;
+}
+prompt.addEventListener("keyup", (e) => /^(Arrow(Left|Right)|Home|End)$/.test(e.key) && showTagPopover());
+prompt.addEventListener("click", showTagPopover);
+prompt.addEventListener("blur", closeTagPopover);
+
+/** One row per paragraph under the composer saying where it goes; a machine button writes
+ * `@slug` into that paragraph. It never blocks sending. */
+function renderTagRoute(catalog) {
+  const rows = catalog ? routePreview(prompt.value, catalog) : [];
+  if (!rows.length) closeTagPopover();
+  tagRoute.hidden = !rows.length;
+  // Rebuilt only when it changes: renderComposer runs on every render, and a button swapped
+  // under a press loses the click.
+  const html = composerRoutingHtml(rows, esc);
+  if (html === tagRouteHtml) return;
+  tagRouteHtml = html;
+  tagRoute.innerHTML = html;
+  tagRoute.querySelectorAll("[data-machine]").forEach((button) => {
+    button.onclick = () => {
+      prompt.value = tagParagraph(prompt.value, Number(button.closest("[data-index]").dataset.index), button.dataset.machine);
+      prompt.focus();
+      prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+      prompt.dispatchEvent(new Event("input"));
+    };
+  });
+}
+
 /** T3 Code's code blocks in the prompt: a fence on a line of its own opens one, closed by a fence
  * of the same kind or by the end of the prompt. The textarea keeps the fences as typed, which is the
  * markdown claude gets; the copy under it draws the block framed and highlighted, with the language
