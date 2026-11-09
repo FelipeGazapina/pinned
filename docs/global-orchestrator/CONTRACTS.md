@@ -147,6 +147,12 @@ Tagged by `outcome`. Every variant carries the tab it went to.
 - `machines` (`#[serde(default)]`) lists every machine of the account, with or without projects. `problem` says why its projects may be missing or old.
 - A node that is not linked, or whose hub is too old, answers `projects` with itself alone, under its hub id once the link's hello gave one, else its hostname.
 - `WaitingKind` is `"needs_input"` or `"failed"`. Adding a kind, such as a ready PR, is an additive enum change.
+- `global_orchestrator::waiting_kind(&TabView)` decides whether a tab waits on the user, on the node and the hub alike. The sidebar's `waitingKindOf(view)` in `ui/global-chat.js` follows the same cases and returns the same strings. `crates/core/src/waiting_cases.json` lists the cases, and the Rust and node tests both read it:
+  - `failed`: status failed.
+  - `needs_input`: needs-input with `interrupted` true on a running session (a question or an approval mid-turn).
+  - `needs_input`: any status but working, when `TabView.question` is set (a finished turn that asked the user, before or after Claude Code's idle notice, and after a restart).
+  - Nothing else. Needs-input with `interrupted` false and no question is the idle notice alone. The global orchestrator's own tab never waits.
+- `TabView.question` (`#[serde(default)]`, omitted when empty) is the last sentence outside code ending in `?` of the turn's last reply (`global_orchestrator::question_in`, at most 300 characters). The node sets it on Done and on restore, and clears it on Working and Failed. `Waiting.message` is the question when there is one, else the tab's message.
 
 ## 6. Session tools
 
@@ -241,12 +247,12 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 | Seam | Signature | Built by | What it does |
 |---|---|---|---|
 | `projects_overview` | `fn projects_overview(&self) -> Result<global::Overview, String>` | node-local, remote-reach | The hub's `Overview` when linked. This machine alone (`local_overview`, under its hub id) while unlinked or when the hub is too old. |
-| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local | `projects_overview().waiting`. A needs-input tab with `interrupted` false is Claude Code's idle notice and stays out. |
+| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local | `projects_overview().waiting`, by `waiting_kind` (section 5). |
 | `read_captain` | `fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String>` | node-local, remote-reach | `reading::read` of the Capitão here, or `HubCall::ReadCaptain` to the machine `remote_checkout` finds. |
 | `route_remote` | `fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String>` | hub-bridge, remote-reach | `HubCall::Relay { to: captain }` to the checkout `remote_checkout` finds, under this machine's busy policy. |
 | `remote_checkout` | `fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(MachineId, String), String>` | hub-bridge, remote-reach | Section 6 resolution, steps 2 and 3. |
 | `report_up` | `fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String>` | node-local, remote-reach | Builds `CaptainReport` with this machine's hub id, then `deliver_report` when `settings.host`, else `HubCall::Relay { to: orchestrator }`. |
-| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | node-local | `Ledger::answer(project)`, then under `ReportPolicy::Auto` the last reply goes up through `report_up` on its own thread. |
+| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | node-local | `Ledger::answer(project)`, then under `ReportPolicy::Auto` the turn's last reply goes up through `report_up` on its own thread. `thread::last_reply` reads it from the transcript's end and stops at the turn's prompt, so a turn that wrote no text reports `(sem resposta)`, never an older reply. |
 | `is_this_machine` | `fn is_this_machine(&self, machine: &str) -> bool` | hub-bridge | Matches the id from `ToMachine::Hello` (`set_hub_id`) or the hostname, with or without `@`. |
 | hub handle | `Machine::set_hub(...)`, `Machine::call_hub(HubCall)` | foundation | Installed by `link::spawn`. `Err("this machine is not linked to a hub")` when unlinked. |
 | hub calls | `crates/server/src/relay.rs` `serve` | hub-bridge (`Relay`), remote-reach (`Overview`, `ReadCaptain`) | Section 4. |

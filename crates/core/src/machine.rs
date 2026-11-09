@@ -270,6 +270,8 @@ struct Tab {
     updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// What the last finished turn asked the user, until the next turn starts or fails.
+    question: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
@@ -346,6 +348,7 @@ impl Tab {
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
+            question: self.question.clone(),
         }
     }
 
@@ -2361,6 +2364,12 @@ impl Machine {
         thread::last_reply(&self.transcript(tab).ok()?).ok()?
     }
 
+    /// Keeps what the tab's finished turn asked the user, which makes it wait on the user.
+    fn note_question(&self, tab: &str) {
+        let question = self.last_reply(tab).as_deref().and_then(global::question_in);
+        let _ = self.tab(tab, |t| t.question = question);
+    }
+
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
@@ -2689,6 +2698,10 @@ impl Machine {
             }
         }
         let ids: Vec<TabId> = restored.into_iter().map(|(id, _)| id).collect();
+        // A turn that asked before the restart still waits on the user.
+        for id in ids.iter().filter(|id| self.tab(id, |t| !t.interrupted).unwrap_or(false)) {
+            self.note_question(id);
+        }
         self.emit_tabs();
         // A resumed session reports no new id, so its transcript is read here.
         for id in &ids {
@@ -3207,6 +3220,9 @@ impl Machine {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
+            if event.status == AgentStatus::Done {
+                self.note_question(tab);
+            }
             match role {
                 Some((Role::Worker, project)) => self.report_worker(tab, &project, &event, before),
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
@@ -3256,6 +3272,7 @@ impl Machine {
             updated: None,
             title: None,
             message: None,
+            question: None,
             held: vec![],
             turn_pending: None,
             draft: Draft::default(),
@@ -3409,6 +3426,9 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            if event.status != AgentStatus::NeedsInput {
+                t.question = None;
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -7433,6 +7453,43 @@ while True:
         assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
         let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
         assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
+        let dir = temp("waits-question");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
+        let asks = |question: &str| vec![(global::WaitingKind::NeedsInput, Some(question.to_owned()))];
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(1, "Merge the fix.", Some("Merged. Quer que eu faça a release?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"));
+        m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook(&tab, AgentStatus::NeedsInput) });
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"), "Claude Code's idle notice a minute later");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(waiting(&m), [], "the user answered");
+        append_transcript(&dir, "s1", &turn_lines(2, "Sim.", Some("Released v0.17.21.")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), [], "a turn that asked nothing");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(3, "And #89?", Some("O #89 conflita com o main. Fecho o #89?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        drop(m);
+        let restarted = work_machine(&dir, &claude, &sock);
+        assert_eq!(restarted.restore_tabs().len(), 1);
+        assert_eq!(waiting(&restarted), asks("Fecho o #89?"), "the question outlives a restart");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -417,6 +417,48 @@ pub enum WaitingKind {
     Failed,
 }
 
+/// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
+/// `ui/global-chat.js` follows the same cases, which `waiting_cases.json` lists for both tests.
+///
+/// A question or an approval mid-turn waits while the session runs. A finished turn waits when its
+/// last reply asked the user something, whether or not Claude Code's idle notice came after it.
+/// The idle notice alone asks nothing. The global orchestrator's own tab never waits: the user
+/// talks to it directly.
+pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
+    if tab.orchestrator_global {
+        return None;
+    }
+    match tab.status {
+        Some(AgentStatus::Failed) => Some(WaitingKind::Failed),
+        Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => Some(WaitingKind::NeedsInput),
+        Some(AgentStatus::Working) => None,
+        _ => tab.question.as_ref().map(|_| WaitingKind::NeedsInput),
+    }
+}
+
+/// The question a reply puts to the user: its last sentence outside code that ends in a question
+/// mark, cut at `QUESTION_CHARS`. None when it asks nothing.
+pub fn question_in(reply: &str) -> Option<String> {
+    let chars: Vec<char> = reply.chars().collect();
+    let ends_sentence = |i: usize| chars.get(i + 1).is_none_or(|next| next.is_whitespace() || matches!(next, '*' | '_' | ')' | '"' | '\u{201d}' | '\u{bb}'));
+    let mut in_code = false;
+    let mut end = None;
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '`' => in_code = !in_code,
+            '?' | '\u{ff1f}' if !in_code && ends_sentence(i) => end = Some(i),
+            _ => {}
+        }
+    }
+    let end = end?;
+    let start = (0..end).rev().find(|&i| chars[i] == '\n' || (matches!(chars[i], '.' | '!' | '?' | '\u{ff1f}') && chars[i + 1].is_whitespace())).map_or(0, |i| i + 1);
+    let sentence: String = chars[start..=end].iter().collect();
+    let sentence = sentence.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '-' | '#' | '>')).split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(crate::thread::clip(&sentence, QUESTION_CHARS))
+}
+
+const QUESTION_CHARS: usize = 300;
+
 /// What one machine holds, as `overview` reads it: the node's own lists, or what the hub last heard.
 pub struct MachineSnapshot<'a> {
     pub id: &'a str,
@@ -461,12 +503,8 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
                 None => projects.push(OverviewProject { key, name: project.name.clone(), repo: project.repo.clone(), checkouts: vec![checkout] }),
             }
         }
-        for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
-            let kind = match tab.status {
-                Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => WaitingKind::NeedsInput,
-                Some(AgentStatus::Failed) => WaitingKind::Failed,
-                _ => continue,
-            };
+        for tab in tabs {
+            let Some(kind) = waiting_kind(tab) else { continue };
             let folder = history::project_of(Path::new(&tab.cwd));
             waiting.push(Waiting {
                 machine: machine.id.to_owned(),
@@ -475,7 +513,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
                 kind,
                 project: machine.projects.iter().find(|p| Path::new(&p.path) == folder).map(|p| p.path.clone()),
                 title: tab.title.clone(),
-                message: tab.message.clone(),
+                message: tab.question.clone().or_else(|| tab.message.clone()),
                 since: tab.updated,
             });
         }
@@ -685,6 +723,23 @@ mod tests {
                 "machines": [{ "id": "m-1", "name": "MacBook", "online": true, "version": "0.17.19" }],
             })
         );
+    }
+
+    #[test]
+    fn a_reply_asks_the_user_when_a_sentence_outside_code_ends_in_a_question_mark() {
+        assert_eq!(
+            question_in("O `-11` era o último dos quatro workers da revisão da PR 254.\n\nFalta só a sua decisão: coloco na revisão para o Leandro a ideia de consultar a e-Rede antes de cobrar de novo?"),
+            Some("Falta só a sua decisão: coloco na revisão para o Leandro a ideia de consultar a e-Rede antes de cobrar de novo?".into()),
+            "monorepo-photoshot's PR #254"
+        );
+        assert_eq!(
+            question_in("**A produção ainda não tem a correção.** O hub continua na v0.17.19, então o clique segue quebrado até sair a v0.17.20. Quer que eu faça a release?\n\n**O PR #89 corrige o mesmo bug.** A segunda saída é fechar o #89."),
+            Some("Quer que eu faça a release?".into()),
+            "personal-harness's workflow thread asks mid-reply"
+        );
+        assert_eq!(question_in("Mandei ao Orquestrador o caminho de cliques; ele já recebeu. Não mexi no código."), None, "the Captain's report asks nothing");
+        assert_eq!(question_in("Use `a?.b`, see https://x.dev/search?q=1, then:\n```js\nconst ok = done ? 1 : 2; // why?\n```\nDone."), None, "question marks in code and links");
+        assert_eq!(question_in("1. **Ship it now?**"), Some("Ship it now?".into()));
     }
 
     #[test]

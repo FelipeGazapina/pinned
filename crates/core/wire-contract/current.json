@@ -13133,6 +13133,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -16474,6 +16481,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -27850,6 +27864,13 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0
+          },
+          "question": {
+            "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -28121,6 +28142,13 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0
+          },
+          "question": {
+            "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -28665,6 +28693,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -31121,6 +31156,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [

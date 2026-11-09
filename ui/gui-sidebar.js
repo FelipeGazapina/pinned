@@ -325,13 +325,13 @@ function globalSidebarTop() {
 }
 
 /** What each `waitingKindOf` answer reads as, and the tone of its dot. */
-const WAITING_LOOKS = { question: ["Question", "question"], failed: ["Failed", "failed"] };
+const WAITING_LOOKS = { needs_input: ["Question", "question"], failed: ["Failed", "failed"] };
 
-/** Every thread on every machine that waits on Felipe, newest first: a question mid-turn or a
- * failure, each with its title, where it is and since when. */
+/** Every thread on every machine that waits on Felipe, newest first: a question or a failure, each
+ * with its title, where it is and since when. */
 function globalWaitingRows() {
   return tabs
-    .map((tab) => ({ tab, kind: waitingKindOf(tab.view, !!tab.menu) }))
+    .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
     .map(({ tab, kind }) => {

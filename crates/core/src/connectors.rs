@@ -5639,6 +5639,7 @@ mod tests {
             orchestrator_global: false,
             orchestrator_turn: false,
             queued: 0,
+            question: None,
         }
     }
 
