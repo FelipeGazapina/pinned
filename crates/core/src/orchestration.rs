@@ -9,7 +9,7 @@ use std::path::Path;
 /// runaway orchestrator before it melts the machine.
 pub const DEFAULT_MAX_WORKERS: u32 = 100;
 const MAX_WORKERS_LIMIT: u32 = 10_000;
-const FILE: &str = "orchestration.json";
+pub(crate) const FILE: &str = "orchestration.json";
 
 /// What the user optimizes for when the orchestrator picks providers and models.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
