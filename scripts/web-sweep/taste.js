@@ -22,6 +22,7 @@ const LAUNCHES = path.join(DIR, "home", "claude-launch.log");
 const SCREENS = path.join(__dirname, "screens");
 const ALPHA = "github.com/example/alpha";
 const TASTE_CALLS = path.join(DIR, "home", "taste-calls.jsonl");
+const SKILL = path.join(DIR, "home", ".claude", "skills", "brief-for-flash", "SKILL.md");
 
 const check = (ok, what) => {
   if (!ok) throw new Error(what);
@@ -53,6 +54,8 @@ const scope = (page, label) => page.click(`.taste-scopes button:text-is("${label
 const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}.png`) });
 
 (async () => {
+  fs.mkdirSync(path.dirname(SKILL), { recursive: true });
+  fs.writeFileSync(SKILL, "---\nname: brief-for-flash\ndescription: Brief a cheap model with files, contracts and a command that proves it.\n---\n\nName the files.\n");
   const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   const page = await desktop.newPage();
@@ -210,6 +213,22 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   await shot(watcher, "taste-chat-after");
   await small.locator(".taste-stepper").evaluate((el) => el.scrollIntoView({ block: "center" }));
   await shot(small, "taste-chat-after-phone");
+
+  await watcher.click('[data-act="adding"]');
+  await waitFor("the add-skill form", () => watcher.isVisible("[data-skill-pick]"));
+  check(await watcher.evaluate(() => [...document.querySelectorAll("[data-skill-pick] option")].some((o) => o.value === "brief-for-flash")), "Add skill offers the machine's personal skill");
+  await watcher.selectOption("[data-skill-pick]", "brief-for-flash");
+  await watcher.click('.taste-skill-form button[type="submit"]');
+  const row = watcher.locator(".taste-skills li", { hasText: "brief-for-flash" });
+  await waitFor("the skill's row", () => row.isVisible());
+  check((await row.locator(".taste-chip").textContent()) === "Personal" && (await row.locator(".taste-skill-about").textContent()).startsWith("Brief a cheap model"), "the row shows where the skill lives and what it does");
+  check((await brief(watcher)).includes("brief-for-flash"), "the brief names the new skill");
+  await watcher.click('.taste-foot [data-act="save"]');
+  await waitFor("the skill saved", async () => !(await watcher.isVisible(".taste-foot")));
+  const skilled = await watcher.evaluate(() => hub.hub({ cmd: "get_tastes" }));
+  check(JSON.stringify(skilled.captains.skills) === JSON.stringify([{ name: "brief-for-flash", enabled: true }]), `the hub stores the Captains' skill: ${JSON.stringify(skilled.captains.skills)}`);
+  await row.evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await shot(watcher, "taste-skill-added");
 
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);
   await browser.close();

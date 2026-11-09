@@ -7,7 +7,8 @@
 //   BOARD_DIR=<folder holding Taste.dc.html> SWEEP_DIR=... node scripts/web-sweep/taste-board.js
 //
 // The boards load a support.js runtime that is not in the repo; board-support.js stands in for it.
-// Writes taste-vs-board-{orchestrator,captains,project}-{desktop,phone}.png into screens/.
+// Writes taste-vs-board-{orchestrator,captains,captains-lower,project}-{desktop,phone}.png into
+// screens/; captains-lower starts at the Pace section.
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -46,6 +47,10 @@ async function boardShots(browser, out) {
       await page.evaluate((phone) => window.scrollTo(0, phone ? document.querySelector("main").offsetTop : 0), size === "phone");
       shots[`${name}-${size}`] = path.join(out, `board-${name}-${size}.png`);
       await page.screenshot({ path: shots[`${name}-${size}`] });
+      if (name !== "captains") continue;
+      await page.evaluate(() => [...document.querySelectorAll("main span")].find((el) => el.textContent === "Ritmo").scrollIntoView({ block: "start" }));
+      shots[`captains-lower-${size}`] = path.join(out, `board-captains-lower-${size}.png`);
+      await page.screenshot({ path: shots[`captains-lower-${size}`] });
     }
     await context.close();
   }
@@ -77,6 +82,11 @@ async function appShots(browser, out) {
       await page.waitForTimeout(1600);
       shots[`${name}-${size}`] = path.join(out, `app-${name}-${size}.png`);
       await page.screenshot({ path: shots[`${name}-${size}`] });
+      if (name !== "captains") continue;
+      await page.evaluate(() => [...document.querySelectorAll(".taste-section h2")].find((el) => el.textContent === "Pace").scrollIntoView({ block: "start" }));
+      await page.waitForTimeout(300);
+      shots[`captains-lower-${size}`] = path.join(out, `app-captains-lower-${size}.png`);
+      await page.screenshot({ path: shots[`captains-lower-${size}`] });
     }
     await context.close();
   }

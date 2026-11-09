@@ -87,10 +87,9 @@ button.taste-card:hover { background: var(--g-hover); }
 .taste-heading-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .taste-link { height: 28px; padding: 0 4px; color: var(--g-primary); font-size: 13px; }
 .taste-link:hover { text-decoration: underline; }
-.taste-skills { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.03); overflow: hidden; }
+.taste-skills { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .taste-skills:empty { display: none; }
-.taste-skills li { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; }
-.taste-skills li + li { border-top: 1px solid var(--g-border); }
+.taste-skills li { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.03); }
 .taste-skill-text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .taste-skill-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
 .taste-skill-name code { font: 12px/18px var(--g-mono); color: var(--g-text); overflow-wrap: anywhere; }
