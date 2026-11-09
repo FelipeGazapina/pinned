@@ -398,7 +398,7 @@ function spawnTree(list) {
   const byId = new Map(list.map((t) => [`${t.machine}:${t.view.id}`, t]));
   const roots = [];
   const kids = new Map();
-  const parentOf = (t) => t.view.spawned_by && byId.get(`${t.machine}:${t.view.spawned_by}`);
+  const parentOf = (t) => t.view.spawned_by && byId.get(spawnerKey(t));
   // A thread whose spawner chain leads back to itself has no top to hang from, so it stands on its own.
   const loops = (tab) => {
     const seen = new Set();
