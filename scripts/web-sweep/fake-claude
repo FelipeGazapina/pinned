@@ -523,6 +523,9 @@ function submit() {
       out(`serving on ${server.address().port}\r\n`);
     });
     wrote([{ type: "text", text: "Started a web server." }]);
+  } else if (line === "options") {
+    wrote([{ type: "text", text: "Li os relatórios dos dois Capitães.\n\nOpções: Sim | Ainda não" }]);
+    out("options\r\n");
   } else {
     wrote([{ type: "text", text: `echo: ${line}` }]);
     out(`echo: ${line}\r\n`);
