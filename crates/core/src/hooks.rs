@@ -2,6 +2,7 @@ use crate::history;
 use crate::ipc::{UnixListener, UnixStream};
 use crate::process;
 use crate::reminders;
+use crate::thread;
 use crate::agent::{
     AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
@@ -111,6 +112,7 @@ fn hook_payload() -> String {
 /// `done` is Claude's Stop hook and Codex's `agent-turn-complete` notify. A turn Claude Code starts
 /// to hand the session a finished background task carries that `<task-notification>` as its
 /// prompt; it is no prompt of the user's, so it neither names the session nor starts a user turn.
+/// A message from another session starts a turn the session answers, but names nothing either.
 pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
     let status = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)?;
     let hook: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
@@ -130,7 +132,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
         title: field("transcript_path")
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| title_from_transcript(BufReader::new(file)))
-            .or_else(|| prompt.and_then(title_from_prompt)),
+            .or_else(|| prompt.filter(|p| !thread::delivered(p)).and_then(title_from_prompt)),
         resume_at: (status == AgentStatus::Failed)
             .then(|| field("transcript_path"))
             .flatten()
@@ -429,6 +431,13 @@ mod tests {
         assert_eq!((event.status, event.prompt, event.title), (AgentStatus::Working, None, None));
         let typed = event_from(Some("working"), r#"{"session_id":"s1","prompt":"fix the login page"}"#).unwrap();
         assert_eq!((typed.prompt.as_deref(), typed.title.as_deref()), (Some("fix the login page"), Some("fix the login page")));
+    }
+
+    #[test]
+    fn a_message_from_another_session_is_a_prompt_that_names_nothing() {
+        let message = "<cross-session-message from=\"uds:/tmp/cc-socks/85194.sock\" from-name=\"Captain\">\nAnything running?\n</cross-session-message>";
+        let event = event_from(Some("working"), &serde_json::json!({ "session_id": "s1", "prompt": message }).to_string()).unwrap();
+        assert_eq!((event.prompt.as_deref(), event.title), (Some(message), None));
     }
 
     #[test]
