@@ -143,6 +143,10 @@ pub struct TabView {
     /// news and the global orchestrator's requests.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: u32,
+    /// The tab was opened from the Way of working page to adjust the account's tastes by talking,
+    /// and its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub taste_chat: bool,
     /// What the session's last finished turn asked the user, read from its last reply. Cleared when
     /// the next turn starts or fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +295,14 @@ pub enum Call {
     /// The id of this machine's global orchestrator tab: the one already open, else a new one, not
     /// yet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.
     OpenGlobalOrchestrator,
+    /// The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with
+    /// the taste tools and whose first prompt says so. It opens in the project folder `path`, or
+    /// in the folder for threads without a project.
+    OpenTasteChat {
+        scope: crate::taste::TasteScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
@@ -826,6 +838,8 @@ pub enum MachineEvent {
     Update { status: Option<UpdateStatus> },
     /// Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.
     SkillsChanged { scopes: Vec<crate::skills::Scope> },
+    /// A taste chat's session changed the account's tastes. An open Way of working page reads them again.
+    TastesChanged,
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -1256,6 +1270,7 @@ mod tests {
             role: None,
             spawned_by: None,
             orchestrator_global: false,
+            taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
             question: None,

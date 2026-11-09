@@ -672,6 +672,15 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     {
                         hub.hub_call(&account, call).await
                     }
+                    // A thread opened with Chat to adjust changes the account's tastes, and the hub
+                    // takes that only while this machine reports such a thread open.
+                    None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
+                        if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
+                            hub.hub_call(&account, call).await
+                        } else {
+                            Err("only a machine with a Chat to adjust thread open may change the way of working".into())
+                        }
+                    }
                     None => Err("a machine may only forward a workflow session's callbacks".into()),
                 };
                 if let Err(e) = &result {

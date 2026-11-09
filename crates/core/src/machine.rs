@@ -381,6 +381,7 @@ impl Tab {
             role: role.map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
+            taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
             question: self.question.clone(),
         }
@@ -859,6 +860,7 @@ impl Machine {
             Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
+            Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
@@ -1969,6 +1971,45 @@ impl Machine {
         Ok(id)
     }
 
+    /// A new tab, not yet started, that adjusts `scope`'s way of working: in the project folder
+    /// `path`, or else in the folder for threads without a project. Its first prompt names the scope.
+    pub fn open_taste_chat(&self, scope: &TasteScope, path: Option<&str>) -> Result<TabId, String> {
+        let cwd = match path {
+            Some(path) if Path::new(path).is_dir() => canonical(path),
+            Some(path) => return Err(format!("{path} is not a folder on this machine")),
+            None => {
+                std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
+                self.scratch.clone()
+            }
+        };
+        let account = self.account_for(None, &cwd)?;
+        // The taste tools reach it through pinned's MCP server, which only Claude Code loads.
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't adjust the way of working", account.id, account.provider.spec().name));
+        }
+        let id = self.add_tab(cwd, account, vec![taste::chat_prompt(scope)], taste::chat_env(), false, None);
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    /// Applies `change` to the account's tastes: on the hub while this machine is linked, keeping
+    /// the answer in `taste.json`, or else to `taste.json` itself. An open Way of working page hears of it.
+    fn change_tastes(&self, call: HubCall, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Tastes, String> {
+        let dir = self.orchestration_dir.as_deref();
+        let tastes = match self.hub.lock().unwrap().clone() {
+            Some(hub) => {
+                let tastes: Tastes = serde_json::from_value(hub(call)?).map_err(|e| format!("the hub's answer did not read: {e}"))?;
+                if let Err(e) = taste::save(&tastes, dir) {
+                    eprintln!("pinned: could not keep the account's taste: {e}");
+                }
+                tastes
+            }
+            None => taste::change(dir, change)?,
+        };
+        self.emit(Event::TastesChanged);
+        Ok(tastes)
+    }
+
     fn global_folder(&self) -> PathBuf {
         dunce::canonicalize(&self.global_dir).unwrap_or_else(|_| self.global_dir.clone())
     }
@@ -2345,6 +2386,27 @@ impl Machine {
             ProjectTool::Waiting => {
                 only_global()?;
                 text_json(self.waiting()?)
+            }
+            ProjectTool::TasteGet { .. } | ProjectTool::TasteSet { .. } | ProjectTool::TasteReset { .. } if !self.tab(tab, |t| taste::is_chat(&t.env))? => {
+                Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into())
+            }
+            ProjectTool::TasteGet { scope } => {
+                let scope = TasteScope::parse(&scope)?;
+                text_json(self.tastes_now()?.view(&scope))
+            }
+            ProjectTool::TasteSet { scope, patch } => {
+                let scope = TasteScope::parse(&scope)?;
+                let call = HubCall::SetTaste { scope: scope.clone(), patch: patch.clone() };
+                text_json(self.change_tastes(call, |tastes| tastes.set(&scope, patch))?.view(&scope))
+            }
+            ProjectTool::TasteReset { scope, field } => {
+                let scope = TasteScope::parse(&scope)?;
+                let call = HubCall::ResetTasteField { scope: scope.clone(), field };
+                let reset = |tastes: &mut Tastes| {
+                    tastes.reset(&scope, field);
+                    Ok(())
+                };
+                text_json(self.change_tastes(call, reset)?.view(&scope))
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
@@ -2866,6 +2928,15 @@ impl Machine {
         let hub = self.hub.lock().unwrap().clone();
         if let Some(hub) = hub {
             share_tastes(&*hub, &self.tastes_shared, self.orchestration_dir.as_deref());
+        }
+    }
+
+    /// The account's tastes as they stand: the hub's while this machine is linked, else its own.
+    /// Unlike `tastes`, a hub that can't answer is an error, so a chat never reads a stale copy.
+    fn tastes_now(&self) -> Result<Tastes, String> {
+        match self.hub.lock().unwrap().clone() {
+            Some(hub) => serde_json::from_value(hub(HubCall::GetTastes)?).map_err(|e| format!("the hub's answer did not read: {e}")),
+            None => Ok(self.local_tastes()),
         }
     }
 
@@ -8086,6 +8157,56 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(serde_json::to_value(&reset.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
         assert_eq!(m.local_tastes(), reset);
         assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the worker cap's save kept the seeded taste");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_taste_chat_starts_on_its_scope_and_its_session_alone_changes_the_taste_file() {
+        let dir = temp("taste-chat");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let claude = recording_claude(&dir);
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, move |e| {
+            seen.lock().unwrap().push(serde_json::to_value(e).unwrap())
+        });
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let chat = m.call(Call::OpenTasteChat { scope: site.clone(), path: Some(path.clone()) }).unwrap().as_str().unwrap().to_owned();
+        let view = m.view(&chat).unwrap();
+        assert_eq!((view.cwd.as_str(), view.taste_chat, view.role, view.running), (path.as_str(), true, None, false));
+        m.start_claude(&chat, 80, 24).unwrap();
+        let args = started(&claude, &chat);
+        assert!(args.iter().any(|a| a.starts_with("Help me adjust the way of working of the Captain of the project github.com/acme/site in pinned (scope project:github.com/acme/site).")), "{args:?}");
+
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"project:github.com/acme/site","patch":{"parallel":2}"#).unwrap()).unwrap();
+        assert_eq!((&set["scope"], &set["own"], &set["effective"]["parallel"], &set["inherits_from"]), (&json!("project:github.com/acme/site"), &json!({ "parallel": 2 }), &json!(2), &json!("captains")));
+        assert!(set["brief"].as_str().unwrap().starts_with("Run up to 2 workers at once.\n"), "{set}");
+        let written: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
+        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read, get_tastes, reads this file");
+        assert_eq!(m.local_tastes().resolve(&site).parallel, 2);
+        assert_eq!(events.lock().unwrap().iter().filter(|e| e["kind"] == "tastes-changed").count(), 1);
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"project:github.com/acme/site""#).unwrap()).unwrap();
+        assert_eq!(got, set);
+
+        let reset: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"parallel""#).unwrap()).unwrap();
+        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":9}"#), Err("parallel workers go from 1 to 8".into()));
+        assert_eq!(tool(&chat, r#""name":"taste_get","scope":"site""#), Err("unknown scope \"site\": use orchestrator, captains or project:<repo>, as in project:github.com/acme/site".into()));
+
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(tool(&plain, r#""name":"taste_set","scope":"captains","patch":{"parallel":1}"#), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
+        assert_eq!(m.local_tastes().captains.parallel, 3, "a plain thread changed the taste");
+
+        let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
+        assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");
+        assert_eq!(m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: Some(dir.join("gone").display().to_string()) }), Err(format!("{} is not a folder on this machine", dir.join("gone").display())));
         let _ = std::fs::remove_dir_all(dir);
     }
 

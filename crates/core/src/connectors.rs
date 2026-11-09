@@ -5641,6 +5641,7 @@ mod tests {
             role: None,
             spawned_by: None,
             orchestrator_global: false,
+            taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
             question: None,
