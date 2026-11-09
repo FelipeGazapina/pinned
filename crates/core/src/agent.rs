@@ -102,6 +102,22 @@ pub enum ProjectTool {
     },
     /// The global orchestrator's: what waits on the user across the account's machines.
     Waiting,
+    /// The global orchestrator's: every session of the account, in `project` and on `machine`
+    /// when given.
+    Sessions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: the last `items` items of the session in tab `id`.
+    ReadSession {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
 }

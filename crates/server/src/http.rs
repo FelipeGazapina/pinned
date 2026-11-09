@@ -636,7 +636,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
                 // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
                 // and serve the global orchestrator and the Capitães, which `relay` checks against this socket.
-                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) {
+                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
                     let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
                     if let Err(e) = &result {
                         eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");

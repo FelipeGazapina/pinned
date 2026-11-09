@@ -500,7 +500,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
+            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
             HubCall::GetTastes => return json(self.db.tastes(account.id).await?.unwrap_or_default()),
             HubCall::SetTaste { scope, patch } => return self.change_tastes(account, |tastes| tastes.set(&scope, patch)).await,
             HubCall::ResetTasteField { scope, field } => {

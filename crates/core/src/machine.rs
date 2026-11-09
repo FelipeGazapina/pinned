@@ -373,6 +373,10 @@ impl Tab {
             session: self.claude_session.clone(),
             interrupted: self.interrupted,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            branch: self.tally.branch.clone(),
+            pr: self.tally.pr.clone(),
+            last_message_at: self.tally.last_at,
+            prompt_title: self.tally.prompt_title.clone(),
             orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
             role: role.map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
@@ -480,6 +484,8 @@ pub struct Machine {
     hub: Mutex<Option<Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>>>,
     /// This machine's id on the hub, from the hub's hello. Empty until the first sign-in.
     hub_id: Mutex<crate::wire::MachineId>,
+    /// This machine's name on the hub, which the user may have changed from its hostname.
+    hub_name: Mutex<String>,
 }
 
 pub trait SelfUpdate: Send + Sync {
@@ -630,6 +636,7 @@ impl Machine {
             sync_waker: Mutex::new(None),
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
+            hub_name: Mutex::default(),
         })
     }
 
@@ -854,6 +861,7 @@ impl Machine {
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
+            Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
                 let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
@@ -1142,22 +1150,40 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
+        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = self.transcript_of(tab)? else {
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
+        };
+        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        agents.extend(self.delegates.cards(tab));
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+    }
+
+    /// The tab's transcript, once claude reported a session that has one.
+    fn transcript_of(&self, tab: &str) -> Result<Option<PathBuf>, String> {
+        let (session, account, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.last_found_transcript.clone()))?;
         let file = session.as_deref().and_then(|s| {
             let home = self.accounts.home(&account);
             let still = known.as_ref().filter(|path| path.file_stem().is_some_and(|stem| stem == s) && path.starts_with(&home) && path.is_file());
             still.cloned().or_else(|| self.find_transcript(&account, s))
         });
-        let Some(file) = file else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
-        };
-        if known.as_ref() != Some(&file) {
+        if let Some(file) = file.as_ref().filter(|f| known.as_ref() != Some(f)) {
             self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
         }
-        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
-        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
-        agents.extend(self.delegates.cards(tab));
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+        Ok(file)
+    }
+
+    /// `reading::read` of the tab's session with the last `items` items of its conversation, read
+    /// from the end of its transcript. `None` when this machine has no such tab.
+    fn read_session_here(&self, tab: &str, items: usize) -> Option<Value> {
+        let view = self.tabs().into_iter().find(|t| t.id == tab)?;
+        let page = match self.transcript_of(tab) {
+            Ok(Some(file)) => reading::end_of(&file, items),
+            Ok(None) => Ok(json!({ "items": [], "next": 0, "reset": false })),
+            Err(e) => Err(e),
+        };
+        Some(reading::read(&view, page, items))
     }
 
     fn watch_threads(&self) {
@@ -2117,9 +2143,51 @@ impl Machine {
     /// This machine alone, under its hub id once it has one, so its keys and links match the hub's.
     fn local_overview(&self) -> global::Overview {
         let (projects, tabs) = (self.list_projects(), self.tabs());
-        let name = crate::account::hostname();
-        let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| name.clone());
-        global::overview(&[global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }])
+        let (id, name) = self.machine_ids();
+        let here = [global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }];
+        global::overview(&here)
+    }
+
+    /// This machine's id and name on the hub, each its hostname until the hub's hello.
+    fn machine_ids(&self) -> (String, String) {
+        let host = crate::account::hostname();
+        let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| host.clone());
+        let name = Some(self.hub_name.lock().unwrap().clone()).filter(|name| !name.is_empty()).unwrap_or(host);
+        (id, name)
+    }
+
+    /// Every session of the account in `project` and on `machine` when given, for the `sessions`
+    /// tool, with every machine of the account so an offline one or one that needs an update shows.
+    fn sessions(&self, project: Option<&str>, machine: Option<&str>) -> Result<String, String> {
+        let overview = self.projects_overview()?;
+        let (sessions, machines) = match overview.sessions {
+            Some(sessions) => (sessions, overview.machines),
+            None => {
+                let here = self.local_overview();
+                (here.sessions.unwrap_or_default(), here.machines)
+            }
+        };
+        let sessions: Vec<global::Session> = sessions.into_iter().filter(|s| s.matches(project, machine)).collect();
+        text_json(json!({ "sessions": sessions, "machines": machines }))
+    }
+
+    /// The last `items` items of the session in tab `id`, here when this machine has it and
+    /// `machine` names no other, else through the hub on the machine that has it.
+    fn read_session(&self, id: &str, machine: Option<&str>, items: Option<usize>) -> Result<String, String> {
+        let items = read_items(items);
+        if machine.is_none_or(|m| self.is_this_machine(m)) {
+            if let Some(mut out) = self.read_session_here(id, items) {
+                let (machine, machine_name) = self.machine_ids();
+                (out["id"], out["machine"], out["machine_name"]) = (json!(id), json!(machine), json!(machine_name));
+                return text_json(out);
+            }
+        }
+        let call = HubCall::ReadSession { tab: id.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), items: Some(items) };
+        match self.call_hub(call) {
+            Ok(out) => text_json(out),
+            Err(e) if e == NOT_LINKED => Err(format!("no session {id} on this machine, and it is not linked to a hub to look on the others")),
+            Err(e) => Err(needs_update(e)),
+        }
     }
 
     /// What waits on the user across the account's machines, for the `waiting` tool.
@@ -2255,7 +2323,16 @@ impl Machine {
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
             ProjectTool::Projects => {
                 only_global()?;
-                text_json(self.projects_overview()?)
+                // The sessions tool lists them; here they would bury the projects.
+                text_json(global::Overview { sessions: None, ..self.projects_overview()? })
+            }
+            ProjectTool::Sessions { project, machine } => {
+                only_global()?;
+                self.sessions(project.as_deref(), machine.as_deref())
+            }
+            ProjectTool::ReadSession { id, machine, items } => {
+                only_global()?;
+                self.read_session(&id, machine.as_deref(), items)
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine } => {
                 only_global()?;
@@ -2558,9 +2635,11 @@ impl Machine {
         *self.hub.lock().unwrap() = Some(hub);
     }
 
-    /// Remembers this machine's id from the hub's hello, so a project named by it is local.
-    pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId) {
+    /// Remembers this machine's id and name from the hub's hello, so a project named by it is
+    /// local and what this machine lists of itself reads as the hub lists it.
+    pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId, name: String) {
         *self.hub_id.lock().unwrap() = id;
+        *self.hub_name.lock().unwrap() = name;
     }
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Never call it while holding a Machine
@@ -3899,6 +3978,13 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 fn machine_named(machine: &str) -> &str {
     machine.trim().trim_start_matches('@')
 }
+
+/// How many conversation items a `read_session` returns: 20 when not asked, at most 50.
+fn read_items(items: Option<usize>) -> usize {
+    items.unwrap_or(reading::DEFAULT_ITEMS).clamp(1, READ_ITEMS_MAX)
+}
+
+const READ_ITEMS_MAX: usize = 50;
 
 /// Whether `path` is absolute on macOS, Linux or Windows. A folder on another machine follows that
 /// machine's rules, not this one's.
@@ -7460,7 +7546,7 @@ while True:
         assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
         assert_eq!(*relayed.lock().unwrap(), [relay("r-1", "m-book", "/w/site"), relay("r-2", "m-book", "/w/site"), relay("r-4", "m-mini", &path)]);
 
-        m.set_hub_id("m-mini".into());
+        m.set_hub_id("m-mini".into(), "mini".into());
         let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
         assert_eq!(started(&claude, here.tab())[7], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
@@ -7571,7 +7657,7 @@ while True:
         let tool = |tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{global_tab}","tool":{{{tool}}}}}"#));
         let host = crate::account::hostname();
         // As the link does on the hub's hello; the hub itself is down, so every view is this machine's.
-        m.set_hub_id("m-mini".into());
+        m.set_hub_id("m-mini".into(), host.clone());
         let projects = |captain: &str, tab: &str| {
             let checkout = json!({ "machine": "m-mini", "machine_name": host, "online": true, "version": env!("CARGO_PKG_VERSION"), "path": path, "captain": captain, "captain_tab": tab, "workers": 0 });
             let machine = json!({ "id": "m-mini", "name": host, "online": true, "version": env!("CARGO_PKG_VERSION") });
