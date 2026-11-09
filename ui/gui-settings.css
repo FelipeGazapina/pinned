@@ -277,6 +277,6 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="busy"], [data-setting="reports"]) { flex-wrap: wrap; }
-  #settings-page #global-orchestrator-settings .side-setting select { width: 100%; }
+  #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex-basis: 100%; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
