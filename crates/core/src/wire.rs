@@ -125,6 +125,10 @@ pub struct TabView {
     /// which it may not have reported yet: a message to it queues.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrator_turn: bool,
+    /// How many messages wait for the tab to go idle before they are typed into it: its workers'
+    /// news and the global orchestrator's requests.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -593,6 +597,10 @@ pub enum Call {
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn skill_md() -> String {
@@ -1169,6 +1177,7 @@ mod tests {
             spawned_by: None,
             orchestrator_global: false,
             orchestrator_turn: false,
+            queued: 0,
         }
     }
 

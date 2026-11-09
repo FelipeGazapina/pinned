@@ -320,7 +320,7 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>) -> TabView {
         let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
@@ -345,6 +345,7 @@ impl Tab {
             role: role.map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
+            queued: queued.get(id).copied().unwrap_or_default(),
         }
     }
 
@@ -1168,14 +1169,16 @@ impl Machine {
     /// Every tab, in the order they opened.
     pub fn tabs(&self) -> Vec<TabView> {
         let turns = self.turns.lock().unwrap().clone();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns)).collect();
+        let queued = self.delegates.queued();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
 
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
         let turns = self.turns.lock().unwrap().clone();
-        self.tab(tab, |t| t.view(tab, &turns))
+        let queued = self.delegates.queued();
+        self.tab(tab, |t| t.view(tab, &turns, &queued))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -2004,6 +2007,7 @@ impl Machine {
                 let session = self.tab(tab, |t| t.claude_session.clone())?;
                 self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
                 self.arm_delegate_pass();
+                self.emit_tabs();
                 Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
             }
         }
@@ -2323,7 +2327,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new())).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new())).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -2387,6 +2391,7 @@ impl Machine {
             let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&target, session, line);
             self.arm_delegate_pass();
+            self.emit_tabs();
             return;
         }
         if self.type_prompt(&target, &line).is_err() {
@@ -2394,6 +2399,7 @@ impl Machine {
             let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&target, session, line);
             self.arm_delegate_pass();
+            self.emit_tabs();
         }
     }
 
@@ -3073,7 +3079,8 @@ impl Machine {
             self.delegates.release_reports(tab);
         } else {
             let typed = self.delegates.drop_claimed_reports(tab);
-            self.mark_typed(&typed);
+            self.sent.lock().unwrap().typed(&typed);
+            self.emit_tabs();
         }
     }
 
@@ -6935,10 +6942,12 @@ while True:
         assert_eq!(enqueue(&m, &path, "And the docs.", "r-3"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
         assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
+        assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
         m.record_event(hook(&tab, AgentStatus::Done));
         let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
+        assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-2", "r-3"], "the drained messages started the next turn");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered), "the turn r-1 started ended");
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
@@ -8041,6 +8050,7 @@ while True:
         .unwrap();
         m.record_event(AgentEvent { status: AgentStatus::Done, tab: Some(worker.clone()), ..done_event(&worker) });
         assert!(m.delegates.has_pending(), "the finished worker's news was dropped instead of queued");
+        assert_eq!(m.view(&orchestrator).unwrap().queued, 1, "the orchestrator's view does not count its worker's queued news");
         let _ = std::fs::remove_dir_all(root);
     }
 

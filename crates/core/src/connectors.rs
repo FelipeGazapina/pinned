@@ -5638,6 +5638,7 @@ mod tests {
             spawned_by: None,
             orchestrator_global: false,
             orchestrator_turn: false,
+            queued: 0,
         }
     }
 
