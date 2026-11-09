@@ -168,6 +168,8 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 .usage .usage-warn .i, .pulls .pr-warn .i { flex: none; }
 
 /* The account's projects page: every project of every machine, its Captain and its workers. */
+/* The Usage page hides every head's range until it is wide; the projects page always shows its count. */
+body[data-page="global-projects"] #page-view .page-head .range { display: block; min-width: 0; }
 .gp-list { display: flex; flex-direction: column; gap: 10px; }
 .gp-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--g-border); border-radius: 12px; }
 .gp-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
