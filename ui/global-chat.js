@@ -54,13 +54,13 @@ function speechTextOf(text) {
   return kept.join(" ").replace(/\s+/g, " ").trim();
 }
 
-/** Why a thread waits on Felipe: `pergunta` for a question mid-turn (needs-input with a live menu
- * or interrupted), `falha` for a failure. A thread Claude Code is merely done with is not waiting,
+/** Why a thread waits on Felipe: `question` for a question mid-turn (needs-input with a live menu
+ * or interrupted), `failed` for a failure. A thread Claude Code is merely done with is not waiting,
  * which is the idle notice: needs-input without a menu and without interrupted. */
 function waitingKindOf(view, hasMenu) {
   if (!view) return null;
-  if (view.status === "failed") return "falha";
-  if (view.status === "needs-input" && (hasMenu || view.interrupted === true)) return "pergunta";
+  if (view.status === "failed") return "failed";
+  if (view.status === "needs-input" && (hasMenu || view.interrupted === true)) return "question";
   return null;
 }
 

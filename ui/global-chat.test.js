@@ -65,10 +65,10 @@ test("read aloud says the words without code blocks and without the Opções lin
 });
 
 test("a thread waits on Felipe for a question mid-turn or a failure, not for an idle notice", () => {
-  assert.equal(waitingKindOf({ status: "needs-input", interrupted: true }, false), "pergunta");
-  assert.equal(waitingKindOf({ status: "needs-input", interrupted: false }, true), "pergunta");
+  assert.equal(waitingKindOf({ status: "needs-input", interrupted: true }, false), "question");
+  assert.equal(waitingKindOf({ status: "needs-input", interrupted: false }, true), "question");
   assert.equal(waitingKindOf({ status: "needs-input", interrupted: false }, false), null);
-  assert.equal(waitingKindOf({ status: "failed" }, false), "falha");
+  assert.equal(waitingKindOf({ status: "failed" }, false), "failed");
   assert.equal(waitingKindOf({ status: "working", interrupted: true }, false), null);
   assert.equal(waitingKindOf({ status: "done" }, false), null);
   assert.equal(waitingKindOf(null, false), null);

@@ -330,7 +330,7 @@ const sendText = (page, text) => page.evaluate((t) => {
 
     await page.evaluate((k) => activate(tabByKey(k)), keys.site);
     await sendText(page, "/question");
-    await waitFor("Esperando você", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
+    await waitFor("Waiting on you", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
     s = await page.evaluate(state);
     console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
     check(s.waitingHead === "Waiting on you 1", `head: ${s.waitingHead}`);
