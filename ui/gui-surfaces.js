@@ -597,8 +597,10 @@ function renderMemoryPanel() {
       ? `<ul class="memory-list">${m.hits.map((h) => `<li><span class="id">#${h.id}</span><span class="body"><span class="title">${esc(h.title)}</span>${h.kind ? `<span class="kind">${esc(h.kind)}</span>` : ""}<span class="text">${esc(h.text)}</span></span><button type="button" class="ghost" data-forget="${h.id}" title="Forget #${h.id}" aria-label="Forget #${h.id}">${icon("x")}</button></li>`).join("")}</ul>`
       : `<p class="memory-empty">${m.query ? "No memory matches that." : "No memories yet. Agents save them as they work, or add one below."}</p>`;
   const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
+  // The global tab's panel is the account's memory, and reads with the orchestrator's own name.
+  const find = isGlobalOrchestratorTab(tab) ? `Buscar na memória do ${globalOrchestratorName()}` : `Search ${esc(projectName(tab))}'s memory`;
   const shown = showPanel(`<div class="memory"><p class="memory-state">${esc(count)}</p>
-    <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="Search ${esc(projectName(tab))}'s memory" aria-label="Search memory" autocomplete="off" spellcheck="false">
+    <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="${esc(find)}" aria-label="${esc(find)}" autocomplete="off" spellcheck="false">
     ${hits}
     <form class="memory-add"><input name="title" type="text" value="${esc(m.title)}" placeholder="Title" aria-label="New memory's title" autocomplete="off"><textarea name="text" rows="3" placeholder="What to remember about this project" aria-label="New memory's text">${esc(m.text)}</textarea><button type="submit" class="outline">Add</button></form></div>`);
   const again = shown && focus?.name && panelBody.querySelector(`.memory [name="${focus.name}"]`);

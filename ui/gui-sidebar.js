@@ -1528,15 +1528,16 @@ function projectListsPending() {
   return onlineMachines().some((id) => machines.get(id).projects === undefined);
 }
 
-/** The sidebar's projects: `{ key, name, tab, tabs, checkouts }`. `tab` is the group's first thread, or null when the folder has none. */
-function projectGroups() {
+/** The sidebar's projects: `{ key, name, tab, tabs, checkouts }`. `tab` is the group's first thread, or null when the folder has none.
+ * `grouping` defaults to the sidebar's Project grouping; account-wide views pass true, since a project there is its repo on every machine. */
+function projectGroups(grouping = !!sideSettings.grouping) {
   const threads = [];
   for (const tab of tabs) {
     const path = projectPathOf(tab);
     threads.push({ machine: tab.machine, path, name: projectName(tab), repo: projectRepos.get(`${tab.machine}:${path}`) || null, thread: tab });
   }
   const listed = Object.fromEntries([...machines].map(([id, machine]) => [id, machine.projects ?? []]));
-  return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping: !!sideSettings.grouping }), (g) => g.tabs);
+  return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping }), (g) => g.tabs);
 }
 function projectNameMark(name) {
   const text = esc(name);

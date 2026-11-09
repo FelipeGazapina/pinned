@@ -1,17 +1,17 @@
 #sidebar footer .back { display: none; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: 8px; color: var(--g-side-muted); font-size: 13px; }
 #sidebar footer .back:hover { background: var(--g-hover); color: var(--g-fg); }
 #sidebar footer .back .i { width: 16px; height: 16px; }
-body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"]) #sidebar footer > :not(.back) { display: none; }
-body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"]) #sidebar footer .back { display: flex; }
+body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #sidebar footer > :not(.back) { display: none; }
+body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #sidebar footer .back { display: flex; }
 
 #page-view { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"]) #expanded > header { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"]) #chat { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #expanded > header { display: none; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #chat { display: none; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
   background: var(--g-bg); color: var(--g-fg); }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"]) #panel { visibility: hidden; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"]) #panel { visibility: hidden; }
 #page-view [hidden] { display: none !important; }
 #page-view .page-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--topbar); padding: 0 16px; user-select: none; }
 #page-view .page-head h1 { margin: 0; font-size: 14px; font-weight: 500; white-space: nowrap; }
@@ -166,3 +166,23 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 .usage .usage-warn, .pulls .pr-warn { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border-radius: 8px; background: rgb(var(--g-warning-rgb) / 0.08); color: var(--g-warning-fg); font-size: 13px; }
 .usage .usage-warn span, .pulls .pr-warn span { flex: 1; }
 .usage .usage-warn .i, .pulls .pr-warn .i { flex: none; }
+
+/* The account's projects page: every project of every machine, its Capitão and its workers. */
+.gp-list { display: flex; flex-direction: column; gap: 10px; }
+.gp-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--g-border); border-radius: 12px; }
+.gp-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.gp-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-state { flex: none; padding: 1px 9px; border: 1px solid var(--g-border); border-radius: 999px; color: var(--g-muted); font-size: 12px; }
+.gp-state.trabalhando { color: var(--g-warning); border-color: rgb(var(--g-warning-rgb) / 0.4); }
+.gp-state.livre { color: var(--g-success); border-color: color-mix(in srgb, var(--g-success) 40%, transparent); }
+.gp-repo { color: var(--g-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-side { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.gp-machine { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px; border: 1px solid var(--g-input); border-radius: 999px;
+  background: transparent; color: var(--g-fg); font-size: 13px; }
+.gp-machine:hover:not(:disabled) { background: var(--g-hover); }
+.gp-machine:disabled { opacity: 0.55; }
+.gp-machine .gp-captain { font-size: 11px; color: var(--g-muted); }
+.gp-machine .gp-captain.trabalhando { color: var(--g-warning); }
+.gp-machine .gp-captain.livre { color: var(--g-success); }
+.gp-workers { margin-left: auto; color: var(--g-muted); font-size: 12px; }
+.gp-empty { margin: 0; padding: 40px 0; text-align: center; color: var(--g-muted); }

@@ -1871,7 +1871,7 @@ let tagRouteHtml = "";
 function composerTagCatalog() {
   const directory = machineDirectory();
   directory.localName = machines.get(LOCAL)?.hubView?.name ?? directory.localName;
-  return tagCatalog({ groups: projectGroups(), directory, phase: phaseOf, repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) });
+  return tagCatalog({ groups: projectGroups(true), directory, phase: phaseOf, repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) });
 }
 
 /** Hides the tag popover and forgets its options. */

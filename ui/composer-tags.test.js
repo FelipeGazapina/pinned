@@ -263,6 +263,25 @@ test("the catalog groups projects by repo as the sidebar does and reads each Cap
   assert.equal(tagCatalog({ groups: [], directory: { localId: "local", localName: "This Mac", names: {}, online: {} }, phase: () => "idle", repoAt: () => null }).machines.length, 0);
 });
 
+test("a workers callback counts each host's running workers, and without it the host entries stand as they were", () => {
+  const captain = { machine: "mm", view: { role: "orchestrator", status: "working" } };
+  const groups = groupProjects({
+    threads: [{ machine: "mm", path: "/Users/f/site", name: "site", repo: "github.com/felipe/site", thread: captain }],
+    listed: { mm: [{ path: "/Users/f/site", name: "site", repo: "github.com/felipe/site" }] },
+    grouping: true,
+  });
+  const args = {
+    groups,
+    directory: { localId: "mm", localName: "Mac mini", names: { mm: "Mac mini" }, online: { mm: true } },
+    phase: () => "working",
+    repoAt: () => "github.com/felipe/site",
+  };
+  assert.deepEqual(tagCatalog({ ...args, workers: () => 2 }).projects[0].machines, [
+    { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "trabalhando", workers: 2 },
+  ]);
+  assert.deepEqual(tagCatalog(args).projects[0].machines, [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "trabalhando" }]);
+});
+
 test("the mirror paints a known project blue, a known machine green and an unknown tag red, letter for letter", () => {
   const known = { project: new Set(["site"]), machine: new Set(["macbook"]) };
   const esc = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
