@@ -2104,11 +2104,11 @@ impl Machine {
     fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(crate::wire::MachineId, String), String> {
         let asked = project.trim();
         let (project, machine) = match asked.split_once(':') {
-            Some((m, path)) if Path::new(path).is_absolute() => (path, Some(machine.unwrap_or(m))),
+            Some((m, path)) if !is_absolute_anywhere(asked) && is_absolute_anywhere(path) => (path, Some(machine.unwrap_or(m))),
             _ => (asked, machine),
         };
         let machine = machine.map(machine_named);
-        let named = machine.filter(|_| Path::new(project).is_absolute());
+        let named = machine.filter(|_| is_absolute_anywhere(project));
         let overview = self.call_hub(HubCall::Overview).and_then(|v| serde_json::from_value::<global::Overview>(v).map_err(|e| e.to_string()));
         let overview = match overview {
             Ok(overview) => overview,
@@ -3584,10 +3584,16 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
-/// A tool's answer as one line of JSON, which the session reads and the chat can render.
 /// A machine as a tool names it: an id or a name, with or without the `@` of a tag.
 fn machine_named(machine: &str) -> &str {
     machine.trim().trim_start_matches('@')
+}
+
+/// Whether `path` is absolute on macOS, Linux or Windows. A folder on another machine follows that
+/// machine's rules, not this one's.
+fn is_absolute_anywhere(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/') || path.starts_with(r"\\") || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
 }
 
 /// The hub's error, or which side needs an update when it is an older hub's or machine's refusal.
@@ -3599,6 +3605,7 @@ fn needs_update(e: String) -> String {
     }
 }
 
+/// A tool's answer as one line of JSON, which the session reads and the chat can render.
 fn text_json<T: Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
@@ -7174,7 +7181,9 @@ while True:
         assert_eq!(read, Ok(json!({ "state": "working", "next": "it is working; read again in a while", "title": "Ship the form", "conversation": { "items": [], "cursor": 3, "reset": false }, "project": "/w/site" })));
         let notes = dir.join("notes").display().to_string();
         assert_eq!(m.read_captain(&notes, Some("@imac")), Err("o hub ou a máquina precisa atualizar o pinned".into()), "a folder the overview doesn't list, on a machine named by name");
-        assert_eq!(*asked.lock().unwrap(), [json!(["m-book", "/w/site"]), json!(["m-old", notes])]);
+        assert_eq!(m.read_captain(r"m-win:C:\w\site", None).map(|text| serde_json::from_str::<Value>(&text).unwrap()["project"].clone()), Ok(json!(r"C:\w\site")), "a Windows folder, from any machine");
+        assert_eq!(m.read_captain("m-book:/w/api", None).map(|text| serde_json::from_str::<Value>(&text).unwrap()["project"].clone()), Ok(json!("/w/api")), "a Unix folder, from any machine");
+        assert_eq!(*asked.lock().unwrap(), [json!(["m-book", "/w/site"]), json!(["m-old", notes]), json!(["m-win", r"C:\w\site"]), json!(["m-book", "/w/api"])]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

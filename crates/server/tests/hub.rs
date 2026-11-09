@@ -3132,7 +3132,7 @@ fn wait_launch(dir: &Path, tab: &str, line: &str) {
 fn origin(dir: &Path, remote: &str) {
     std::fs::create_dir_all(dir).unwrap();
     for args in [&["init", "-q"][..], &["remote", "add", "origin", remote]] {
-        assert!(std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+        assert!(pinned_core::process::command("git").arg("-C").arg(dir).args(args).status().unwrap().success());
     }
 }
 
@@ -3284,8 +3284,9 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
     assert_eq!((raw.calls("list_projects"), raw.calls("global_orchestrator_settings"), raw.calls("tabs")), (1, 1, 1), "the hub asked for the tabs only of the machine that never reported them");
     let mac_link = fleet.mac.link.as_ref().unwrap();
     assert_eq!(mac_link.call_hub(HubCall::Overview), Err("mac does not host the global orchestrator (mini does), so it can't list the account's projects".into()));
-    let signed_in = by_key(fleet.client.hub(json!({ "cmd": "overview" })).unwrap());
-    assert_eq!(signed_in["projects"][3], site(true), "a signed-in client reads it too");
+    let signed_in = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let signed_in_site = signed_in["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site");
+    assert_eq!(signed_in_site, Some(&site(true)), "a signed-in client reads it too");
 
     drop(raw);
     fleet.mac.kill();
@@ -3336,4 +3337,6 @@ fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_a
     );
     let elsewhere = tool(json!({ "name": "read_captain", "project": format!("{mac}:{}", fleet.mac_dir.display()) })).unwrap();
     assert_eq!(elsewhere, json!({ "state": "not_started", "next": "message it to start it", "project": fleet.mac_dir.display().to_string() }), "a folder with no Capitão, named by machine id");
+    let unknown = tool(json!({ "name": "read_captain", "project": "/w/site", "machine": "Studio" }));
+    assert_eq!(unknown, Err("this account has no machine Studio".into()), "a mistyped machine is not an offline one");
 }

@@ -70,9 +70,15 @@ async fn relay(hub: &Hub, account: &Account, from: Source<'_>, request_id: Strin
 /// An offline machine shows those too, with no Capitão.
 async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Value, String> {
     let machines = hub.machines(account).await?;
+    let asker = match from {
+        Source::Machine(from) => Some(from),
+        Source::Client => None,
+    };
     let looks = join_all(machines.iter().map(|m| async move {
+        // The asking machine's own settings decide whether it may ask, so they get the host's wait.
+        let settings_wait = if asker == Some(m.id.as_str()) { HOST_WAIT } else { LOOK_WAIT };
         match m.online {
-            true => Some(look(hub, account, &m.id).await),
+            true => Some(look(hub, account, &m.id, settings_wait).await),
             false => None,
         }
     }))
@@ -97,7 +103,7 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
                 }
                 Err(_) => account.last_listed(&m.id),
             };
-            (projects, look.tabs, problem)
+            (projects, look.tabs.unwrap_or_default(), problem)
         })
         .collect();
     let snapshots: Vec<MachineSnapshot> = machines
@@ -112,28 +118,32 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
 struct Look {
     projects: Result<Vec<ProjectView>, Unanswered>,
     settings: Result<Value, Unanswered>,
-    tabs: Vec<TabView>,
+    tabs: Result<Vec<TabView>, Unanswered>,
 }
 
 impl Look {
+    /// What the overview says about a machine whose answers fell short. A machine whose settings
+    /// alone did not come in lists fine: those only decide who hosts.
     fn problem(&self) -> Option<String> {
-        fn too_old<T>(answer: &Result<T, Unanswered>) -> bool {
-            matches!(answer, Err(Unanswered::Refused(e)) if is_unknown_command(e))
+        let errors = [self.projects.as_ref().err(), self.settings.as_ref().err(), self.tabs.as_ref().err()];
+        if errors.iter().flatten().any(|e| matches!(e, Unanswered::Refused(e) if is_unknown_command(e))) {
+            return Some(TOO_OLD.into());
         }
-        match &self.projects {
-            _ if too_old(&self.projects) || too_old(&self.settings) => Some(TOO_OLD.into()),
-            Ok(_) => None,
-            Err(Unanswered::Lost(_)) => Some("não respondeu".into()),
-            Err(Unanswered::Refused(e)) => Some(e.clone()),
+        match self.projects.as_ref().err().or(self.tabs.as_ref().err())? {
+            Unanswered::Lost(_) => Some("não respondeu".into()),
+            Unanswered::Refused(e) => Some(e.clone()),
         }
     }
 }
 
-async fn look(hub: &Hub, account: &Account, machine: &str) -> Look {
-    let ask = |call| hub.call_machine(account, machine, call, LOOK_WAIT);
-    let (projects, settings, tabs) = tokio::join!(ask(Call::ListProjects), ask(Call::GlobalOrchestratorSettings), tabs(hub, account, machine, LOOK_WAIT));
+async fn look(hub: &Hub, account: &Account, machine: &str, settings_wait: Duration) -> Look {
+    let (projects, settings, tabs) = tokio::join!(
+        hub.call_machine(account, machine, Call::ListProjects, LOOK_WAIT),
+        hub.call_machine(account, machine, Call::GlobalOrchestratorSettings, settings_wait),
+        tabs(hub, account, machine, LOOK_WAIT)
+    );
     let projects = projects.and_then(|listed| serde_json::from_value(listed).map_err(|e| Unanswered::Refused(e.to_string())));
-    Look { projects, settings, tabs: tabs.unwrap_or_default() }
+    Look { projects, settings, tabs }
 }
 
 /// The latest replies of the Capitão of the project at `path` on `machine`, as the node's own
@@ -141,6 +151,9 @@ async fn look(hub: &Hub, account: &Account, machine: &str) -> Look {
 async fn read_captain(hub: &Hub, account: &Account, from: Source<'_>, machine: &str, path: String) -> Result<Value, String> {
     only_host(hub, account, &from, "read a Capitão").await?;
     let mut out = if !account.is_online(machine) {
+        if !hub.machines(account).await?.iter().any(|m| m.id == machine) {
+            return Err(format!("this account has no machine {machine}"));
+        }
         json!({ "state": "offline", "next": reading::next_for("offline") })
     } else {
         let tabs = tabs(hub, account, machine, RELAY_WAIT).await?;
@@ -222,5 +235,24 @@ async fn call(hub: &Hub, account: &Account, machine: &str, call: Call) -> Result
         Err(Unanswered::Refused(e)) => Err(e),
         // The machine keeps the request id, so a retry answers what it did instead of doing it twice.
         Err(Unanswered::Lost(e)) => Err(format!("{e}; try again with the same request_id")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_machine_shows_why_the_overview_lacks_its_projects_or_its_tabs() {
+        let problem = |projects: Result<Vec<ProjectView>, Unanswered>, settings: Result<Value, Unanswered>, tabs: Result<Vec<TabView>, Unanswered>| Look { projects, settings, tabs }.problem();
+        let lost = || Unanswered::Lost("mini did not answer".into());
+        let old = || Unanswered::Refused("this machine runs pinned 0.17.0, which can't answer that: unknown variant `tabs`".into());
+        assert_eq!(problem(Ok(vec![]), Ok(json!({})), Ok(vec![])), None);
+        assert_eq!(problem(Ok(vec![]), Err(lost()), Ok(vec![])), None, "settings only decide who hosts");
+        assert_eq!(problem(Ok(vec![]), Ok(json!({})), Err(lost())), Some("não respondeu".into()), "tabs that never came are not an idle machine");
+        assert_eq!(problem(Err(lost()), Ok(json!({})), Ok(vec![])), Some("não respondeu".into()));
+        assert_eq!(problem(Err(Unanswered::Refused("no disk".into())), Ok(json!({})), Err(lost())), Some("no disk".into()));
+        assert_eq!(problem(Ok(vec![]), Ok(json!({})), Err(old())), Some("precisa atualizar o pinned".into()));
+        assert_eq!(problem(Err(lost()), Err(old()), Ok(vec![])), Some("precisa atualizar o pinned".into()));
     }
 }

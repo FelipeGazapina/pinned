@@ -30,7 +30,7 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 - One global tab per machine: `open_global_orchestrator` returns the lowest-numbered tab with the global env, else adds one, not started.
 - The global folder's memory store is the global memory. `project_of_tab(global tab)` answers the folder, so `memory_*` tools and automatic recall use it. `known_project(folder)` accepts it, so `Call::MemorySearch/Save/Forget/Status { path: <folder> }` work. `Call::ListProjects` never lists it.
 - In tests the folder is `<config dir>/home/.pinned/orquestrador` (`test_binary()`), so tests never touch the real home.
-- The global tab gets no `--append-system-prompt` yet. `role_of` is `None` for it, so `launch_tab` adds nothing. The node-local unit adds its prompt there.
+- `launch_tab` appends `global::prompt(<name>, <hostname>)` to the global tab's `--append-system-prompt`, after the device agent prompt. `role_of` is `None` for it, so it gets no role prompt and no disallowed tools.
 
 ## 2. Settings
 
@@ -70,7 +70,7 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 |---|---|---|
 | `Relay` | `{"cmd":"relay","request_id":"r-1","to":{RelayTo}}` | `Handoff` from the target machine |
 | `Overview` | `{"cmd":"overview"}` | `Overview` |
-| `ReadCaptain` | `{"cmd":"read_captain","machine":"<machine id>","path":"/w/site"}` | what the node's own `read_captain` answers: `reading::read` of the Capitão with `project` set to `path`, or `{"state":"not_started",...}` when the project has no Capitão that runs or has a conversation, or `{"state":"offline",...}` |
+| `ReadCaptain` | `{"cmd":"read_captain","machine":"<machine id>","path":"/w/site"}` | what the node's own `read_captain` answers: `reading::read` of the Capitão with `project` set to `path`, or `{"state":"not_started",...}` when the project has no Capitão that runs or has a conversation, or `{"state":"offline",...}`. A machine id the account does not have is an error, `this account has no machine <id>` |
 
 `RelayTo` is tagged by `kind`:
 
@@ -87,8 +87,8 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 - The host is the one online machine whose `Call::GlobalOrchestratorSettings` answers `host: true`, asked each time and never cached. No host, two hosts and a silent machine each get their own error.
 - `Overview` builds one `MachineSnapshot` per machine the account has, in the order they joined, and returns `global_orchestrator::overview` of them:
   - Tabs are what each machine last reported (`MachineEvent::Tabs`). The hub asks `Call::Tabs` only of a machine that has reported none yet.
-  - Each online machine is asked `Call::ListProjects` and `Call::GlobalOrchestratorSettings` at once, all machines in parallel, waiting at most 5 s (`LOOK_WAIT`).
-  - A machine that refuses either with an unknown command is listed with `problem: "precisa atualizar o pinned"`, and its projects still list when `ListProjects` answered. A machine that does not answer in time gets `problem: "não respondeu"`, and another refusal its text. Neither fails the call.
+  - Each online machine is asked `Call::ListProjects` and `Call::GlobalOrchestratorSettings` at once, all machines in parallel, waiting at most 5 s (`LOOK_WAIT`). The asking machine's own settings wait 10 s (`HOST_WAIT`), as in the host check, because they decide whether it may ask.
+  - A machine that refuses any of its calls with an unknown command is listed with `problem: "precisa atualizar o pinned"`, and its projects still list when `ListProjects` answered. A machine whose `ListProjects` or `Call::Tabs` does not answer in time gets `problem: "não respondeu"`, and another refusal of those its text. A missing settings answer alone is no problem. None of these fails the call.
   - The hub keeps each machine's last project list in memory (`Account::listed`). A machine that does not answer, and an offline machine, show those projects, an offline one with `online: false` and `captain: "nenhum"`.
 - `ReadCaptain` reads the tabs as `Overview` does, finds the Capitão with `captain_tab`, and reads its conversation with `Call::Thread { from: 0 }` (`reading::DEFAULT_ITEMS` items). Every node answers both calls, so a machine too old for the relay can still be read.
 - An older hub answers any of them with `this hub runs pinned <v>, which can't answer that: unknown variant ...`, and `is_unknown_command` is true for it. The node falls back to this machine alone for `projects` and `waiting`, and answers `o hub ou a máquina precisa atualizar o pinned` for `send_to_captain` and `read_captain` (`needs_update`). Test: `a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command`.
@@ -180,6 +180,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 1. `local_project`: when `machine` is absent or names this machine (`is_this_machine`: its hub id or its hostname, with or without `@`), and `project` is a known project folder, `<this machine>:<path>`, or the `repo` of a local project, it is this machine's.
 2. Otherwise `remote_checkout` asks the hub for `Overview`. `<machine>:<path>` splits into a folder and a machine, and a `machine` argument wins over the prefix. It keeps the checkouts whose project `key` or `repo`, or whose own `path`, is `project`, on the named machine (its id, or its name in any case). One checkout, or one online checkout among several, wins. Several online checkouts ask for `machine`. A folder the overview does not list goes to the named machine, its name turned into its id through `machines`.
 3. Without the hub's overview only `<machine id>:<path>`, or an absolute path with `machine`, names a checkout.
+4. A path is absolute when macOS, Linux or Windows would read it so (`/…`, `\\…`, `C:\…`, `C:/…`), whatever this machine runs, so `<machine>:C:\w\site` names a folder on a Windows machine from a Mac. A machine whose name is one letter can't be a `<machine>:` prefix, because it reads as a drive.
 
 ## 7. The delivery primitive and the ledger
 
@@ -280,7 +281,9 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 - `local_project` prefers this machine when `machine` is absent. The global prompt tells the orchestrator to pass `machine` when `projects` lists more than one checkout, per the routing rule (running Capitão, then own machine, then first online).
 - A Capitão whose session ends mid-turn with no Done or Failed hook keeps its message `in_flight`. Once it runs again it reads `trabalhando`, and a message it started still makes the next one queue, until its next turn ends.
 - The hub keeps each machine's project list in memory only. After a hub restart, an offline machine is in `machines` with no projects until it comes online and an overview lists them.
-- Every `projects`, `waiting`, and `send_to_captain` or `read_captain` for another machine runs one overview: two calls to each online machine, plus `Call::Tabs` for one that has not reported tabs. Calls queue behind a machine's other calls, so a busy machine may show its last project list with `não respondeu`.
+- Every `projects` and `waiting`, and every `send_to_captain` or `read_captain` for another machine, runs one overview: `ListProjects` and `GlobalOrchestratorSettings` to each online machine, plus `Call::Tabs` for one that has not reported tabs. A `send_to_captain` or `read_captain` then asks each online machine's settings once more for the host check. Calls queue behind a machine's other calls, so a busy machine may show its last project list with `não respondeu`.
+- The hub refuses a non-host machine's `Overview` only after the overview's calls, since it reads the host from their settings answers. The refused machine gets no projects, but every machine answered the calls.
+- A machine computes its tab views and sends them in two steps (`emit_tabs`), so two threads that emit at once may deliver the older views last. The hub then holds a stale `orchestrator_turn` or `status` until the machine's next emit, for example the Capitão's next hook. `hand_to` decides from the machine's own tabs, so routing is unaffected. This predates the global orchestrator.
 - A report delivered on the host carries the host's hostname as `machine_name`, and a relayed one the hub's name for the machine. They differ when the machine was renamed on the hub.
 
 ## PR
