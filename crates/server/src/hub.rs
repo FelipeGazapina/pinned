@@ -4,7 +4,9 @@ use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
+use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::taste::Tastes;
+use pinned_core::wire::BOX_USD_PER_HOUR;
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
@@ -21,6 +23,7 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+const MAX_RECORDS_PER_CALL: usize = 500;
 /// A run may clone a large repository before its session starts.
 pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
 
@@ -515,12 +518,53 @@ impl Hub {
                 let _held = account.tastes.lock().await;
                 return json(self.db.import_tastes(account.id, &tastes).await?);
             }
+            HubCall::RecordTasks { .. } => return Err("only a machine records the tasks it ran".into()),
+            HubCall::DelegationStats { days } => {
+                let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
+                let now = pinned_core::connectors::unix_millis();
+                let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
+                let records = self.db.task_records(account.id, since).await?;
+                return json(pinned_core::delegate::aggregate(&records, now, days));
+            }
         };
         if changed {
             self.watch(account).await?;
             self.push_settings(account).await;
         }
         answer
+    }
+
+    /// Keeps what `machine` sent about the tasks it ran. A record from a machine that runs in one of
+    /// the account's boxes is box work: it is billed the box time since the box's previous task
+    /// ended (the first task, since the box was made), at the box rate. A record sent again keeps
+    /// the box time it was billed the first time.
+    pub async fn record_tasks(&self, account: &Account, machine: &str, records: Vec<TaskRecord>) -> Result<(), String> {
+        if records.len() > MAX_RECORDS_PER_CALL {
+            return Err(format!("send at most {MAX_RECORDS_PER_CALL} task records at once"));
+        }
+        let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+        let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
+        let boxed = self.db.box_created_ms(account.id, id).await?;
+        for mut record in records {
+            record.machine = machine.to_owned();
+            record.machine_name = name.clone();
+            let billed = self.db.task_record(account.id, id, &record.id).await?.filter(|old| old.usage.box_ms.is_some());
+            let box_ms = match (billed, boxed) {
+                (Some(old), _) => old.usage.box_ms,
+                (None, Some(created)) => {
+                    let before = self.db.billed_box_ms(account.id, id, &record.id).await?;
+                    Some(record.ended.saturating_sub(created).saturating_sub(before))
+                }
+                (None, None) => None,
+            };
+            if let Some(ms) = box_ms {
+                record.target = RunTarget::UpstashBox;
+                record.usage.box_ms = Some(ms);
+                record.usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+            }
+            self.db.save_task_record(account.id, id, &record).await?;
+        }
+        Ok(())
     }
 
     async fn change_tastes(&self, account: &Account, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Value, String> {

@@ -200,6 +200,14 @@ fn get_tastes(machine: State<Arc<Machine>>) -> Tastes {
     machine.local_tastes()
 }
 
+/// A signed-out app's delegation totals, from this machine's tasks, as `HubCall::DelegationStats`
+/// answers a signed-in one.
+#[tauri::command]
+fn delegation_stats(machine: State<Arc<Machine>>, days: u32) -> Result<pinned_core::delegate::DelegationStats, String> {
+    let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
+    Ok(machine.local_delegation_stats(days))
+}
+
 #[tauri::command]
 fn set_taste(machine: State<Arc<Machine>>, scope: TasteScope, patch: TastePatch) -> Result<Tastes, String> {
     machine.set_local_taste(&scope, patch)
@@ -411,6 +419,7 @@ fn main() {
             get_opacity,
             get_usage,
             get_tastes,
+            delegation_stats,
             set_taste,
             reset_taste_field,
             commands::get_settings,

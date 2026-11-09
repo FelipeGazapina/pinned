@@ -74,6 +74,9 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 | `ReadSession` | `{"cmd":"read_session","tab":"tab-2b-7","machine":"mini","items":5}`. `machine` (an id or a name) and `items` are optional. | the target node's `Call::ReadSession` answer with `id`, `machine` and `machine_name` set, or `{"state":"offline",...}` for a named offline machine. Errors: `this account has no machine <m>`, `<name> has no session <tab>`, `no online machine of this account has a session <tab>`, `<a> and <b> each have a session <tab>: pass machine`. |
 | `ReadCaptain` | `{"cmd":"read_captain","machine":"<machine id>","path":"/w/site"}` | what the node's own `read_captain` answers: `reading::read` of the Capitão with `project` set to `path`, or `{"state":"not_started",...}` when the project has no Capitão that runs or has a conversation, or `{"state":"offline",...}`. A machine id the account does not have is an error, `this account has no machine <id>` |
 
+| `RecordTasks` | `{"cmd":"record_tasks","records":[TaskRecord]}`, at most 500 | `null`. Only from a machine: a client gets `only a machine records the tasks it ran`. The hub stamps `machine` and `machine_name` from the socket and upserts by (account, machine, task id). |
+| `DelegationStats` | `{"cmd":"delegation_stats","days":7}` (1, 7 or 30) | `delegate::DelegationStats` of the account's records that ended in that period, from a client or a machine |
+
 `RelayTo` is tagged by `kind`:
 
 ```json
@@ -226,6 +229,15 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 2. Otherwise `remote_checkout` asks the hub for `Overview`. `<machine>:<path>` splits into a folder and a machine, and a `machine` argument wins over the prefix. It keeps the checkouts whose project `key` or `repo`, or whose own `path`, is `project`, on the named machine (its id, or its name in any case). One checkout, or one online checkout among several, wins. Several online checkouts ask for `machine`. A folder the overview does not list goes to the named machine, its name turned into its id through `machines`.
 3. Without the hub's overview only `<machine id>:<path>`, or an absolute path with `machine`, names a checkout.
 4. A path is absolute when macOS, Linux or Windows would read it so (`/…`, `\\…`, `C:\…`, `C:/…`), whatever this machine runs, so `<machine>:C:\w\site` names a folder on a Windows machine from a Mac. A machine whose name is one letter can't be a `<machine>:` prefix, because it reads as a drive.
+
+### Delegation metrics
+
+Every delegated task leaves a `TaskRecord` (`crates/core/src/delegate/metrics.rs`) when it ends: delegator (`kind` global_orchestrator, captain, worker, session or task, with tab and project), provider, account, model, cost tier, effort, target (local, machine, box), start and end, `usage` (the limits unit's `usage::TaskUsage`: tokens in and out, `cost_usd` when known, `wall_ms`, `box_usd` and `box_ms`), `outcome` (done, failed, limit, cancelled) with `reason` and `limit` (`time` or `budget`), and `review`. The node keeps it on the task in its delegates file and sends unsent ones with `RecordTasks` from the delegate pass and on each hub connect. The hub keeps them in `delegation_tasks`.
+
+- Usage: a Claude thread child is metered from its transcript by `usage::Meter` (the limits unit), read once more just before the task settles. A headless child counts the `usage` of its stream's `result` / `turn.completed` lines; only Claude prints a cost there, so Cursor and Codex records have `cost_usd: None`.
+- Box work: a record from a machine that runs in one of the account's boxes is billed the box time since that box's previous task ended (the first task: since the box was made), at `BOX_USD_PER_HOUR`. A record sent again keeps that figure.
+- Accepted or redone: `task_review(taskId, verdict, note?)` sets it. pinned sets it by itself in two cases and never over the delegator's verdict: the pull request a task's thread watched merged (accepted), and the same caller starting a task with the same title again (the newest earlier one becomes redone).
+- `delegation_stats(days?)` (every seat but a delegated child, the global orchestrator included) answers `DelegationStats::brief`: per model runs, `doneRate`, `medianMinutes`, `medianUsd`, `stoppedByLimit`, accepted and redone, plus `scope` (`every machine of the account`, or `this machine` without a hub or with one too old). `task_review` goes to whoever can delegate.
 
 ## 7. The delivery primitive and the ledger
 

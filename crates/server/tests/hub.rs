@@ -4293,3 +4293,101 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
     let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
     assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
 }
+
+fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {
+    let mut record = json!({
+        "id": id, "machine": "spoofed", "title": format!("task {id}"),
+        "delegator": { "kind": "captain", "tab": "tab-1", "project": "github.com/acme/site", "project_name": "site" },
+        "provider": "claude", "account": "claude", "model": model, "started": ended - minutes * 60_000, "ended": ended,
+        "usage": { "tokens_in": 1000, "tokens_out": 100, "wall_ms": minutes * 60_000 },
+        "outcome": outcome,
+    });
+    if let Some(cost) = cost {
+        record["usage"]["cost_usd"] = json!(cost);
+    }
+    if outcome == "limit" {
+        record["limit"] = json!("time");
+    }
+    record
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+#[test]
+fn an_accounts_delegated_task_records_and_totals_reach_only_that_account() {
+    let hub = TestHub::start("iso_delegation");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, |_| RawReply::Ok(Value::Null));
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let now = now_ms();
+    let stats = |days: u32| json!({ "cmd": "delegation_stats", "days": days });
+
+    let anas = json!([task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now), task_record("task-2", "claude-opus-5-5", "limit", 120, Some(6.0), now)]);
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": anas })), Ok(Value::Null));
+    let bobs = json!([task_record("task-1", "glm-5.3", "failed", 3, None, now)]);
+    assert_eq!(bob_raw.ask(json!({ "cmd": "record_tasks", "records": bobs })), Ok(Value::Null), "the same task id on bob's machine is bob's own");
+    assert_eq!(ana.hub(json!({ "cmd": "record_tasks", "records": [] })), Err("only a machine records the tasks it ran".into()));
+
+    let ana_stats = ana.hub(stats(7)).unwrap();
+    assert_eq!(
+        json!([ana_stats["totals"]["runs"], ana_stats["totals"]["limited"], ana_stats["totals"]["cost_usd"], ana_stats["by_model"][0]["key"], ana_stats["by_model"][0]["limits"]]),
+        json!([2, 1, 7.5, "claude-opus-5-5", { "time": 1 }])
+    );
+    assert_eq!(
+        json!([ana_stats["slowest"][0]["id"], ana_stats["slowest"][0]["machine"], ana_stats["slowest"][0]["machine_name"]]),
+        json!(["task-2", ana_machine.id, "ana-mac"]),
+        "the hub names the machine that sent it"
+    );
+    assert!(!ana_stats.to_string().contains("glm-5.3"), "bob's task is in ana's totals: {ana_stats}");
+    let bob_stats = bob.hub(stats(30)).unwrap();
+    assert_eq!((bob_stats["totals"]["runs"].as_u64(), bob_stats["totals"]["failed"].as_u64()), (Some(1), Some(1)));
+    assert!(!bob_stats.to_string().contains("opus"), "ana's tasks are in bob's totals: {bob_stats}");
+    assert_eq!(bob_raw.ask(stats(7)).unwrap()["totals"], bob.hub(stats(7)).unwrap()["totals"], "bob's machine reads bob's totals");
+    assert_eq!(ana.hub(stats(2)), Err("days must be 1, 7 or 30, not 2".into()));
+
+    let mut accepted = task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now);
+    accepted["review"] = json!({ "verdict": "accepted", "at": now });
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": [accepted] })), Ok(Value::Null));
+    let again = ana.hub(stats(7)).unwrap();
+    assert_eq!((again["totals"]["runs"].as_u64(), again["totals"]["accepted"].as_u64()), (Some(2), Some(1)), "a record sent again replaces the first");
+    assert_eq!(bob.hub(stats(7)).unwrap()["totals"]["accepted"], 0);
+    let old = task_record("task-3", "claude-opus-5-5", "done", 10, None, now - 8 * 24 * 60 * 60 * 1000);
+    ana_raw.ask(json!({ "cmd": "record_tasks", "records": [old] })).unwrap();
+    assert_eq!((ana.hub(stats(7)).unwrap()["totals"]["runs"].as_u64(), ana.hub(stats(30)).unwrap()["totals"]["runs"].as_u64()), (Some(2), Some(3)));
+}
+
+#[test]
+fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() {
+    let hub = TestHub::start("delegation_box");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let first = task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 20 * 60_000);
+    let second = task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first.clone(), second] })).unwrap();
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first] })).unwrap();
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
+    let usd = stats["totals"]["box_usd"].as_f64().unwrap();
+    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}

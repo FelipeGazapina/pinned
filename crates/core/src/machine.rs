@@ -20,6 +20,9 @@ use std::time::{Duration, Instant, SystemTime};
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
+/// Task records sent to the hub in one call.
+const RECORDS_PER_SEND: usize = 100;
+const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
@@ -453,6 +456,9 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
+    sending_records: AtomicBool,
+    /// After the hub refused records, when to offer them again.
+    records_retry: Mutex<Option<Instant>>,
     threads_watched: AtomicBool,
     thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
@@ -617,6 +623,8 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
+            sending_records: AtomicBool::new(false),
+            records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
             thread_watchers: Mutex::default(),
             usage: Mutex::default(),
@@ -2847,7 +2855,10 @@ impl Machine {
             let Ok(cwd) = self.tab(&tab, |t| t.cwd.clone()) else { continue };
             for url in self.pr_watches.of(&tab) {
                 let view = workspace::run(&cwd, self.launch.path_env.as_deref(), "gh", &["pr", "view", "--json", crate::prwatch::FIELDS, "--", &url]);
-                if let Some(view) = view.ok().and_then(|v| serde_json::from_str(&v).ok()) {
+                if let Some(view) = view.ok().and_then(|v| serde_json::from_str::<Value>(&v).ok()) {
+                    if view["state"] == "MERGED" {
+                        self.accept_merged(&tab, view["number"].as_u64());
+                    }
                     self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
                 }
             }
@@ -3072,6 +3083,8 @@ impl Machine {
                 Message::TaskStatus { tab, task, id } => machine.task_status(tab, task, &id),
                 Message::TaskCancel { tab, task, id, reason } => machine.task_cancel(tab, task, &id, &reason),
                 Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
+                Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
+                Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 message => other(message),
             }
@@ -3134,6 +3147,102 @@ impl Machine {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
         }
         Ok(status.to_string())
+    }
+
+    /// Who `caller` is, as a task's record names its delegator.
+    fn delegator(&self, caller: &crate::delegate::Caller) -> crate::delegate::Delegator {
+        use crate::delegate::{Delegator, DelegatorKind};
+        if let Some(parent) = caller.task.as_deref() {
+            let project = self.delegates.get(parent).map(|t| t.delegator).unwrap_or_default();
+            return Delegator { kind: DelegatorKind::Task, tab: None, task: Some(parent.to_owned()), project: project.project, project_name: project.project_name };
+        }
+        let Some(tab) = caller.tab.as_deref() else { return Delegator::default() };
+        let Ok((role, global)) = self.tab(tab, |t| (role_of(&t.env), global::is_global(&t.env))) else { return Delegator::default() };
+        let kind = match (global, &role) {
+            (true, _) => DelegatorKind::GlobalOrchestrator,
+            (false, Some((Role::Orchestrator, _))) => DelegatorKind::Captain,
+            (false, Some((Role::Worker, _))) => DelegatorKind::Worker,
+            (false, _) => DelegatorKind::Session,
+        };
+        let folder = match (global, role) {
+            (true, _) => None,
+            (false, Some((_, project))) => Some(project),
+            (false, None) => self.project_of_tab(tab).ok(),
+        };
+        let (project, project_name) = match folder {
+            Some(folder) => {
+                let repo = git_remote(&folder).and_then(|remote| repo_key(&remote));
+                let name = repo.as_deref().and_then(repo_name).map(str::to_owned).or_else(|| folder.file_name().map(|n| n.to_string_lossy().into_owned()));
+                (Some(repo.unwrap_or_else(|| folder.display().to_string())), name)
+            }
+            None => (None, None),
+        };
+        Delegator { kind, tab: Some(tab.to_owned()), task: None, project, project_name }
+    }
+
+    /// The pull request a worker thread watched merged, so the task it ran was used.
+    fn accept_merged(&self, tab: &str, number: Option<u64>) {
+        let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return };
+        let pr = number.map_or_else(|| "its pull request".to_owned(), |n| format!("its PR #{n}"));
+        self.delegates.accept_auto(&task, format!("{pr} merged"));
+        self.send_records();
+    }
+
+    /// Sends the hub the records of tasks that ended or changed since it last took them, in the
+    /// background, one send at a time. A machine with no hub keeps them for its own totals.
+    pub(crate) fn send_records(&self) {
+        if self.hub.lock().unwrap().is_none() || self.records_retry.lock().unwrap().is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self.sending_records.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            loop {
+                let records = machine.delegates.unrecorded(RECORDS_PER_SEND);
+                if records.is_empty() {
+                    break;
+                }
+                match machine.call_hub(HubCall::RecordTasks { records: records.clone() }) {
+                    Ok(_) => machine.delegates.mark_recorded(&records),
+                    Err(e) => {
+                        eprintln!("pinned: the hub did not take {} task records: {e}", records.len());
+                        *machine.records_retry.lock().unwrap() = Some(Instant::now() + RECORDS_RETRY);
+                        break;
+                    }
+                }
+            }
+            machine.sending_records.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn task_review(&self, tab: Option<String>, task: Option<String>, id: &str, verdict: &str, note: Option<String>) -> Result<String, String> {
+        let caller = Self::require_caller(tab, task)?;
+        let verdict = crate::delegate::Verdict::parse(verdict)?;
+        let answer = self.delegates.review(&caller, id, verdict, note)?;
+        self.send_records();
+        Ok(answer.to_string())
+    }
+
+    /// The account's delegation totals when the hub keeps them, else this machine's own.
+    fn delegation_stats(&self, days: Option<u64>) -> Result<String, String> {
+        let days = crate::delegate::stats_days(days)?;
+        let from_hub = self.call_hub(HubCall::DelegationStats { days }).ok().and_then(|value| serde_json::from_value::<crate::delegate::DelegationStats>(value).ok());
+        let (stats, scope) = match from_hub {
+            Some(stats) => (stats, "every machine of the account"),
+            None => (self.local_delegation_stats(days), "this machine"),
+        };
+        let mut brief = stats.brief();
+        brief["scope"] = json!(scope);
+        Ok(brief.to_string())
+    }
+
+    /// The totals of the tasks this machine ran, for a signed-out app and a machine with no hub.
+    pub fn local_delegation_stats(&self, days: u32) -> crate::delegate::DelegationStats {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        crate::delegate::aggregate(&self.delegates.records(), now, days)
     }
 
     /// The task the tab's thread shows, while that task is still working. `runs` asks only for
@@ -3251,6 +3360,7 @@ impl Machine {
         };
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        self.delegates.describe(&task.id, self.delegator(&caller), effort.clone());
         if let Some(tab) = caller.tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
@@ -3584,6 +3694,9 @@ impl Machine {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.meter_workers();
+                if !machine.delegates.unrecorded(1).is_empty() {
+                    machine.send_records();
+                }
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
@@ -8556,6 +8669,78 @@ Have another model review a risky change before it goes ahead.";
         let transcript = transcripts.join("s-child.jsonl");
         std::fs::write(&transcript, json!({ "type": "custom-title", "customTitle": "Board check", "sessionId": "s-child" }).to_string() + "\n").unwrap();
         (m, dir, captain, task, child, transcript)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captains_finished_thread_task_reaches_the_hub_with_its_usage_and_the_stats_answer_from_there() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-record");
+        let usage = |id: &str| json!({ "type": "assistant", "message": { "id": id, "model": "claude-sonnet-5-5", "content": [{ "type": "text", "text": "Matches the boards." }], "usage": { "input_tokens": 12, "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 400, "output_tokens": 250 } } });
+        append(&transcript, &[usage("m1"), usage("m1"), usage("m2")]);
+        let rates = json!({ "claude-sonnet-5-5": { "input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6, "cache_read_input_token_cost": 0.3e-6, "cache_creation_input_token_cost": 3.75e-6 } });
+        std::fs::write(dir.join("config/usage-model-rates.json"), rates.to_string()).unwrap();
+        let kept: Arc<Mutex<Vec<crate::delegate::TaskRecord>>> = Arc::default();
+        let hub_records = kept.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RecordTasks { records } => {
+                hub_records.lock().unwrap().extend(records);
+                Ok(Value::Null)
+            }
+            HubCall::DelegationStats { days } => Ok(json!(crate::delegate::aggregate(&hub_records.lock().unwrap(), SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64, days))),
+            _ => Err("not this test's".into()),
+        }));
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        m.send_records();
+        let start = Instant::now();
+        while kept.lock().unwrap().is_empty() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let record = kept.lock().unwrap().first().cloned().expect("the finished task reached the hub");
+        assert_eq!(
+            json!([record.id, record.title, record.delegator.kind, record.delegator.tab, record.delegator.project_name, record.account, record.outcome, record.thread, record.usage.tokens_in, record.usage.tokens_out]),
+            json!([task, "Board check", "captain", captain, "app", "work", "done", child, 2 * 3412, 500]),
+            "the turn that ended is metered before the task settles, and m1's two lines count once"
+        );
+        let cost = record.usage.cost_usd.expect("priced from the rates file");
+        assert!((cost - (24.0 * 3e-6 + 6000.0 * 0.3e-6 + 800.0 * 3.75e-6 + 500.0 * 15e-6)).abs() < 1e-9, "{cost}");
+        assert!(m.delegates.unrecorded(10).is_empty(), "the hub took it");
+
+        let answer: Value = serde_json::from_str(&m.delegation_stats(None).unwrap()).unwrap();
+        assert_eq!((answer["scope"].as_str(), answer["all"]["runs"].as_u64(), answer["byModel"]["work's default"]["runs"].as_u64()), (Some("every machine of the account"), Some(1), Some(1)), "{answer}");
+        m.set_hub(Arc::new(|_| Err("this hub runs pinned 0.17.20, which can't answer that".into())));
+        let local: Value = serde_json::from_str(&m.delegation_stats(Some(30)).unwrap()).unwrap();
+        assert_eq!((local["scope"].as_str(), local["days"].as_u64(), local["all"]["runs"].as_u64()), (Some("this machine"), Some(30), Some(1)), "{local}");
+        assert_eq!(m.delegation_stats(Some(2)).unwrap_err(), "days must be 1, 7 or 30, not 2");
+
+        let review = m.task_review(Some(captain.clone()), None, &task, "accepted", Some("merged".into())).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&review).unwrap()["review"]["verdict"], "accepted");
+        assert_eq!(m.task_review(Some(captain), None, &task, "kept", None).unwrap_err(), "verdict must be accepted or redone, not \"kept\"");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_global_orchestrator_a_captain_and_a_plain_thread_each_name_themselves_as_delegator() {
+        use crate::delegate::{Caller, DelegatorKind};
+        let dir = temp("delegator");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let global = m.open_global_orchestrator().unwrap();
+        let plain = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let of = |tab: &str| {
+            let d = m.delegator(&Caller { tab: Some(tab.to_owned()), task: None });
+            (d.kind, d.project, d.project_name)
+        };
+        let site = (Some("github.com/acme/site".to_owned()), Some("site".to_owned()));
+        assert_eq!(of(&captain), (DelegatorKind::Captain, site.0.clone(), site.1.clone()));
+        assert_eq!(of(&global), (DelegatorKind::GlobalOrchestrator, None, None));
+        assert_eq!(of(&plain), (DelegatorKind::Session, site.0, site.1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// What the hook reports for `payload`, as Claude Code's hook process would send it from `tab`.
