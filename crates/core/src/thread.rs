@@ -238,6 +238,55 @@ pub fn last_reply(file: &Path) -> std::io::Result<Option<String>> {
     Ok(None)
 }
 
+/// Work a session runs in the background, which hands back to it when it ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Background {
+    Shell,
+    Agent,
+}
+
+/// What `pending_background` parses; the rest of a transcript, megabytes of it, is skipped unread.
+const BACKGROUND_MARKS: [&[u8]; 4] = [b"\"backgroundTaskId\"", b"\"isAsync\":true", b"task-notification>", b"\"TaskStop\""];
+
+/// The background shells and subagents the session started at or after `since` that have not
+/// handed back. Claude Code resumes the session with a `<task-notification>` naming each one as it
+/// ends, and `TaskStop` ends one with none. Work started before `since` died with an earlier process.
+pub fn pending_background(file: &Path, since: Option<std::time::SystemTime>) -> std::io::Result<Vec<Background>> {
+    use std::io::BufRead;
+    let mut started: Vec<(String, Background)> = vec![];
+    let mut ended = std::collections::HashSet::new();
+    for line in std::io::BufReader::new(std::fs::File::open(file)?).split(b'\n') {
+        let line = line?;
+        if !BACKGROUND_MARKS.iter().any(|mark| line.windows(mark.len()).any(|w| w == *mark)) {
+            continue;
+        }
+        let Ok(line) = serde_json::from_slice::<Value>(&line) else { continue };
+        let current = || {
+            let at = line["timestamp"].as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+            since.zip(at).is_none_or(|(since, at)| std::time::SystemTime::from(at) >= since)
+        };
+        let outcome = &line["toolUseResult"];
+        match line["type"].as_str() {
+            Some("user") if outcome["backgroundTaskId"].is_string() && current() => started.push((outcome["backgroundTaskId"].as_str().unwrap().to_owned(), Background::Shell)),
+            Some("user") if outcome["isAsync"] == true && outcome["agentId"].is_string() && current() => started.push((outcome["agentId"].as_str().unwrap().to_owned(), Background::Agent)),
+            Some("user") => ended.extend(handed_back(&result_text(&line["message"]["content"]))),
+            Some("attachment") if line["attachment"]["type"] == "queued_command" => ended.extend(handed_back(line["attachment"]["prompt"].as_str().unwrap_or_default())),
+            Some("assistant") => {
+                let blocks = line["message"]["content"].as_array().into_iter().flatten();
+                let stops = blocks.filter(|b| b["type"] == "tool_use" && b["name"] == "TaskStop");
+                ended.extend(stops.filter_map(|b| b["input"]["task_id"].as_str().map(str::to_owned)));
+            }
+            _ => {}
+        }
+    }
+    Ok(started.into_iter().filter(|(id, _)| !ended.contains(id)).map(|(_, kind)| kind).collect())
+}
+
+/// The task ids of the `<task-notification>`s in a message.
+fn handed_back(text: &str) -> Vec<String> {
+    text.split("<task-notification>").skip(1).filter_map(|notice| tag(notice, "task-id").map(str::to_owned)).collect()
+}
+
 /// A slash command as `spoken` writes one, `/name args`, unlike a prompt that starts with a path.
 fn is_command(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| word.starts_with('/') && !word[1..].contains('/'))
@@ -581,6 +630,33 @@ mod tests {
             writeln!(file, "{line}").unwrap();
         }
         read(file.path(), 0).unwrap()
+    }
+
+    #[test]
+    fn background_work_is_pending_until_its_notification_or_task_stop() {
+        use serde_json::json;
+        let pending = |lines: &[serde_json::Value], since: Option<&str>| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            let since = since.map(|t| std::time::SystemTime::from(chrono::DateTime::parse_from_rfc3339(t).unwrap()));
+            pending_background(file.path(), since).unwrap()
+        };
+        let shell = |id: &str, at: &str| json!({ "type": "user", "timestamp": at, "message": { "content": [{ "type": "tool_result", "content": format!("Command running in background with ID: {id}.") }] }, "toolUseResult": { "stdout": "", "backgroundTaskId": id } });
+        let agent = json!({ "type": "user", "timestamp": "2026-11-09T10:00:00Z", "message": { "content": [] }, "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a7" } });
+        let notice = |id: &str| format!("<task-notification>\n<task-id>{id}</task-id>\n<status>completed</status>\n</task-notification>");
+        let queued = |id: &str| json!({ "type": "attachment", "attachment": { "type": "queued_command", "prompt": notice(id), "commandMode": "task-notification" } });
+        let enqueued = |id: &str| json!({ "type": "queue-operation", "operation": "enqueue", "content": notice(id) });
+        let stop = |id: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "name": "TaskStop", "input": { "task_id": id } }] } });
+        let typed = json!({ "type": "user", "message": { "content": notice("b2") } });
+
+        let (b1, b2) = (shell("b1", "2026-11-09T10:00:00Z"), shell("b2", "2026-11-09T10:00:00Z"));
+        assert_eq!(pending(&[b1.clone(), agent.clone()], None), [Background::Shell, Background::Agent]);
+        assert_eq!(pending(&[b1.clone(), enqueued("b1")], None), [Background::Shell], "a notification still queued has not handed back");
+        assert_eq!(pending(&[b1.clone(), b2.clone(), agent.clone(), queued("b1"), queued("a7")], None), [Background::Shell]);
+        assert_eq!(pending(&[b1.clone(), b2.clone(), typed, stop("b1")], None), []);
+        assert_eq!(pending(&[b1.clone(), shell("b3", "2026-11-09T11:00:00Z")], Some("2026-11-09T10:30:00Z")), [Background::Shell], "b1 died with the process before");
     }
 
     #[test]

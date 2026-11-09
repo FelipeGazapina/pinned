@@ -249,6 +249,12 @@ struct ThreadChild<'a> {
     model: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct BackgroundWait {
+    since: Instant,
+    shells_only: bool,
+}
+
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -297,6 +303,9 @@ struct Tab {
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// Set while a worker's turn has ended with background work it started still pending: Claude
+    /// Code resumes the session when that work hands back, so the turn end is not the worker's end.
+    background_wait: Option<BackgroundWait>,
     /// The terminal's input line. Done does not clear it.
     draft: Draft,
     owes_reload: bool,
@@ -2226,7 +2235,7 @@ impl Machine {
         }
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
-            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(sem resposta)".into()), REPORT_CHARS, "read_captain has the whole message"),
+            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
         };
         // Up to the hub it may wait a minute, which the hook that ended the turn must not.
         let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
@@ -3233,6 +3242,45 @@ impl Machine {
         }
     }
 
+    /// Whether the worker's turn that just ended left background work it started pending, which
+    /// Claude Code resumes the worker with once it hands back. Notes since when the worker waits.
+    fn waits_on_background(&self, tab: &str) -> bool {
+        let started = self.tab(tab, |t| t.started).ok().flatten();
+        let pending = self.transcript(tab).ok().and_then(|file| thread::pending_background(&file, started).ok()).unwrap_or_default();
+        let wait = (!pending.is_empty()).then(|| BackgroundWait { since: Instant::now(), shells_only: pending.iter().all(|b| *b == thread::Background::Shell) });
+        let _ = self.tab(tab, |t| t.background_wait = wait);
+        if wait.is_some() {
+            self.arm_delegate_pass();
+        }
+        wait.is_some()
+    }
+
+    /// Ends the wait of a worker left waiting only on background shells and quiet for as long as a
+    /// headless child is given: a shell such as a dev server never hands back, so the reply before
+    /// it is the worker's last.
+    fn end_quiet_waits(&self, now: Instant) {
+        let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
+        let ended: Vec<(String, PathBuf)> = {
+            let mut tabs = self.tabs.lock().unwrap();
+            let ripe = tabs.iter_mut().filter(|(_, t)| t.background_wait.is_some_and(|w| w.shells_only && now.saturating_duration_since(w.since) >= quiet));
+            ripe.filter_map(|(id, t)| {
+                t.background_wait = None;
+                t.status = Some(AgentStatus::Done);
+                t.updated = Some(unix_now());
+                Some((id.clone(), role_of(&t.env)?.1))
+            })
+            .collect()
+        };
+        for (tab, project) in ended {
+            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+            if !self.settle_thread_task(&tab, &event) {
+                self.report_worker(&tab, &project, &event, Some(AgentStatus::Working));
+            }
+            self.maybe_deliver(&tab);
+            self.emit_tabs();
+        }
+    }
+
     /// The last steps of a thread's conversation, as `task_status` lists them.
     fn thread_steps(&self, tab: &str) -> Vec<thread::Item> {
         let Some(page) = self.transcript(tab).ok().and_then(|file| thread::read(&file, 0).ok()) else { return vec![] };
@@ -3340,6 +3388,7 @@ impl Machine {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.follow_headless_threads();
+                machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
@@ -3433,12 +3482,21 @@ impl Machine {
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
-            let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
+            let (before, role, waiting) = self.tab(tab, |t| (t.status, role_of(&t.env), t.background_wait.is_some())).unwrap_or_default();
+            // Claude Code's idle notice after the turn end the worker waits past.
+            if waiting && event.status == AgentStatus::NeedsInput && event.message.as_deref().is_some_and(|m| m.contains("waiting for your input")) {
+                return;
+            }
+            let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
+            let held = worker && event.status == AgentStatus::Done && self.waits_on_background(tab);
             self.record_status(tab, &event);
-            if event.status == AgentStatus::Done {
+            if held {
+                let _ = self.tab(tab, |t| t.status = Some(AgentStatus::Working));
+            } else if event.status == AgentStatus::Done {
                 self.note_question(tab);
             }
             match role {
+                Some((Role::Worker, _)) if held => {}
                 Some((Role::Worker, project)) => {
                     if !self.settle_thread_task(tab, &event) {
                         self.report_worker(tab, &project, &event, before);
@@ -3495,6 +3553,7 @@ impl Machine {
             question: None,
             held: vec![],
             turn_pending: None,
+            background_wait: None,
             draft: Draft::default(),
             owes_reload: false,
             permission_mode: None,
@@ -3523,7 +3582,7 @@ impl Machine {
             return;
         }
         self.end_session(tab);
-        let _ = self.tab(tab, |t| t.session = None);
+        let _ = self.tab(tab, |t| (t.session, t.background_wait) = (None, None));
         if let Some(task) = self.thread_task(tab, true) {
             self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
         }
@@ -3649,6 +3708,9 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            if matches!(event.status, AgentStatus::Working | AgentStatus::Failed) {
+                t.background_wait = None;
             }
             if event.status != AgentStatus::NeedsInput {
                 t.question = None;
@@ -7689,7 +7751,7 @@ while True:
         let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
         assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(reports(), ["Reply one.", "(sem resposta)", "Reply four."], "each turn's own reply, each once");
+        assert_eq!(reports(), ["Reply one.", "(no reply)", "Reply four."], "each turn's own reply, each once");
         assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
         let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
         assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
@@ -8085,6 +8147,100 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(read["conversation"]["items"][0]["text"], "Added --json; cargo test passes.", "{read}");
         assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
         assert_eq!(m.worker_count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Captain's thread child on the `work` account, with its transcript file and its folder.
+    #[cfg(unix)]
+    fn captain_with_thread_child(name: &str) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        let dir = temp(name);
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = thread_claude(&dir);
+        let config = dir.join("config");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": { "providerInstanceId": "work" } }));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, json!({ "type": "custom-title", "customTitle": "Board check", "sessionId": "s-child" }).to_string() + "\n").unwrap();
+        (m, dir, captain, task, child, transcript)
+    }
+
+    /// What the hook reports for `payload`, as Claude Code's hook process would send it from `tab`.
+    #[cfg(unix)]
+    fn hook_event(tab: &str, status: &str, transcript: &Path, prompt: Option<&str>) -> AgentEvent {
+        let payload = json!({ "session_id": "s-child", "transcript_path": transcript, "prompt": prompt });
+        AgentEvent { tab: Some(tab.into()), ..hooks::event_from(Some(status), &payload.to_string()).unwrap() }
+    }
+
+    #[cfg(unix)]
+    fn append(file: &Path, lines: &[Value]) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_that_ends_a_turn_with_a_background_shell_pending_finishes_after_the_turn_the_shell_resumes() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-background");
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let notification = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"cargo test\" completed</summary>\n</task-notification>";
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        let notices = || m.delegates.claim_notice(&captain).map(|(text, _)| text);
+
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check\n\nCompare the screens with the boards.")));
+        append(&transcript, &[
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "content": "Command running in background with ID: b1." }] }, "toolUseResult": { "backgroundTaskId": "b1" } }),
+            said("Looking at the screenshots."),
+        ]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook_event(&child, "needs-input", &transcript, None) });
+        assert_eq!((status()["workState"].as_str(), notices()), (Some("working"), None), "a turn end with the shell pending is not the end");
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.title.as_deref()), (Some(AgentStatus::Working), Some("Board check")));
+
+        append(&transcript, &[json!({ "type": "attachment", "attachment": { "type": "queued_command", "prompt": notification, "commandMode": "task-notification" } })]);
+        m.record_event(hook_event(&child, "working", &transcript, Some(notification)));
+        assert_eq!(m.view(&child).unwrap().title.as_deref(), Some("Board check"), "the resume renamed the thread");
+        append(&transcript, &[said("All four screens match the boards.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+
+        let notice = notices().expect("the task's end notice");
+        assert!(notice.contains(&format!("Delegated task {task} \"Board check\"")) && notice.contains("finished: result available"), "{notice}");
+        assert_eq!(notices(), None, "the notice came once");
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("All four screens match the boards.")));
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.title.as_deref()), (Some(AgentStatus::Done), Some("Board check")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_waiting_only_on_a_shell_ends_with_its_reply_after_30_quiet_minutes() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-quiet-shell");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        append(&transcript, &[
+            json!({ "type": "user", "message": { "content": [] }, "toolUseResult": { "backgroundTaskId": "dev" } }),
+            json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "The dev server runs on :3000." }] } }),
+        ]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.end_quiet_waits(Instant::now());
+        let state = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        assert_eq!(state()["workState"], "working");
+
+        let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
+        m.end_quiet_waits(Instant::now() + quiet);
+        assert_eq!((state()["workState"].as_str(), state()["summary"].as_str()), (Some("result_available"), Some("The dev server runs on :3000.")));
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
         let _ = std::fs::remove_dir_all(dir);
     }
 
