@@ -6623,6 +6623,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -6688,6 +6742,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -6700,7 +6785,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -6730,7 +6821,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -6756,7 +6853,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -6815,7 +6918,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -6846,6 +6949,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -6857,7 +7003,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Target2": {
@@ -13356,6 +13508,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -13421,6 +13627,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -13433,7 +13670,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -13463,7 +13706,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -13489,7 +13738,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -13543,7 +13798,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -13574,6 +13829,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
           },
@@ -17405,6 +17703,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -17470,6 +17822,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -17482,7 +17865,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -17512,7 +17901,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -17538,7 +17933,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -17597,7 +17998,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -17628,6 +18029,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -17639,7 +18083,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           }
         }
@@ -21233,6 +21683,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -21298,6 +21802,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -21310,7 +21845,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -21340,7 +21881,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -21366,7 +21913,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -21420,7 +21973,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -21451,6 +22004,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
           }
@@ -31200,7 +31796,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "captains": {
@@ -31226,7 +31828,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "projects": {
@@ -31285,7 +31893,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -31316,6 +31924,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -31327,7 +31978,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Strategy": {
@@ -31390,6 +32047,37 @@
             "required": [
               "name",
               "enabled"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ]
           },
           "TastePatch": {
@@ -31472,6 +32160,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           }
@@ -31506,7 +32248,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "captains": {
@@ -31532,7 +32280,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "projects": {
@@ -31586,7 +32340,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -31617,6 +32371,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
           },
@@ -31680,6 +32477,37 @@
             "required": [
               "name",
               "enabled"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ]
           },
           "TastePatch": {
@@ -31762,6 +32590,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           }

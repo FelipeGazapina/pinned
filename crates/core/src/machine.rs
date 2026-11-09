@@ -2415,20 +2415,13 @@ impl Machine {
         }
     }
 
-    /// The delegation limits a call from `caller` is held to, and the project it works in: its
-    /// scope's limits in the account's tastes, a project's over the Captains', narrowed by the
-    /// limits of the task the caller itself runs as.
-    fn caller_limits(&self, caller: &crate::delegate::Caller) -> Result<(taste::Limits, PathBuf), String> {
-        let (cwd, global, own_task) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (t.cwd.clone(), global::is_global(&t.env), t.task.clone()))?
-        } else {
-            let id = caller.task.clone().unwrap_or_default();
-            let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
-            (task.cwd, false, Some(id))
-        };
+    /// The delegation limits a call from `tab` is held to, and the project it works in: the
+    /// project's limits in the account's tastes over the Captains', narrowed by the limits of the
+    /// task the tab itself runs, when it is a worker.
+    fn caller_limits(&self, tab: &str) -> Result<(taste::Limits, PathBuf), String> {
+        let (cwd, own_task) = self.tab(tab, |t| (t.cwd.clone(), t.task.clone()))?;
         let project = history::project_of(&cwd);
-        let scope = if global { TasteScope::Orchestrator } else { captain_scope(&project) };
-        let limits = self.tastes().resolve(&scope).limits();
+        let limits = self.tastes().resolve(&captain_scope(&project)).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
         Ok((outer.map_or(limits, |outer| limits.narrow(outer)), project))
     }
@@ -3121,11 +3114,11 @@ impl Machine {
                 return Err(NO_PROJECT_WORK.into());
             }
         }
-        let (limits, project) = self.caller_limits(&caller)?;
-        self.check_parallel(&limits, &project)?;
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
+        let (limits, project) = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
+        self.check_parallel(&limits, &project)?;
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
         } else {
@@ -8003,7 +7996,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
-            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."] } },
+            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
         });
         let asked = Arc::new(AtomicU32::new(0));
         let (answer, count) = (account.clone(), asked.clone());
@@ -8023,7 +8016,7 @@ Send hard work, such as architecture calls or a bug whose cause is unknown, stra
 Tell the user only at the end, with the result.
 Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
-        let cap = "At most 100 workers run at once on this machine; if that blocks you, tell the user to raise it under Settings rather than working around it.";
+        let cap = "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");

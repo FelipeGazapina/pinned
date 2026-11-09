@@ -2105,7 +2105,11 @@ struct BoxAccount {
 
 impl BoxAccount {
     fn new(hub: &TestHub) -> BoxAccount {
-        let (token, account) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        BoxAccount::named(hub, "ana@acme.dev")
+    }
+
+    fn named(hub: &TestHub, email: &str) -> BoxAccount {
+        let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
         let mut client = Client::connect(&hub.url, &token);
         client.wait("hello", |f| f["type"] == "hello");
         assert_eq!(
@@ -3972,6 +3976,40 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     for (who, client) in [("ana", &mut ana), ("bob", &mut bob)] {
         assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
     }
+}
+
+#[test]
+fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
+    let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    for client in [&mut ana.client, &mut bob.client] {
+        client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    }
+    let limits = json!({ "box_budget_cents": 100, "tier": "mid", "time_limit_min": 60 });
+    let anas = ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": limits })).unwrap();
+    assert_eq!((anas["captains"]["box_budget_cents"].as_u64(), anas["captains"]["tier"].as_str()), (Some(100), Some("mid")));
+    let bobs = bob.client.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(
+        (bobs["captains"]["box_budget_cents"].as_u64(), bobs["captains"]["tier"].as_str(), bobs["captains"]["time_limit_min"].as_u64()),
+        (Some(0), Some("high"), Some(480)),
+        "ana's limits never show in bob's tastes"
+    );
+
+    let open = |client: &mut Client, budget: Option<f64>| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": budget }));
+    assert_eq!(open(&mut ana.client, Some(5.0)), Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()));
+    let anas_box = open(&mut ana.client, None).unwrap();
+    assert_eq!(anas_box["budget_usd"].as_f64(), Some(1.0), "a box with no budget named gets the account's box budget");
+    let bobs_box = open(&mut bob.client, Some(5.0)).unwrap();
+    assert_eq!(bobs_box["budget_usd"].as_f64(), Some(5.0), "ana's box budget never bounds bob's box");
+    let machine = anas_box["machine"].as_str().unwrap();
+    assert_eq!(
+        ana.client.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "adding funds stops at the box budget too"
+    );
+    let bobs_machine = bobs_box["machine"].as_str().unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "extend_box", "machine": bobs_machine, "extra_usd": 1.0 })).unwrap()["budget_usd"].as_f64(), Some(6.0));
 }
 
 /// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.
