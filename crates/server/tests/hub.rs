@@ -4143,8 +4143,10 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
         std::fs::create_dir_all(project).unwrap();
     }
     let ana_thread = running_tab(&mut ana, &ana_m, &ana_dir.join("secret-project").display().to_string());
+    hook(&ana_dir, json!({ "kind": "agent", "status": "working", "tab": ana_thread }));
     hook(&ana_dir, json!({ "kind": "agent", "status": "needs-input", "tab": ana_thread, "message": "Ship the unreleased pricing page?" }));
     let bob_thread = running_tab(&mut bob, &bob_m, &bob_dir.join("own-project").display().to_string());
+    hook(&bob_dir, json!({ "kind": "agent", "status": "working", "tab": bob_thread }));
     hook(&bob_dir, json!({ "kind": "agent", "status": "needs-input", "tab": bob_thread, "message": "Rename the button?" }));
 
     let ana_tool = |tool: Value| session_tool(&ana_dir, &ana_global, tool);
