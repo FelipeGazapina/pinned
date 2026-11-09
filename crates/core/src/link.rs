@@ -115,6 +115,8 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
         waking.sync_now.store(true, Ordering::SeqCst);
         sync_thread.unpark();
     }));
+    let calling = shared.clone();
+    machine.set_hub(Arc::new(move |call| calling.call(call)));
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
         events.send(&MachineFrame::Event { event: event.clone() });

@@ -3,6 +3,7 @@ use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
+use pinned_core::global_orchestrator::RelayTo;
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
@@ -884,6 +885,38 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();
+}
+
+#[test]
+fn a_node_reads_the_hubs_refusal_of_the_global_orchestrator_calls_as_an_unknown_command() {
+    let hub = TestHub::start("global_orchestrator");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let dir = temp("global-orchestrator");
+    let (machine, machine_token) = account::register_machine(&url, &token, "mini", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token: machine_token.clone() };
+    creds.save(&dir).unwrap();
+    let mut node = Node::start(&dir, creds);
+    wait_for("the machine online", || node.online());
+    let link = node.link.as_ref().unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+
+    let to = RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orquestrador".into(), busy: None };
+    let relay = link.call_hub(HubCall::Relay { request_id: "r-1".into(), to }).unwrap_err();
+    assert_eq!(relay, format!("this hub runs pinned {version}, which can't answer that yet: the global orchestrator's relay is not on the hub"));
+    assert!(link::is_unknown_command(&relay));
+    let overview = link.call_hub(HubCall::Overview).unwrap_err();
+    assert_eq!(overview, format!("this hub runs pinned {version}, which can't answer that yet: the global orchestrator's overview is not on the hub"));
+    assert!(link::is_unknown_command(&overview));
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(client.hub(json!({ "cmd": "overview" })), Err(overview));
+
+    // An older hub knows neither call, and a node reads its answer the same way.
+    let older = machine_result(&url, &machine_token, json!({ "cmd": "relay_from_a_later_app" })).unwrap_err();
+    assert!(older.starts_with(&format!("this hub runs pinned {version}, which can't answer that: unknown variant `relay_from_a_later_app`")), "{older}");
+    assert!(link::is_unknown_command(&older));
+    node.kill();
 }
 
 #[test]

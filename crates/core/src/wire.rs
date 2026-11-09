@@ -12,6 +12,7 @@ use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
+use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, RelayTo};
 use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
@@ -116,6 +117,10 @@ pub struct TabView {
     /// delegated task this tab reopened. The sidebar nests the tab under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<TabId>,
+    /// The tab is the account's global orchestrator, the chat above every project's Capitão. Its
+    /// `role` is empty, so an older app shows it as a plain thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub orchestrator_global: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -239,6 +244,31 @@ pub enum Call {
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
     OpenOrchestrator { path: String },
+    /// `global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,
+    /// opening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt
+    /// when it is stopped, else queued until it is idle, or refused as busy when `busy` (else this
+    /// machine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.
+    Enqueue {
+        path: String,
+        text: String,
+        request_id: String,
+        /// The orchestrator's name; blank takes this machine's.
+        #[serde(default)]
+        sender: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<BusyPolicy>,
+    },
+    /// `global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global
+    /// orchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A
+    /// repeat of `request_id` answers the first outcome and types nothing.
+    OrchestratorReport { request_id: String, report: CaptainReport },
+    /// The id of this machine's global orchestrator tab: the one already open, else a new one, not
+    /// yet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.
+    OpenGlobalOrchestrator,
+    /// `global_orchestrator::Settings` of this machine.
+    GlobalOrchestratorSettings,
+    /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
+    SetGlobalOrchestratorSettings { settings: global::Settings },
     /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
     /// latest ones for an empty query.
     MemorySearch {
@@ -879,6 +909,13 @@ pub enum HubCall {
     DenyAgent { request: String },
     /// `null`. Ends the agent's access at once: its tokens stop working.
     RevokeAgent { id: String },
+    /// From a machine: `global_orchestrator::Handoff` of the machine `to` names. Carries a message
+    /// from the global orchestrator to a Capitão on another machine, or a Capitão's report up to the
+    /// account's global orchestrator. `request_id` makes a repeat answer the first outcome.
+    Relay { request_id: String, to: RelayTo },
+    /// `global_orchestrator::Overview`: the account's projects on every machine, and what waits on
+    /// the user.
+    Overview,
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1123,6 +1160,7 @@ mod tests {
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             role: None,
             spawned_by: None,
+            orchestrator_global: false,
         }
     }
 
@@ -1135,6 +1173,45 @@ mod tests {
         let plain = serde_json::to_value(tab_view()).unwrap();
         assert!(plain.get("spawned_by").is_none(), "a tab nobody started sends no spawned_by: {plain}");
         assert_eq!(serde_json::from_value::<TabView>(plain).unwrap().spawned_by, None, "an older machine's tab reads as started by nobody");
+    }
+
+    #[test]
+    fn only_the_global_orchestrators_tab_says_so_and_an_older_tab_reads_as_not_it() {
+        let global = TabView { orchestrator_global: true, ..tab_view() };
+        let sent = serde_json::to_value(&global).unwrap();
+        assert_eq!((&sent["orchestrator_global"], &sent["role"]), (&json!(true), &Value::Null));
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), global);
+        let plain = serde_json::to_value(tab_view()).unwrap();
+        assert!(plain.get("orchestrator_global").is_none(), "{plain}");
+        assert!(!serde_json::from_value::<TabView>(plain).unwrap().orchestrator_global);
+    }
+
+    #[test]
+    fn global_orchestrator_calls_keep_their_wire_shape() {
+        round_trip(
+            Call::Enqueue { path: "/w/site".into(), text: "Ship the form.".into(), request_id: "r-1".into(), sender: "Orquestrador".into(), busy: Some(BusyPolicy::Refuse) },
+            json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship the form.", "request_id": "r-1", "sender": "Orquestrador", "busy": "refuse" }),
+        );
+        let bare: Call = serde_json::from_value(json!({ "cmd": "enqueue", "path": "/w/site", "text": "x", "request_id": "r-2" })).unwrap();
+        assert_eq!(bare, Call::Enqueue { path: "/w/site".into(), text: "x".into(), request_id: "r-2".into(), sender: String::new(), busy: None });
+        round_trip(Call::OpenGlobalOrchestrator, json!({ "cmd": "open_global_orchestrator" }));
+        round_trip(Call::GlobalOrchestratorSettings, json!({ "cmd": "global_orchestrator_settings" }));
+        let partial: Call = serde_json::from_value(json!({ "cmd": "set_global_orchestrator_settings", "settings": { "name": "Almirante", "host": true } })).unwrap();
+        assert_eq!(partial, Call::SetGlobalOrchestratorSettings { settings: global::Settings { name: "Almirante".into(), host: true, ..global::Settings::default() } });
+        let report = CaptainReport { machine: "m1".into(), machine_name: "MacBook".into(), project: "site".into(), path: "/w/site".into(), tab: "tab-1a-3".into(), text: "Done.".into(), answers: vec!["r-1".into()] };
+        round_trip(
+            Call::OrchestratorReport { request_id: "report-1".into(), report: report.clone() },
+            json!({ "cmd": "orchestrator_report", "request_id": "report-1", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } }),
+        );
+        round_trip(
+            MachineFrame::Call { id: 9, call: HubCall::Relay { request_id: "r-1".into(), to: RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orquestrador".into(), busy: None } } },
+            json!({ "type": "call", "id": 9, "call": { "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": "m2", "path": "/w/site", "text": "Ship it.", "sender": "Orquestrador" } } }),
+        );
+        round_trip(
+            MachineFrame::Call { id: 10, call: HubCall::Relay { request_id: "report-1".into(), to: RelayTo::Orchestrator { report } } },
+            json!({ "type": "call", "id": 10, "call": { "cmd": "relay", "request_id": "report-1", "to": { "kind": "orchestrator", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } } } }),
+        );
+        round_trip(ClientFrame::Hub { id: 3, call: HubCall::Overview }, json!({ "type": "hub", "id": 3, "call": { "cmd": "overview" } }));
     }
 
     #[test]

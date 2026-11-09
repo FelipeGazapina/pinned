@@ -92,6 +92,9 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());
     outbound.insert("AgentRequest".into(), schemas::<AgentRequest>());
     outbound.insert("AgentRedirect".into(), schemas::<AgentRedirect>());
+    outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
+    outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
+    outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),

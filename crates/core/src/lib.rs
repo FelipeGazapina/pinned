@@ -13,6 +13,7 @@ pub mod favicon;
 pub mod files;
 pub mod fsx;
 pub mod github;
+pub mod global_orchestrator;
 pub mod graph;
 pub mod history;
 pub mod hooks;

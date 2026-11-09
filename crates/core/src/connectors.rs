@@ -5636,6 +5636,7 @@ mod tests {
             stats: None,
             role: None,
             spawned_by: None,
+            orchestrator_global: false,
         }
     }
 

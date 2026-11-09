@@ -140,6 +140,12 @@ fn frame<T: Serialize>(frame: &T) -> String {
     serde_json::to_string(frame).unwrap()
 }
 
+/// What the hub answers a global orchestrator call it can't serve yet. It reads as an unknown
+/// command, as an older hub's answer does, so a machine treats both alike.
+pub fn not_yet(call: &str) -> String {
+    format!("this hub runs pinned {}, which can't answer that yet: the global orchestrator's {call} is not on the hub", env!("CARGO_PKG_VERSION"))
+}
+
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
@@ -471,6 +477,8 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
+            HubCall::Relay { .. } => return Err(not_yet("relay")),
+            HubCall::Overview => return Err(not_yet("overview")),
         };
         if changed {
             self.watch(account).await?;
