@@ -2115,6 +2115,7 @@ document.querySelector("#settings-nav .links").addEventListener("click", (e) => 
 settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
   { title: "Keep this Mac awake", terms: ["sleep display power"] },
   { title: "Capitão and workers", terms: ["orchestration cost style economical balanced quality max workers orchestrator capitao"] },
+  { title: "Orquestrador global", terms: ["global orchestrator orquestrador almirante comandante host machine busy queue refuse reports relatórios memory memória name nome"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
