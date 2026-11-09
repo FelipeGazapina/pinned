@@ -3507,6 +3507,7 @@ fn a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients
     assert_eq!(bob.call(&id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })).err(), None);
 
     let mut tab = captain_tab("tab-1", "/b/secret-project");
+    tab["question"] = json!("Ship the unreleased pricing page?");
     tab["orchestrator_turn"] = json!(true);
     tab["queued"] = json!(2);
     for event in [
@@ -3529,6 +3530,7 @@ fn a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients
 
     assert_eq!(mentioning(&mut ana, &id), Vec::<Value>::new(), "ana got no frame about bob's machine");
     assert_eq!(mentioning(&mut ana, "c2VjcmV0"), Vec::<Value>::new(), "nor its output");
+    assert_eq!(mentioning(&mut ana, "unreleased pricing"), Vec::<Value>::new(), "nor what its sessions ask");
     let mut late = Client::connect(&url, &ana_token);
     let hello = late.wait("hello", |f| f["type"] == "hello");
     assert_eq!((&hello["machines"], &hello["tabs"]), (&json!([]), &json!({})), "a client that connects later sees none of bob's machines or tabs");
@@ -3563,7 +3565,9 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
         }
     };
     let ana_raw = RawMachine::start(&url, &ana_machine_token, host("/a/site"));
-    let bob_tabs = json!({ "kind": "tabs", "tabs": [captain_tab("tab-9", "/b/secret-project")] });
+    let mut asking = captain_tab("tab-9", "/b/secret-project");
+    asking["question"] = json!("Ship the unreleased pricing page?");
+    let bob_tabs = json!({ "kind": "tabs", "tabs": [asking] });
     let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![bob_tabs], host("/b/secret-project"));
     ana.wait_machines(&[("ana-mini", true)]);
     bob.wait_machines(&[("bob-mac", true)]);
@@ -3571,10 +3575,11 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
 
     let bobs = bob.hub(json!({ "cmd": "overview" })).unwrap();
     assert!(bobs.to_string().contains("/b/secret-project") && bobs.to_string().contains(&bob_m), "bob's own overview lists his project: {bobs}");
+    assert!(bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's question waits on bob: {bobs}");
     for (from, overview) in [("ana's client", ana.hub(json!({ "cmd": "overview" }))), ("ana's host", ana_raw.ask(json!({ "cmd": "overview" })))] {
         let overview = overview.unwrap().to_string();
         assert!(overview.contains("/a/site") && overview.contains(&ana_m), "{from}: {overview}");
-        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m), "{from} sees none of bob's: {overview}");
+        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing"), "{from} sees none of bob's: {overview}");
     }
 
     let none = Err(format!("this account has no machine {bob_m}"));
