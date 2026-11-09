@@ -3,7 +3,7 @@ use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
-use pinned_core::global_orchestrator::RelayTo;
+use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
@@ -888,7 +888,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
 }
 
 #[test]
-fn a_node_reads_the_hubs_refusal_of_the_global_orchestrator_calls_as_an_unknown_command() {
+fn a_node_reads_the_hubs_refusal_of_the_global_orchestrator_overview_as_an_unknown_command() {
     let hub = TestHub::start("global_orchestrator");
     let url = hub.url.clone();
     let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
@@ -901,10 +901,6 @@ fn a_node_reads_the_hubs_refusal_of_the_global_orchestrator_calls_as_an_unknown_
     let link = node.link.as_ref().unwrap();
     let version = env!("CARGO_PKG_VERSION");
 
-    let to = RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orquestrador".into(), busy: None };
-    let relay = link.call_hub(HubCall::Relay { request_id: "r-1".into(), to }).unwrap_err();
-    assert_eq!(relay, format!("this hub runs pinned {version}, which can't answer that yet: the global orchestrator's relay is not on the hub"));
-    assert!(link::is_unknown_command(&relay));
     let overview = link.call_hub(HubCall::Overview).unwrap_err();
     assert_eq!(overview, format!("this hub runs pinned {version}, which can't answer that yet: the global orchestrator's overview is not on the hub"));
     assert!(link::is_unknown_command(&overview));
@@ -2947,6 +2943,7 @@ fn an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in()
 
 enum RawReply {
     Ok(Value),
+    Err(String),
     /// Reads the call, then drops the connection without answering, as a machine that crashed mid-call.
     Hangup,
 }
@@ -2988,6 +2985,7 @@ impl RawMachine {
                     log.lock().unwrap().push(frame["call"].clone());
                     match answer(&frame["call"]) {
                         RawReply::Ok(value) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "ok": value }).to_string())).unwrap(),
+                        RawReply::Err(err) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "err": err }).to_string())).unwrap(),
                         RawReply::Hangup => {
                             if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
                                 let _ = stream.shutdown(Shutdown::Both);
@@ -3076,4 +3074,169 @@ fn a_lost_answer_is_reported_as_unknown_and_never_acted_on_twice() {
     back_online();
     assert_eq!(tool(&url, &http, &access, "send_message", message).unwrap()["delivered"], "unknown");
     assert_eq!(raw.calls("prompt"), 1, "the retry did not type the message again");
+}
+
+/// Two machines of one account: `mini` hosts the global orchestrator and has its tab open, `mac`
+/// has a project `site`. Each records every claude launch.
+struct Fleet {
+    hub: TestHub,
+    token: String,
+    client: Client,
+    mac: Node,
+    mini: Node,
+    mac_dir: PathBuf,
+    mini_dir: PathBuf,
+    mac_id: String,
+    mini_id: String,
+    site: String,
+    global: String,
+}
+
+impl Fleet {
+    fn start(name: &str) -> Fleet {
+        let hub = TestHub::start(name);
+        let url = hub.url.clone();
+        let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+        let mut client = Client::connect(&url, &token);
+        client.wait("hello", |f| f["type"] == "hello");
+        let (mac_dir, mini_dir) = (temp(&format!("{name}-mac")), temp(&format!("{name}-mini")));
+        let (mac_creds, mini_creds) = (pair(&url, &mut client, "mac", &mac_dir), pair(&url, &mut client, "mini", &mini_dir));
+        let (mac_id, mini_id) = (mac_creds.machine_id.clone(), mini_creds.machine_id.clone());
+        let (mac, mini) = (Node::start(&mac_dir, mac_creds), Node::start(&mini_dir, mini_creds));
+        for dir in [&mac_dir, &mini_dir] {
+            std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nprintf '%s\\n' \"$@\" >> \"$0.$PINNED_TAB.args\"\nexec cat\n").unwrap();
+        }
+        client.wait_machines(&[("mac", true), ("mini", true)]);
+        mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+        client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+        let global = client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+        std::fs::create_dir_all(mac_dir.join("site")).unwrap();
+        let site = mac_dir.join("site").display().to_string();
+        Fleet { hub, token, client, mac, mini, mac_dir, mini_dir, mac_id, mini_id, site, global }
+    }
+
+    /// What the global orchestrator's tab gets from `send_to_captain`, through mini's session socket.
+    fn send_to_captain(&self, project: &str, message: &str, request_id: &str) -> Result<Value, String> {
+        session_tool(&self.mini_dir, &self.global, json!({ "name": "send_to_captain", "project": project, "message": message, "request_id": request_id }))
+    }
+
+    fn set_host(&mut self, machine: &str, host: bool) {
+        let machine = machine.to_owned();
+        self.client.call(&machine, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": host } })).unwrap();
+    }
+}
+
+/// A session's MCP tool call on the node's socket, answered as the tool's text read as JSON.
+fn session_tool(dir: &Path, tab: &str, tool: Value) -> Result<Value, String> {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", json!({ "kind": "project", "tab": tab, "tool": tool })).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    let reply: Result<String, String> = serde_json::from_str(&reply).unwrap();
+    reply.map(|text| serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+/// Each argument of every claude launch in `tab`, one per line.
+fn launches(dir: &Path, tab: &str) -> String {
+    std::fs::read_to_string(dir.join(format!("claude.{tab}.args"))).unwrap_or_default()
+}
+
+fn wait_launch(dir: &Path, tab: &str, line: &str) {
+    wait_for(&format!("{tab} to start on {line:?}"), || launches(dir, tab).lines().any(|l| l == line));
+}
+
+fn captain(machine: &str, path: &str, text: &str) -> HubCall {
+    HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orquestrador".into(), busy: None } }
+}
+
+fn report(tab: &str, path: &str, text: &str) -> HubCall {
+    let report = CaptainReport { machine: "m-lie".into(), machine_name: "Impostor".into(), project: "site".into(), path: path.into(), tab: tab.into(), text: text.into(), answers: vec![] };
+    HubCall::Relay { request_id: format!("report:{text}"), to: RelayTo::Orchestrator { report } }
+}
+
+#[test]
+fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back() {
+    let mut fleet = Fleet::start("relay");
+    let (mac, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let project = format!("{mac}:{}", fleet.site);
+
+    let sent = fleet.send_to_captain(&project, "Ship the form.", "r-1").unwrap();
+    let capitao = sent["tab"].as_str().unwrap().to_owned();
+    assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
+    wait_launch(&mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    assert_eq!(fleet.send_to_captain(&project, "Ship the form.", "r-1"), Ok(sent.clone()), "a repeat answers the first outcome");
+    let queued = fleet.send_to_captain(&project, "Also the footer.", "r-2").unwrap();
+    assert_eq!(queued, json!({ "outcome": "na_fila", "tab": capitao, "position": 1 }));
+    let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orquestrador" } });
+    assert_eq!(fleet.client.hub(to_site("From the phone.")), Ok(json!({ "outcome": "na_fila", "tab": capitao, "position": 2 })), "a signed-in client relays too");
+    assert_eq!(launches(&mac_dir, &capitao).matches("[Orquestrador]").count(), 1, "the Capitão started once, and nothing was typed into it");
+
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    assert_eq!(
+        mac_link.call_hub(captain(&mac, &fleet.site, "Delete the repo.")),
+        Err("mac does not host the global orchestrator (mini does), so it can't send to a Capitão".into())
+    );
+
+    fleet.client.wait("mac's Capitão on the hub", |f| {
+        f["type"] == "event" && f["machine"] == mac && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == capitao && t["role"] == "orchestrator")
+    });
+    let plain = fleet.client.call(&mac, json!({ "cmd": "open_tab", "path": fleet.site, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    fleet.client.wait("mac's plain tab on the hub", |f| {
+        f["type"] == "event" && f["machine"] == mac && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == plain)
+    });
+    let not_captain = |tab: &str, path: &str| Err(format!("tab {tab} on mac is not the Capitão of {path}, so it can't report to the global orchestrator"));
+    assert_eq!(mac_link.call_hub(report(&plain, &fleet.site, "I am the Capitão.")), not_captain(&plain, &fleet.site));
+    let other = mac_dir.display().to_string();
+    assert_eq!(mac_link.call_hub(report(&capitao, &other, "Elsewhere.")), not_captain(&capitao, &other));
+    let mini_link = fleet.mini.link.as_ref().unwrap();
+    assert_eq!(
+        mini_link.call_hub(report(&capitao, &fleet.site, "From mini.")),
+        Err(format!("tab {capitao} on mini is not the Capitão of {}, so it can't report to the global orchestrator", fleet.site))
+    );
+
+    let reported = mac_link.call_hub(report(&capitao, &fleet.site, "Halfway: the form ships today.")).unwrap();
+    assert_eq!(reported, json!({ "outcome": "iniciado", "tab": fleet.global }));
+    wait_launch(&mini_dir, &fleet.global, &format!("[pinned] Capitão site (mac) [{mac} {capitao}]: Halfway: the form ships today."));
+
+    fleet.set_host(&mac, true);
+    assert_eq!(fleet.send_to_captain(&project, "Ship it.", "r-3"), Err("mac and mini each host the global orchestrator: keep it on one machine in its settings".into()));
+    fleet.set_host(&mac, false);
+    let mini = fleet.mini_id.clone();
+    fleet.set_host(&mini, false);
+    assert_eq!(fleet.send_to_captain(&project, "Ship it.", "r-4"), Err("no online machine hosts the global orchestrator: choose one in its settings".into()));
+    assert_eq!(
+        fleet.mac.link.as_ref().unwrap().call_hub(report(&capitao, &fleet.site, "Done.")),
+        Err("no online machine hosts the global orchestrator: choose one in its settings".into())
+    );
+}
+
+#[test]
+fn a_plain_session_still_cannot_reach_the_hub() {
+    let mut fleet = Fleet::start("relay_plain");
+    let mini = fleet.mini_id.clone();
+    let project = format!("{}:{}", fleet.mac_id, fleet.site);
+    let plain = fleet.client.call(&mini, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    let send = json!({ "name": "send_to_captain", "project": project, "message": "Ship it.", "request_id": "r-1" });
+    assert_eq!(session_tool(&fleet.mini_dir, &plain, send), Err("only the global orchestrator has this tool".into()));
+    assert_eq!(
+        session_tool(&fleet.mini_dir, &plain, json!({ "name": "tell_orchestrator", "text": "Done." })),
+        Err("only a project's Capitão reports to the global orchestrator".into())
+    );
+    let mini_link = fleet.mini.link.as_ref().unwrap();
+    assert_eq!(mini_link.call_hub(HubCall::Machines), Err("a machine may only forward a workflow session's callbacks".into()));
+    let started = std::fs::read_dir(&fleet.mac_dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".args")).count();
+    assert_eq!(started, 0, "nothing started on mac");
+}
+
+#[test]
+fn a_machine_too_old_for_the_relay_is_named_for_an_update() {
+    let mut fleet = Fleet::start("relay_old");
+    let (machine, machine_token) = account::register_machine(&fleet.hub.url, &fleet.token, "old", "linux").unwrap();
+    let old = RawMachine::start(&fleet.hub.url, &machine_token, |call| {
+        RawReply::Err(format!("this machine runs pinned 0.17.0, which can't answer that: unknown variant `{}`", call["cmd"].as_str().unwrap()))
+    });
+    fleet.client.wait_machines(&[("mac", true), ("mini", true), ("old", true)]);
+    let sent = fleet.send_to_captain(&format!("{}:/w/site", machine.id), "Ship it.", "r-1");
+    assert_eq!(sent, Err("old precisa atualizar o pinned".into()));
+    assert_eq!((old.calls("global_orchestrator_settings"), old.calls("enqueue")), (1, 1));
 }

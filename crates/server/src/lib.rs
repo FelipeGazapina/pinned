@@ -4,6 +4,7 @@ pub mod http;
 pub mod hub;
 pub mod mcp;
 pub mod oauth;
+pub mod relay;
 pub mod self_update;
 
 use std::net::SocketAddr;
