@@ -19,7 +19,7 @@ const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
-const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
+pub const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const STDERR_CLOSE_WAIT: Duration = Duration::from_secs(1);
