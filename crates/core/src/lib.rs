@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod agent;
 pub mod boot;
 pub mod branches;
+pub mod claude_models;
 pub mod cli;
 pub mod commands;
 pub mod connectors;

@@ -156,12 +156,16 @@ pub struct View {
     pub builtin: bool,
     #[serde(flatten)]
     pub status: Status,
+    /// The models the composer's picker offers for a Claude Code login, newest first. An older
+    /// machine sends none, and the picker falls back to its own short list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<crate::claude_models::ClaudeModel>,
 }
 
 impl View {
     pub fn new(account: Account, status: Status) -> View {
         let provider_name = if account.auth == Auth::OpenCodeGo { "OpenCode Go" } else { account.provider.spec().name };
-        View { provider_name: provider_name.into(), builtin: account.is_builtin(), account, status }
+        View { provider_name: provider_name.into(), builtin: account.is_builtin(), account, status, models: vec![] }
     }
 }
 

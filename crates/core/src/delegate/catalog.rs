@@ -1,18 +1,14 @@
 use super::*;
 
+use crate::claude_models::ClaudeModel;
+
+/// The levels `claude --effort` takes; the composer's ultracode and ultrathink are not among them.
 const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const CLAUDE_MODELS: &[(&str, &str, Cost)] = &[
-    ("claude-opus-5-5", "Opus 5.5", Cost::High),
-    ("claude-sonnet-5-5", "Sonnet 5.5", Cost::Mid),
-    ("claude-fable-5-2", "Fable 5.2", Cost::Mid),
-    ("claude-haiku-5-5", "Haiku 5.5", Cost::Low),
-    // Left Claude Code's /model menu; listed so briefs and threads that name it still run.
-    ("claude-fable-5-1", "Fable 5.1 (legacy)", Cost::Mid),
-];
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
 
 /// What a model costs to run, coarsely: routing by tier beats stale per-token prices.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum Cost {
     /// Haiku and flash models: sweeps, translations, first drafts.
     Low,
@@ -43,18 +39,26 @@ pub struct ModelChoice {
 
 pub fn provider_models(provider: Provider) -> Vec<ModelChoice> {
     match provider {
-        Provider::Claude => CLAUDE_MODELS
-            .iter()
-            .map(|(id, label, cost)| ModelChoice {
-                id: (*id).into(),
-                label: (*label).into(),
-                efforts: CLAUDE_EFFORT.iter().map(|e| (*e).into()).collect(),
-                cost: *cost,
-            })
-            .collect(),
+        Provider::Claude => claude_choices(&crate::claude_models::known()),
         Provider::Codex => vec![],
         Provider::Cursor => vec![],
     }
+}
+
+/// Claude's models as `delegate_task` offers them: a legacy one still runs, named as legacy.
+pub fn claude_choices(models: &[ClaudeModel]) -> Vec<ModelChoice> {
+    models
+        .iter()
+        .map(|m| {
+            let name = m.name.strip_prefix("Claude ").unwrap_or(&m.name);
+            ModelChoice {
+                id: m.slug.clone(),
+                label: if m.legacy { format!("{name} (legacy)") } else { name.into() },
+                efforts: m.efforts.iter().filter(|e| CLAUDE_EFFORT.contains(&e.as_str())).cloned().collect(),
+                cost: m.cost,
+            }
+        })
+        .collect()
 }
 
 /// `{model, effort}` becomes `model-effort` when `--list-models` printed that id.

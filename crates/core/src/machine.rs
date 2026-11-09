@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+const MODEL_MENU_FILE: &str = "claude-model-menu.json";
+
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
@@ -442,6 +444,9 @@ pub struct Machine {
     uploads: Option<PathBuf>,
     /// LiteLLM's price list, downloaded at most daily for the usage page.
     rates_file: Option<PathBuf>,
+    /// The model rows claude's /model menu showed last on this machine, kept in `model_menu_file`.
+    model_menu: Mutex<Vec<crate::claude_models::MenuRow>>,
+    model_menu_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
     shells: Shells,
@@ -606,6 +611,8 @@ impl Machine {
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
+            model_menu: Mutex::new(dir.as_ref().and_then(|d| std::fs::read(d.join(MODEL_MENU_FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
+            model_menu_file: dir.as_ref().map(|d| d.join(MODEL_MENU_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
             device_hub: DeviceHub::default(),
@@ -808,6 +815,7 @@ impl Machine {
             }
             Call::ReadImage { path } => json(uploads::named(&path, &home())?),
             Call::ListAccounts => json(self.list_accounts()),
+            Call::LearnModelMenu { lines } => json(self.learn_model_menu(&lines)?),
             Call::AddAccount { provider, name, auth, key } => {
                 let auth = auth.unwrap_or(Auth::Login);
                 if auth == Auth::OpenCodeGo {
@@ -1299,7 +1307,31 @@ impl Machine {
 
     fn view_account(&self, account: Account) -> accounts::View {
         let status = self.status(&account);
-        accounts::View::new(account, status)
+        let mut view = accounts::View::new(account, status);
+        if view.account.provider == Provider::Claude && view.account.auth != Auth::OpenCodeGo {
+            view.models = self.claude_models();
+        }
+        view
+    }
+
+    /// Claude's models on this machine: pinned's table as this machine's claude last showed its
+    /// /model menu.
+    pub fn claude_models(&self) -> Vec<crate::claude_models::ClaudeModel> {
+        crate::claude_models::merged(crate::claude_models::known(), &self.model_menu.lock().unwrap())
+    }
+
+    /// Keeps the model rows of claude's /model menu when `lines`, a screen, shows it, and answers
+    /// Claude's models as they are now.
+    fn learn_model_menu(&self, lines: &[String]) -> Result<Vec<crate::claude_models::ClaudeModel>, String> {
+        let rows = crate::claude_models::menu_rows(lines).ok_or("claude's /model menu is not on that screen")?;
+        if !rows.is_empty() && *self.model_menu.lock().unwrap() != rows {
+            if let Some(file) = &self.model_menu_file {
+                let body = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;
+                crate::fsx::replace(file, &body, None, None)?;
+            }
+            *self.model_menu.lock().unwrap() = rows;
+        }
+        Ok(self.claude_models())
     }
 
     fn status(&self, account: &Account) -> accounts::Status {
@@ -3550,7 +3582,7 @@ impl Machine {
     }
 
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
+        use crate::delegate::{capabilities, codex_constraints, cursor_models, Access, Inherited, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -3572,7 +3604,7 @@ impl Machine {
                     Provider::Claude if account.auth == Auth::OpenCodeGo => {
                         (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()])
                     }
-                    Provider::Claude => (provider_models(Provider::Claude), vec![]),
+                    Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
                     Provider::Codex => (vec![], codex_constraints()),
                     Provider::Cursor => {
                         let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
@@ -6002,10 +6034,23 @@ pub(crate) mod tests {
             "id": "work", "provider": "claude", "name": "Work", "auth": "login", "provider_name": "Claude Code", "builtin": false,
             "signed_in": false, "email": null, "org": null, "plan": null,
         });
-        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }), Ok(work.clone()));
+        // Claude Code logins carry the picker's models; the rest of each account reads as before.
+        let without_models = |mut value: Value| {
+            let first = |account: &mut Value| account.as_object_mut().unwrap().remove("models").map(|models| models[0]["slug"].clone());
+            let firsts = match value.as_array_mut() {
+                Some(list) => list.iter_mut().map(first).collect(),
+                None => vec![first(&mut value)],
+            };
+            (value, firsts)
+        };
+        let (added, firsts) = without_models(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap());
+        assert_eq!((added, firsts), (work.clone(), vec![Some(json!("claude-fable-5-2"))]));
         assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into(), auth: None, key: None }), Err("an account work already exists".into()));
+        let (listed, firsts) = without_models(m.call(Call::ListAccounts).unwrap());
+        let fable = Some(json!("claude-fable-5-2"));
+        assert_eq!(firsts, [fable.clone(), None, None, fable]);
         assert_eq!(
-            m.call(Call::ListAccounts),
+            Ok::<_, String>(listed),
             Ok(json!([
                 {
                     "id": "claude", "provider": "claude", "name": "Claude Code", "auth": "login", "provider_name": "Claude Code", "builtin": true,
@@ -6780,6 +6825,38 @@ exec sleep 30
             assert!(err.contains("PINNED_TAB") && err.contains("PINNED_TASK"), "{err}");
         }
         assert!(m.capabilities(None, None, "").is_ok());
+    }
+
+    #[test]
+    fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
+        let picker = |m: &Machine| -> Vec<String> {
+            let accounts = m.call(Call::ListAccounts).unwrap();
+            let claude = accounts.as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap().clone();
+            claude["models"].as_array().unwrap().iter().take(5).map(|model| format!("{} {}", model["name"].as_str().unwrap(), model["legacy"])).collect()
+        };
+        let catalog = |m: &Machine| -> Vec<String> {
+            let value: Value = serde_json::from_str(&m.capabilities(None, None, "fable").unwrap()).unwrap();
+            value["providers"][0]["models"].as_array().unwrap().iter().map(|model| model["id"].as_str().unwrap().to_owned()).collect()
+        };
+
+        let m = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&m)[0], "Claude Fable 5.2 false");
+        assert_eq!(m.call(Call::LearnModelMenu { lines: vec!["$ ls".into()] }).unwrap_err(), "claude's /model menu is not on that screen");
+        let learned = m.call(Call::LearnModelMenu { lines }).unwrap();
+        assert_eq!(learned[0]["slug"], "claude-fable-5-3");
+        let expected = ["Claude Fable 5.3 false", "Claude Opus 5.5 false", "Claude Sonnet 5.5 false", "Claude Haiku 5.5 false", "Claude Fable 5.2 true"];
+        assert_eq!(picker(&m), expected);
+        assert_eq!(catalog(&m), ["claude-fable-5-3", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]);
+        drop(m);
+
+        let again = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&again), expected, "a restarted machine keeps what its claude showed");
+        assert_eq!(catalog(&again)[0], "claude-fable-5-3");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

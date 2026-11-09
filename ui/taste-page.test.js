@@ -43,7 +43,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     },
     revealTab: async (machine, id) => ({ machine, id }),
     startTab: (tab) => opened.push(["start", tab]),
-    CLAUDE_MODELS: [
+    claudeModels: () => [
       { slug: "claude-opus-5-5", name: "Claude Opus 5.5" },
       { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
       { slug: "claude-opus-5", name: "Claude Opus 5", legacy: true },
