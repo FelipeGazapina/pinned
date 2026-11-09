@@ -134,8 +134,8 @@ function seed() {
   const hostSettings = perNode[nodes.indexOf(chosen)];
   check(JSON.stringify(await page.evaluate(() => window.__goEvent)) === JSON.stringify(hostSettings), `event detail: ${JSON.stringify(await page.evaluate(() => window.__goEvent))}`);
 
-  // Every option reads whole in its select, and the save status sits inside the section, at the
-  // desktop width and at a phone's.
+  // Every option reads whole in its select, every button's label inside the button, and the save
+  // status inside the section, at the desktop width and at a phone's.
   const fits = () =>
     page.evaluate(() => {
       const section = document.getElementById("global-orchestrator-settings");
@@ -150,6 +150,10 @@ function seed() {
       const box = section.getBoundingClientRect();
       const status = document.getElementById("go-status").getBoundingClientRect();
       if (status.right > box.right || status.left < box.left || status.right > document.documentElement.clientWidth) cut.push(`Saved at ${status.left}-${status.right}, section ${box.left}-${box.right}`);
+      for (const button of section.querySelectorAll("button")) {
+        const edge = button.getBoundingClientRect().right;
+        if (button.scrollWidth > button.clientWidth + 1 || edge > box.right + 1) cut.push(`"${button.textContent}" needs ${button.scrollWidth}px, has ${button.clientWidth}px, ends at ${edge} of ${box.right}`);
+      }
       return cut;
     });
   const desktopCut = await fits();
