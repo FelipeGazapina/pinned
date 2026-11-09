@@ -148,7 +148,7 @@ async fn look(hub: &Hub, account: &Account, machine: &str, settings_wait: Durati
 }
 
 /// The latest replies of the Capitão of the project at `path` on `machine`, as the node's own
-/// `read_captain` answers them.
+/// `read_captain` answers them, read from the end of its transcript.
 async fn read_captain(hub: &Hub, account: &Account, from: Source<'_>, machine: &str, path: String) -> Result<Value, String> {
     only_host(hub, account, &from, "read a Capitão").await?;
     let mut out = if !account.is_online(machine) {
@@ -160,8 +160,7 @@ async fn read_captain(hub: &Hub, account: &Account, from: Source<'_>, machine: &
         let tabs = tabs(hub, account, machine, RELAY_WAIT).await?;
         match global::captain_tab(&tabs, &path) {
             Some(tab) if tab.running || tab.session.is_some() => {
-                let page = hub.call_machine(account, machine, Call::Thread { tab: tab.id.clone(), from: 0 }, RELAY_WAIT).await;
-                reading::read(tab, page.map_err(String::from), reading::DEFAULT_ITEMS)
+                read_tab(hub, account, machine, tab, None).await.unwrap_or_else(|e| reading::read(tab, Err(e.into()), reading::DEFAULT_ITEMS))
             }
             _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
         }
@@ -193,15 +192,21 @@ async fn read_session(hub: &Hub, account: &Account, from: Source<'_>, tab: Strin
         (0, None) => return Err(format!("no online machine of this account has a session {tab}")),
         _ => return Err(format!("{} each have a session {tab}: pass machine", holders.iter().map(|(m, _)| m.name.as_str()).collect::<Vec<_>>().join(" and "))),
     };
-    let mut out = match hub.call_machine(account, &m.id, Call::ReadSession { tab: tab.clone(), items }, RELAY_WAIT).await {
-        Err(Unanswered::Refused(e)) if is_unknown_command(&e) => {
-            let page = hub.call_machine(account, &m.id, Call::Thread { tab: tab.clone(), from: 0 }, RELAY_WAIT).await;
-            reading::read(&view, page.map_err(String::from), items.unwrap_or(reading::DEFAULT_ITEMS))
-        }
-        answer => answer.map_err(String::from)?,
-    };
+    let mut out = read_tab(hub, account, &m.id, &view, items).await.map_err(String::from)?;
     (out["id"], out["machine"], out["machine_name"]) = (json!(tab), json!(m.id), json!(m.name));
     Ok(out)
+}
+
+/// `reading::read` of `tab` on `machine`, its conversation read from the end of the transcript by
+/// `Call::ReadSession`, or from the start by `Call::Thread` on a node too old for that.
+async fn read_tab(hub: &Hub, account: &Account, machine: &str, tab: &TabView, items: Option<usize>) -> Result<Value, Unanswered> {
+    match hub.call_machine(account, machine, Call::ReadSession { tab: tab.id.clone(), items }, RELAY_WAIT).await {
+        Err(Unanswered::Refused(e)) if is_unknown_command(&e) => {
+            let page = hub.call_machine(account, machine, Call::Thread { tab: tab.id.clone(), from: 0 }, RELAY_WAIT).await;
+            Ok(reading::read(tab, page.map_err(String::from), items.unwrap_or(reading::DEFAULT_ITEMS)))
+        }
+        answer => answer,
+    }
 }
 
 /// The tabs `machine` last reported, or its answer when it has not reported any yet.
