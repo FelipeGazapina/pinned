@@ -726,7 +726,7 @@ async function fillRepo() {
 }
 
 function connectorsHtml() {
-  if (view.name === "edit") return editorHtml();
+  if (view.name === "edit") return workflowEditorHtml();
   if (view.name === "pick") return triggerChoiceHtml();
   const intro = `<h2>Workflows</h2>
     <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
@@ -780,7 +780,7 @@ function triggerChoiceHtml() {
       .join("")}`;
 }
 
-function editorHtml() {
+function workflowEditorHtml() {
   const c = view.draft;
   return `<datalist id="linear-labels">${options(suggestions.labels)}</datalist>
     <datalist id="linear-columns">${options(suggestions.columns)}</datalist>
