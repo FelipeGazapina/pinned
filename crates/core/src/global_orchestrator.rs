@@ -319,8 +319,8 @@ pub struct Overview {
     /// Every machine of the account, with or without projects.
     #[serde(default)]
     pub machines: Vec<OverviewMachine>,
-    /// Every session on the account's online machines, newest activity first. Absent from a hub
-    /// that predates the `sessions` tool.
+    /// Every session on the account's online machines, newest activity first; `waiting` is those
+    /// that wait on the user. Absent from a hub that predates the `sessions` tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<Vec<Session>>,
 }
@@ -488,6 +488,7 @@ pub fn captain_tab<'a>(tabs: &'a [TabView], path: &str) -> Option<&'a TabView> {
 pub fn overview(machines: &[MachineSnapshot]) -> Overview {
     let mut projects: Vec<OverviewProject> = vec![];
     let mut waiting = vec![];
+    let mut sessions = vec![];
     for machine in machines {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
@@ -509,26 +510,35 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
                 None => projects.push(OverviewProject { key, name: project.name.clone(), repo: project.repo.clone(), checkouts: vec![checkout] }),
             }
         }
-        for tab in tabs {
-            let Some(kind) = waiting_kind(tab) else { continue };
-            let folder = history::project_of(Path::new(&tab.cwd));
-            waiting.push(Waiting {
-                machine: machine.id.to_owned(),
-                machine_name: machine.name.to_owned(),
-                tab: tab.id.clone(),
-                kind,
-                project: machine.projects.iter().find(|p| Path::new(&p.path) == folder).map(|p| p.path.clone()),
-                title: tab.title.clone(),
-                message: tab.question.clone().or_else(|| tab.message.clone()),
-                since: tab.updated,
-            });
+        // What waits on the user is the sessions in those two states, so the two lists never differ.
+        for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
+            let session = session(machine, tab);
+            let kind = match session.state {
+                SessionState::WaitingOnInput => Some(WaitingKind::NeedsInput),
+                SessionState::Error => Some(WaitingKind::Failed),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                waiting.push(Waiting {
+                    machine: session.machine.clone(),
+                    machine_name: session.machine_name.clone(),
+                    tab: session.id.clone(),
+                    kind,
+                    project: machine.projects.iter().any(|p| Path::new(&p.path) == Path::new(&session.project.path)).then(|| session.project.path.clone()),
+                    title: session.title.clone(),
+                    message: session.message.clone(),
+                    since: tab.updated,
+                });
+            }
+            sessions.push(session);
         }
     }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
     let machines = machines
         .iter()
         .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned) })
         .collect();
-    Overview { projects, waiting, machines, sessions: None }
+    Overview { projects, waiting, machines, sessions: Some(sessions) }
 }
 
 /// One session of the account, as the global orchestrator's `sessions` tool lists it.
@@ -589,9 +599,10 @@ pub enum SessionState {
     Running,
     /// Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.
     Idle,
-    /// It asks the user mid-turn: a question or a permission prompt.
+    /// It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,
+    /// or a finished turn whose last reply asked the user something.
     WaitingOnInput,
-    /// It stopped on an error, a usage limit included.
+    /// It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).
     Error,
     /// Its session is not running. A message starts it again.
     Settled,
@@ -599,13 +610,12 @@ pub enum SessionState {
 
 impl SessionState {
     pub fn of(tab: &TabView) -> SessionState {
-        match tab.status {
-            Some(AgentStatus::Failed) => SessionState::Error,
-            _ if !tab.running => SessionState::Settled,
-            Some(AgentStatus::NeedsInput) if tab.interrupted => SessionState::WaitingOnInput,
-            Some(AgentStatus::Working) => SessionState::Running,
-            _ if tab.orchestrator_turn => SessionState::Running,
-            _ => SessionState::Idle,
+        match waiting_kind(tab) {
+            Some(WaitingKind::Failed) => SessionState::Error,
+            Some(WaitingKind::NeedsInput) => SessionState::WaitingOnInput,
+            None if !tab.running => SessionState::Settled,
+            None if tab.status == Some(AgentStatus::Working) || tab.orchestrator_turn => SessionState::Running,
+            None => SessionState::Idle,
         }
     }
 }
@@ -620,14 +630,8 @@ impl Session {
     }
 }
 
-/// Every session on the online `machines`, newest activity first. The global orchestrator's own
-/// tab is left out, and an offline machine has none, since its tabs are not live.
-pub fn sessions(machines: &[MachineSnapshot]) -> Vec<Session> {
-    let mut sessions: Vec<Session> = machines.iter().filter(|m| m.online).flat_map(|machine| machine.tabs.iter().filter(|t| !t.orchestrator_global).map(move |tab| session(machine, tab))).collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
-    sessions
-}
-
+/// One tab as a session. `overview` lists one per tab of each online machine, the global
+/// orchestrator's own tab left out.
 fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
     let folder = history::project_of(Path::new(&tab.cwd));
     let listed = machine.projects.iter().find(|p| Path::new(&p.path) == folder);
@@ -655,7 +659,7 @@ fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
         title: tab.title.clone().or_else(|| tab.prompt_title.clone()),
         branch: tab.branch.clone(),
         pr: tab.pr.clone(),
-        message: tab.message.clone().filter(|_| matches!(state, SessionState::WaitingOnInput | SessionState::Error)),
+        message: tab.question.clone().or_else(|| tab.message.clone()).filter(|_| matches!(state, SessionState::WaitingOnInput | SessionState::Error)),
         state,
         last_activity: tab.last_message_at.or(tab.updated),
     }
@@ -816,7 +820,7 @@ mod tests {
             MachineSnapshot { id: "m-book", name: "MacBook", online: true, version: "0.17.18", projects: &book, tabs: &[], problem: Some("precisa atualizar o pinned") },
         ];
         assert_eq!(
-            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::to_value(Overview { sessions: None, ..overview(&machines) }).unwrap(),
             serde_json::json!({
                 "projects": [{
                     "key": "github.com/o/site",
@@ -842,7 +846,7 @@ mod tests {
         let tabs = [view("tab-b-1", "/w/notes", Some(Role::Orchestrator), true, Some(AgentStatus::Done)), view("tab-b-2", "/w/site", None, true, Some(AgentStatus::Failed))];
         let machines = [MachineSnapshot { id: "m-1", name: "Linux box", online: false, version: "0.17.10", projects: &notes, tabs: &tabs, problem: None }];
         assert_eq!(
-            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::to_value(Overview { sessions: None, ..overview(&machines) }).unwrap(),
             serde_json::json!({
                 "projects": [
                     { "key": "m-1:/w/notes", "name": "notes", "checkouts": [{ "machine": "m-1", "machine_name": "Linux box", "online": false, "version": "0.17.10", "path": "/w/notes", "captain": "nenhum", "workers": 0 }] },
@@ -864,7 +868,7 @@ mod tests {
         let tabs = [idle_notice, question, failed, own];
         let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.19", projects: &site, tabs: &tabs, problem: None }];
         assert_eq!(
-            serde_json::to_value(overview(&machines)).unwrap(),
+            serde_json::to_value(Overview { sessions: None, ..overview(&machines) }).unwrap(),
             serde_json::json!({
                 "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-1", "machine_name": "MacBook", "online": true, "version": "0.17.19", "path": "/w/site", "captain": "livre", "captain_tab": "tab-c-1", "workers": 1 }] }],
                 "waiting": [
@@ -919,7 +923,8 @@ mod tests {
         let lead = TabView { spawned_by: Some("tab-b-5".into()), ..view("tab-b-6", "/Users/f/client-apps/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)) };
         let sub = talk(TabView { spawned_by: Some("tab-b-6".into()), ..view("tab-b-7", "/Users/f/client-apps/.claude/worktrees/pinned-2", Some(Role::Worker), true, Some(AgentStatus::Done)) }, "pinned/sub", Some(92), 1794235000);
         let own = TabView { orchestrator_global: true, ..view("tab-b-8", "/Users/f/.pinned/orquestrador", None, true, Some(AgentStatus::Working)) };
-        let book = [slack, asking, new_thread, captain, lead, sub, own];
+        let asked = TabView { question: Some("Should I open the PR now?".into()), message: Some("Claude is waiting for your input".into()), ..on("bloom", talk(view("tab-b-9", "/Users/f/client-apps", None, true, Some(AgentStatus::NeedsInput)), "felipega/fix-and-ops", None, 1794241000)) };
+        let book = [slack, asking, new_thread, captain, lead, sub, own, asked];
         let old = TabView { prompt_title: Some("Someone mentioned you in the Slack thread".into()), message: Some("API Error: 500".into()), updated: Some(1793800000), ..view("tab-d-1", "/home/f/client-apps", None, false, Some(AgentStatus::Failed)) };
         let stopped = view("tab-d-2", "/home/f/scratch", None, false, Some(AgentStatus::Done));
         let dev = [old, stopped];
@@ -928,11 +933,13 @@ mod tests {
             MachineSnapshot { id: "m-dev", name: "dev", online: true, version: "0.17.20", projects: &[], tabs: &dev, problem: None },
             MachineSnapshot { id: "m-off", name: "Mac mini", online: false, version: "0.17.21", projects: &apps, tabs: &dev, problem: None },
         ];
-        let listed = sessions(&machines);
+        let overview = overview(&machines);
+        let listed = overview.sessions.clone().unwrap();
         let apps_on_book = serde_json::json!({ "key": "github.com/o/client-apps", "name": "client-apps", "path": "/Users/f/client-apps" });
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
             serde_json::json!([
+                { "id": "tab-b-9", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "branch": "felipega/fix-and-ops", "state": "waiting_on_input", "message": "Should I open the PR now?", "last_activity": 1794241000 },
                 { "id": "tab-b-2", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "title": "Someone mentioned you in the Slack thread", "branch": "felipega/fix-and-ops", "state": "idle", "last_activity": 1794240000 },
                 { "id": "tab-b-3", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "state": "waiting_on_input", "message": "Claude needs your permission to use Bash", "last_activity": 1794239000 },
                 { "id": "tab-b-7", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "worker", "captain": "tab-b-5", "branch": "pinned/sub", "pr": { "number": 92, "url": "https://github.com/o/client-apps/pull/92" }, "state": "idle", "last_activity": 1794235000 },
@@ -944,10 +951,37 @@ mod tests {
             ])
         );
         let ids = |project: Option<&str>, machine: Option<&str>| listed.iter().filter(|s| s.matches(project, machine)).map(|s| s.id.as_str()).collect::<Vec<_>>();
-        assert_eq!(ids(Some("Client-Apps"), None), ["tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-d-1", "tab-b-4", "tab-b-6"], "a name matches the project on every machine");
-        assert_eq!(ids(Some("github.com/o/client-apps"), Some("@macbook")), ["tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-b-4", "tab-b-6"]);
+        assert_eq!(ids(Some("Client-Apps"), None), ["tab-b-9", "tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-d-1", "tab-b-4", "tab-b-6"], "a name matches the project on every machine");
+        assert_eq!(ids(Some("github.com/o/client-apps"), Some("@macbook")), ["tab-b-9", "tab-b-2", "tab-b-3", "tab-b-7", "tab-b-5", "tab-b-4", "tab-b-6"]);
         assert_eq!(ids(Some("m-dev:/home/f/client-apps"), None), ["tab-d-1"]);
         assert_eq!(ids(None, Some("m-dev")), ["tab-d-1", "tab-d-2"]);
+        let waiting: Vec<(&str, WaitingKind, Option<&str>)> = overview.waiting.iter().map(|w| (w.tab.as_str(), w.kind, w.message.as_deref())).collect();
+        assert_eq!(
+            waiting,
+            [
+                ("tab-b-3", WaitingKind::NeedsInput, Some("Claude needs your permission to use Bash")),
+                ("tab-b-9", WaitingKind::NeedsInput, Some("Should I open the PR now?")),
+                ("tab-d-1", WaitingKind::Failed, Some("API Error: 500")),
+            ],
+            "what waits is the sessions waiting on input or stopped on an error, a loose thread that asked included"
+        );
+        assert_eq!(overview.waiting[2].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
+    }
+
+    #[test]
+    fn a_session_waits_on_input_or_is_in_error_exactly_when_it_waits_on_the_user() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("waiting_cases.json")).unwrap();
+        for case in cases["cases"].as_array().unwrap().iter().filter(|c| c["view"]["orchestrator_global"] != true) {
+            let mut view = cases["base"].clone();
+            view.as_object_mut().unwrap().extend(case["view"].as_object().unwrap().clone());
+            let state = SessionState::of(&serde_json::from_value(view).unwrap());
+            let expected = match case["waits"].as_str() {
+                Some("needs_input") => Some(SessionState::WaitingOnInput),
+                Some("failed") => Some(SessionState::Error),
+                _ => None,
+            };
+            assert_eq!(Some(state).filter(|s| matches!(s, SessionState::WaitingOnInput | SessionState::Error)), expected, "{}", case["case"]);
+        }
     }
 
     #[test]

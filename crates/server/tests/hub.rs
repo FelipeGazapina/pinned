@@ -3839,7 +3839,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     }
     transcript += &format!("{}\n", line("user", json!("what is running?"), "2026-11-09T12:00:00.000Z"));
     transcript += &format!("{}\n", json!({ "type": "pr-link", "prNumber": 92, "prUrl": "https://github.com/acme/client-apps/pull/92", "prRepository": "acme/client-apps", "timestamp": "2026-11-09T12:05:00.000Z" }));
-    transcript += &format!("{}\n", line("assistant", json!([{ "type": "text", "text": "Two Slack threads wait on you." }]), "2026-11-09T12:10:00.000Z"));
+    transcript += &format!("{}\n", line("assistant", json!([{ "type": "text", "text": "Two Slack threads wait on you. Should I answer them?" }]), "2026-11-09T12:10:00.000Z"));
     assert!(transcript.len() > 8 << 20);
     std::fs::write(transcripts.join("s-long.jsonl"), transcript).unwrap();
     hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "done", "tab": long, "session": "s-long", "title": slack }));
@@ -3864,7 +3864,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     wait_for("mac's tabs and the long transcript's tally on the hub", || {
         let listed = sessions(None);
         let list = listed["sessions"].as_array().unwrap();
-        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92) && list.iter().any(|s| s["id"] == worker)
+        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["state"] == "waiting_on_input") && list.iter().any(|s| s["id"] == worker)
     });
     let listed = sessions(Some("client-apps"));
     let list = listed["sessions"].as_array().unwrap().clone();
@@ -3886,7 +3886,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     };
     let mut expected = vec![
         on_mac(&asking, "thread", "waiting_on_input", json!({ "title": slack, "message": "Claude needs your permission to use Bash" })),
-        on_mac(&long, "thread", "idle", json!({ "title": slack, "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
+        on_mac(&long, "thread", "waiting_on_input", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
         on_mac(&new_thread, "thread", "idle", json!({})),
         on_mac(&captain, "captain", "running", json!({})),
         on_mac(&worker, "worker", "idle", json!({ "captain": captain, "title": "Lint the app." })),
@@ -3920,12 +3920,18 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
             "conversation": { "items": [
                 { "kind": "user", "at": "2026-11-09T12:00:00.000Z", "text": "what is running?" },
                 { "kind": "pr", "at": "2026-11-09T12:05:00.000Z", "url": "https://github.com/acme/client-apps/pull/92" },
-                { "kind": "text", "at": "2026-11-09T12:10:00.000Z", "text": "Two Slack threads wait on you." },
+                { "kind": "text", "at": "2026-11-09T12:10:00.000Z", "text": "Two Slack threads wait on you. Should I answer them?" },
             ], "cursor": read["conversation"]["cursor"], "reset": false },
             "id": long, "machine": mac, "machine_name": "mac",
         }),
         "a loose thread on another machine, read to the true end of a transcript past 8 MiB"
     );
+    let waiting = tool(json!({ "name": "waiting" })).unwrap();
+    let mut waits: Vec<(&str, &str, &str)> = waiting.as_array().unwrap().iter().map(|w| (w["tab"].as_str().unwrap(), w["kind"].as_str().unwrap(), w["message"].as_str().unwrap_or(""))).collect();
+    waits.sort();
+    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (long.as_str(), "needs_input", "Should I answer them?"), (failed.as_str(), "failed", "")];
+    expected_waits.sort();
+    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, the loose thread whose last reply asked included");
     let here = tool(json!({ "name": "read_session", "id": failed })).unwrap();
     assert_eq!(here, json!({ "state": "failed", "next": "it may take a message now", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "id": failed, "machine": mini, "machine_name": "mini" }));
     assert_eq!(tool(json!({ "name": "read_session", "id": "tab-0-0" })), Err("no online machine of this account has a session tab-0-0".into()));

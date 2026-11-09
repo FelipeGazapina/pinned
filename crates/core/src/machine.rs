@@ -2145,7 +2145,7 @@ impl Machine {
         let (projects, tabs) = (self.list_projects(), self.tabs());
         let (id, name) = self.machine_ids();
         let here = [global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }];
-        global::Overview { sessions: Some(global::sessions(&here)), ..global::overview(&here) }
+        global::overview(&here)
     }
 
     /// This machine's id and name on the hub, each its hostname until the hub's hello.

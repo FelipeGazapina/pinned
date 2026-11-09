@@ -195,7 +195,8 @@ function mcp(sock, tab, calls) {
   const settled = async () => {
     const [, , listed] = await mcp(devSock, global, [["sessions", { project: "client-apps" }]]);
     const sessions = JSON.parse(listed.result.content[0].text).sessions;
-    return sessions.length === 6 && sessions.some((s) => s.id === working && s.pr) && sessions.some((s) => s.id === old && s.branch) ? sessions : null;
+    const ready = sessions.some((s) => s.id === working && s.pr) && sessions.some((s) => s.id === old && s.branch) && sessions.some((s) => s.id === asked && s.state === "waiting_on_input");
+    return sessions.length === 6 && ready ? sessions : null;
   };
   await waitFor("every seeded session on the hub with its transcript read", settled, 30000);
   const answers = await mcp(devSock, global, [
@@ -212,18 +213,20 @@ function mcp(sock, tab, calls) {
   console.log(JSON.stringify(out, null, 2));
   check(sessions.sessions.length === 6, "six sessions in client-apps across both machines and accounts");
   check(oldRead.conversation.items.at(-1).text.startsWith("The Android build is green"), "read_session reaches the end of a transcript past 8 MiB");
+  check(waiting.some((w) => w.tab === asked) && waiting.some((w) => w.tab === permission), "waiting() holds the loose thread that asked and the one asking permission");
 
   // Waiting on you, desktop then phone.
   await page.evaluate(() => setMode("gui"));
-  await waitFor("Waiting on you", () => page.evaluate(() => !!document.querySelector(".waiting-head")));
+  await waitFor("both threads in Waiting on you", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length >= 2));
   fs.mkdirSync(SCREENS, { recursive: true });
   await page.screenshot({ path: path.join(SCREENS, "sessions-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => toggleSidebar(true));
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.join(SCREENS, "sessions-phone.png") });
-  const rows = await page.evaluate(() => [...document.querySelectorAll(".waiting-row")].map((r) => r.textContent.trim()));
+  const rows = await page.evaluate(() => [...document.querySelectorAll(".waiting-row")].map((r) => r.getAttribute("aria-label")));
   console.log("waiting rows:", JSON.stringify(rows));
+  check(rows.length === 2, "Waiting on you lists both threads waiting on Felipe");
   check(!errors.length, `page errors: ${errors.join("; ")}`);
   await browser.close();
 })().catch((e) => {

@@ -25083,7 +25083,7 @@
             "default": []
           },
           "sessions": {
-            "description": "Every session on the account's online machines, newest activity first. Absent from a hub\nthat predates the `sessions` tool.",
+            "description": "Every session on the account's online machines, newest activity first; `waiting` is those\nthat wait on the user. Absent from a hub that predates the `sessions` tool.",
             "type": [
               "array",
               "null"
@@ -25440,12 +25440,12 @@
                 "const": "idle"
               },
               {
-                "description": "It asks the user mid-turn: a question or a permission prompt.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
               {
-                "description": "It stopped on an error, a usage limit included.",
+                "description": "It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).",
                 "type": "string",
                 "const": "error"
               },
@@ -25486,7 +25486,7 @@
             "default": []
           },
           "sessions": {
-            "description": "Every session on the account's online machines, newest activity first. Absent from a hub\nthat predates the `sessions` tool.",
+            "description": "Every session on the account's online machines, newest activity first; `waiting` is those\nthat wait on the user. Absent from a hub that predates the `sessions` tool.",
             "type": [
               "array",
               "null"
@@ -25839,12 +25839,12 @@
                 "const": "idle"
               },
               {
-                "description": "It asks the user mid-turn: a question or a permission prompt.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
               {
-                "description": "It stopped on an error, a usage limit included.",
+                "description": "It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).",
                 "type": "string",
                 "const": "error"
               },

@@ -112,8 +112,7 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
         .zip(&seen)
         .map(|(m, (projects, tabs, problem))| MachineSnapshot { id: &m.id, name: &m.name, online: m.online, version: &m.version, projects, tabs, problem: problem.as_deref() })
         .collect();
-    let overview = global::Overview { sessions: Some(global::sessions(&snapshots)), ..global::overview(&snapshots) };
-    serde_json::to_value(overview).map_err(|e| e.to_string())
+    serde_json::to_value(global::overview(&snapshots)).map_err(|e| e.to_string())
 }
 
 /// What one online machine told the overview.

@@ -157,7 +157,7 @@ Tagged by `outcome`. Every variant carries the tab it went to.
   - `needs_input`: any status but working, when `TabView.question` is set (a finished turn that asked the user, before or after Claude Code's idle notice, and after a restart).
   - Nothing else. Needs-input with `interrupted` false and no question is the idle notice alone. The global orchestrator's own tab never waits.
 - `TabView.question` (`#[serde(default)]`, omitted when empty) is the last sentence outside code ending in `?` of the turn's last reply (`global_orchestrator::question_in`, at most 300 characters). The node sets it on Done and on restore, and clears it on Working and Failed. `Waiting.message` is the question when there is one, else the tab's message.
-- `sessions` (`#[serde(default)]`, an `Option`) is `global_orchestrator::sessions` of the same snapshots, which the hub and `local_overview` fill and `overview()` leaves `None`. A hub that predates it sends none, and the node then lists this machine's sessions alone. The `projects` tool drops it from its answer.
+- `sessions` (`#[serde(default)]`, an `Option`) is every session `overview()` builds from the same snapshots, and `waiting` is those whose state is `waiting_on_input` (kind `needs_input`) or `error` (kind `failed`), built from the same `Session` of each tab, so the two lists never disagree. A `Waiting` takes the session's title and message and the tab's `updated` as `since`. A hub that predates `sessions` sends none, and the node then lists this machine's sessions alone. The `projects` tool drops it from its answer.
 
 ### `Session`
 
@@ -177,15 +177,15 @@ Tagged by `outcome`. Every variant carries the tab it went to.
 - `role` is `captain` (`Role::Orchestrator`), `worker` (`Role::Worker`) or `thread`. `captain`, on a worker only, is the first Capitão up its `spawned_by` tabs, else its project's Capitão on that machine.
 - `title` is `TabView.title`, else `TabView.prompt_title`. A thread with no conversation yet has none.
 - `branch`, `pr` and `last_activity` come from the transcript tally the node already runs (`stats::Tally`), sent as `TabView.branch`, `TabView.pr` and `TabView.last_message_at`; `last_activity` falls back to `TabView.updated`. They are top-level `TabView` fields because the wire checker names an untagged struct inside `Option` by its keys, so a new `ThreadStats` field reads as a removed variant.
-- `message` is set only for `waiting_on_input` and `error`.
+- `message` is set only for `waiting_on_input` and `error`: `TabView.question` when there is one, else the tab's message.
 
-`SessionState::of(&TabView)`, in order:
+`SessionState::of(&TabView)`, in order. The first two are `waiting_kind`, so a session waits exactly when the sidebar's `waitingKindOf` says it does; `waiting_cases.json` holds the cases, and `a_session_waits_on_input_or_is_in_error_exactly_when_it_waits_on_the_user` checks them against the states:
 
 | State | From the tab |
 |---|---|
-| `error` | status failed, running or not |
+| `error` | `waiting_kind` is `failed`: status failed, running or not |
+| `waiting_on_input` | `waiting_kind` is `needs_input`: a question or an approval mid-turn, or a finished turn whose last reply asked the user (`TabView.question`), a loose thread included |
 | `settled` | its session is not running |
-| `waiting_on_input` | needs-input with `interrupted` (a question or a permission prompt mid-turn) |
 | `running` | status working, or `orchestrator_turn` |
 | `idle` | everything else that runs: done, the idle notice, no status yet |
 
@@ -286,7 +286,7 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 | Seam | Signature | Built by | What it does |
 |---|---|---|---|
 | `projects_overview` | `fn projects_overview(&self) -> Result<global::Overview, String>` | node-local, remote-reach | The hub's `Overview` when linked. This machine alone (`local_overview`, under its hub id) while unlinked or when the hub is too old. |
-| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local | `projects_overview().waiting`, by `waiting_kind` (section 5). |
+| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local, sessions | `projects_overview().waiting`: the sessions waiting on input or in error (section 5). |
 | `read_captain` | `fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String>` | node-local, remote-reach | `reading::read` of the Capitão here, or `HubCall::ReadCaptain` to the machine `remote_checkout` finds. |
 | `route_remote` | `fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String>` | hub-bridge, remote-reach | `HubCall::Relay { to: captain }` to the checkout `remote_checkout` finds, under this machine's busy policy. |
 | `remote_checkout` | `fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(MachineId, String), String>` | hub-bridge, remote-reach | Section 6 resolution, steps 2 and 3. |
