@@ -917,13 +917,17 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read sees the session's change");
     assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()));
 
+    let bobs_set = HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(7), ..TastePatch::default() } };
+    assert_eq!(bob_node.link.as_ref().unwrap().call_hub(bobs_set), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "ana's open chat lets no machine of bob's change a taste");
     let bob_chat = open_chat(&bob_node, &mut bob);
     let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
     assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
     session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
-    session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "captains", "field": "hard_model" })).unwrap();
     assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
-    assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's session changed ana's taste");
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()), "bob's set changed ana's taste");
+    let reset = session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "parallel" })).unwrap();
+    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+    assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
 
