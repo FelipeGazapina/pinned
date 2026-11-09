@@ -36,8 +36,15 @@ test("the words before the first header are the sender's own, and a block needs 
 });
 
 test("the fold line counts the reports and names each Captain once", () => {
-  assert.equal(reportFoldLabel(reportBlocks(pasted)), "3 atualizações · Capitão site, Capitão pinned");
-  assert.equal(reportFoldLabel(reportBlocks("[pinned] Capitão site (node) [m t]: um\n[pinned] Capitão site (node) [m t]: dois")), "2 atualizações · Capitão site");
+  assert.equal(reportFoldLabel(reportBlocks(pasted)), "3 updates · Captain site, Captain pinned");
+  assert.equal(reportFoldLabel(reportBlocks("[pinned] Capitão site (node) [m t]: um\n[pinned] Capitão site (node) [m t]: dois")), "2 updates · Captain site");
+});
+
+test("the English forms of the report header and the quick-reply line read like the Portuguese ones", () => {
+  assert.deepEqual(reportBlocks("[pinned] Captain site (node) [m t]: done"), [{ start: 0, project: "site", machineName: "node", machineId: "m", tabId: "t", text: "done" }]);
+  assert.deepEqual(quickReplyOf("Merge it?\n\nOptions: Yes | Not yet\n"), { options: ["Yes", "Not yet"], text: "Merge it?" });
+  assert.equal(speechTextOf("Done.\nOptions: Yes | No"), "Done.");
+  assert.equal(reportFoldLabel(reportBlocks("[pinned] Captain site (node) [m t]: one")), "1 update · Captain site");
 });
 
 test("an answer offers quick replies only when its last non-empty line reads Opções", () => {
@@ -68,7 +75,7 @@ test("a thread waits on Felipe for a question mid-turn or a failure, not for an 
 });
 
 test("the settings cache starts as the contracts default them", () => {
-  assert.deepEqual(here(globalSettings), { name: "Orquestrador", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(here(globalSettings), { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
 });
 
 test("an ordinary prompt and an ordinary answer hold nothing of the global orchestrator's", () => {
@@ -76,4 +83,14 @@ test("an ordinary prompt and an ordinary answer hold nothing of the global orche
   assert.deepEqual(reportBlocks("olha os logs de ontem"), []);
   assert.equal(quickReplyOf("Publiquei a v2 e escrevi o changelog."), null);
   assert.equal(speechTextOf("Publiquei a v2 e escrevi o changelog."), "Publiquei a v2 e escrevi o changelog.");
+});
+
+test("the global orchestrator's tab shows its name where an ordinary tab shows its folder", () => {
+  const source = readFileSync(new URL("./gui.js", import.meta.url), "utf8");
+  const line = source.slice(source.indexOf("const projectName ="), source.indexOf("\n", source.indexOf("const projectName =")));
+  context.threadOf = () => ({});
+  context.isGlobalOrchestratorTab = (tab) => tab?.view?.orchestrator_global === true;
+  const projectName = vm.runInContext(`${line}; projectName`, context);
+  assert.equal(projectName({ view: { cwd: "/home/felipe/.pinned/orquestrador", orchestrator_global: true } }), "Orchestrator");
+  assert.equal(projectName({ view: { cwd: "/home/felipe/work/site" } }), "site");
 });

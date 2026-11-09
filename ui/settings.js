@@ -298,7 +298,7 @@ const BOX_KINDS = [
   ["workflow", "Workflows", "Connector runs"],
   ["session", "Sessions", "Plain threads"],
   ["worker", "Workers", "Started by another thread"],
-  ["orchestrator", "Capitães", "The session that leads a project's workers"],
+  ["orchestrator", "Captains", "The session that leads a project's workers"],
 ];
 
 function boxAccess() {
@@ -337,7 +337,7 @@ function boxPermissionsHtml() {
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows follow this now. Sessions, workers, and Capitães keep the choice and follow it in the next update.</p>
+    <p class="hint">Workflows follow this now. Sessions, workers, and Captains keep the choice and follow it in the next update.</p>
     ${boxAsksHtml()}`;
 }
 
@@ -2114,14 +2114,14 @@ document.querySelector("#settings-nav .links").addEventListener("click", (e) => 
 });
 settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
   { title: "Keep this Mac awake", terms: ["sleep display power"] },
-  { title: "Capitão and workers", terms: ["orchestration cost style economical balanced quality max workers orchestrator capitao"] },
-  { title: "Orquestrador global", terms: ["global orchestrator orquestrador almirante comandante host machine busy queue refuse reports relatórios memory memória name nome"] },
+  { title: "Captain and workers", terms: ["orchestration cost style economical balanced quality max workers orchestrator captain capitao capitão"] },
+  { title: "Global orchestrator", terms: ["global orchestrator orquestrador orchestrator admiral commander host machine busy queue refuse reports memory name"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
 settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents()), search: [
-  { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator capitão capitao token revoke"], id: "external-agents" },
+  { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },

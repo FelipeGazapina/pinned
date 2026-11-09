@@ -93,7 +93,8 @@ const ago = (unix) => {
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
 };
-const projectName = (tab) => (threadOf(tab).workspace?.scratch ? "No project" : (threadOf(tab).workspace?.project ?? tab.view.cwd).split(/[\\/]/).filter(Boolean).pop() || "/");
+/** The global orchestrator's folder is not a project: its tab shows the orchestrator's own name (global-chat.js), not the folder's. */
+const projectName = (tab) => (typeof isGlobalTab === "function" && isGlobalTab(tab) ? globalSettings.name : threadOf(tab).workspace?.scratch ? "No project" : (threadOf(tab).workspace?.project ?? tab.view.cwd).split(/[\\/]/).filter(Boolean).pop() || "/");
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
 const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || tab.view.title || firstPrompt(tab) || "New thread";
 /** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */

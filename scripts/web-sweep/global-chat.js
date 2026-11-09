@@ -190,7 +190,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("the orchestrator's row", () => page.evaluate(() => !!document.querySelector(".global-row")));
     let s = await page.evaluate(state);
     console.log("the row:", JSON.stringify(s.row));
-    check(s.row === "Orquestrador sweep-node", `row: ${s.row}`);
+    check(/^Orchestrator sweep-node( Projects| Projetos)?$/.test(s.row), `row: ${s.row}`);
     check(!s.projectsLink, "the Projects link shows without the settings page");
     check(!s.orquestradorProject, "orquestrador is a project in the tree");
 
@@ -227,15 +227,15 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("the turn to end", () => page.evaluate(() => document.getElementById("thread").innerText.includes("echo:")));
     s = await page.evaluate(state);
     console.log("reports:", JSON.stringify({ fold: s.fold, rows: s.reportRows }));
-    check(s.fold === "2 atualizações · Capitão site, Capitão pinned", `fold: ${s.fold}`);
+    check(s.fold === "2 updates · Captain site, Captain pinned", `fold: ${s.fold}`);
     check(s.reportRows.length === 0, "the reports show expanded while folded");
     await page.screenshot(path.join(SCREENS, "global-chat-reports-folded.png"));
 
     await page.click(".report-fold");
     await waitFor("the reports to expand", () => page.evaluate(() => document.querySelectorAll(".report-row").length === 2));
     s = await page.evaluate(state);
-    check(s.reportRows[0].startsWith("Capitão site · sweep-node") && s.reportRows[0].includes("Publiquei a v2"), `site row: ${s.reportRows[0]}`);
-    check(s.reportRows[1].startsWith("Capitão pinned · sweep-node") && s.reportRows[1].includes("Fechei o PR #12"), `pinned row: ${s.reportRows[1]}`);
+    check(s.reportRows[0].startsWith("Captain site · sweep-node") && s.reportRows[0].includes("Publiquei a v2"), `site row: ${s.reportRows[0]}`);
+    check(s.reportRows[1].startsWith("Captain pinned · sweep-node") && s.reportRows[1].includes("Fechei o PR #12"), `pinned row: ${s.reportRows[1]}`);
     await page.screenshot(path.join(SCREENS, "global-chat-reports-open.png"));
 
     await page.click(".report-row .who");
@@ -276,7 +276,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("Esperando você", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
     s = await page.evaluate(state);
     console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
-    check(s.waitingHead === "Esperando você 1", `head: ${s.waitingHead}`);
+    check(/^(Waiting on you|Esperando você) 1$/.test(s.waitingHead), `head: ${s.waitingHead}`);
     check(s.waitingRows.length === 1 && s.waitingRows[0].startsWith("pergunta") && s.waitingRows[0].endsWith("site · sweep-node"), `rows: ${JSON.stringify(s.waitingRows)}`);
     check(!s.threadRows.includes(globalKey), "the global tab joined the thread list");
     check(await page.evaluate((k) => tabByKey(k).view.status === "needs-input" && !tabByKey(k).view.interrupted, keys.pinned), "the pinned Captain left its idle notice");

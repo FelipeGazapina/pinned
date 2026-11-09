@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 pub const ROLE: &str = "global-orchestrator";
 /// The tab's folder, under the home folder.
 pub const FOLDER: [&str; 2] = [".pinned", "orquestrador"];
-pub const DEFAULT_NAME: &str = "Orquestrador";
+pub const DEFAULT_NAME: &str = "Orchestrator";
 const NAME_MAX: usize = 40;
 const SETTINGS_FILE: &str = "global-orchestrator.json";
 const LEDGER_FILE: &str = "captain-requests.json";
@@ -35,7 +35,7 @@ pub fn is_global(env: &[(String, String)]) -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[schemars(rename = "GlobalOrchestratorSettings")]
 pub struct Settings {
-    /// The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.
+    /// The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.
     #[serde(default = "default_name")]
     pub name: String,
     /// This machine hosts the account's global orchestrator. One machine of the account does.
@@ -567,11 +567,11 @@ mod tests {
 
     #[test]
     fn settings_default_to_queueing_and_automatic_reports_and_keep_a_clean_name() {
-        assert_eq!(serde_json::to_value(Settings::default()).unwrap(), serde_json::json!({ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }));
+        assert_eq!(serde_json::to_value(Settings::default()).unwrap(), serde_json::json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }));
         let read: Settings = serde_json::from_str(r#"{"name":"Almirante","busy":"refuse","reports":"tool_only"}"#).unwrap();
         assert_eq!(read, Settings { name: "Almirante".into(), busy: BusyPolicy::Refuse, reports: ReportPolicy::ToolOnly, ..Settings::default() });
         assert_eq!(Settings { name: "  [Comandante]\n ".into(), ..Settings::default() }.cleaned().name, "Comandante");
-        assert_eq!(Settings { name: " ".into(), ..Settings::default() }.cleaned().name, "Orquestrador");
+        assert_eq!(Settings { name: " ".into(), ..Settings::default() }.cleaned().name, "Orchestrator");
     }
 
     #[test]

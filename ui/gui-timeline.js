@@ -919,7 +919,7 @@ function globalReportsHtml(user, t, tab, first, by, reports) {
 
 /** One Captain's report: who sent it and when, over what it says, its Captain opening the thread. */
 function reportRowHtml(report, at) {
-  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" title="Open this thread">Capitão ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
+  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
 }
 
 /** The prompt bubble as every other thread draws it. */

@@ -3137,7 +3137,7 @@ fn origin(dir: &Path, remote: &str) {
 }
 
 fn captain(machine: &str, path: &str, text: &str) -> HubCall {
-    HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orquestrador".into(), busy: None } }
+    HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orchestrator".into(), busy: None } }
 }
 
 fn report(tab: &str, path: &str, text: &str) -> HubCall {
@@ -3154,13 +3154,13 @@ fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back()
     let sent = fleet.send_to_captain(&project, "Ship the form.", "r-1").unwrap();
     let capitao = sent["tab"].as_str().unwrap().to_owned();
     assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-    wait_launch(&mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    wait_launch(&mac_dir, &capitao, "[Orchestrator] Ship the form.");
     assert_eq!(fleet.send_to_captain(&project, "Ship the form.", "r-1"), Ok(sent.clone()), "a repeat answers the first outcome");
     let queued = fleet.send_to_captain(&project, "Also the footer.", "r-2").unwrap();
     assert_eq!(queued, json!({ "outcome": "na_fila", "tab": capitao, "position": 1 }));
-    let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orquestrador" } });
+    let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orchestrator" } });
     assert_eq!(fleet.client.hub(to_site("From the phone.")), Ok(json!({ "outcome": "na_fila", "tab": capitao, "position": 2 })), "a signed-in client relays too");
-    let prompts = launches(&mac_dir, &capitao).lines().filter(|l| l.starts_with("[Orquestrador] ")).count();
+    let prompts = launches(&mac_dir, &capitao).lines().filter(|l| l.starts_with("[Orchestrator] ")).count();
     assert_eq!(prompts, 1, "the Capitão started once, and nothing was typed into it");
 
     let mac_link = fleet.mac.link.as_ref().unwrap();
@@ -3316,7 +3316,7 @@ fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_a
     let sent = tool(json!({ "name": "send_to_captain", "project": "github.com/acme/site", "machine": "@mac", "message": "Ship the form.", "request_id": "r-1" })).unwrap();
     let capitao = sent["tab"].as_str().unwrap().to_owned();
     assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-    wait_launch(&fleet.mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    wait_launch(&fleet.mac_dir, &capitao, "[Orchestrator] Ship the form.");
     let overview = tool(json!({ "name": "projects" })).unwrap();
     let site = overview["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site").unwrap();
     let on_mac = site["checkouts"].as_array().unwrap().iter().find(|c| c["machine"] == mac).unwrap();

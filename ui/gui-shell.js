@@ -267,7 +267,7 @@ function actionItems() {
     ...online.filter((m) => machines.get(m).view.os === "wsl").slice(0, 1).map((m) => ({ icon: "folder-plus", title: "Open WSL folder", sub: machineName(m), keep: true, terms: ["add project", "open", "wsl", "linux", "folder", "directory"], run: () => browseForProject(m) })),
     ...themeActionItems(),
     { icon: "git-pull-request-arrow", title: "Open pull requests", terms: ["pull requests", "prs", "pr", "github", "review", "merge", "branch"], run: () => openPage("pull-requests") },
-    { icon: "folder-git-2", title: "Open the account's projects", terms: ["projects", "projetos", "global", "account", "machines", "capitão", "capitao", "orquestrador", "orchestrator", "workers"], run: () => openGlobalProjects() },
+    { icon: "folder-git-2", title: "Open the account's projects", terms: ["projects", "projetos", "global", "account", "machines", "captain", "capitão", "capitao", "orquestrador", "orchestrator", "workers"], run: () => openGlobalProjects() },
     { icon: "sparkles", title: "Open skills", terms: ["skills", "plugins", "edit skill", "skill.md", "reload skills"], run: () => openPage("skills") },
     { icon: "chart-no-axes-column", title: "Open usage", command: "usage.open", terms: ["usage", "use", "tokens", "cost", "spend", "limits", "stats", "analytics"], run: () => openPage("usage") },
     { icon: "settings", title: "Open settings", terms: ["settings", "preferences", "configuration", "keybindings"], run: () => openSettings() },

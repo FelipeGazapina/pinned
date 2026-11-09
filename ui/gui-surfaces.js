@@ -598,7 +598,7 @@ function renderMemoryPanel() {
       : `<p class="memory-empty">${m.query ? "No memory matches that." : "No memories yet. Agents save them as they work, or add one below."}</p>`;
   const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
   // The global tab's panel is the account's memory, and reads with the orchestrator's own name.
-  const find = isGlobalOrchestratorTab(tab) ? `Buscar na memória do ${globalOrchestratorName()}` : `Search ${esc(projectName(tab))}'s memory`;
+  const find = isGlobalOrchestratorTab(tab) ? `Search ${globalOrchestratorName()}'s memory` : `Search ${esc(projectName(tab))}'s memory`;
   const shown = showPanel(`<div class="memory"><p class="memory-state">${esc(count)}</p>
     <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="${esc(find)}" aria-label="${esc(find)}" autocomplete="off" spellcheck="false">
     ${hits}
