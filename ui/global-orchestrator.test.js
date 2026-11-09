@@ -263,9 +263,31 @@ function projectsPage() {
     machineDirectory: () => ({ localId: "local", localName: "This Mac", names: {}, online: {} }),
     phaseOf: () => "working",
     projectRepos: new Map(),
+    hasProject: () => true,
   });
   return { ...harness, captain, catalog, click: harness.click };
 }
+
+test("threads started without a project are not a row on the projects page", () => {
+  const harness = page();
+  const tab = (machine, cwd, scratch) => ({ machine, scratch, view: { id: cwd, cwd } });
+  Object.assign(harness.context, {
+    machines: new Map(),
+    projectGroups: () => [
+      { name: "No project", tabs: [tab("mm", "/scratch/1", true), tab("mm", "/scratch/2", true)], checkouts: [{ machine: "mm", path: "/scratch/1", thread: true }] },
+      { name: "site", tabs: [tab("mm", "/work/site", false)], checkouts: [{ machine: "mm", path: "/work/site", thread: true }] },
+      { name: "infra", tabs: [], checkouts: [{ machine: "mm", path: "/work/infra" }] },
+    ],
+    machineDirectory: () => ({ localId: "local", localName: "This Mac", names: { mm: "Mac mini" }, online: { mm: true } }),
+    phaseOf: () => "idle",
+    projectRepos: new Map(),
+    hasProject: (t) => !t.scratch,
+  });
+  harness.context.renderGlobalProjectsPage();
+  const html = harness.pages.at(-1);
+  assert.deepEqual([...html.matchAll(/<span class="gp-name">([^<]*)<\/span>/g)].map((m) => m[1]), ["site", "infra"]);
+  assert.match(html, /2 projects · 1 machine/);
+});
 
 test("the projects page lists every project with its machines, Captain and running workers", () => {
   const { context, pages } = projectsPage();

@@ -921,11 +921,11 @@ async function sweep(profileName) {
     check(/^Worked( for .+)?$/.test(await lastTurn(".work > summary .label").textContent()), `the turn's own work did not settle: ${await lastTurn(".work > summary").textContent()}`);
     const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
     check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
-    check(/2 agents working/.test(await rowStatus()), `the sidebar row reads ${await rowStatus()}`);
+    check(/^2 working/.test((await rowStatus()).trim()), `the sidebar row reads ${await rowStatus()}`);
     check((await page.locator("#composer").getAttribute("data-working")) === "false", "the composer acts as if claude's turn were running");
     await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-running.png") });
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
-    await waitFor("one agent left", async () => /1 agent working/.test(await rowStatus()), 8000);
+    await waitFor("one agent left", async () => /^1 working/.test((await rowStatus()).trim()), 8000);
     check(!(await page.evaluate((k) => unseenDone(tabByKey(k)), beta)), "the row read Done while an agent still worked");
     await waitFor("the row to show an unread finish", () => page.evaluate((k) => unseenDone(tabByKey(k)), beta), 12000);
     check((await page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).count()) === 0, "the finished row still shows a status");
