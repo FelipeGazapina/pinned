@@ -2398,9 +2398,13 @@ impl Machine {
     }
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
+    /// Tauri calls this again on ExitRequested after the tray's Quit or an update's restart, so
+    /// only the first call runs: a second would find no tabs and save none.
     pub fn quit(&self) {
         self.save_sessions();
-        self.quitting.store(true, Ordering::SeqCst);
+        if self.quitting.swap(true, Ordering::SeqCst) {
+            return;
+        }
         self.stamp_parent_sessions();
         self.delegates.stop_for_restart(self.launch.path_env.as_deref());
         self.delegates.kill_remembered();
@@ -2857,8 +2861,9 @@ impl Machine {
     }
 
     /// Writes the tabs whose claude session is still going, in the order they were opened.
+    /// Does nothing once `quit` has run: the tabs are gone by then, and the file keeps them for the next launch.
     fn save_sessions(&self) {
-        let Some(file) = &self.sessions_file else { return };
+        let Some(file) = self.sessions_file.as_ref().filter(|_| !self.quitting.load(Ordering::SeqCst)) else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
             let parent_session = |t: &Tab| tabs.get(t.spawned_by.as_ref()?)?.claude_session.clone();
@@ -3520,6 +3525,30 @@ pub(crate) mod tests {
         let tabs = after.restore_tabs();
         let parents: Vec<_> = tabs.iter().map(|id| after.view(id).unwrap().spawned_by).collect();
         assert_eq!(parents, [None, Some(tabs[0].clone()), Some(tabs[1].clone())], "the restored tabs nest under their restored parents");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The tray's Quit and an update's restart call `quit`, then Tauri's ExitRequested calls it again.
+    #[test]
+    #[cfg(unix)]
+    fn quitting_twice_keeps_the_saved_threads() {
+        let root = temp("quit-twice");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let before = accounts_machine(&root);
+        for session in ["s1", "s2"] {
+            before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some(session.into()));
+        }
+        before.quit();
+        before.quit();
+        let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s3".into()));
+        before.close_tab(&tab);
+        let saved: Vec<String> = sessions::load(&root.join("config/sessions.json")).into_iter().map(|s| s.session).collect();
+        assert_eq!(saved, ["s1", "s2"], "nothing after the first quit rewrites the threads it saved");
+
+        let after = accounts_machine(&root);
+        assert_eq!(after.restore_tabs().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
