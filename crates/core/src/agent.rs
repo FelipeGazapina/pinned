@@ -93,6 +93,27 @@ pub enum ProjectTool {
         id: Option<i64>,
     },
     MemoryForget { id: i64 },
+    /// The global orchestrator's: every project of the account, the machines it is on and its Capitão.
+    Projects,
+    /// The global orchestrator's: hands `message` to the Capitão of `project`, a key `projects`
+    /// lists or a folder of this machine, on `machine` when given.
+    SendToCaptain {
+        project: String,
+        message: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: the latest replies of `project`'s Capitão.
+    ReadCaptain {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: what waits on the user across the account's machines.
+    Waiting,
+    /// A Capitão's: tells the global orchestrator `text` now, mid-work.
+    TellOrchestrator { text: String },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";

@@ -26,6 +26,9 @@ struct Report {
     claimed: bool,
     #[serde(default)]
     task: Option<String>,
+    /// The orchestrator's `request_id` this text delivers, so the machine knows when it was typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<String>,
 }
 
 struct Agent {
@@ -162,7 +165,7 @@ impl Delegates {
                 } else if ran >= task.run.budget_ms && !task.run.told_late {
                     task.run.told_late = true;
                     if let Parent::Tab(tab) = &task.parent {
-                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, task: Some(task.id.clone()) });
+                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, task: Some(task.id.clone()), request: None });
                     }
                 }
             }
@@ -567,7 +570,12 @@ impl Delegates {
     }
 
     pub fn queue_report(&self, tab: &str, session: Option<String>, text: String) {
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: None });
+    }
+
+    /// Queues a message from the global orchestrator, typed with the tab's other news once it is idle.
+    pub fn queue_request(&self, tab: &str, session: Option<String>, text: String, request: String) {
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: Some(request) });
     }
 
     fn push_report(&self, report: Report) {
@@ -576,9 +584,18 @@ impl Delegates {
         self.persist();
     }
 
-    pub fn drop_claimed_reports(&self, tab: &str) {
-        self.reports.lock().unwrap().retain(|report| !(report.tab == tab && report.claimed));
+    /// Drops the tab's reports that were typed, and returns the orchestrator requests among them.
+    pub fn drop_claimed_reports(&self, tab: &str) -> Vec<String> {
+        let mut typed = vec![];
+        self.reports.lock().unwrap().retain(|report| {
+            let drop = report.tab == tab && report.claimed;
+            if drop {
+                typed.extend(report.request.clone());
+            }
+            !drop
+        });
         self.persist();
+        typed
     }
 
     pub fn release_reports(&self, tab: &str) {
@@ -1028,7 +1045,7 @@ fn pending_report(task: &mut Task) -> Option<Report> {
         span(QUIET_AFTER_REPLY_MS),
         task.id
     );
-    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, task: Some(task.id.clone()) })
+    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, task: Some(task.id.clone()), request: None })
 }
 
 const SHELL_TASK: &str = "local_bash";

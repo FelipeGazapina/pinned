@@ -632,6 +632,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     {
                         hub.hub_call(&account, call).await
                     }
+                    None if matches!(call, HubCall::Relay { .. } | HubCall::Overview) => hub.hub_call(&account, call).await,
                     None => Err("a machine may only forward a workflow session's callbacks".into()),
                 };
                 if let Err(e) = &result {

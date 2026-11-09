@@ -837,6 +837,111 @@
                 ]
               },
               {
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enqueue"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "description": "The orchestrator's name; blank takes this machine's.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text",
+                  "request_id",
+                  "sender"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global\norchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A\nrepeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "orchestrator_report"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "report"
+                ]
+              },
+              {
+                "description": "The id of this machine's global orchestrator tab: the one already open, else a new one, not\nyet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_global_orchestrator"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Settings` of this machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_global_orchestrator_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
@@ -2813,6 +2918,123 @@
               "opencode-go"
             ]
           },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "project",
+              "path",
+              "tab",
+              "text"
+            ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "type": "string",
+                "default": "Orquestrador"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud"
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -4569,6 +4791,40 @@
                   "cmd",
                   "id"
                 ]
+              },
+              {
+                "description": "From a machine: `global_orchestrator::Handoff` of the machine `to` names. Carries a message\nfrom the global orchestrator to a Capitão on another machine, or a Capitão's report up to the\naccount's global orchestrator. `request_id` makes a repeat answer the first outcome.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/RelayTo"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "to"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Overview`: the account's projects on every machine, and what waits on\nthe user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -5985,6 +6241,68 @@
               "name"
             ]
           },
+          "RelayTo": {
+            "description": "Where a relayed message goes, and what it carries.",
+            "oneOf": [
+              {
+                "description": "`text` for the Capitão of the project at `path` on `machine`, as `Call::Enqueue` takes it.\nThe hub takes it only from the machine that hosts the account's global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "machine",
+                  "path",
+                  "text",
+                  "sender"
+                ]
+              },
+              {
+                "description": "A report for the account's global orchestrator, as `Call::OrchestratorReport` takes it. The\nhub takes it only from a machine whose Capitão tab `report.tab` works in `report.path`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "report"
+                ]
+              }
+            ]
+          },
           "Target2": {
             "type": "object",
             "properties": {
@@ -6806,6 +7124,110 @@
                 "required": [
                   "cmd",
                   "path"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enqueue"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "description": "The orchestrator's name; blank takes this machine's.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text",
+                  "request_id"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global\norchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A\nrepeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "orchestrator_report"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "report"
+                ]
+              },
+              {
+                "description": "The id of this machine's global orchestrator tab: the one already open, else a new one, not\nyet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_global_orchestrator"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Settings` of this machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_global_orchestrator_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
                 ]
               },
               {
@@ -8763,6 +9185,113 @@
               "opencode-go"
             ]
           },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "project",
+              "path",
+              "tab",
+              "text"
+            ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "type": "string",
+                "default": "Orquestrador"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              }
+            }
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -10494,6 +11023,40 @@
                   "cmd",
                   "id"
                 ]
+              },
+              {
+                "description": "From a machine: `global_orchestrator::Handoff` of the machine `to` names. Carries a message\nfrom the global orchestrator to a Capitão on another machine, or a Capitão's report up to the\naccount's global orchestrator. `request_id` makes a repeat answer the first outcome.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/RelayTo"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "to"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Overview`: the account's projects on every machine, and what waits on\nthe user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -11856,6 +12419,67 @@
               "path"
             ]
           },
+          "RelayTo": {
+            "description": "Where a relayed message goes, and what it carries.",
+            "oneOf": [
+              {
+                "description": "`text` for the Capitão of the project at `path` on `machine`, as `Call::Enqueue` takes it.\nThe hub takes it only from the machine that hosts the account's global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "machine",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "A report for the account's global orchestrator, as `Call::OrchestratorReport` takes it. The\nhub takes it only from a machine whose Capitão tab `report.tab` works in `report.path`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "report"
+                ]
+              }
+            ]
+          },
           "Target2": {
             "type": "object",
             "properties": {
@@ -12453,6 +13077,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "orchestrator_global": {
+                "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -13744,6 +14372,40 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "From a machine: `global_orchestrator::Handoff` of the machine `to` names. Carries a message\nfrom the global orchestrator to a Capitão on another machine, or a Capitão's report up to the\naccount's global orchestrator. `request_id` makes a repeat answer the first outcome.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/RelayTo"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "to"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Overview`: the account's projects on every machine, and what waits on\nthe user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -15160,6 +15822,128 @@
               "path",
               "name"
             ]
+          },
+          "RelayTo": {
+            "description": "Where a relayed message goes, and what it carries.",
+            "oneOf": [
+              {
+                "description": "`text` for the Capitão of the project at `path` on `machine`, as `Call::Enqueue` takes it.\nThe hub takes it only from the machine that hosts the account's global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "machine",
+                  "path",
+                  "text",
+                  "sender"
+                ]
+              },
+              {
+                "description": "A report for the account's global orchestrator, as `Call::OrchestratorReport` takes it. The\nhub takes it only from a machine whose Capitão tab `report.tab` works in `report.path`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "report"
+                ]
+              }
+            ]
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "project",
+              "path",
+              "tab",
+              "text"
+            ]
           }
         }
       },
@@ -15603,6 +16387,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "orchestrator_global": {
+                "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -16869,6 +17657,40 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "From a machine: `global_orchestrator::Handoff` of the machine `to` names. Carries a message\nfrom the global orchestrator to a Capitão on another machine, or a Capitão's report up to the\naccount's global orchestrator. `request_id` makes a repeat answer the first outcome.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/RelayTo"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "to"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Overview`: the account's projects on every machine, and what waits on\nthe user.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -18230,6 +19052,125 @@
             "required": [
               "machine",
               "path"
+            ]
+          },
+          "RelayTo": {
+            "description": "Where a relayed message goes, and what it carries.",
+            "oneOf": [
+              {
+                "description": "`text` for the Capitão of the project at `path` on `machine`, as `Call::Enqueue` takes it.\nThe hub takes it only from the machine that hosts the account's global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "machine",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "A report for the account's global orchestrator, as `Call::OrchestratorReport` takes it. The\nhub takes it only from a machine whose Capitão tab `report.tab` works in `report.path`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "report"
+                ]
+              }
+            ]
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "project",
+              "path",
+              "tab",
+              "text"
             ]
           }
         }
@@ -21191,6 +22132,316 @@
         ]
       }
     },
+    "GlobalOrchestratorSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSettings",
+        "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "type": "string",
+            "default": "Orquestrador"
+          },
+          "host": {
+            "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+            "type": "boolean",
+            "default": false
+          },
+          "busy": {
+            "$ref": "#/$defs/BusyPolicy",
+            "default": "queue"
+          },
+          "reports": {
+            "$ref": "#/$defs/ReportPolicy",
+            "default": "auto"
+          },
+          "group_reports": {
+            "description": "The chat folds consecutive reports into one row.",
+            "type": "boolean",
+            "default": true
+          },
+          "read_aloud": {
+            "description": "The phone reads the orchestrator's summaries aloud.",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "name",
+          "host",
+          "busy",
+          "reports",
+          "group_reports",
+          "read_aloud"
+        ],
+        "$defs": {
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSettings",
+        "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "type": "string",
+            "default": "Orquestrador"
+          },
+          "host": {
+            "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+            "type": "boolean",
+            "default": false
+          },
+          "busy": {
+            "$ref": "#/$defs/BusyPolicy",
+            "default": "queue"
+          },
+          "reports": {
+            "$ref": "#/$defs/ReportPolicy",
+            "default": "auto"
+          },
+          "group_reports": {
+            "description": "The chat folds consecutive reports into one row.",
+            "type": "boolean",
+            "default": true
+          },
+          "read_aloud": {
+            "description": "The phone reads the orchestrator's summaries aloud.",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "$defs": {
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "Handoff": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Handoff",
+        "description": "What became of a message handed to a Capitão, or of a report handed to the orchestrator.\n\n`{\"outcome\":\"na_fila\",\"tab\":\"tab-1a-3\",\"position\":2}`",
+        "oneOf": [
+          {
+            "description": "Typed into the idle session now.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "entregue"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          },
+          {
+            "description": "Waits in the tab's queue and is typed once the session is idle. It survives a restart.\n`position` counts this message among those waiting for the tab.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "na_fila"
+              },
+              "tab": {
+                "type": "string"
+              },
+              "position": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "outcome",
+              "tab",
+              "position"
+            ]
+          },
+          {
+            "description": "The session was not running, or had no conversation yet: it started with the message as its\nfirst prompt.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "iniciado"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          },
+          {
+            "description": "The Capitão is working and the busy policy refuses. Nothing was typed or queued, and a retry\nwith the same `request_id` may deliver it.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "ocupado"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          }
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Handoff",
+        "description": "What became of a message handed to a Capitão, or of a report handed to the orchestrator.\n\n`{\"outcome\":\"na_fila\",\"tab\":\"tab-1a-3\",\"position\":2}`",
+        "oneOf": [
+          {
+            "description": "Typed into the idle session now.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "entregue"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          },
+          {
+            "description": "Waits in the tab's queue and is typed once the session is idle. It survives a restart.\n`position` counts this message among those waiting for the tab.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "na_fila"
+              },
+              "tab": {
+                "type": "string"
+              },
+              "position": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "outcome",
+              "tab",
+              "position"
+            ]
+          },
+          {
+            "description": "The session was not running, or had no conversation yet: it started with the message as its\nfirst prompt.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "iniciado"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          },
+          {
+            "description": "The Capitão is working and the busy policy refuses. Nothing was typed or queued, and a retry\nwith the same `request_id` may deliver it.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "ocupado"
+              },
+              "tab": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "tab"
+            ]
+          }
+        ]
+      }
+    },
     "LinearAccount": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -21690,6 +22941,376 @@
                 "type": "string",
                 "const": "off"
               }
+            ]
+          }
+        }
+      }
+    },
+    "Overview": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Overview",
+        "description": "Every project of the account, for the global orchestrator's `projects` and `waiting` tools.",
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/OverviewProject"
+            }
+          },
+          "waiting": {
+            "description": "What waits on the user across the account's machines.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Waiting"
+            }
+          }
+        },
+        "required": [
+          "projects",
+          "waiting"
+        ],
+        "$defs": {
+          "OverviewProject": {
+            "description": "One project, with every machine that has a checkout of it.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "What `send_to_captain` and `read_captain` take: the `repo`, or `<machine id>:<path>` for a\nfolder with no origin.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "repo": {
+                "description": "The origin as `host/owner/name`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "checkouts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/OverviewCheckout"
+                }
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "checkouts"
+            ]
+          },
+          "OverviewCheckout": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "online": {
+                "type": "boolean"
+              },
+              "version": {
+                "description": "The pinned build the machine last signed in with.",
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string"
+              },
+              "captain": {
+                "$ref": "#/$defs/CaptainState"
+              },
+              "captain_tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "workers": {
+                "description": "Worker tabs of the project running on that machine.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "online",
+              "version",
+              "path",
+              "captain",
+              "workers"
+            ]
+          },
+          "CaptainState": {
+            "description": "Whether a message to the project's Capitão would be typed now.",
+            "oneOf": [
+              {
+                "description": "Idle, finished, failed or stopped: a message is typed now or starts it.",
+                "type": "string",
+                "const": "livre"
+              },
+              {
+                "description": "Working or waiting on the user: a message queues.",
+                "type": "string",
+                "const": "trabalhando"
+              },
+              {
+                "description": "No Capitão tab, or the machine is offline: a message opens one where the machine is online.",
+                "type": "string",
+                "const": "nenhum"
+              }
+            ]
+          },
+          "Waiting": {
+            "description": "A tab that waits on the user.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "tab": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/WaitingKind"
+              },
+              "project": {
+                "description": "The project folder the tab works in, when it has one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What the session asks, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "since": {
+                "description": "Unix seconds of the tab's last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "tab",
+              "kind"
+            ]
+          },
+          "WaitingKind": {
+            "type": "string",
+            "enum": [
+              "needs_input",
+              "failed"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Overview",
+        "description": "Every project of the account, for the global orchestrator's `projects` and `waiting` tools.",
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/OverviewProject"
+            }
+          },
+          "waiting": {
+            "description": "What waits on the user across the account's machines.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Waiting"
+            }
+          }
+        },
+        "required": [
+          "projects",
+          "waiting"
+        ],
+        "$defs": {
+          "OverviewProject": {
+            "description": "One project, with every machine that has a checkout of it.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "What `send_to_captain` and `read_captain` take: the `repo`, or `<machine id>:<path>` for a\nfolder with no origin.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "repo": {
+                "description": "The origin as `host/owner/name`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "checkouts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/OverviewCheckout"
+                }
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "checkouts"
+            ]
+          },
+          "OverviewCheckout": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "online": {
+                "type": "boolean"
+              },
+              "version": {
+                "description": "The pinned build the machine last signed in with.",
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string"
+              },
+              "captain": {
+                "$ref": "#/$defs/CaptainState"
+              },
+              "captain_tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "workers": {
+                "description": "Worker tabs of the project running on that machine.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "online",
+              "path",
+              "captain"
+            ]
+          },
+          "CaptainState": {
+            "description": "Whether a message to the project's Capitão would be typed now.",
+            "oneOf": [
+              {
+                "description": "Idle, finished, failed or stopped: a message is typed now or starts it.",
+                "type": "string",
+                "const": "livre"
+              },
+              {
+                "description": "Working or waiting on the user: a message queues.",
+                "type": "string",
+                "const": "trabalhando"
+              },
+              {
+                "description": "No Capitão tab, or the machine is offline: a message opens one where the machine is online.",
+                "type": "string",
+                "const": "nenhum"
+              }
+            ]
+          },
+          "Waiting": {
+            "description": "A tab that waits on the user.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "tab": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/WaitingKind"
+              },
+              "project": {
+                "description": "The project folder the tab works in, when it has one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What the session asks, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "since": {
+                "description": "Unix seconds of the tab's last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "tab",
+              "kind"
+            ]
+          },
+          "WaitingKind": {
+            "type": "string",
+            "enum": [
+              "needs_input",
+              "failed"
             ]
           }
         }
@@ -26033,6 +27654,10 @@
               "string",
               "null"
             ]
+          },
+          "orchestrator_global": {
+            "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -26290,6 +27915,10 @@
               "string",
               "null"
             ]
+          },
+          "orchestrator_global": {
+            "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -26820,6 +28449,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "orchestrator_global": {
+                "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -29262,6 +30895,10 @@
                   "string",
                   "null"
                 ]
+              },
+              "orchestrator_global": {
+                "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -32194,6 +33831,111 @@
                 ]
               },
               {
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enqueue"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "description": "The orchestrator's name; blank takes this machine's.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text",
+                  "request_id",
+                  "sender"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global\norchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A\nrepeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "orchestrator_report"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "report"
+                ]
+              },
+              {
+                "description": "The id of this machine's global orchestrator tab: the one already open, else a new one, not\nyet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_global_orchestrator"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Settings` of this machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_global_orchestrator_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
@@ -34170,6 +35912,123 @@
               "opencode-go"
             ]
           },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "project",
+              "path",
+              "tab",
+              "text"
+            ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "type": "string",
+                "default": "Orquestrador"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud"
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -36061,6 +37920,110 @@
                 "required": [
                   "cmd",
                   "path"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enqueue"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "description": "The orchestrator's name; blank takes this machine's.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text",
+                  "request_id"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global\norchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A\nrepeat of `request_id` answers the first outcome and types nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "orchestrator_report"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/CaptainReport"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "request_id",
+                  "report"
+                ]
+              },
+              {
+                "description": "The id of this machine's global orchestrator tab: the one already open, else a new one, not\nyet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_global_orchestrator"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`global_orchestrator::Settings` of this machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_global_orchestrator_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
                 ]
               },
               {
@@ -38016,6 +39979,113 @@
             "enum": [
               "login",
               "opencode-go"
+            ]
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "CaptainReport": {
+            "description": "What a Capitão tells the global orchestrator, at the end of a turn one of its messages started\nor through `tell_orchestrator`.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine the Capitão runs on. Empty when that machine does not know its id.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The project's name, its folder's.",
+                "type": "string"
+              },
+              "path": {
+                "description": "The project's folder on that machine.",
+                "type": "string"
+              },
+              "tab": {
+                "description": "The Capitão's tab.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "answers": {
+                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "project",
+              "path",
+              "tab",
+              "text"
+            ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "type": "string",
+                "default": "Orquestrador"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              }
+            }
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
             ]
           },
           "PrAction": {

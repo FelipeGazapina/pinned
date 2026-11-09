@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::agent::{Message, ProjectTool, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{Message, ProjectTool, Role, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::delegate::{self, Mode};
 use crate::ipc::UnixStream;
 
@@ -183,7 +183,8 @@ pub fn serve_io(reminders: bool, input: impl BufRead, output: impl Write + Send 
             })),
             Some("tools/list") => {
                 let child = std::env::var(TASK_ENV).ok().is_some_and(|value| !value.is_empty());
-                Ok(json!({ "tools": tool_definitions(reminders, child) }))
+                let seat = Seat::of(session_var(ROLE_ENV).as_deref(), child);
+                Ok(json!({ "tools": tool_definitions(reminders, child, seat) }))
             }
             Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
@@ -208,14 +209,53 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
-fn tool_definitions(reminders: bool, child: bool) -> Value {
-    // The orchestrator, a plain thread and a worker all fan out to workers the same way, so all
-    // get delegate and agents. A delegated child never starts more workers.
+/// The part a session's tab plays, as its `PINNED_ROLE` names it, which picks the tools it sees.
+/// A delegated child plays none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seat {
+    GlobalOrchestrator,
+    Captain,
+    Other,
+}
+
+impl Seat {
+    fn of(role: Option<&str>, child: bool) -> Seat {
+        match role {
+            _ if child => Seat::Other,
+            Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
+            Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
+            _ => Seat::Other,
+        }
+    }
+}
+
+/// Who a project tool is offered to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Audience {
+    /// Sessions that may start workers: every one but a delegated child and the global orchestrator.
+    Spawners,
+    Everyone,
+    GlobalOrchestrator,
+    Captains,
+}
+
+fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
+    // The Capitão, a plain thread and a worker all fan out to workers the same way, so all get
+    // delegate and agents. A delegated child never starts more workers. The global orchestrator
+    // does no project work: it hands every request to a Capitão.
     let spawner = delegate::delegate_block(child).is_none();
-    let project = project_tools().into_iter().filter(|(needs_spawner, _)| !needs_spawner || spawner).map(|(_, tool)| tool);
+    let global = seat == Seat::GlobalOrchestrator;
+    let offered = |audience: Audience| match audience {
+        Audience::Spawners => spawner && !global,
+        Audience::Everyone => true,
+        Audience::GlobalOrchestrator => global,
+        Audience::Captains => seat == Seat::Captain,
+    };
     let mut tools = if reminders { reminder_tools() } else { vec![] };
-    tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || spawner));
-    tools.extend(project);
+    if !global {
+        tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || spawner));
+    }
+    tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
     Value::Array(tools)
 }
 
@@ -327,14 +367,14 @@ fn reminder_tools() -> Vec<Value> {
     ]
 }
 
-/// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
-/// Every session gets the memory tools; one outside a project is told it has no memory.
-/// Each project tool, and whether it needs a session that may start workers: a delegated child
-/// never gets those.
-fn project_tools() -> [(bool, serde_json::Value); 5] {
+/// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
+/// memory tools; one outside a project is told it has no memory.
+fn project_tools() -> [(Audience, serde_json::Value); 10] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
+    let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, or its folder on this machine." });
+    let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects. Pass it whenever projects lists the project on more than one machine." });
     [
-        (true, serde_json::json!({
+        (Audience::Spawners, serde_json::json!({
             "name": "delegate",
             "description": "Start a worker thread on a task. It works in its own git worktree when the project is a repository, and you get a message when it finishes or needs input. Returns the worker's tab id.",
             "inputSchema": {
@@ -346,12 +386,12 @@ fn project_tools() -> [(bool, serde_json::Value); 5] {
                 "required": ["task"],
             },
         })),
-        (true, serde_json::json!({
+        (Audience::Spawners, serde_json::json!({
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
             "inputSchema": no_args,
         })),
-        (false, serde_json::json!({
+        (Audience::Everyone, serde_json::json!({
             "name": "memory_search",
             "description": "Search this project's memory: facts saved by earlier sessions, such as the user's preferences, decisions, conventions and how the code works. Matches by words and by meaning, in any language. Returns one memory per line as [id] title: text.",
             "inputSchema": {
@@ -363,7 +403,7 @@ fn project_tools() -> [(bool, serde_json::Value); 5] {
                 "required": ["query"],
             },
         })),
-        (false, serde_json::json!({
+        (Audience::Everyone, serde_json::json!({
             "name": "memory_save",
             "description": "Save a durable fact about this project for later sessions: a user preference, a decision, a convention or an architecture fact. One fact per memory. With id, replaces that memory instead. A memory that repeats an existing one is not saved; you get the existing one's id to update.",
             "inputSchema": {
@@ -377,13 +417,55 @@ fn project_tools() -> [(bool, serde_json::Value); 5] {
                 "required": ["title", "text"],
             },
         })),
-        (false, serde_json::json!({
+        (Audience::Everyone, serde_json::json!({
             "name": "memory_forget",
             "description": "Remove a memory that is wrong or no longer holds, by its id.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "id": { "type": "integer", "description": "The memory's id." } },
                 "required": ["id"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "projects",
+            "description": "List every project of the account as JSON: its key, name and repo, each machine that has it (online or not, with its pinned version), its Capitão's state there (livre, trabalhando or nenhum) and how many workers run. Call it to pick the project and machine before send_to_captain.",
+            "inputSchema": no_args,
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "send_to_captain",
+            "description": "Hand a message to a project's Capitão. It opens the Capitão when the project has none and starts it when it is stopped, and while it works the message waits in its queue, so it is never typed over its work. Returns JSON whose outcome is entregue (typed now), na_fila (queued, with its position), iniciado (started with the message) or ocupado (busy, and the settings refuse: try again later with the same request_id). The same request_id never delivers twice.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project,
+                    "message": { "type": "string", "description": "What the Capitão should do, written so it stands alone." },
+                    "request_id": { "type": "string", "description": "A new id for each message, such as a UUID. Sending again with the same id is safe." },
+                    "machine": machine,
+                },
+                "required": ["project", "message", "request_id"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "read_captain",
+            "description": "Read the latest replies of a project's Capitão.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "project": project, "machine": machine },
+                "required": ["project"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "waiting",
+            "description": "List as JSON what waits on the user across every machine: threads that ask for input and threads that stopped on an error.",
+            "inputSchema": no_args,
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "tell_orchestrator",
+            "description": "Tell the global orchestrator something now, mid-work: progress, a result, or a question for the user. When the user's settings send reports by themselves, your last reply of a turn that a message from the orchestrator started reaches it without this tool.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "text": { "type": "string", "description": "The report, written so it stands alone." } },
+                "required": ["text"],
             },
         })),
     ]
@@ -559,6 +641,8 @@ fn project_request(name: &str, args: &serde_json::Value, tab: Option<String>) ->
 fn send(message: &Message) -> Result<String, String> {
     let timeout = match message {
         Message::Delegate { .. } => StdDuration::from_secs(120),
+        // These may wait on the hub and another machine, which allow a minute.
+        Message::Project { tool: ProjectTool::Projects | ProjectTool::SendToCaptain { .. } | ProjectTool::ReadCaptain { .. } | ProjectTool::Waiting | ProjectTool::TellOrchestrator { .. }, .. } => StdDuration::from_secs(70),
         _ => StdDuration::from_secs(10),
     };
     let sock = std::env::var(SOCK_ENV).map_err(|_| format!("{SOCK_ENV} is not set: run this inside a pinned tab"))?;
@@ -661,7 +745,7 @@ mod tests {
 
     #[test]
     fn delegate_task_names_every_argument() {
-        let tools = tool_definitions(true, false);
+        let tools = tool_definitions(true, false, Seat::Other);
         let tool = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "delegate_task").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         let mut names: Vec<_> = props.keys().cloned().collect();
@@ -918,15 +1002,29 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[test]
     fn a_session_gets_the_project_tools_a_delegated_child_lacks() {
-        let names = |child| tool_definitions(true, child).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let names = |child| tool_definitions(true, child, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
-        let on_a_node = tool_definitions(false, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &["delegate", "agents"], &memory].concat());
-        assert_eq!(permissions()[7..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
+        assert_eq!(
+            permissions()[7..],
+            [
+                "mcp__pinned__delegate",
+                "mcp__pinned__agents",
+                "mcp__pinned__memory_search",
+                "mcp__pinned__memory_save",
+                "mcp__pinned__memory_forget",
+                "mcp__pinned__projects",
+                "mcp__pinned__send_to_captain",
+                "mcp__pinned__read_captain",
+                "mcp__pinned__waiting",
+                "mcp__pinned__tell_orchestrator",
+            ]
+        );
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
@@ -966,7 +1064,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(plain.contains(&"delegate".to_owned()) && plain.contains(&"agents".to_owned()), "{plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), plain);
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &["tell_orchestrator".to_owned()]].concat());
         assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
@@ -974,6 +1072,28 @@ fn restore_var(name: &str, value: Option<String>) {
         let child_orchestrator = offered(Some("orchestrator"), Some("task-1"));
         assert!(!child_orchestrator.contains(&"delegate_task".to_owned()), "{child_orchestrator:?}");
         assert!(!child_orchestrator.contains(&"delegate".to_owned()), "{child_orchestrator:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
+        let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
+        let memory = ["memory_search", "memory_save", "memory_forget"];
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "delegate", "agents"], &memory].concat();
+        assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
+        assert_eq!(offered(Some("worker"), None), today);
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
+
+        let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
+        assert_eq!(
+            ask("send_to_captain", serde_json::json!({ "project": "github.com/o/site", "message": "Ship the form.", "request_id": "r-1", "machine": "mini" })),
+            Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"send_to_captain","project":"github.com/o/site","message":"Ship the form.","request_id":"r-1","machine":"mini"}}"#.into())
+        );
+        assert_eq!(ask("send_to_captain", serde_json::json!({ "project": "site", "message": "x" })), Err("send_to_captain: missing field `request_id`".into()));
+        assert_eq!(ask("tell_orchestrator", serde_json::json!({ "text": "Halfway." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"tell_orchestrator","text":"Halfway."}}"#.into()));
+        assert_eq!(ask("waiting", serde_json::Value::Null), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"waiting"}}"#.into()));
     }
 
     #[test]

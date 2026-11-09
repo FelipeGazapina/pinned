@@ -2,6 +2,7 @@ use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
+use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -337,6 +338,7 @@ impl Tab {
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
             role: role_of(&self.env).map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
+            orchestrator_global: global::is_global(&self.env),
         }
     }
 
@@ -416,6 +418,12 @@ pub struct Machine {
     memories: Arc<memory::Memories>,
     orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
+    global: Mutex<global::Settings>,
+    /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
+    global_dir: PathBuf,
+    /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
+    /// holding `tabs`.
+    sent: Mutex<global::Ledger>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -518,6 +526,7 @@ impl Machine {
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let home = home();
+        let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
@@ -555,6 +564,9 @@ impl Machine {
             memories,
             orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
+            global: Mutex::new(global::Settings::load(dir.as_deref())),
+            global_dir,
+            sent: Mutex::new(global::Ledger::load(dir.as_deref())),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -780,6 +792,11 @@ impl Machine {
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
+            Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
+            Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
+            Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
+            Call::GlobalOrchestratorSettings => json(self.global_settings()),
+            Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
                 let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
@@ -1831,10 +1848,238 @@ impl Machine {
         Ok(id)
     }
 
+    /// This machine's global orchestrator tab: the one already open, else a new one, not yet
+    /// started, in its folder, which is made when missing and never becomes a project.
+    pub fn open_global_orchestrator(&self) -> Result<TabId, String> {
+        std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
+        let folder = self.global_folder();
+        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| global::is_global(&t.env)).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
+        if let Some(id) = open {
+            return Ok(id);
+        }
+        let account = self.account_for(None, &folder)?;
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't be the global orchestrator", account.id, account.provider.spec().name));
+        }
+        let id = self.add_tab(folder, account, vec![], global::env(), false, None);
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    fn global_folder(&self) -> PathBuf {
+        dunce::canonicalize(&self.global_dir).unwrap_or_else(|_| self.global_dir.clone())
+    }
+
+    pub fn global_settings(&self) -> global::Settings {
+        self.global.lock().unwrap().clone()
+    }
+
+    pub fn set_global_settings(&self, settings: global::Settings) -> Result<global::Settings, String> {
+        let settings = settings.cleaned();
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.global.lock().unwrap() = settings.clone();
+        Ok(settings)
+    }
+
+    /// Hands `text` from the global orchestrator `sender` to the Capitão of the project at `path`,
+    /// opening the Capitão when the project has none. It is typed now when the Capitão is idle,
+    /// becomes its first prompt when it is stopped or has no conversation yet, and otherwise waits
+    /// in its queue, or is refused as busy under `BusyPolicy::Refuse`. A repeat of `request_id`
+    /// answers the first outcome without typing. The ledger keeps which turn the message started,
+    /// so the Capitão's reply can go back up when that turn ends.
+    pub fn enqueue_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+        let (request_id, text) = (request_id.trim(), text.trim());
+        if request_id.is_empty() {
+            return Err("request_id is required".into());
+        }
+        if text.is_empty() {
+            return Err("the message is empty".into());
+        }
+        let settings = self.global_settings();
+        let mut sent = self.sent.lock().unwrap();
+        if let Some(earlier) = sent.find(request_id) {
+            return if earlier.project == canonical(path) { Ok(earlier.handoff.clone()) } else { Err(format!("request_id {request_id} was already used for another message")) };
+        }
+        let tab = self.open_orchestrator(path)?;
+        let project = canonical(path);
+        let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
+        let handoff = self.hand_to(&tab, &format!("[{sender}] {text}"), request_id, busy.unwrap_or(settings.busy), &sent)?;
+        let progress = match handoff {
+            Handoff::Busy { .. } => return Ok(handoff),
+            Handoff::Queued { .. } => Progress::Queued,
+            Handoff::Delivered { .. } | Handoff::Started { .. } => Progress::InFlight,
+        };
+        sent.record(global::Sent { request_id: request_id.to_owned(), sender, project, handoff: handoff.clone(), progress, at: unix_now() });
+        Ok(handoff)
+    }
+
+    /// Hands a Capitão's report to this machine's global orchestrator as `CaptainReport::line`,
+    /// opening it when missing. It never refuses as busy. A repeat of `request_id` answers the first
+    /// outcome without typing.
+    pub fn deliver_report(&self, request_id: &str, report: &CaptainReport) -> Result<Handoff, String> {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return Err("request_id is required".into());
+        }
+        let mut sent = self.sent.lock().unwrap();
+        if let Some(earlier) = sent.find(request_id) {
+            return if earlier.project == self.global_folder() { Ok(earlier.handoff.clone()) } else { Err(format!("request_id {request_id} was already used for another message")) };
+        }
+        let tab = self.open_global_orchestrator()?;
+        let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent)?;
+        let progress = if matches!(handoff, Handoff::Queued { .. }) { Progress::Queued } else { Progress::InFlight };
+        sent.record(global::Sent { request_id: request_id.to_owned(), sender: report.project.clone(), project: self.global_folder(), handoff: handoff.clone(), progress, at: unix_now() });
+        Ok(handoff)
+    }
+
+    /// Types `line` into `tab` now when its session is idle, or starts the session on it as its
+    /// first prompt when it is stopped or has no conversation yet. Otherwise it queues `line` with
+    /// the tab's other news, or answers busy under `BusyPolicy::Refuse`. Starting with the prompt
+    /// instead of typing it keeps a startup dialog from taking its Enter.
+    fn hand_to(&self, tab: &str, line: &str, request_id: &str, busy: BusyPolicy, sent: &global::Ledger) -> Result<Handoff, String> {
+        #[derive(PartialEq)]
+        enum Ready {
+            Stopped,
+            /// Running without a conversation, with nothing typed or started there yet.
+            Fresh,
+            Idle,
+            Busy,
+        }
+        let ours = sent.started(tab);
+        let ready = self.tab(tab, |t| match &t.session {
+            None if t.starting => Ready::Busy,
+            None => Ready::Stopped,
+            Some(session) if session.raw() && t.notice_idle() => Ready::Idle,
+            Some(_) if t.claude_session.is_none() && t.status.is_none() && t.turn_pending.is_none() && t.held.is_empty() && t.draft.empty() && !ours => Ready::Fresh,
+            Some(_) => Ready::Busy,
+        })?;
+        let id = tab.to_owned();
+        match ready {
+            Ready::Stopped | Ready::Fresh => {
+                self.tab(tab, |t| {
+                    let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
+                    args.push(if line.starts_with('-') { format!("\n{line}") } else { line.to_owned() });
+                    t.launch = args;
+                })?;
+                if ready == Ready::Fresh {
+                    self.relaunch(tab, UNWATCHED.0, UNWATCHED.1)?;
+                } else {
+                    self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
+                }
+                Ok(Handoff::Started { tab: id })
+            }
+            Ready::Idle if self.write_notice(tab, line) == Ok(true) => Ok(Handoff::Delivered { tab: id }),
+            Ready::Idle | Ready::Busy if busy == BusyPolicy::Refuse => Ok(Handoff::Busy { tab: id }),
+            Ready::Idle | Ready::Busy => {
+                let session = self.tab(tab, |t| t.claude_session.clone())?;
+                self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+                self.arm_delegate_pass();
+                Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
+            }
+        }
+    }
+
+    /// Hands `message` to `project`'s Capitão: on this machine when the project is here and
+    /// `machine` names no other, else on the machine the hub finds.
+    fn send_to_captain(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
+        let sender = self.global_settings().name;
+        match self.local_project(project, machine) {
+            Some(path) => self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None),
+            None => self.route_remote(project, machine, message, request_id, &sender),
+        }
+    }
+
+    /// The folder on this machine that `project` names, as a key `projects` lists (`repo`, or
+    /// `<machine>:<path>`) or as a folder, unless `machine` names another machine.
+    fn local_project(&self, project: &str, machine: Option<&str>) -> Option<PathBuf> {
+        if machine.is_some_and(|m| !self.is_this_machine(m)) {
+            return None;
+        }
+        let project = project.trim();
+        let path = if Path::new(project).is_absolute() {
+            Some(project)
+        } else {
+            project.split_once(':').filter(|(m, path)| Path::new(path).is_absolute() && self.is_this_machine(m)).map(|(_, path)| path)
+        };
+        let projects = self.list_projects();
+        match path {
+            Some(path) => {
+                let path = canonical(path);
+                projects.iter().any(|p| Path::new(&p.path) == path).then_some(path)
+            }
+            None => projects.into_iter().find(|p| p.repo.as_deref() == Some(project)).map(|p| PathBuf::from(p.path)),
+        }
+    }
+
+    /// Whether `machine`, an id or a name from `projects`, is this machine. Without the hub's id
+    /// for it, only its name matches.
+    fn is_this_machine(&self, machine: &str) -> bool {
+        machine.trim().eq_ignore_ascii_case(&crate::account::hostname())
+    }
+
+    /// Every project of the account for the global orchestrator's `projects` tool. The node-local
+    /// unit fills this in.
+    fn projects_overview(&self) -> Result<global::Overview, String> {
+        Err("projects is not available yet".into())
+    }
+
+    /// What waits on the user across the account's machines, for the `waiting` tool. The node-local
+    /// unit fills this in.
+    fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
+        Err("waiting is not available yet".into())
+    }
+
+    /// The latest replies of `project`'s Capitão, for the `read_captain` tool. The node-local unit
+    /// fills this in, and the hub-bridge unit reaches a Capitão on another machine.
+    fn read_captain(&self, _project: &str, _machine: Option<&str>) -> Result<String, String> {
+        Err("read_captain is not available yet".into())
+    }
+
+    /// Hands a message to a Capitão on another machine through `HubCall::Relay`. The hub-bridge
+    /// unit fills this in.
+    fn route_remote(&self, project: &str, _machine: Option<&str>, _text: &str, _request_id: &str, _sender: &str) -> Result<Handoff, String> {
+        Err(format!("{project} is not a project on this machine, and sending to a Capitão on another machine is not available yet"))
+    }
+
+    /// Sends a Capitão's report up to the account's global orchestrator: `deliver_report` when this
+    /// machine hosts it, else `HubCall::Relay`. `answers` are the request ids the report ends. The
+    /// node-local unit fills this in.
+    fn report_up(&self, _captain: &str, _project: &Path, _text: String, _answers: Vec<String>) -> Result<Handoff, String> {
+        Err("reporting to the global orchestrator is not available yet".into())
+    }
+
+    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. Under
+    /// `ReportPolicy::Auto` the node-local unit takes `Ledger::answer(project)` and sends the last
+    /// reply up with `report_up`.
+    fn captain_turn_ended(&self, _captain: &str, _project: &Path, _event: &AgentEvent) {}
+
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
+        let global = self.tab(tab, |t| global::is_global(&t.env))?;
+        let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
         match tool {
+            ProjectTool::Delegate { .. } | ProjectTool::Agents if global => Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()),
             ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
+            ProjectTool::Projects => {
+                only_global()?;
+                text_json(self.projects_overview()?)
+            }
+            ProjectTool::SendToCaptain { project, message, request_id, machine } => {
+                only_global()?;
+                text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
+            }
+            ProjectTool::ReadCaptain { project, machine } => {
+                only_global()?;
+                self.read_captain(&project, machine.as_deref())
+            }
+            ProjectTool::Waiting => {
+                only_global()?;
+                text_json(self.waiting()?)
+            }
+            ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
+                Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
+                _ => Err("only a project's Capitão reports to the global orchestrator".into()),
+            },
             ProjectTool::MemorySearch { query, limit } => {
                 let found = self.memories.search(&self.project_of_tab(tab)?, &query, limit.unwrap_or(SEARCH_LIMIT))?;
                 if found.is_empty() {
@@ -1870,10 +2115,11 @@ impl Machine {
         }
     }
 
-    /// The project `path` names, if it is one of this machine's.
+    /// The project `path` names, if it is one of this machine's, or the global orchestrator's
+    /// folder, whose memory is the global memory.
     fn known_project(&self, path: &str) -> Result<PathBuf, String> {
         let path = canonical(path);
-        if self.projects.lock().unwrap().iter().any(|p| p.path == path) {
+        if self.projects.lock().unwrap().iter().any(|p| p.path == path) || path == self.global_folder() {
             Ok(path)
         } else {
             Err(format!("{} is not a project on this machine", path.display()))
@@ -1881,8 +2127,13 @@ impl Machine {
     }
 
     /// The project a tab works in; a worktree's is the repository's. A scratch thread has none.
+    /// The global orchestrator's is its folder, which keeps the global memory.
     fn project_of_tab(&self, tab: &str) -> Result<PathBuf, String> {
-        let project = history::project_of(&self.tab(tab, |t| t.cwd.clone())?);
+        let (cwd, global) = self.tab(tab, |t| (t.cwd.clone(), global::is_global(&t.env)))?;
+        if global {
+            return Ok(self.global_folder());
+        }
+        let project = history::project_of(&cwd);
         if self.projects.lock().unwrap().iter().any(|p| p.path == project) {
             Ok(project)
         } else {
@@ -2364,8 +2615,11 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
             match message {
                 Message::Agent(event) => {
-                    let notices = if event.hook_feedback { machine.take_notices(&event) } else { String::new() };
+                    let (notices, typed) = if event.hook_feedback { machine.take_notices(&event) } else { Default::default() };
                     machine.record_event(event.clone());
+                    // After the event: a Stop hook that hands a request over continues the turn, and
+                    // the turn that just ended did not answer it.
+                    machine.sent.lock().unwrap().typed(&typed);
                     if !notices.is_empty() && event.status == AgentStatus::Done {
                         if let Some(tab) = &event.tab {
                             let _ = machine.tab(tab, |t| t.turn_pending = Some(Instant::now()));
@@ -2650,7 +2904,8 @@ impl Machine {
             self.delegates.release_notice(&ids);
             self.delegates.release_reports(tab);
         } else {
-            self.delegates.drop_claimed_reports(tab);
+            let typed = self.delegates.drop_claimed_reports(tab);
+            self.sent.lock().unwrap().typed(&typed);
         }
     }
 
@@ -2778,8 +3033,10 @@ impl Machine {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
-            if let Some((Role::Worker, project)) = role {
-                self.report_worker(tab, &project, &event, before);
+            match role {
+                Some((Role::Worker, project)) => self.report_worker(tab, &project, &event, before),
+                Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
+                _ => {}
             }
             self.record_turn(tab, &event);
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
@@ -2903,15 +3160,16 @@ impl Machine {
         new
     }
 
-    fn take_notices(&self, event: &AgentEvent) -> String {
-        let Some(tab) = event.tab.as_deref() else { return String::new() };
+    /// The notices the hook adds to the session's context, and the orchestrator requests among them.
+    fn take_notices(&self, event: &AgentEvent) -> (String, Vec<String>) {
+        let Some(tab) = event.tab.as_deref() else { return Default::default() };
         let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
         if !wants {
-            return String::new();
+            return Default::default();
         }
-        let Some((text, _)) = self.delegates.claim_notice(tab) else { return String::new() };
-        self.delegates.drop_claimed_reports(tab);
-        text
+        let Some((text, _)) = self.delegates.claim_notice(tab) else { return Default::default() };
+        let typed = self.delegates.drop_claimed_reports(tab);
+        (text, typed)
     }
 
     fn stamp_parent_sessions(&self) {
@@ -3156,6 +3414,11 @@ impl Machine {
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
+}
+
+/// A tool's answer as one line of JSON, which the session reads and the chat can render.
+fn text_json<T: Serialize>(value: T) -> Result<String, String> {
+    serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
 fn canonical(path: &str) -> PathBuf {
@@ -6416,6 +6679,248 @@ while True:
         let mut reply = String::new();
         std::io::BufReader::new(stream).read_line(&mut reply).unwrap();
         serde_json::from_str(&reply).unwrap()
+    }
+
+    fn hook(tab: &str, status: AgentStatus) -> AgentEvent {
+        AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false }
+    }
+
+    /// A Capitão whose session is a pty running cat in raw mode, which writes what it is typed
+    /// to `file`, and which has finished a turn: idle.
+    #[cfg(unix)]
+    fn idle_captain(m: &Machine, path: &str, file: &Path) -> TabId {
+        let tab = m.open_orchestrator(path).unwrap();
+        let (seen, sink) = viewer();
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        tab
+    }
+
+    #[cfg(unix)]
+    fn typed(file: &Path, expected: &[u8]) -> Vec<u8> {
+        wait_for("cat to write", || std::fs::read(file).is_ok_and(|b| b.len() >= expected.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::read(file).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn enqueue(m: &Machine, path: &str, text: &str, request_id: &str) -> Result<Value, String> {
+        m.call(Call::Enqueue { path: path.into(), text: text.into(), request_id: request_id.into(), sender: String::new(), busy: None })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_message_for_an_idle_capitao_is_typed_now_once_and_the_rest_wait_for_its_turn_to_end() {
+        let dir = temp("enqueue-idle");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })), "a repeat answers the first outcome");
+        assert_eq!(enqueue(&m, &dir.display().to_string(), "Other.", "r-1"), Err("request_id r-1 was already used for another message".into()));
+
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "typed over the turn the first message started");
+        assert_eq!(enqueue(&m, &path, "And the docs.", "r-3"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
+        assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
+
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1", "r-2", "r-3"], "the drained messages started the turn in flight");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stop_hook_hands_over_a_queued_message_and_its_turn_is_the_next_one() {
+        let dir = temp("enqueue-hook");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&m, &path, "Check the build.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        assert!(m.sent.lock().unwrap().in_flight(&project).is_empty());
+        let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
+        assert_eq!(ask(&sock, &done), Ok("[Orquestrador] Check the build.".into()));
+        assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_busy_capitao_refuses_when_the_settings_say_so_and_a_refusal_is_not_remembered() {
+        let dir = temp("enqueue-refuse");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
+        m.record_event(hook(&tab, AgentStatus::Working));
+        let refuse = global::Settings { busy: BusyPolicy::Refuse, ..global::Settings::default() };
+        m.call(Call::SetGlobalOrchestratorSettings { settings: refuse }).unwrap();
+
+        assert_eq!(enqueue(&m, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "ocupado", "tab": tab })));
+        assert!(m.delegates.claim_notice(&tab).is_none(), "a refused message was queued");
+        let queue = Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: "r-1".into(), sender: "Almirante".into(), busy: Some(BusyPolicy::Queue) };
+        assert_eq!(m.call(queue), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the call's policy wins, and the refused id delivers on a retry");
+        assert_eq!(m.delegates.claim_notice(&tab).map(|(text, _)| text), Some("[Almirante] Ship it.".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stopped_capitao_starts_on_the_message_and_one_without_a_conversation_restarts_on_it() {
+        let dir = temp("enqueue-start");
+        let (project, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let path = project.display().to_string();
+        let capitao = format!("{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint());
+
+        let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
+        let tab = opened["tab"].as_str().unwrap().to_owned();
+        assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orquestrador] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
+
+        let api = dir.join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        let api_path = api.display().to_string();
+        let fresh = m.open_orchestrator(&api_path).unwrap();
+        m.start_claude(&fresh, 80, 24).unwrap();
+        started(&claude, &fresh);
+        assert_eq!(enqueue(&m, &api_path, "- Fix the README.", "r-3"), Ok(json!({ "outcome": "iniciado", "tab": fresh })));
+        assert_eq!(started(&claude, &fresh)[7..9], ["[Orquestrador] - Fix the README.", "--append-system-prompt"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_capitao_resumes_its_conversation_on_the_message() {
+        let dir = temp("enqueue-resume");
+        let (project, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let path = project.display().to_string();
+        std::fs::write(config.join("projects.json"), json!([{ "path": path }]).to_string()).unwrap();
+        let env = json!([["PINNED_ROLE", "orchestrator"], ["PINNED_PROJECT", path]]);
+        std::fs::write(config.join("sessions.json"), json!([{ "cwd": path, "session": "s1", "env": env }]).to_string()).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let tab = m.restore_tabs().remove(0);
+        assert_eq!(enqueue(&m, &path, "Where are we?", "r-1"), Ok(json!({ "outcome": "iniciado", "tab": tab })));
+        assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orquestrador] Where are we?", "--append-system-prompt"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_queued_message_survives_a_restart_and_its_request_id_still_answers_the_first_outcome() {
+        let dir = temp("enqueue-restart");
+        let (project, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.display().to_string();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = idle_captain(&before, &path, &dir.join("typed.bin"));
+        before.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&before, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        before.quit();
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let restored = after.restore_tabs().remove(0);
+        assert_ne!(restored, tab);
+        assert_eq!(enqueue(&after, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        assert_eq!(after.delegates.claim_notice(&restored).map(|(text, _)| text), Some("[Orquestrador] Ship it.".into()), "the queue did not follow the Capitão's conversation");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrator_opens_once_in_its_own_folder_which_is_no_project_but_keeps_memory() {
+        let dir = temp("global-tab");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap();
+        assert_eq!(m.call(Call::OpenGlobalOrchestrator).unwrap(), global, "a second global orchestrator opened");
+        let global = global.as_str().unwrap().to_owned();
+        let folder = config.join("home/.pinned/orquestrador");
+        let view = m.view(&global).unwrap();
+        assert_eq!((view.cwd.as_str(), view.orchestrator_global, view.role, view.running), (folder.to_str().unwrap(), true, None, false));
+        assert_eq!(m.list_projects().iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), [path.as_str()], "the global folder became a project");
+
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        assert_eq!(tool(&global, r#""name":"memory_save","title":"Machines","text":"The Mac mini hosts the orchestrator.""#), Ok("Saved #1.".into()));
+        let found = m.call(Call::MemorySearch { path: folder.display().to_string(), query: "".into(), limit: None }).unwrap();
+        assert_eq!(found.as_array().unwrap().iter().map(|m| m["title"].clone()).collect::<Vec<_>>(), [json!("Machines")]);
+        assert_eq!(m.list_projects().len(), 1);
+
+        let send = format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#);
+        let sent: Value = serde_json::from_str(&tool(&global, &send).unwrap()).unwrap();
+        assert_eq!(sent["outcome"], json!("iniciado"));
+        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orquestrador] Ship the form.");
+        let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
+        assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and sending to a Capitão on another machine is not available yet".into()));
+        assert_eq!(tool(&global, r#""name":"projects""#), Err("projects is not available yet".into()));
+        assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
+
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(tool(&plain, &send.replace("r-1", "r-3")), Err("only the global orchestrator has this tool".into()));
+        assert_eq!(tool(&plain, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("only a project's Capitão reports to the global orchestrator".into()));
+        let capitao = sent["tab"].as_str().unwrap();
+        assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("reporting to the global orchestrator is not available yet".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_starts_the_global_orchestrator_on_its_line_once() {
+        let dir = temp("global-report");
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let report = CaptainReport { machine: "m1".into(), machine_name: "MacBook".into(), project: "site".into(), path: "/w/site".into(), tab: "tab-1a-3".into(), text: "Done: PR #12 is open.".into(), answers: vec![] };
+        let call = || m.call(Call::OrchestratorReport { request_id: "report-1".into(), report: report.clone() });
+        let first = call().unwrap();
+        let global = first["tab"].as_str().unwrap().to_owned();
+        assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
+        let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open."]);
+        assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn global_orchestrator_settings_are_saved_on_the_machine() {
+        let dir = temp("global-settings");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
+        let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
+        let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
+        assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
+        let again = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        assert_eq!(again.call(Call::GlobalOrchestratorSettings), Ok(saved));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
