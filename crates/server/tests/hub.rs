@@ -2986,15 +2986,25 @@ enum RawReply {
 }
 
 /// A machine socket the test scripts, which reconnects after a hangup and logs every call it got.
+/// It sends `events` after each sign in, and the hub calls `ask` queues, as a node's sessions do.
 struct RawMachine {
     calls: Arc<Mutex<Vec<Value>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    outbox: Arc<Mutex<Vec<Value>>>,
+    replies: Arc<Mutex<Vec<Value>>>,
+    next: AtomicU64,
 }
 
 impl RawMachine {
     fn start(url: &str, token: &str, answer: impl Fn(&Value) -> RawReply + Send + 'static) -> RawMachine {
+        RawMachine::start_with(url, token, vec![], answer)
+    }
+
+    fn start_with(url: &str, token: &str, events: Vec<Value>, answer: impl Fn(&Value) -> RawReply + Send + 'static) -> RawMachine {
         let (calls, stop) = (Arc::new(Mutex::new(vec![])), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (outbox, replies): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = (Arc::default(), Arc::default());
         let (log, stopped, url, token) = (calls.clone(), stop.clone(), url.to_owned(), token.to_owned());
+        let (queued, answered) = (outbox.clone(), replies.clone());
         std::thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
@@ -3002,9 +3012,15 @@ impl RawMachine {
                     stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
                 }
                 ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+                for event in &events {
+                    ws.send(Message::text(json!({ "type": "event", "event": event }).to_string())).unwrap();
+                }
                 loop {
                     if stopped.load(Ordering::SeqCst) {
                         return;
+                    }
+                    for frame in std::mem::take(&mut *queued.lock().unwrap()) {
+                        ws.send(Message::text(frame.to_string())).unwrap();
                     }
                     let frame: Value = match ws.read() {
                         Ok(Message::Text(text)) => serde_json::from_str(&text).unwrap(),
@@ -3016,6 +3032,10 @@ impl RawMachine {
                         Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
                         Err(_) => break,
                     };
+                    if frame["type"] == "reply" {
+                        answered.lock().unwrap().push(frame);
+                        continue;
+                    }
                     if frame["type"] != "call" {
                         continue;
                     }
@@ -3034,11 +3054,28 @@ impl RawMachine {
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
-        RawMachine { calls, stop }
+        RawMachine { calls, stop, outbox, replies, next: AtomicU64::new(1) }
     }
 
     fn calls(&self, cmd: &str) -> usize {
         self.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).count()
+    }
+
+    /// A hub call from this machine, as `Link::call_hub` sends it.
+    fn ask(&self, call: Value) -> Result<Value, String> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.outbox.lock().unwrap().push(json!({ "type": "call", "id": id, "call": call }));
+        let start = Instant::now();
+        loop {
+            if let Some(reply) = self.replies.lock().unwrap().iter().find(|r| r["id"] == id) {
+                return match reply.get("err") {
+                    Some(e) => Err(e.as_str().unwrap().to_owned()),
+                    None => Ok(reply["ok"].clone()),
+                };
+            }
+            assert!(start.elapsed() < Duration::from_secs(40), "timed out waiting for the hub's answer to {call}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -3393,4 +3430,331 @@ fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_a
     assert_eq!(elsewhere, json!({ "state": "not_started", "next": "message it to start it", "project": fleet.mac_dir.display().to_string() }), "a folder with no Capitão, named by machine id");
     let unknown = tool(json!({ "name": "read_captain", "project": "/w/site", "machine": "Studio" }));
     assert_eq!(unknown, Err("this account has no machine Studio".into()), "a mistyped machine is not an offline one");
+}
+
+// Isolation between accounts: two accounts share one hub, and nothing of one reaches the other.
+
+fn signed_in(url: &str, email: &str) -> (String, String, Client) {
+    let (token, account) = account::signup(url, email, "correct horse").unwrap();
+    let mut client = Client::connect(url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    (token, account.id, client)
+}
+
+/// Frames that name `needle` anywhere, after the client read all that came.
+fn mentioning(client: &mut Client, needle: &str) -> Vec<Value> {
+    settle(client);
+    client.frames.iter().filter(|f| f.to_string().contains(needle)).cloned().collect()
+}
+
+/// Every frame the machine got within `wait`.
+fn heard(sock: &mut MachineSock, wait: Duration) -> Vec<Value> {
+    let start = Instant::now();
+    let mut frames = vec![];
+    while start.elapsed() < wait {
+        frames.extend(sock.try_text());
+    }
+    frames
+}
+
+fn captain_tab(id: &str, path: &str) -> Value {
+    json!({ "id": id, "cwd": path, "bypass": false, "running": true, "status": "done", "title": null, "message": null, "resume_at": null, "opened": 1, "role": "orchestrator" })
+}
+
+#[test]
+fn another_accounts_machine_takes_no_call_attach_watch_or_change_from_this_one() {
+    let hub = TestHub::start("iso_calls");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let mut sock = MachineSock::connect(&url, &machine_token, "0.17.20");
+    bob.wait_machines(&[("bob-mac", true)]);
+    let id = machine.id.clone();
+    let none = Err(format!("this account has no machine {id}"));
+
+    for call in [json!({ "cmd": "tabs" }), json!({ "cmd": "prompt", "tab": "tab-1", "text": "rm -rf ~" }), json!({ "cmd": "close_tab", "tab": "tab-1" }), json!({ "cmd": "update_self" })] {
+        assert_eq!(ana.call(&id, call.clone()), none, "{call}");
+    }
+    assert_eq!(ana.call(&id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null), "a watch is answered by the hub, which passes it to no machine");
+    ana.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    ana.send(json!({ "type": "detach", "machine": id, "tab": "tab-1" }));
+    assert_eq!(ana.hub(json!({ "cmd": "rename_machine", "id": id, "name": "mine now" })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "remove_machine", "id": id })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "clone", "machine": id, "repo": "github.com/acme/site" })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "box_status", "machine": id })), Err("this machine is no box".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "extend_box", "machine": id, "extra_usd": 5.0 })), Err("this machine is no box".into()));
+    assert_eq!(heard(&mut sock, Duration::from_millis(400)), Vec::<Value>::new(), "bob's machine heard nothing of ana's");
+    settle(&mut bob);
+    assert_eq!(bob.machines(), vec![("bob-mac".to_owned(), true)], "still bob's, under its name");
+
+    bob.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    let subscribe = sock.read_json();
+    assert_eq!((subscribe["type"].as_str(), subscribe["tab"].as_str()), (Some("subscribe"), Some("tab-1")), "bob's own attach does reach it");
+}
+
+#[test]
+fn a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients() {
+    let hub = TestHub::start("iso_fanout");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let id = machine.id.clone();
+    let mut sock = MachineSock::connect(&url, &machine_token, "0.17.20");
+    bob.wait_machines(&[("bob-mac", true)]);
+    bob.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    assert_eq!(bob.call(&id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })).err(), None);
+
+    let mut tab = captain_tab("tab-1", "/b/secret-project");
+    tab["orchestrator_turn"] = json!(true);
+    tab["queued"] = json!(2);
+    for event in [
+        json!({ "kind": "tabs", "tabs": [tab] }),
+        json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 42.0, "resets_at": 1792400000 } }, "account": "claude" }),
+        json!({ "kind": "thread", "tab": "tab-1" }),
+        json!({ "kind": "exit", "tab": "tab-1" }),
+        json!({ "kind": "update", "status": { "state": "updating", "to": "0.17.21" } }),
+    ] {
+        sock.send(json!({ "type": "event", "event": event }));
+    }
+    // A machine names its viewer, so it may name any client of the hub: it still reaches only its own account's.
+    for n in 0..64 {
+        sock.send(json!({ "type": "output", "viewer": format!("client-{n}"), "tab": "tab-1", "data": "c2VjcmV0" }));
+    }
+    bob.wait("bob's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f.to_string().contains("secret-project"));
+    bob.wait("bob's thread nudge", |f| f["type"] == "event" && f["event"]["kind"] == "thread");
+    bob.wait("bob's output", |f| f["type"] == "event" && f["event"]["kind"] == "output");
+    wait_row(&mut bob, &id, "bob's update", |m| m["update"]["state"] == "updating");
+
+    assert_eq!(mentioning(&mut ana, &id), Vec::<Value>::new(), "ana got no frame about bob's machine");
+    assert_eq!(mentioning(&mut ana, "c2VjcmV0"), Vec::<Value>::new(), "nor its output");
+    let mut late = Client::connect(&url, &ana_token);
+    let hello = late.wait("hello", |f| f["type"] == "hello");
+    assert_eq!((&hello["machines"], &hello["tabs"]), (&json!([]), &json!({})), "a client that connects later sees none of bob's machines or tabs");
+    assert_eq!(mentioning(&mut late, &id), Vec::<Value>::new(), "nor bob's usage");
+    assert_eq!(ana.hub(json!({ "cmd": "machines" })), Ok(json!([])));
+
+    drop(sock);
+    bob.wait_machines(&[("bob-mac", false)]);
+    assert_eq!(mentioning(&mut ana, &id), Vec::<Value>::new(), "nor its going offline");
+
+    bob.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "ask" } } })).unwrap();
+    bob.wait("bob's new settings", |f| f["type"] == "settings");
+    settle(&mut ana);
+    assert_eq!(ana.frames.iter().filter(|f| f["type"] == "settings").count(), 0, "bob's settings reach only bob's clients");
+}
+
+#[test]
+fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_account() {
+    let hub = TestHub::start("iso_global");
+    let url = hub.url.clone();
+    let (ana_token, ana_id, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, bob_id, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mini", "linux").unwrap();
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let host = |path: &'static str| {
+        move |call: &Value| match call["cmd"].as_str().unwrap() {
+            "global_orchestrator_settings" => RawReply::Ok(json!({ "host": true })),
+            "list_projects" => RawReply::Ok(json!([{ "path": path, "name": path.rsplit('/').next().unwrap(), "account": "claude" }])),
+            "tabs" => RawReply::Ok(json!([])),
+            "enqueue" | "orchestrator_report" => RawReply::Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })),
+            _ => RawReply::Ok(Value::Null),
+        }
+    };
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, host("/a/site"));
+    let bob_tabs = json!({ "kind": "tabs", "tabs": [captain_tab("tab-9", "/b/secret-project")] });
+    let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![bob_tabs], host("/b/secret-project"));
+    ana.wait_machines(&[("ana-mini", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let (bob_m, ana_m) = (bob_machine.id.clone(), ana_machine.id.clone());
+
+    let bobs = bob.hub(json!({ "cmd": "overview" })).unwrap();
+    assert!(bobs.to_string().contains("/b/secret-project") && bobs.to_string().contains(&bob_m), "bob's own overview lists his project: {bobs}");
+    for (from, overview) in [("ana's client", ana.hub(json!({ "cmd": "overview" }))), ("ana's host", ana_raw.ask(json!({ "cmd": "overview" })))] {
+        let overview = overview.unwrap().to_string();
+        assert!(overview.contains("/a/site") && overview.contains(&ana_m), "{from}: {overview}");
+        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m), "{from} sees none of bob's: {overview}");
+    }
+
+    let none = Err(format!("this account has no machine {bob_m}"));
+    let to_bob = json!({ "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": bob_m, "path": "/b/secret-project", "text": "Push to main.", "sender": "Orchestrator" } });
+    let read_bob = json!({ "cmd": "read_captain", "machine": bob_m, "path": "/b/secret-project" });
+    assert_eq!(ana.hub(to_bob.clone()), none);
+    assert_eq!(ana_raw.ask(to_bob), none);
+    assert_eq!(ana.hub(read_bob.clone()), none);
+    assert_eq!(ana_raw.ask(read_bob), none);
+    let report = |machine: &str| {
+        json!({ "cmd": "relay", "request_id": "rep-1", "to": { "kind": "orchestrator", "report": {
+            "machine": machine, "machine_name": "x", "project": "secret-project", "path": "/b/secret-project", "tab": "tab-9", "text": "Done.", "answers": [] } } })
+    };
+    assert_eq!(ana.hub(report(&bob_m)), Err(format!("machine {bob_m} is offline")), "ana can't report as bob's Capitão");
+
+    assert_eq!(bob_raw.ask(report("m-lie")), Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })), "bob's Capitão reports to bob's own host");
+    assert_eq!((bob_raw.calls("orchestrator_report"), ana_raw.calls("orchestrator_report")), (1, 0), "the report reached bob's host only");
+    assert_eq!((bob_raw.calls("enqueue"), bob_raw.calls("thread")), (0, 0), "ana's relay and reads never reached bob's machine");
+    assert_eq!(bob_raw.calls("list_projects"), 1, "only bob's own overview listed bob's projects");
+
+    let shared = hub.hub().clone();
+    hub.runtime.block_on(async {
+        let ana = shared.account(uuid::Uuid::parse_str(&ana_id).unwrap()).await.unwrap();
+        let bob = shared.account(uuid::Uuid::parse_str(&bob_id).unwrap()).await.unwrap();
+        let _held = shared.hold_captain(&ana, &ana_m, "/w/site").await;
+        tokio::time::timeout(Duration::from_secs(1), shared.hold_captain(&bob, &ana_m, "/w/site")).await.expect("bob waits on no Capitão lock of ana's");
+        let again = tokio::time::timeout(Duration::from_millis(300), shared.hold_captain(&ana, &ana_m, "/w/site")).await;
+        assert!(again.is_err(), "ana's own second message to the Capitão still waits");
+    });
+}
+
+#[test]
+fn synced_files_skills_and_shared_projects_stay_in_their_account() {
+    let hub = TestHub::start("iso_sync");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    bob.wait_machines(&[("bob-mac", true)]);
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let project = "github.com/acme/site";
+    let memory = "claude/memory/notes.md";
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [file(memory, "ana's plans")] })).unwrap();
+    ana.hub(json!({ "cmd": "sync_push", "project": sync::PLUGINS_KEY, "files": [file(HOOK_PATH, "#!/bin/sh\necho ana")] })).unwrap();
+    ana.hub(json!({ "cmd": "share_project", "project": { "key": project, "name": "site", "repo": "git@github.com:acme/site.git" } })).unwrap();
+
+    let reads = [
+        json!({ "cmd": "sync_list", "project": project }),
+        json!({ "cmd": "sync_pull", "project": project, "paths": [memory] }),
+        json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY }),
+        json!({ "cmd": "shared_projects" }),
+    ];
+    for read in reads {
+        assert_eq!(bob.hub(read.clone()), Ok(json!([])), "bob's client: {read}");
+        let from_machine = match read["cmd"] == "shared_projects" {
+            true => Err("a machine may only forward a workflow session's callbacks".to_owned()),
+            false => Ok(json!([])),
+        };
+        assert_eq!(bob_raw.ask(read.clone()), from_machine, "bob's machine: {read}");
+    }
+    let ana_hook_sha = sha256_hex(b"#!/bin/sh\necho ana");
+    bob.hub(json!({ "cmd": "sync_mark_executable", "project": sync::PLUGINS_KEY, "repairs": [{ "path": HOOK_PATH, "sha": ana_hook_sha }] })).unwrap();
+    bob.hub(json!({ "cmd": "sync_push", "project": project, "files": [file(memory, "bob's plans")] })).unwrap();
+
+    let listed = ana.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+    assert_eq!(listed[0]["sha"], sha256_hex(b"ana's plans"), "bob's push of the same path left ana's file alone");
+    let hooks = ana.hub(json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY })).unwrap();
+    assert_eq!((hooks[0]["sha"].as_str(), hooks[0]["executable"].as_bool()), (Some(ana_hook_sha.as_str()), Some(false)), "bob's repair named ana's sha and changed nothing");
+    assert_eq!(bob.hub(json!({ "cmd": "sync_list", "project": project })).unwrap()[0]["sha"], sha256_hex(b"bob's plans"));
+}
+
+#[test]
+fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
+    let hub = TestHub::start("iso_pair");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let code = ana.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let creds = account::pair(&url, &code, "ana-mac", "linux").unwrap();
+    assert_eq!(creds.email, "ana@acme.dev");
+    ana.wait_machines(&[("ana-mac", false)]);
+    assert_eq!(account::pair(&url, &code, "bob-mac", "linux"), Err("that pairing code is unknown, used or expired".into()), "a code pairs once");
+    assert_eq!(bob.hub(json!({ "cmd": "machines" })), Ok(json!([])));
+    assert_eq!(mentioning(&mut bob, &creds.machine_id), Vec::<Value>::new());
+
+    account::logout(&url, &ana_token).unwrap();
+    let start = Instant::now();
+    while ana.pump() {
+        assert!(start.elapsed() < WAIT, "ana's client stays open after her logout");
+    }
+    assert_eq!(bob.hub(json!({ "cmd": "machines" })), Ok(json!([])), "bob's login still works");
+    let mut gone = Client::connect(&url, &ana_token);
+    while gone.pump() {}
+    assert_eq!(gone.closed, Some(u16::from(link::UNAUTHORIZED)));
+    assert!(Client::connect(&url, &bob_token).wait("hello", |f| f["type"] == "hello")["account"]["email"] == "bob@acme.dev");
+}
+
+#[test]
+fn an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in() {
+    let hub = TestHub::start("iso_agent");
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let lists = |path: &'static str| {
+        move |call: &Value| match call["cmd"].as_str().unwrap() {
+            "list_projects" => RawReply::Ok(json!([{ "path": path, "name": "app", "account": "claude" }])),
+            "tabs" => RawReply::Ok(json!([captain_tab("tab-o", path)])),
+            "open_orchestrator" => RawReply::Ok(json!("tab-o")),
+            _ => RawReply::Ok(Value::Null),
+        }
+    };
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, lists("/a/app"));
+    let _bob_raw = RawMachine::start(&url, &bob_machine_token, lists("/b/app"));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let client_id = register_agent(&url, &http);
+    let scopes = ["sessions", "orchestrator"];
+    let (ana_access, _) = connect_agent(&url, &http, &mut ana, &client_id, &scopes, json!([{ "machine": ana_machine.id, "path": "/a/app" }]));
+    let (bob_access, _) = connect_agent(&url, &http, &mut bob, &client_id, &scopes, json!([{ "machine": bob_machine.id, "path": "/b/app" }]));
+    let ana_pid = tool(&url, &http, &ana_access, "list_projects", json!({})).unwrap()["projects"][0]["id"].as_str().unwrap().to_owned();
+    let bob_projects = tool(&url, &http, &bob_access, "list_projects", json!({})).unwrap();
+    assert_eq!(bob_projects["projects"].as_array().map(Vec::len), Some(1));
+    assert_ne!(bob_projects["projects"][0]["id"], json!(ana_pid));
+
+    let refused = format!("no project {ana_pid} for this agent; call list_projects");
+    assert_eq!(tool(&url, &http, &bob_access, "message_orchestrator", json!({ "project": ana_pid, "message": "drop the tables", "request_id": "b-1" })), Err(refused.clone()));
+    assert_eq!(tool(&url, &http, &bob_access, "read_orchestrator", json!({ "project": ana_pid })), Err(refused.clone()));
+    assert_eq!(tool(&url, &http, &bob_access, "start_session", json!({ "project": ana_pid, "task": "t", "request_id": "b-2" })), Err(refused));
+    assert_eq!((ana_raw.calls("open_orchestrator"), ana_raw.calls("thread"), ana_raw.calls("run"), ana_raw.calls("prompt")), (0, 0, 0, 0), "bob's agent reached nothing on ana's machine");
+
+    let ana_agents = ana.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].clone();
+    let bob_agents = bob.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].clone();
+    assert_eq!((ana_agents.as_array().map(Vec::len), bob_agents.as_array().map(Vec::len)), (Some(1), Some(1)), "each account lists its own grant only");
+    let ana_grant = ana_agents[0]["id"].as_str().unwrap();
+    assert_ne!(bob_agents[0]["id"].as_str(), Some(ana_grant));
+    assert_eq!(bob.hub(json!({ "cmd": "revoke_agent", "id": ana_grant })), Err(format!("this account has no agent {ana_grant}")));
+    assert_eq!(tool(&url, &http, &ana_access, "list_projects", json!({})).unwrap()["projects"][0]["id"], json!(ana_pid), "ana's agent still works");
+    let request = authorize(&url, &http, &client_id, &pkce().1, "b");
+    assert!(bob.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": ["orchestrator"], "projects": [{ "machine": ana_machine.id, "path": "/a/app" }] })).unwrap_err().contains("this account has no machine"));
+}
+
+#[test]
+fn a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back() {
+    let hub = TestHub::start_learning("iso_dictation");
+    let url = hub.url.clone();
+    let (ana_token, ana) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, bob) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    account::dictation_feedback(&url, &ana_token, &dictation("ana's comet")).unwrap();
+    account::dictation_feedback(&url, &bob_token, &dictation("bob's comet")).unwrap();
+    let mut kept: Vec<(String, String)> = learning_rows(&hub.learning.clone().unwrap()).iter().map(|r| (r["account"].as_str().unwrap().to_owned(), r["raw"].as_str().unwrap().to_owned())).collect();
+    kept.sort();
+    let mut expected = vec![(ana.id, "ana's comet".to_owned()), (bob.id, "bob's comet".to_owned())];
+    expected.sort();
+    assert_eq!(kept, expected, "each row names the account whose login sent it");
+    let read = reqwest::blocking::Client::new().get(format!("{url}/api/dictation/feedback")).bearer_auth(&bob_token).send().unwrap();
+    assert_eq!(read.status(), 405, "the hub only takes dictations in");
+}
+
+#[test]
+fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
+    let hub = TestHub::start_with_boxes("iso_box", true, fast());
+    let (bob_token, bob) = account::signup(&hub.url, "bob@acme.dev", "correct horse").unwrap();
+    let (bob_machine, _) = account::register_machine(&hub.url, &bob_token, "bob-box", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('bobs-box', '{}', '{}', 'box_bob', 'c-bob', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
+        bob.id, bob_machine.id,
+    ));
+    let mut ana = BoxAccount::new(&hub);
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fixed", "row": "bobs-box" } } })).unwrap();
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
+    assert_eq!(created(&hub), 1, "ana's run got a box of its own");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_ne!(ana.box_machine(), bob_machine.id);
+    let bobs = hub.runtime.block_on(hub.hub().db.boxes(uuid::Uuid::parse_str(&bob.id).unwrap())).unwrap();
+    assert_eq!(bobs.len(), 1, "bob's box row is still there");
 }

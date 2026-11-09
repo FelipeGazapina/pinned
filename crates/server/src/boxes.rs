@@ -524,7 +524,7 @@ impl Boxes {
         let Some(_driving) = self.drive_guard(id) else {
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         };
-        match hub.db.box_by_id(id).await? {
+        match hub.db.box_by_id(account.id, id).await? {
             None => {
                 drop(_driving);
                 let proposed = new_row_id();
