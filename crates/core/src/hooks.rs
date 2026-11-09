@@ -286,7 +286,7 @@ fn title_from_transcript(transcript: impl BufRead) -> Option<String> {
 }
 
 /// Stands in for the title until Claude Code names the session: the prompt's first line.
-fn title_from_prompt(prompt: &str) -> Option<String> {
+pub(crate) fn title_from_prompt(prompt: &str) -> Option<String> {
     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.starts_with("[pinned]") {
         return None;

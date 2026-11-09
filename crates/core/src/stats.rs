@@ -15,6 +15,13 @@ pub struct ThreadStats {
     pub cost_usd: Option<f64>,
 }
 
+/// A pull request a conversation opened or worked on.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, schemars::JsonSchema)]
+pub struct PrLink {
+    pub number: u64,
+    pub url: String,
+}
+
 /// The running totals of a transcript, read up to `offset`.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Tally {
@@ -24,6 +31,40 @@ pub struct Tally {
     pub costs: BTreeMap<u64, f64>,
     pub active_ms: u64,
     pub turns: u32,
+    /// The git branch of the conversation's last message.
+    pub branch: Option<String>,
+    /// The last pull request the conversation opened or worked on.
+    pub pr: Option<PrLink>,
+    /// Unix seconds of the conversation's last message.
+    pub last_at: Option<u64>,
+    /// The first prompt's first line, cut short, which stands in for a title.
+    pub prompt_title: Option<String>,
+    /// The first prompt went by, so no later line is read for it.
+    pub prompted: bool,
+}
+
+/// The fields of a transcript line the tally reads. The rest, such as a message's content, is
+/// skipped unread.
+#[derive(Deserialize)]
+struct Line {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    subtype: Option<String>,
+    #[serde(rename = "isSidechain")]
+    sidechain: Option<bool>,
+    #[serde(rename = "startTime")]
+    start: Option<u64>,
+    #[serde(rename = "totalCostUSD")]
+    cost: Option<f64>,
+    #[serde(rename = "durationMs")]
+    duration: Option<u64>,
+    #[serde(rename = "gitBranch")]
+    branch: Option<String>,
+    timestamp: Option<String>,
+    #[serde(rename = "prNumber")]
+    pr_number: Option<u64>,
+    #[serde(rename = "prUrl")]
+    pr_url: Option<String>,
 }
 
 impl Tally {
@@ -49,22 +90,36 @@ impl Tally {
     /// Adds the whole lines of `bytes`, which follow `offset`, and moves `offset` past them.
     pub fn scan(&mut self, bytes: &[u8]) {
         let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-        for line in bytes[..whole].split(|b| *b == b'\n') {
-            let cost = contains(line, br#""cost-state""#);
-            if !cost && !contains(line, b"turn_duration") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
-            match (v["type"].as_str(), v["subtype"].as_str()) {
+        for raw in bytes[..whole].split(|b| *b == b'\n') {
+            let Ok(line) = serde_json::from_slice::<Line>(raw) else { continue };
+            match (line.kind.as_deref(), line.subtype.as_deref()) {
                 (Some("cost-state"), _) => {
-                    if let (Some(start), Some(usd)) = (v["startTime"].as_u64(), v["totalCostUSD"].as_f64()) {
+                    if let (Some(start), Some(usd)) = (line.start, line.cost) {
                         self.costs.insert(start, usd);
                     }
                 }
                 (Some("system"), Some("turn_duration")) => {
-                    if let Some(ms) = v["durationMs"].as_u64() {
+                    if let Some(ms) = line.duration {
                         self.active_ms += ms;
                         self.turns += 1;
+                    }
+                }
+                (Some("pr-link"), _) => {
+                    if let Some(number) = line.pr_number {
+                        self.pr = Some(PrLink { number, url: line.pr_url.unwrap_or_default() });
+                    }
+                }
+                (Some("user" | "assistant"), _) if line.sidechain != Some(true) => {
+                    if let Some(branch) = line.branch.filter(|b| !b.is_empty()) {
+                        self.branch = Some(branch);
+                    }
+                    if let Some(at) = line.timestamp.as_deref().and_then(unix_of) {
+                        self.last_at = Some(at);
+                    }
+                    if !self.prompted && line.kind.as_deref() == Some("user") {
+                        if let Some(title) = first_prompt(raw) {
+                            (self.prompted, self.prompt_title) = (true, title);
+                        }
                     }
                 }
                 _ => {}
@@ -81,8 +136,18 @@ impl Tally {
     }
 }
 
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
+/// The title of the prompt on a user line, as the thread shows that prompt: `None` when the line
+/// holds no prompt, such as a tool's output, and `Some(None)` for a prompt that makes no title.
+fn first_prompt(line: &[u8]) -> Option<Option<String>> {
+    let line: Value = serde_json::from_slice(line).ok()?;
+    crate::thread::items_of(&line).into_iter().find_map(|item| match item {
+        crate::thread::Item::User { text, .. } => Some(crate::hooks::title_from_prompt(&text)),
+        _ => None,
+    })
+}
+
+fn unix_of(timestamp: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(timestamp).ok().and_then(|at| u64::try_from(at.timestamp()).ok())
 }
 
 #[cfg(test)]
@@ -157,6 +222,21 @@ mod tests {
         std::fs::write(file.path(), format!("{COST_A2}\n")).unwrap();
         t.advance(file.path()).unwrap();
         assert_eq!(t.stats(), ThreadStats { active_ms: None, cost_usd: Some(0.5) });
+    }
+
+    #[test]
+    fn the_last_message_names_the_branch_and_time_and_the_last_pr_link_the_pr() {
+        let user = r#"{"parentUuid":null,"isSidechain":false,"cwd":"/w/app","sessionId":"s","gitBranch":"main","type":"user","message":{"role":"user","content":"ship \"gitBranch\":\"fake\""},"uuid":"u1","timestamp":"2026-11-09T12:00:00.000Z"}"#;
+        let pr = r#"{"type":"pr-link","sessionId":"s","prNumber":92,"prUrl":"https://github.com/o/app/pull/92","prRepository":"o/app","timestamp":"2026-11-09T12:05:00.000Z"}"#;
+        let side = r#"{"isSidechain":true,"gitBranch":"side","type":"assistant","message":{},"timestamp":"2026-11-09T13:00:00.000Z"}"#;
+        let reply = r#"{"isSidechain":false,"gitBranch":"felipe/fix-and-ops","type":"assistant","message":{"content":[{"type":"text","text":"Done."}]},"uuid":"a1","timestamp":"2026-11-09T12:10:00.000Z"}"#;
+        let tool_output = r#"{"isSidechain":false,"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},"timestamp":"2026-11-09T11:59:00.000Z"}"#;
+        let t = tally_of(&[tool_output, user, pr, side, reply, COST_A1]);
+        assert_eq!(t.prompt_title.as_deref(), Some("ship \"gitBranch\":\"fake\""), "the first prompt, not a tool's output");
+        assert_eq!(t.branch.as_deref(), Some("felipe/fix-and-ops"));
+        assert_eq!(t.pr, Some(PrLink { number: 92, url: "https://github.com/o/app/pull/92".into() }));
+        assert_eq!(t.last_at, Some(1794226200));
+        assert_eq!(t.stats(), ThreadStats { active_ms: None, cost_usd: Some(0.25) });
     }
 
     #[test]

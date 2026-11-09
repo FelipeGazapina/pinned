@@ -11,7 +11,7 @@ use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
 use crate::workspace::{DiffScope, PrAction};
-use crate::stats::ThreadStats;
+use crate::stats::{PrLink, ThreadStats};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, RelayTo};
 use crate::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use crate::{pulls, subagents, sync, thread, usage};
@@ -111,6 +111,19 @@ pub struct TabView {
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
+    /// The git branch of the conversation's last message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The last pull request the conversation opened or worked on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrLink>,
+    /// Unix seconds of the conversation's last message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<u64>,
+    /// The conversation's first prompt, its first line cut short. It stands in for `title`, which
+    /// a restored tab has lost until its next prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_title: Option<String>,
     /// The tab is its project's orchestrator, or a worker the orchestrator started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
@@ -1187,6 +1200,10 @@ mod tests {
             session: Some("s1".into()),
             interrupted: false,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
+            branch: Some("felipe/forms".into()),
+            pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
+            last_message_at: Some(1_794_226_200),
+            prompt_title: Some("Fix the build".into()),
             role: None,
             spawned_by: None,
             orchestrator_global: false,
@@ -1216,6 +1233,21 @@ mod tests {
         let plain = serde_json::to_value(tab_view()).unwrap();
         assert!(plain.get("orchestrator_global").is_none(), "{plain}");
         assert!(!serde_json::from_value::<TabView>(plain).unwrap().orchestrator_global);
+    }
+
+    #[test]
+    fn a_tab_carries_its_transcripts_branch_pr_and_last_message_and_an_older_tab_reads_without_them() {
+        let sent = serde_json::to_value(tab_view()).unwrap();
+        assert_eq!(
+            (&sent["branch"], &sent["pr"], &sent["last_message_at"]),
+            (&json!("felipe/forms"), &json!({ "number": 92, "url": "https://github.com/o/site/pull/92" }), &json!(1_794_226_200))
+        );
+        let mut older = sent;
+        for key in ["branch", "pr", "last_message_at", "prompt_title"] {
+            older.as_object_mut().unwrap().remove(key);
+        }
+        let read: TabView = serde_json::from_value(older).unwrap();
+        assert_eq!((read.branch, read.pr, read.last_message_at, read.prompt_title), (None, None, None, None));
     }
 
     #[test]
@@ -1420,6 +1452,8 @@ mod tests {
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
+                "branch": "felipe/forms", "pr": { "number": 92, "url": "https://github.com/o/site/pull/92" }, "last_message_at": 1794226200,
+                "prompt_title": "Fix the build",
             }] }),
         );
         round_trip(
