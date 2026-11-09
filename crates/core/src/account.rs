@@ -46,6 +46,27 @@ impl Credentials {
 pub struct SignIn {
     pub email: String,
     pub password: String,
+    /// The invite code a hub in `invite` mode asks a new account for. Sign in ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<String>,
+}
+
+/// Who may create an account on a hub.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Signup {
+    /// Only the hub's first account.
+    First,
+    /// Anyone who reaches the hub.
+    Open,
+    /// The first account, then whoever holds an invite code an account made.
+    Invite,
+}
+
+/// `GET /api/signup` answers this, before anyone signs in.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct SignupInfo {
+    pub signup: Signup,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -129,12 +150,18 @@ pub struct Failure {
 }
 
 pub fn signup(hub: &str, email: &str, password: &str) -> Result<(String, AccountView), String> {
-    let session: Session = post(hub, "/api/signup", None, &SignIn { email: email.into(), password: password.into() })?;
+    signup_invited(hub, email, password, None)
+}
+
+/// Signs up with the invite code a hub in `invite` mode asks for, when there is one.
+pub fn signup_invited(hub: &str, email: &str, password: &str, invite: Option<&str>) -> Result<(String, AccountView), String> {
+    let invite = invite.map(str::trim).filter(|code| !code.is_empty()).map(str::to_owned);
+    let session: Session = post(hub, "/api/signup", None, &SignIn { email: email.into(), password: password.into(), invite })?;
     Ok((session.token, session.account))
 }
 
 pub fn login(hub: &str, email: &str, password: &str) -> Result<(String, AccountView), String> {
-    let session: Session = post(hub, "/api/login", None, &SignIn { email: email.into(), password: password.into() })?;
+    let session: Session = post(hub, "/api/login", None, &SignIn { email: email.into(), password: password.into(), invite: None })?;
     Ok((session.token, session.account))
 }
 

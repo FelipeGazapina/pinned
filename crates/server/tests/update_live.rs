@@ -58,7 +58,7 @@ impl Hub {
             downloads: dir.join("downloads"),
             public_url: None,
             key_file: dir.join("hub.key"),
-            open_signup: true,
+            signup: pinned_core::account::Signup::Open,
             box_api: Arc::new(Upstash),
             box_policy: Policy::default(),
             learning_db: None,

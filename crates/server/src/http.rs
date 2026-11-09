@@ -9,7 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pinned_core::agent::Subject;
-use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
+use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn, Signup, SignupInfo};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
@@ -31,6 +31,8 @@ const ADDRESS_ATTEMPTS: usize = 10;
 /// address lock the owner out.
 const EMAIL_ATTEMPTS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
+/// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
+const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an account";
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Each argon2 hash holds about 19 MiB, so only this many run at once whatever arrives.
 const CONCURRENT_HASHES: usize = 4;
@@ -50,13 +52,13 @@ pub struct Server {
     downloads: PathBuf,
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
     hashing: tokio::sync::Semaphore,
-    open_signup: bool,
     learning: Option<db::Learning>,
 }
 
 /// Routes a released hub keeps serving. Dropping one breaks apps that still call it.
 pub const ROUTES: &[&str] = &[
     "POST /api/signup",
+    "GET /api/signup",
     "POST /api/login",
     "POST /api/logout",
     "POST /api/password",
@@ -87,10 +89,15 @@ fn route(spec: &str) -> &str {
     spec.split_once(' ').expect("METHOD /path").1
 }
 
-pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool, learning: Option<db::Learning>) -> Router {
-    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), open_signup, learning });
+pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>) -> Router {
+    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
+        // The app's sign-in form reads it from whichever hub the user types, so any origin may.
+        .route(
+            route("GET /api/signup"),
+            get(|State(server): State<Arc<Server>>| async move { ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(SignupInfo { signup: server.hub.signup })) }),
+        )
         .route(route("POST /api/login"), post(login))
         .route(route("POST /api/logout"), post(logout))
         .route(route("POST /api/password"), post(change_password))
@@ -207,15 +214,32 @@ async fn password_matches(server: &Server, password: String, hash: String) -> bo
 async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
     new_password(&body.password)?;
-    // Refused before the email is looked at, so a closed hub tells nobody which accounts it has.
-    if !server.open_signup && server.hub.db.has_accounts().await.map_err(internal)? {
+    // Refused before the email or the code is looked at, so a closed hub tells nobody which accounts it has.
+    let first = !server.hub.db.has_accounts().await.map_err(internal)?;
+    if server.hub.signup == Signup::First && !first {
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
     if !server.attempt(&[(format!("signup:{}", client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
     }
+    let invite_needed = || Error(StatusCode::FORBIDDEN, INVITE_NEEDED.into());
+    // The first account of an invite hub needs no code, so a fresh hub can start.
+    let invite = match server.hub.signup {
+        Signup::Invite if !first => {
+            let code = body.invite.as_deref().map(str::trim).filter(|code| !code.is_empty()).ok_or_else(invite_needed)?;
+            Some(db::invite_hash(code))
+        }
+        _ => None,
+    };
     let hash = hash_password(&server, body.password).await?;
-    let account = server.hub.db.create_account(&email, &hash).await.map_err(internal)?;
+    let account = match invite {
+        Some(code) => match server.hub.db.create_invited_account(&code, &email, &hash).await.map_err(internal)? {
+            db::Invited::Created(account) => Some(account),
+            db::Invited::NoInvite => return Err(invite_needed()),
+            db::Invited::EmailTaken => None,
+        },
+        None => server.hub.db.create_account(&email, &hash).await.map_err(internal)?,
+    };
     let account = account.ok_or_else(|| Error(StatusCode::CONFLICT, "an account with that email already exists".into()))?;
     let token = server.hub.db.create_login(Uuid::parse_str(&account.id).unwrap()).await.map_err(internal)?;
     eprintln!("pinned-server: account {} signed up", account.id);
@@ -610,9 +634,9 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
-                // import into an account with no connectors yet, sync its projects, and serve the global
-                // orchestrator and the Capitães, which `relay` checks against this socket.
-                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. }) {
+                // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
+                // and serve the global orchestrator and the Capitães, which `relay` checks against this socket.
+                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
                     let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
                     if let Err(e) = &result {
                         eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
@@ -631,14 +655,31 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 let result = match work {
                     Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
                     Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
-                    // An app's first sign-in moves its own connectors in, which only an empty account takes,
-                    // and every machine keeps its projects' files in step with the account's.
+                    // An app's first sign-in moves its own connectors and tastes in, which only an empty account
+                    // takes, every machine keeps its projects' files in step with the account's, and a Capitão
+                    // or the global orchestrator starts with the account's tastes.
                     None if matches!(
                         call,
-                        HubCall::Import { .. } | HubCall::ShareProject { .. } | HubCall::SyncList { .. } | HubCall::SyncPush { .. } | HubCall::SyncPull { .. } | HubCall::SyncMarkExecutable { .. }
+                        HubCall::Import { .. }
+                            | HubCall::ImportTastes { .. }
+                            | HubCall::GetTastes
+                            | HubCall::ShareProject { .. }
+                            | HubCall::SyncList { .. }
+                            | HubCall::SyncPush { .. }
+                            | HubCall::SyncPull { .. }
+                            | HubCall::SyncMarkExecutable { .. }
                     ) =>
                     {
                         hub.hub_call(&account, call).await
+                    }
+                    // A thread opened with Chat to adjust changes the account's tastes, and the hub
+                    // takes that only while this machine reports such a thread open.
+                    None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
+                        if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
+                            hub.hub_call(&account, call).await
+                        } else {
+                            Err("only a machine with a Chat to adjust thread open may change the way of working".into())
+                        }
                     }
                     None => Err("a machine may only forward a workflow session's callbacks".into()),
                 };

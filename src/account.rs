@@ -160,11 +160,11 @@ pub fn account(account: State<Account>) -> View {
 }
 
 #[tauri::command]
-pub async fn sign_in(app: AppHandle, hub: String, email: String, password: String, create: bool) -> Result<View, String> {
+pub async fn sign_in(app: AppHandle, hub: String, email: String, password: String, create: bool, invite: Option<String>) -> Result<View, String> {
     // The account calls block on their own HTTP client, which must not run on an async worker.
     tauri::async_runtime::spawn_blocking(move || {
         let hub = hub.trim().trim_end_matches('/').to_owned();
-        let (user_token, view) = if create { account::signup(&hub, &email, &password)? } else { account::login(&hub, &email, &password)? };
+        let (user_token, view) = if create { account::signup_invited(&hub, &email, &password, invite.as_deref())? } else { account::login(&hub, &email, &password)? };
         let (machine, machine_token) = account::register_machine(&hub, &user_token, &computer_name(), std::env::consts::OS)?;
         let creds = Credentials { hub, email: view.email, user_token, machine_id: machine.id, machine_token };
         let state = app.state::<Account>();

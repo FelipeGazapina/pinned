@@ -1,0 +1,283 @@
+{
+  "presets": {
+    "economical": {
+      "strategy": "cheap_with_guidance",
+      "ladder": [
+        {
+          "model": "deepseek-v4.1-flash"
+        },
+        {
+          "model": "glm-5.3"
+        },
+        {
+          "model": "claude-opus-5-5"
+        }
+      ],
+      "hard_model": {
+        "model": "claude-opus-5-5"
+      },
+      "parallel": 2,
+      "autonomy": "ask_first",
+      "review_diffs": true,
+      "second_opinion": false,
+      "skills": [],
+      "context": []
+    },
+    "balanced": {
+      "strategy": "escalate_on_failure",
+      "ladder": [
+        {
+          "model": "glm-5.3"
+        },
+        {
+          "model": "claude-sonnet-5-5"
+        },
+        {
+          "model": "claude-opus-5-5"
+        }
+      ],
+      "hard_model": {
+        "model": "claude-opus-5-5"
+      },
+      "parallel": 3,
+      "autonomy": "decide_and_tell",
+      "review_diffs": true,
+      "second_opinion": false,
+      "skills": [],
+      "context": []
+    },
+    "aggressive": {
+      "strategy": "strongest_first",
+      "ladder": [
+        {
+          "model": "claude-opus-5-5"
+        }
+      ],
+      "hard_model": {
+        "model": "claude-opus-5-5"
+      },
+      "parallel": 6,
+      "autonomy": "report_at_end",
+      "review_diffs": false,
+      "second_opinion": true,
+      "skills": [],
+      "context": []
+    }
+  },
+  "briefs": [
+    {
+      "taste": {
+        "strategy": "cheap_with_guidance",
+        "ladder": [
+          {
+            "model": "deepseek-v4.1-flash"
+          },
+          {
+            "model": "glm-5.3"
+          },
+          {
+            "model": "claude-opus-5-5"
+          }
+        ],
+        "hard_model": {
+          "model": "claude-opus-5-5"
+        },
+        "parallel": 2,
+        "autonomy": "ask_first",
+        "review_diffs": true,
+        "second_opinion": false,
+        "skills": [],
+        "context": []
+      },
+      "brief": "Run up to 2 workers at once.\nStart each worker on deepseek-v4.1-flash with a detailed brief that names the files, the contracts and a command that proves the result, and re-brief it narrower before moving it up to glm-5.3.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nAsk the user before you open a pull request or delete data.\nReview each worker's diff before you accept its work."
+    },
+    {
+      "taste": {
+        "strategy": "escalate_on_failure",
+        "ladder": [
+          {
+            "model": "glm-5.3"
+          },
+          {
+            "model": "claude-sonnet-5-5"
+          },
+          {
+            "model": "claude-opus-5-5"
+          }
+        ],
+        "hard_model": {
+          "model": "claude-opus-5-5"
+        },
+        "parallel": 3,
+        "autonomy": "decide_and_tell",
+        "review_diffs": true,
+        "second_opinion": false,
+        "skills": [],
+        "context": []
+      },
+      "brief": "Run up to 3 workers at once.\nStart each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nDecide on your own and tell the user what you decided.\nReview each worker's diff before you accept its work."
+    },
+    {
+      "taste": {
+        "strategy": "strongest_first",
+        "ladder": [
+          {
+            "model": "claude-opus-5-5"
+          }
+        ],
+        "hard_model": {
+          "model": "claude-opus-5-5"
+        },
+        "parallel": 6,
+        "autonomy": "report_at_end",
+        "review_diffs": false,
+        "second_opinion": true,
+        "skills": [],
+        "context": []
+      },
+      "brief": "Run up to 6 workers at once.\nStart each worker on claude-opus-5-5 directly, without trying a cheaper model first.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nTell the user only at the end, with the result.\nHave another model review a risky change before it goes ahead."
+    },
+    {
+      "taste": {
+        "strategy": "cheap_with_guidance",
+        "ladder": [
+          {
+            "provider": "opencode",
+            "model": "glm-5.3"
+          }
+        ],
+        "hard_model": null,
+        "parallel": 1,
+        "autonomy": "ask_first",
+        "review_diffs": true,
+        "second_opinion": false,
+        "skills": [
+          {
+            "name": "tdd",
+            "enabled": true
+          },
+          {
+            "name": "deslop",
+            "enabled": false
+          }
+        ],
+        "context": [
+          "  Deploys go through the VPS. ",
+          " "
+        ]
+      },
+      "brief": "Run one worker at a time.\nStart each worker on glm-5.3 through opencode with a detailed brief that names the files, the contracts and a command that proves the result, and re-brief it narrower when it fails.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to glm-5.3 through opencode.\nAsk the user before you open a pull request or delete data.\nReview each worker's diff before you accept its work.\nFollow the tdd skill.\nDeploys go through the VPS."
+    },
+    {
+      "taste": {
+        "strategy": "escalate_on_failure",
+        "ladder": [
+          {
+            "provider": "opencode",
+            "model": "glm-5.3"
+          }
+        ],
+        "hard_model": null,
+        "parallel": 1,
+        "autonomy": "ask_first",
+        "review_diffs": true,
+        "second_opinion": false,
+        "skills": [
+          {
+            "name": "tdd",
+            "enabled": true
+          },
+          {
+            "name": "deslop",
+            "enabled": false
+          }
+        ],
+        "context": [
+          "  Deploys go through the VPS. ",
+          " "
+        ]
+      },
+      "brief": "Run one worker at a time.\nStart each worker on glm-5.3 through opencode, and when it fails twice ask the user.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to glm-5.3 through opencode.\nAsk the user before you open a pull request or delete data.\nReview each worker's diff before you accept its work.\nFollow the tdd skill.\nDeploys go through the VPS."
+    },
+    {
+      "taste": {
+        "strategy": "cheap_with_guidance",
+        "ladder": [],
+        "hard_model": null,
+        "parallel": 1,
+        "autonomy": "ask_first",
+        "review_diffs": true,
+        "second_opinion": false,
+        "skills": [
+          {
+            "name": "tdd",
+            "enabled": true
+          },
+          {
+            "name": "deslop",
+            "enabled": false
+          }
+        ],
+        "context": [
+          "  Deploys go through the VPS. ",
+          " "
+        ]
+      },
+      "brief": "Run one worker at a time.\nAsk the user before you open a pull request or delete data.\nReview each worker's diff before you accept its work.\nFollow the tdd skill.\nDeploys go through the VPS."
+    },
+    {
+      "taste": {
+        "strategy": "strongest_first",
+        "ladder": [
+          {
+            "model": "glm-5.3"
+          },
+          {
+            "provider": "opencode",
+            "model": "kimi-k3.1-pro"
+          }
+        ],
+        "hard_model": null,
+        "parallel": 8,
+        "autonomy": "decide_and_tell",
+        "review_diffs": false,
+        "second_opinion": false,
+        "skills": [],
+        "context": []
+      },
+      "brief": "Run up to 8 workers at once.\nStart each worker on kimi-k3.1-pro through opencode directly, without trying a cheaper model first.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to kimi-k3.1-pro through opencode.\nDecide on your own and tell the user what you decided."
+    },
+    {
+      "taste": {
+        "strategy": "cheap_with_guidance",
+        "ladder": [
+          {
+            "model": "deepseek-v4.1-flash"
+          },
+          {
+            "provider": "opencode",
+            "model": "glm-5.3"
+          }
+        ],
+        "hard_model": {
+          "provider": "cursor",
+          "model": "grok-4.7"
+        },
+        "parallel": 4,
+        "autonomy": "report_at_end",
+        "review_diffs": true,
+        "second_opinion": true,
+        "skills": [
+          {
+            "name": "brief-for-flash",
+            "enabled": true
+          }
+        ],
+        "context": [
+          "Releases go out on Fridays."
+        ]
+      },
+      "brief": "Run up to 4 workers at once.\nStart each worker on deepseek-v4.1-flash with a detailed brief that names the files, the contracts and a command that proves the result, and re-brief it narrower before moving it up to glm-5.3 through opencode.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to grok-4.7 through cursor.\nTell the user only at the end, with the result.\nReview each worker's diff before you accept its work.\nHave another model review a risky change before it goes ahead.\nFollow the brief-for-flash skill.\nReleases go out on Fridays."
+    }
+  ]
+}

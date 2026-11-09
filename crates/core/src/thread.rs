@@ -9,6 +9,8 @@ const SUMMARY_CHARS: usize = 300;
 /// The biggest image, as base64, that a thread page carries inline.
 const PICTURE_CHARS: usize = 2 << 20;
 const READ_LIMIT: u64 = 8 << 20;
+/// How far from its end `last_reply` reads first: the last reply is nearly always in the last lines.
+const REPLY_LOOK: u64 = 256 << 10;
 /// The line `fork` adds to a copy, naming the session it was copied from.
 pub const FORK_LINE: &str = "pinned-fork";
 
@@ -191,22 +193,172 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let replaced = from > len;
     let from = if replaced { 0 } else { from };
     f.seek(SeekFrom::Start(from))?;
-    let mut bytes = vec![];
-    (&mut f).take(READ_LIMIT).read_to_end(&mut bytes)?;
-    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
+    let (lines, whole, bytes) = whole_lines(&mut f)?;
     let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
     let context = lines.iter().rev().find_map(context_of);
     let branch = lines.iter().rev().find_map(|l| l["gitBranch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned));
     let todos = lines.iter().rev().find_map(todos_of);
     let mut next = from + whole as u64;
-    if whole == 0 && bytes.len() as u64 == READ_LIMIT {
+    if whole == 0 && bytes as u64 == READ_LIMIT {
         if let Some(rest) = rest_of_line(&mut f)? {
             next = from + READ_LIMIT + rest;
             items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
         }
     }
     Ok(Page { items, next, reset: replaced, context, branch, todos })
+}
+
+/// Where the last page of `file` starts, so a read from there holds its latest items however long
+/// it grew. A read from 0 stops after `READ_LIMIT` bytes.
+pub fn last_page(file: &Path) -> u64 {
+    std::fs::metadata(file).map_or(0, |m| m.len().saturating_sub(READ_LIMIT))
+}
+
+/// The parsed whole lines from where `f` stands, `READ_LIMIT` bytes at most, side chains left out;
+/// with the length of those whole lines and the bytes read.
+fn whole_lines(f: &mut std::fs::File) -> std::io::Result<(Vec<Value>, usize, usize)> {
+    let mut bytes = vec![];
+    Read::take(&mut *f, READ_LIMIT).read_to_end(&mut bytes)?;
+    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let lines = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
+    Ok((lines, whole, bytes.len()))
+}
+
+/// What the assistant said last in the latest turn, read from the end of `file`: its last text, or
+/// else the message it sent another session. None when the latest turn said nothing yet, so a turn
+/// never passes for the turn before.
+pub fn last_reply(file: &Path) -> std::io::Result<Option<String>> {
+    let mut f = std::fs::File::open(file)?;
+    let len = f.metadata()?.len();
+    for back in [REPLY_LOOK, READ_LIMIT] {
+        let from = len.saturating_sub(back);
+        f.seek(SeekFrom::Start(from))?;
+        for line in whole_lines(&mut f)?.0.iter().rev() {
+            if opens_turn(line) {
+                return Ok(None);
+            }
+            if let Some(said) = said_in(line) {
+                return Ok(Some(said));
+            }
+        }
+        if from == 0 {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a prompt is one Claude Code delivers on its own, not one the user typed: a background
+/// task handing back, or a message from another session.
+pub fn delivered(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    let prompt = prompt.strip_prefix("Another Claude session sent a message:").map_or(prompt, str::trim_start);
+    prompt.starts_with("<task-notification>") || prompt.starts_with("<cross-session-message")
+}
+
+/// Whether the line is the prompt a turn opens on: one the user typed or queued, a message from
+/// another session, a background task handing back. Claude Code marks each with `turnPosition`;
+/// older transcripts lack the mark. A slash command such as the `/reload-skills` pinned types into
+/// an idle session opens none.
+fn opens_turn(line: &Value) -> bool {
+    if line["type"] != "user" {
+        return false;
+    }
+    if line["message"]["content"].as_str().is_some_and(delivered) {
+        return true;
+    }
+    let items = items_of(line);
+    let command = items.iter().any(|item| matches!(item, Item::User { text, .. } if is_command(text)));
+    !command && (line.get("turnPosition").is_some() || items.iter().any(|item| matches!(item, Item::User { .. })))
+}
+
+/// The last text of an assistant line, else the message it sends another session.
+fn said_in(line: &Value) -> Option<String> {
+    if line["type"] != "assistant" || line["isApiErrorMessage"].as_bool() == Some(true) || line["isMeta"].as_bool() == Some(true) {
+        return None;
+    }
+    let blocks = line["message"]["content"].as_array()?;
+    let text = blocks.iter().rev().find_map(|b| b["text"].as_str().filter(|t| b["type"] == "text" && !t.trim().is_empty()));
+    let sent = || blocks.iter().rev().find_map(|b| b["input"]["message"].as_str().filter(|_| b["type"] == "tool_use" && b["name"] == "SendMessage"));
+    text.or_else(sent).map(str::to_owned)
+}
+
+/// Work a session runs in the background, which hands back to it when it ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Background {
+    Shell,
+    Agent,
+}
+
+/// What `pending_background` parses; the rest of a transcript, megabytes of it, is skipped unread.
+const BACKGROUND_MARKS: [&[u8]; 4] = [b"\"backgroundTaskId\"", b"\"isAsync\":true", b"task-notification>", b"\"TaskStop\""];
+
+/// The background shells and subagents the session started at or after `since` that have not
+/// handed back. Claude Code resumes the session with a `<task-notification>` naming each one as it
+/// ends, and `TaskStop` ends one with none. Work started before `since` died with an earlier process.
+pub fn pending_background(file: &Path, since: Option<std::time::SystemTime>) -> std::io::Result<Vec<Background>> {
+    use std::io::BufRead;
+    let mut started: Vec<(String, Background)> = vec![];
+    let mut ended = std::collections::HashSet::new();
+    for line in std::io::BufReader::new(std::fs::File::open(file)?).split(b'\n') {
+        let line = line?;
+        if !BACKGROUND_MARKS.iter().any(|mark| line.windows(mark.len()).any(|w| w == *mark)) {
+            continue;
+        }
+        let Ok(line) = serde_json::from_slice::<Value>(&line) else { continue };
+        let current = || {
+            let at = line["timestamp"].as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+            since.zip(at).is_none_or(|(since, at)| std::time::SystemTime::from(at) >= since)
+        };
+        let outcome = &line["toolUseResult"];
+        match line["type"].as_str() {
+            Some("user") if outcome["backgroundTaskId"].is_string() && current() => started.push((outcome["backgroundTaskId"].as_str().unwrap().to_owned(), Background::Shell)),
+            Some("user") if outcome["isAsync"] == true && outcome["agentId"].is_string() && current() => started.push((outcome["agentId"].as_str().unwrap().to_owned(), Background::Agent)),
+            Some("user") => ended.extend(handed_back(&result_text(&line["message"]["content"]))),
+            Some("attachment") if line["attachment"]["type"] == "queued_command" => ended.extend(handed_back(line["attachment"]["prompt"].as_str().unwrap_or_default())),
+            Some("assistant") => {
+                let blocks = line["message"]["content"].as_array().into_iter().flatten();
+                let stops = blocks.filter(|b| b["type"] == "tool_use" && b["name"] == "TaskStop");
+                ended.extend(stops.filter_map(|b| b["input"]["task_id"].as_str().map(str::to_owned)));
+            }
+            _ => {}
+        }
+    }
+    Ok(started.into_iter().filter(|(id, _)| !ended.contains(id)).map(|(_, kind)| kind).collect())
+}
+
+/// The task ids of the `<task-notification>`s in a message.
+fn handed_back(text: &str) -> Vec<String> {
+    text.split("<task-notification>").skip(1).filter_map(|notice| tag(notice, "task-id").map(str::to_owned)).collect()
+}
+
+/// A slash command as `spoken` writes one, `/name args`, unlike a prompt that starts with a path.
+fn is_command(text: &str) -> bool {
+    text.split_whitespace().next().is_some_and(|word| word.starts_with('/') && !word[1..].contains('/'))
+}
+
+/// The items in the last whole lines of `file`, read from as far back as `enough` needs: the window
+/// grows from 256 KiB until `enough` holds, it reaches the start, or it is a page long. `read` from
+/// the start stops a page in, so it never reaches the end of a longer transcript.
+pub fn read_end(file: &Path, enough: impl Fn(&Page) -> bool) -> std::io::Result<Page> {
+    let len = std::fs::metadata(file)?.len();
+    let mut window = 1 << 18;
+    loop {
+        let from = match len.checked_sub(window + 1) {
+            // Starts at the first line that begins inside the window.
+            Some(before) => {
+                let mut f = std::fs::File::open(file)?;
+                f.seek(SeekFrom::Start(before))?;
+                before + rest_of_line(&mut f)?.unwrap_or(len - before)
+            }
+            None => 0,
+        };
+        let page = read(file, from)?;
+        if from == 0 || window >= READ_LIMIT || enough(&page) {
+            return Ok(page);
+        }
+        window = (window * 4).min(READ_LIMIT);
+    }
 }
 
 /// The list of the last `TodoWrite` call on an assistant line of the main conversation.
@@ -550,6 +702,80 @@ mod tests {
     }
 
     #[test]
+    fn background_work_is_pending_until_its_notification_or_task_stop() {
+        use serde_json::json;
+        let pending = |lines: &[serde_json::Value], since: Option<&str>| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            let since = since.map(|t| std::time::SystemTime::from(chrono::DateTime::parse_from_rfc3339(t).unwrap()));
+            pending_background(file.path(), since).unwrap()
+        };
+        let shell = |id: &str, at: &str| json!({ "type": "user", "timestamp": at, "message": { "content": [{ "type": "tool_result", "content": format!("Command running in background with ID: {id}.") }] }, "toolUseResult": { "stdout": "", "backgroundTaskId": id } });
+        let agent = json!({ "type": "user", "timestamp": "2026-11-09T10:00:00Z", "message": { "content": [] }, "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a7" } });
+        let notice = |id: &str| format!("<task-notification>\n<task-id>{id}</task-id>\n<status>completed</status>\n</task-notification>");
+        let queued = |id: &str| json!({ "type": "attachment", "attachment": { "type": "queued_command", "prompt": notice(id), "commandMode": "task-notification" } });
+        let enqueued = |id: &str| json!({ "type": "queue-operation", "operation": "enqueue", "content": notice(id) });
+        let stop = |id: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "name": "TaskStop", "input": { "task_id": id } }] } });
+        let typed = json!({ "type": "user", "message": { "content": notice("b2") } });
+
+        let (b1, b2) = (shell("b1", "2026-11-09T10:00:00Z"), shell("b2", "2026-11-09T10:00:00Z"));
+        assert_eq!(pending(&[b1.clone(), agent.clone()], None), [Background::Shell, Background::Agent]);
+        assert_eq!(pending(&[b1.clone(), enqueued("b1")], None), [Background::Shell], "a notification still queued has not handed back");
+        assert_eq!(pending(&[b1.clone(), b2.clone(), agent.clone(), queued("b1"), queued("a7")], None), [Background::Shell]);
+        assert_eq!(pending(&[b1.clone(), b2.clone(), typed, stop("b1")], None), []);
+        assert_eq!(pending(&[b1.clone(), shell("b3", "2026-11-09T11:00:00Z")], Some("2026-11-09T10:30:00Z")), [Background::Shell], "b1 died with the process before");
+    }
+
+    #[test]
+    fn the_last_reply_is_the_latest_turns_text_read_from_the_end() {
+        let reply = |lines: &[String]| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            last_reply(file.path()).unwrap()
+        };
+        let user = |text: &str| serde_json::json!({ "type": "user", "uuid": "u", "timestamp": "t", "message": { "content": text } }).to_string();
+        let said = |text: &str| serde_json::json!({ "type": "assistant", "uuid": "a", "timestamp": "t", "message": { "content": [{ "type": "text", "text": text }] } }).to_string();
+        let reload = user("<command-name>/reload-skills</command-name>\n<command-message>reload-skills</command-message>\n<command-args></command-args>");
+        let output = |bytes: usize| serde_json::json!({ "type": "user", "uuid": "r", "timestamp": "t", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "x".repeat(bytes) }] } }).to_string();
+
+        assert_eq!(reply(&[user("Ship it."), said("Shipped."), said("Want the release too?"), reload.clone()]), Some("Want the release too?".into()), "a slash command after the reply");
+        assert_eq!(reply(&[user("Ship it."), said("Shipped."), user("Now the docs.")]), None, "the latest turn wrote nothing yet");
+        assert_eq!(reply(&[said("Shipped."), user("/Users/f/notes.md has the plan, read it")]), None, "a prompt that starts with a path");
+        let long: Vec<String> = [said("Before the tools.")].into_iter().chain((0..5).map(|_| output(100 << 10))).collect();
+        assert_eq!(reply(&long), Some("Before the tools.".into()), "a reply further back than the first look");
+    }
+
+    #[test]
+    fn a_turn_another_session_or_a_background_task_opens_has_its_own_reply() {
+        use serde_json::json;
+        let reply = |lines: &[Value]| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            last_reply(file.path()).unwrap()
+        };
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let message = "<cross-session-message from=\"uds:/tmp/cc-socks/85194.sock\" from-name=\"Captain\">\nAnything running?\n</cross-session-message>";
+        let peer = json!({ "type": "user", "isMeta": true, "turnPosition": { "promptIndex": 1, "turnIndex": 1 }, "origin": { "kind": "peer" }, "message": { "content": format!("Another Claude session sent a message:\n{message}") } });
+        let older_peer = json!({ "type": "user", "isMeta": true, "message": { "content": format!("Another Claude session sent a message:\n{message}") } });
+        let notified = json!({ "type": "user", "message": { "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>" } });
+        let answered = json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": "t1", "name": "SendMessage", "input": { "to": "uds:/tmp/cc-socks/85194.sock", "message": "Nothing I started is still running." } }] } });
+        let sent = json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "Message sent." }] } });
+        let earlier = said("Desktop sidebar matches. Comparing against the boards next.");
+
+        assert_eq!(reply(&[earlier.clone(), peer.clone()]), None, "the message's turn wrote nothing yet");
+        assert_eq!(reply(&[earlier.clone(), older_peer]), None, "a message without the turn mark");
+        assert_eq!(reply(&[earlier.clone(), notified]), None, "a background task's turn wrote nothing yet");
+        assert_eq!(reply(&[earlier.clone(), peer.clone(), answered.clone(), sent.clone()]), Some("Nothing I started is still running.".into()), "the message it sent is its reply");
+        assert_eq!(reply(&[earlier, peer, answered, sent, said("Told the Captain.")]), Some("Told the Captain.".into()), "text after it wins");
+    }
+
+    #[test]
     fn search_finds_the_latest_prompt_before_an_answer_with_an_excerpt_around_the_match() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let long = format!("{} the Flaky Test fails on CI {}", "words ".repeat(30), "more ".repeat(30));
@@ -845,6 +1071,28 @@ mod tests {
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
         assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }, "a line still being written waits");
+    }
+
+    #[test]
+    fn the_end_of_a_transcript_longer_than_a_page_holds_its_true_last_reply() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let reply = |uuid: &str, text: &str| format!(r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"t","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#);
+        let filler = reply("old", &"x".repeat(1 << 20));
+        for _ in 0..10 {
+            writeln!(file, "{filler}").unwrap();
+        }
+        writeln!(file, r#"{{"type":"user","uuid":"ask","timestamp":"t","message":{{"content":"what is running?"}}}}"#).unwrap();
+        writeln!(file, "{}", reply("last", "Two Slack threads.")).unwrap();
+        assert!(std::fs::metadata(file.path()).unwrap().len() > READ_LIMIT);
+        let last_text = |page: &Page| page.items.iter().rev().find_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None });
+        assert_eq!(last_text(&read(file.path(), 0).unwrap()).map(|t| t.len()), Some(1 << 20), "a read from the start stops a page in, at an old reply");
+
+        let texts = |page: Page| page.items.into_iter().map(|i| if let Item::User { text, .. } | Item::Text { text, .. } = i { text.chars().take(20).collect() } else { String::new() }).collect::<Vec<String>>();
+        assert_eq!(texts(read_end(file.path(), |p| p.items.len() >= 2).unwrap()), ["what is running?", "Two Slack threads."], "the last 256 KiB hold both");
+        let three = read_end(file.path(), |p| p.items.len() >= 3).unwrap();
+        assert_eq!(texts(three), [&["x".repeat(20), "x".repeat(20), "x".repeat(20)][..], &["what is running?".into(), "Two Slack threads.".into()]].concat(), "4 MiB back, it starts at the first whole line");
+        let all = read_end(file.path(), |_| false).unwrap();
+        assert_eq!(all.items.len(), 9, "it grows no wider than a page");
     }
 
     #[test]

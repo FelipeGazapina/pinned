@@ -523,16 +523,44 @@ function submit() {
       out(`serving on ${server.address().port}\r\n`);
     });
     wrote([{ type: "text", text: "Started a web server." }]);
+  } else if (fs.existsSync(TASTE_CALLS)) {
+    // The turn makes the way-of-working tool calls the sweep queued, one {name, input} a line.
+    const calls = fs.readFileSync(TASTE_CALLS, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    fs.rmSync(TASTE_CALLS);
+    for (const { name, input } of calls) {
+      try {
+        used(`mcp__pinned__${name}`, input, callPinned(name, input));
+      } catch (e) {
+        used(`mcp__pinned__${name}`, input, e.message, true);
+      }
+    }
+    wrote([{ type: "text", text: `Done: ${calls.map((c) => c.name).join(", ")}.` }]);
+    out(`taste ${calls.length}\r\n`);
+  } else if (fs.existsSync(DELEGATE_CALLS)) {
+    // The turn makes the delegate_task calls the sweep queued, one JSON arguments object a line.
+    const calls = fs.readFileSync(DELEGATE_CALLS, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    fs.rmSync(DELEGATE_CALLS);
+    const started = calls.map((input) => {
+      const answer = callPinned("delegate_task", input);
+      used("mcp__pinned__delegate_task", input, answer);
+      return { ...JSON.parse(answer), title: input.title };
+    });
+    wrote([{ type: "text", text: `Started ${started.length} workers:\n\n${started.map((s) => `- ${s.title}: ${s.tabId} (${s.taskId})`).join("\n")}` }]);
+    out(`delegated ${started.length}\r\n`);
   } else if (line === "options") {
     wrote([{ type: "text", text: "Li os relatórios dos dois Capitães.\n\nOpções: Sim | Ainda não" }]);
     out("options\r\n");
+  } else if (line === "asks") {
+    wrote([{ type: "text", text: "Merged PR #91 into main.\n\nShould I cut the release now?" }]);
+    out("asks\r\n");
   } else {
     wrote([{ type: "text", text: `echo: ${line}` }]);
     out(`echo: ${line}\r\n`);
   }
-  if (line !== "/ask") hook("Stop");
+  // A brief marked [hold] keeps its turn working, as a worker still at it.
+  if (line !== "/ask" && !line.includes("[hold]")) hook("Stop");
   // Claude Code's idle notice: a finished turn later fires Notification, which is not a question.
-  if (line === "idle") hook("Notification", { message: "Claude is waiting for your input" });
+  if (line === "idle" || line === "asks") hook("Notification", { message: "Claude is waiting for your input" });
   line = "";
   prompt();
 }
@@ -829,3 +857,33 @@ process.stdin.on("data", (chunk) => {
     }
   }
 });
+
+const DELEGATE_CALLS = path.join(process.env.HOME, "delegate-calls.jsonl");
+const TASTE_CALLS = path.join(process.env.HOME, "taste-calls.jsonl");
+// A pinned tool call as claude makes it: the server --mcp-config names, run with its env, whose
+// ${VAR} and ${VAR:-} come from this session's own environment.
+function callPinned(name, input) {
+  const config = JSON.parse(fs.readFileSync(args[args.indexOf("--mcp-config") + 1], "utf8")).mcpServers.pinned;
+  const env = Object.fromEntries(Object.entries(config.env ?? {}).map(([k, v]) => [k, v.replace(/\$\{(\w+)(:-)?\}/g, (_, key) => process.env[key] ?? "")]));
+  const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: input } });
+  const reply = JSON.parse(execFileSync(config.command, config.args ?? [], { input: `${request}\n`, env: { ...process.env, ...env } }).toString().split("\n")[0]);
+  const text = reply.result?.content?.[0]?.text ?? JSON.stringify(reply);
+  if (reply.result?.isError) throw new Error(text);
+  return text;
+}
+
+// A worker pinned starts on a brief gets it as the one positional argument, and works on it at once.
+const VALUED = new Set(["--settings", "--plugin-dir", "--mcp-config", "--name", "--effort", "--permission-mode", "--model", "--append-system-prompt", "--resume", "--session-id"]);
+const brief = (() => {
+  let list = false;
+  for (const [i, arg] of args.entries()) {
+    if (arg.startsWith("--")) list = arg === "--disallowedTools";
+    else if (!list && !VALUED.has(args[i - 1])) return arg;
+  }
+})();
+if (brief && !trusting) {
+  setTimeout(() => {
+    line = brief.trim();
+    submit();
+  }, 500);
+}

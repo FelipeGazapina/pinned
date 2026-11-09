@@ -215,6 +215,7 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
 enum Seat {
     GlobalOrchestrator,
     Captain,
+    TasteChat,
     Other,
 }
 
@@ -223,6 +224,7 @@ impl Seat {
         match role {
             _ if child => Seat::Other,
             Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
+            Some(crate::taste::CHAT_ROLE) => Seat::TasteChat,
             Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
             _ => Seat::Other,
         }
@@ -237,11 +239,13 @@ enum Audience {
     Everyone,
     GlobalOrchestrator,
     Captains,
+    /// A thread the Way of working page opened to adjust the account's tastes.
+    TasteChat,
 }
 
 fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
     // The Capitão, a plain thread and a worker all fan out to workers the same way, so all get
-    // delegate and agents. A delegated child never starts more workers. The global orchestrator
+    // delegate_task and agents. A delegated child never starts more workers. The global orchestrator
     // does no project work: it hands every request to a Capitão.
     let spawner = delegate::delegate_block(child).is_none();
     let global = seat == Seat::GlobalOrchestrator;
@@ -250,6 +254,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         Audience::Everyone => true,
         Audience::GlobalOrchestrator => global,
         Audience::Captains => seat == Seat::Captain,
+        Audience::TasteChat => seat == Seat::TasteChat,
     };
     let mut tools = if reminders { reminder_tools() } else { vec![] };
     if !global {
@@ -271,7 +276,7 @@ fn delegation_tools() -> Vec<Value> {
         }),
         json!({
             "name": DELEGATE_TOOL,
-            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child. A reply while the child still runs background work is not its answer: the task keeps working, this session gets one notice, and task_status holds the reply so far. When the task ends, pinned stops the child, the processes under it and every background shell it started, including a server the task asked it to leave running, so start a long-lived server yourself. A process that a foreground command leaves behind with & can outlive the task.",
+            "description": "Start a worker: a child agent on a signed-in account, with the model and effort target names. Called from a pinned thread, the worker is a thread nested under this one, in its own worktree with isolation \"worktree\", that the user can open and steer; the answer names its tabId, and agents lists it. The task ends with the worker's first finished turn, and its summary is that turn's last reply. Claude Code runs in the thread itself; Cursor and Codex run headless and the thread shows their steps. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child. A reply while the child still runs background work is not its answer: the task keeps working, this session gets one notice, and task_status holds the reply so far. When a headless task ends, pinned stops the child, the processes under it and every background shell it started, including a server the task asked it to leave running, so start a long-lived server yourself. A process that a foreground command leaves behind with & can outlive the task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -369,23 +374,17 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 10] {
+fn project_tools() -> [(Audience, serde_json::Value); 14] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
+    let scope = serde_json::json!({ "type": "string", "description": "orchestrator (the global orchestrator), captains (every project's Captain) or project:<repo> (one project's Captain, as in project:github.com/acme/site)." });
+    let model = serde_json::json!({
+        "type": "object",
+        "properties": { "model": { "type": "string", "description": "The model's catalog id, as in glm-5.3 or claude-opus-5-5." }, "provider": { "type": "string", "description": "The provider it runs through, when that matters." } },
+        "required": ["model"],
+    });
     [
-        (Audience::Spawners, serde_json::json!({
-            "name": "delegate",
-            "description": "Start a worker thread on a task. It works in its own git worktree when the project is a repository, and you get a message when it finishes or needs input. Returns the worker's tab id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task": { "type": "string", "description": "A self-contained brief: the goal, the files involved, the constraints, and how to verify the result." },
-                    "title": { "type": "string", "description": "A few words naming the task, shown on the worker's thread." },
-                },
-                "required": ["task"],
-            },
-        })),
         (Audience::Spawners, serde_json::json!({
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
@@ -458,6 +457,72 @@ fn project_tools() -> [(Audience, serde_json::Value); 10] {
             "name": "waiting",
             "description": "List as JSON what waits on the user across every machine: threads that ask for input and threads that stopped on an error.",
             "inputSchema": no_args,
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "sessions",
+            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as claude or bloom), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on an error) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Only sessions in this project: its key from projects, its name, or its folder." },
+                    "machine": { "type": "string", "description": "Only sessions on this machine: its id or name, with or without @." },
+                },
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "read_session",
+            "description": "Read any session's state and its last messages, as read_captain reads a Capitão: a loose thread, a worker or a Capitão.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The session's id from sessions." },
+                    "machine": { "type": "string", "description": "The machine sessions lists it on. Optional." },
+                    "items": { "type": "integer", "description": "How many of its last messages and tool calls to read; 20 when left out, at most 50." },
+                },
+                "required": ["id"],
+            },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_get",
+            "description": "Read one scope of the account's way of working as JSON: effective (every field as its sessions get it), own (what the scope sets itself; a project's fields left out inherit from captains), profile, and brief (the text its sessions start with).",
+            "inputSchema": { "type": "object", "properties": { "scope": scope }, "required": ["scope"] },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_set",
+            "description": "Change the fields patch names in one scope of the account's way of working, keeping the rest, and answer taste_get of the scope. A project's field set to the Captains' value inherits again. A change that leaves no model on the ladder or parallel outside 1 to 8 changes nothing and fails. The Way of working page shows the change at once, and sessions started afterwards get it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": scope,
+                    "patch": {
+                        "type": "object",
+                        "properties": {
+                            "strategy": { "type": "string", "enum": ["cheap_with_guidance", "escalate_on_failure", "strongest_first"], "description": "How a worker climbs the ladder: the cheapest rung with a detailed brief, the cheapest rung moving up after two failures, or the hard-work model from the start." },
+                            "ladder": { "type": "array", "items": model, "description": "The models a worker climbs, cheapest first, at least one." },
+                            "hard_model": model,
+                            "parallel": { "type": "integer", "minimum": 1, "maximum": 8, "description": "Workers at once." },
+                            "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
+                            "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
+                            "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
+                            "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
+                            "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
+                        },
+                    },
+                },
+                "required": ["scope", "patch"],
+            },
+        })),
+        (Audience::TasteChat, serde_json::json!({
+            "name": "taste_reset",
+            "description": "Make a project's field inherit from captains again, or give the orchestrator's or the Captains' field its default back, and answer taste_get of the scope.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": scope,
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context"] },
+                },
+                "required": ["scope", "field"],
+            },
         })),
         (Audience::Captains, serde_json::json!({
             "name": "tell_orchestrator",
@@ -642,7 +707,20 @@ fn send(message: &Message) -> Result<String, String> {
     let timeout = match message {
         Message::Delegate { .. } => StdDuration::from_secs(120),
         // These may wait on the hub and another machine, which allow a minute.
-        Message::Project { tool: ProjectTool::Projects | ProjectTool::SendToCaptain { .. } | ProjectTool::ReadCaptain { .. } | ProjectTool::Waiting | ProjectTool::TellOrchestrator { .. }, .. } => StdDuration::from_secs(70),
+        Message::Project {
+            tool:
+                ProjectTool::Projects
+                | ProjectTool::SendToCaptain { .. }
+                | ProjectTool::ReadCaptain { .. }
+                | ProjectTool::Waiting
+                | ProjectTool::Sessions { .. }
+                | ProjectTool::ReadSession { .. }
+                | ProjectTool::TellOrchestrator { .. }
+                | ProjectTool::TasteGet { .. }
+                | ProjectTool::TasteSet { .. }
+                | ProjectTool::TasteReset { .. },
+            ..
+        } => StdDuration::from_secs(70),
         _ => StdDuration::from_secs(10),
     };
     let sock = std::env::var(SOCK_ENV).map_err(|_| format!("{SOCK_ENV} is not set: run this inside a pinned tab"))?;
@@ -1006,14 +1084,13 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        assert_eq!(names(false), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
+        assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, [&delegation[..], &["delegate", "agents"], &memory].concat());
+        assert_eq!(on_a_node, [&delegation[..], &["agents"], &memory].concat());
         assert_eq!(
             permissions()[7..],
             [
-                "mcp__pinned__delegate",
                 "mcp__pinned__agents",
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
@@ -1022,6 +1099,11 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__send_to_captain",
                 "mcp__pinned__read_captain",
                 "mcp__pinned__waiting",
+                "mcp__pinned__sessions",
+                "mcp__pinned__read_session",
+                "mcp__pinned__taste_get",
+                "mcp__pinned__taste_set",
+                "mcp__pinned__taste_reset",
                 "mcp__pinned__tell_orchestrator",
             ]
         );
@@ -1030,7 +1112,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }
 
@@ -1061,7 +1143,8 @@ fn restore_var(name: &str, value: Option<String>) {
     fn a_worker_is_offered_the_delegate_tools_and_a_child_is_not() {
         let plain = offered(None, None);
         assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
-        assert!(plain.contains(&"delegate".to_owned()) && plain.contains(&"agents".to_owned()), "{plain:?}");
+        assert!(plain.contains(&"agents".to_owned()), "{plain:?}");
+        assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
         assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &["tell_orchestrator".to_owned()]].concat());
@@ -1079,11 +1162,13 @@ fn restore_var(name: &str, value: Option<String>) {
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "delegate", "agents"], &memory].concat();
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "agents"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
+        assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
+        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
@@ -1094,6 +1179,8 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("send_to_captain", serde_json::json!({ "project": "site", "message": "x" })), Err("send_to_captain: missing field `request_id`".into()));
         assert_eq!(ask("tell_orchestrator", serde_json::json!({ "text": "Halfway." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"tell_orchestrator","text":"Halfway."}}"#.into()));
         assert_eq!(ask("waiting", serde_json::Value::Null), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"waiting"}}"#.into()));
+        assert_eq!(ask("sessions", serde_json::json!({ "project": "client-apps" })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"sessions","project":"client-apps"}}"#.into()));
+        assert_eq!(ask("read_session", serde_json::json!({ "id": "tab-1a-3", "items": 5 })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"read_session","id":"tab-1a-3","items":5}}"#.into()));
     }
 
     #[test]

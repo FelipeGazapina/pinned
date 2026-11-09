@@ -3,6 +3,7 @@ use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Messa
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
+use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -27,6 +28,12 @@ const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// How long a session's start waits for the account's taste before it takes the one `taste.json`
+/// kept. A Capitão can start while a Machine lock is held, so a silent hub must not hold it long.
+#[cfg(not(test))]
+const TASTE_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const TASTE_WAIT: Duration = Duration::from_millis(500);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -231,6 +238,23 @@ impl Screen {
     }
 }
 
+/// A child `delegate_task` starts from the tab `from`, as the worker thread that shows it.
+struct ThreadChild<'a> {
+    from: &'a str,
+    task: &'a str,
+    title: &'a str,
+    cwd: &'a Path,
+    /// The worktree the thread owns and drops when it closes.
+    made: Option<PathBuf>,
+    model: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundWait {
+    since: Instant,
+    shells_only: bool,
+}
+
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -260,20 +284,28 @@ struct Tab {
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
     made: Option<PathBuf>,
-    /// The tab that spawned this worker with the delegate tool, or whose delegated task this tab
+    /// The tab that started this worker with `delegate_task`, or whose delegated task this tab
     /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
     /// once this tab is closed.
     spawned_by: Option<TabId>,
+    /// The `delegate_task` task this worker thread shows. Its first finished turn ends the task
+    /// when the tab runs it; a headless child's thread follows the task instead.
+    task: Option<String>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
     updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// What the last finished turn asked the user, until the next turn starts or fails.
+    question: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// Set while a worker's turn has ended with background work it started still pending: Claude
+    /// Code resumes the session when that work hands back, so the turn end is not the worker's end.
+    background_wait: Option<BackgroundWait>,
     /// The terminal's input line. Done does not clear it.
     draft: Draft,
     owes_reload: bool,
@@ -320,7 +352,7 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>) -> TabView {
         let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
@@ -341,10 +373,17 @@ impl Tab {
             session: self.claude_session.clone(),
             interrupted: self.interrupted,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            branch: self.tally.branch.clone(),
+            pr: self.tally.pr.clone(),
+            last_message_at: self.tally.last_at,
+            prompt_title: self.tally.prompt_title.clone(),
             orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
             role: role.map(|(role, _)| role),
             spawned_by: self.spawned_by.clone(),
             orchestrator_global: global::is_global(&self.env),
+            taste_chat: taste::is_chat(&self.env),
+            queued: queued.get(id).copied().unwrap_or_default(),
+            question: self.question.clone(),
         }
     }
 
@@ -424,6 +463,9 @@ pub struct Machine {
     memories: Arc<memory::Memories>,
     orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
+    /// Whether the hub has seen this machine's own tastes since the link last connected, so the
+    /// account can take them.
+    tastes_shared: Arc<AtomicBool>,
     global: Mutex<global::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
@@ -443,6 +485,8 @@ pub struct Machine {
     hub: Mutex<Option<Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>>>,
     /// This machine's id on the hub, from the hub's hello. Empty until the first sign-in.
     hub_id: Mutex<crate::wire::MachineId>,
+    /// This machine's name on the hub, which the user may have changed from its hostname.
+    hub_name: Mutex<String>,
 }
 
 pub trait SelfUpdate: Send + Sync {
@@ -538,6 +582,9 @@ impl Machine {
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let sent = global::Ledger::load(dir.as_deref());
+        // Seeds taste.json from the old cost style now, before a change to the worker cap rewrites
+        // orchestration.json without it.
+        taste::load(dir.as_deref());
         let home = home();
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
@@ -577,6 +624,7 @@ impl Machine {
             memories,
             orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
+            tastes_shared: Arc::default(),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
@@ -589,6 +637,7 @@ impl Machine {
             sync_waker: Mutex::new(None),
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
+            hub_name: Mutex::default(),
         })
     }
 
@@ -811,8 +860,10 @@ impl Machine {
             Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
+            Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
+            Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
                 let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
@@ -1101,22 +1152,40 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
+        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = self.transcript_of(tab)? else {
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
+        };
+        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        agents.extend(self.delegates.cards(tab));
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+    }
+
+    /// The tab's transcript, once claude reported a session that has one.
+    fn transcript_of(&self, tab: &str) -> Result<Option<PathBuf>, String> {
+        let (session, account, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.last_found_transcript.clone()))?;
         let file = session.as_deref().and_then(|s| {
             let home = self.accounts.home(&account);
             let still = known.as_ref().filter(|path| path.file_stem().is_some_and(|stem| stem == s) && path.starts_with(&home) && path.is_file());
             still.cloned().or_else(|| self.find_transcript(&account, s))
         });
-        let Some(file) = file else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
-        };
-        if known.as_ref() != Some(&file) {
+        if let Some(file) = file.as_ref().filter(|f| known.as_ref() != Some(f)) {
             self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
         }
-        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
-        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
-        agents.extend(self.delegates.cards(tab));
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+        Ok(file)
+    }
+
+    /// `reading::read` of the tab's session with the last `items` items of its conversation, read
+    /// from the end of its transcript. `None` when this machine has no such tab.
+    fn read_session_here(&self, tab: &str, items: usize) -> Option<Value> {
+        let view = self.tabs().into_iter().find(|t| t.id == tab)?;
+        let page = match self.transcript_of(tab) {
+            Ok(Some(file)) => reading::end_of(&file, items),
+            Ok(None) => Ok(json!({ "items": [], "next": 0, "reset": false })),
+            Err(e) => Err(e),
+        };
+        Some(reading::read(&view, page, items))
     }
 
     fn watch_threads(&self) {
@@ -1168,14 +1237,16 @@ impl Machine {
     /// Every tab, in the order they opened.
     pub fn tabs(&self) -> Vec<TabView> {
         let turns = self.turns.lock().unwrap().clone();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns)).collect();
+        let queued = self.delegates.queued();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
 
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
         let turns = self.turns.lock().unwrap().clone();
-        self.tab(tab, |t| t.view(tab, &turns))
+        let queued = self.delegates.queued();
+        self.tab(tab, |t| t.view(tab, &turns, &queued))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -1433,6 +1504,10 @@ impl Machine {
     }
 
     fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        // A headless child's thread has no session of its own while the child works.
+        if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        }
         let prepared = self.tab(tab, |t| {
             if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
                 return None;
@@ -1458,10 +1533,13 @@ impl Machine {
             prompt.push(crate::device::AGENT_PROMPT.to_owned());
         }
         let settings = self.global_settings();
+        let role = role_of(&env).map(|(role, _)| role);
+        let tastes = (global::is_global(&env) || role == Some(Role::Orchestrator)).then(|| self.tastes());
         if global::is_global(&env) {
             prompt.push(global::prompt(&settings.name, &crate::account::hostname()));
+            prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
         }
-        if let Some((role, _)) = role_of(&env) {
+        if let Some(role) = role {
             if !role.disallowed_tools().is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
                 args.push("--disallowedTools".to_owned());
@@ -1469,6 +1547,7 @@ impl Machine {
             }
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
+                prompt.extend(tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)).brief()));
                 prompt.push(self.orchestration.lock().unwrap().hint());
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
@@ -1777,6 +1856,9 @@ impl Machine {
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
+        if let Some(task) = self.thread_task(tab, false) {
+            let _ = self.delegates.cancel_tree(&task, "its thread was closed", path.as_deref());
+        }
         let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
             let closed = tabs.remove(tab);
@@ -1887,6 +1969,45 @@ impl Machine {
         let id = self.add_tab(folder, account, vec![], global::env(), false, None);
         self.emit_tabs();
         Ok(id)
+    }
+
+    /// A new tab, not yet started, that adjusts `scope`'s way of working: in the project folder
+    /// `path`, or else in the folder for threads without a project. Its first prompt names the scope.
+    pub fn open_taste_chat(&self, scope: &TasteScope, path: Option<&str>) -> Result<TabId, String> {
+        let cwd = match path {
+            Some(path) if Path::new(path).is_dir() => canonical(path),
+            Some(path) => return Err(format!("{path} is not a folder on this machine")),
+            None => {
+                std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
+                self.scratch.clone()
+            }
+        };
+        let account = self.account_for(None, &cwd)?;
+        // The taste tools reach it through pinned's MCP server, which only Claude Code loads.
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't adjust the way of working", account.id, account.provider.spec().name));
+        }
+        let id = self.add_tab(cwd, account, vec![taste::chat_prompt(scope)], taste::chat_env(), false, None);
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    /// Applies `change` to the account's tastes: on the hub while this machine is linked, keeping
+    /// the answer in `taste.json`, or else to `taste.json` itself. An open Way of working page hears of it.
+    fn change_tastes(&self, call: HubCall, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Tastes, String> {
+        let dir = self.orchestration_dir.as_deref();
+        let tastes = match self.hub.lock().unwrap().clone() {
+            Some(hub) => {
+                let tastes: Tastes = serde_json::from_value(hub(call)?).map_err(|e| format!("the hub's answer did not read: {e}"))?;
+                if let Err(e) = taste::save(&tastes, dir) {
+                    eprintln!("pinned: could not keep the account's taste: {e}");
+                }
+                tastes
+            }
+            None => taste::change(dir, change)?,
+        };
+        self.emit(Event::TastesChanged);
+        Ok(tastes)
     }
 
     fn global_folder(&self) -> PathBuf {
@@ -2004,6 +2125,7 @@ impl Machine {
                 let session = self.tab(tab, |t| t.claude_session.clone())?;
                 self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
                 self.arm_delegate_pass();
+                self.emit_tabs();
                 Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
             }
         }
@@ -2062,9 +2184,51 @@ impl Machine {
     /// This machine alone, under its hub id once it has one, so its keys and links match the hub's.
     fn local_overview(&self) -> global::Overview {
         let (projects, tabs) = (self.list_projects(), self.tabs());
-        let name = crate::account::hostname();
-        let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| name.clone());
-        global::overview(&[global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }])
+        let (id, name) = self.machine_ids();
+        let here = [global::MachineSnapshot { id: &id, name: &name, online: true, version: env!("CARGO_PKG_VERSION"), projects: &projects, tabs: &tabs, problem: None }];
+        global::overview(&here)
+    }
+
+    /// This machine's id and name on the hub, each its hostname until the hub's hello.
+    fn machine_ids(&self) -> (String, String) {
+        let host = crate::account::hostname();
+        let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| host.clone());
+        let name = Some(self.hub_name.lock().unwrap().clone()).filter(|name| !name.is_empty()).unwrap_or(host);
+        (id, name)
+    }
+
+    /// Every session of the account in `project` and on `machine` when given, for the `sessions`
+    /// tool, with every machine of the account so an offline one or one that needs an update shows.
+    fn sessions(&self, project: Option<&str>, machine: Option<&str>) -> Result<String, String> {
+        let overview = self.projects_overview()?;
+        let (sessions, machines) = match overview.sessions {
+            Some(sessions) => (sessions, overview.machines),
+            None => {
+                let here = self.local_overview();
+                (here.sessions.unwrap_or_default(), here.machines)
+            }
+        };
+        let sessions: Vec<global::Session> = sessions.into_iter().filter(|s| s.matches(project, machine)).collect();
+        text_json(json!({ "sessions": sessions, "machines": machines }))
+    }
+
+    /// The last `items` items of the session in tab `id`, here when this machine has it and
+    /// `machine` names no other, else through the hub on the machine that has it.
+    fn read_session(&self, id: &str, machine: Option<&str>, items: Option<usize>) -> Result<String, String> {
+        let items = read_items(items);
+        if machine.is_none_or(|m| self.is_this_machine(m)) {
+            if let Some(mut out) = self.read_session_here(id, items) {
+                let (machine, machine_name) = self.machine_ids();
+                (out["id"], out["machine"], out["machine_name"]) = (json!(id), json!(machine), json!(machine_name));
+                return text_json(out);
+            }
+        }
+        let call = HubCall::ReadSession { tab: id.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), items: Some(items) };
+        match self.call_hub(call) {
+            Ok(out) => text_json(out),
+            Err(e) if e == NOT_LINKED => Err(format!("no session {id} on this machine, and it is not linked to a hub to look on the others")),
+            Err(e) => Err(needs_update(e)),
+        }
     }
 
     /// What waits on the user across the account's machines, for the `waiting` tool.
@@ -2082,7 +2246,10 @@ impl Machine {
         let path = path.display().to_string();
         let tabs = self.tabs();
         let mut out = match global::captain_tab(&tabs, &path) {
-            Some(tab) if tab.running || tab.session.is_some() => reading::read(tab, self.thread(&tab.id, 0).and_then(json), reading::DEFAULT_ITEMS),
+            Some(tab) if tab.running || tab.session.is_some() => {
+                let from = self.transcript(&tab.id).map_or(0, |file| thread::last_page(&file));
+                reading::read(tab, self.thread(&tab.id, from).and_then(json), reading::DEFAULT_ITEMS)
+            }
             _ => json!({ "state": "not_started", "next": reading::next_for("not_started") }),
         };
         out["project"] = json!(path);
@@ -2177,7 +2344,7 @@ impl Machine {
         }
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
-            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(sem resposta)".into()), REPORT_CHARS, "read_captain has the whole message"),
+            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
         };
         // Up to the hub it may wait a minute, which the hook that ended the turn must not.
         let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
@@ -2193,12 +2360,20 @@ impl Machine {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
         match tool {
-            ProjectTool::Delegate { .. } | ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
-            ProjectTool::Delegate { task, title, tools } => self.delegate(tab, &self.orchestrated(tab)?, task, title, tools),
+            ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
             ProjectTool::Projects => {
                 only_global()?;
-                text_json(self.projects_overview()?)
+                // The sessions tool lists them; here they would bury the projects.
+                text_json(global::Overview { sessions: None, ..self.projects_overview()? })
+            }
+            ProjectTool::Sessions { project, machine } => {
+                only_global()?;
+                self.sessions(project.as_deref(), machine.as_deref())
+            }
+            ProjectTool::ReadSession { id, machine, items } => {
+                only_global()?;
+                self.read_session(&id, machine.as_deref(), items)
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine } => {
                 only_global()?;
@@ -2211,6 +2386,27 @@ impl Machine {
             ProjectTool::Waiting => {
                 only_global()?;
                 text_json(self.waiting()?)
+            }
+            ProjectTool::TasteGet { .. } | ProjectTool::TasteSet { .. } | ProjectTool::TasteReset { .. } if !self.tab(tab, |t| taste::is_chat(&t.env))? => {
+                Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into())
+            }
+            ProjectTool::TasteGet { scope } => {
+                let scope = TasteScope::parse(&scope)?;
+                text_json(self.tastes_now()?.view(&scope))
+            }
+            ProjectTool::TasteSet { scope, patch } => {
+                let scope = TasteScope::parse(&scope)?;
+                let call = HubCall::SetTaste { scope: scope.clone(), patch: patch.clone() };
+                text_json(self.change_tastes(call, |tastes| tastes.set(&scope, patch))?.view(&scope))
+            }
+            ProjectTool::TasteReset { scope, field } => {
+                let scope = TasteScope::parse(&scope)?;
+                let call = HubCall::ResetTasteField { scope: scope.clone(), field };
+                let reset = |tastes: &mut Tastes| {
+                    tastes.reset(&scope, field);
+                    Ok(())
+                };
+                text_json(self.change_tastes(call, reset)?.view(&scope))
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
@@ -2287,43 +2483,10 @@ impl Machine {
         Ok(())
     }
 
-    /// Opens a worker tab on `project` under `from`, in a new worktree when the project is a git
-    /// repository, starts it on `task`, and says which tab it is.
-    fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>, tools: Vec<String>) -> Result<String, String> {
-        self.check_worker_cap()?;
-        let task = crate::delegate::granted_brief(&task, &tools);
-        let bypass = self.tab(from, |t| t.bypass)?;
-        let account = self.account_for(None, project)?;
-        let made = project.join(".git").exists().then(|| branches::new_worktree(project, self.launch.path_env.as_deref())).transpose()?;
-        let cwd = made.clone().unwrap_or_else(|| project.to_owned());
-        // A thread is titled after its prompt's first line, so the title leads the prompt.
-        let prompt = title.as_ref().map_or_else(|| task.clone(), |t| format!("{t}\n\n{task}"));
-        // A prompt starting with a dash would read as an option.
-        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
-        let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
-        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
-        self.tab(&id, |t| {
-            t.made = made.clone();
-            t.spawned_by = Some(from.to_owned());
-        })?;
-        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
-            self.close_tab(&id);
-            if let Some(made) = made {
-                branches::drop_worktree(&made, self.launch.path_env.as_deref());
-            }
-            return Err(e);
-        }
-        if title.is_some() {
-            self.tab(&id, |t| t.title = title)?;
-            self.emit_tabs();
-        }
-        Ok(format!("Started worker {id} in {}. You get a message when it finishes or needs input.", cwd.display()))
-    }
-
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new())).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new())).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -2349,13 +2512,15 @@ impl Machine {
         lines.join("\n")
     }
 
-    /// The last text the tab's session said, from its transcript.
+    /// The last text the tab's session wrote in its latest turn, from its transcript.
     fn last_reply(&self, tab: &str) -> Option<String> {
-        let page = thread::read(&self.transcript(tab).ok()?, 0).ok()?;
-        page.items.into_iter().rev().find_map(|item| match item {
-            thread::Item::Text { text, .. } => Some(text),
-            _ => None,
-        })
+        thread::last_reply(&self.transcript(tab).ok()?).ok()?
+    }
+
+    /// Keeps what the tab's finished turn asked the user, which makes it wait on the user.
+    fn note_question(&self, tab: &str) {
+        let question = self.last_reply(tab).as_deref().and_then(global::question_in);
+        let _ = self.tab(tab, |t| t.question = question);
     }
 
     /// Types a worker's news into the tab that spawned it, or into its project's orchestrator once
@@ -2387,6 +2552,7 @@ impl Machine {
             let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&target, session, line);
             self.arm_delegate_pass();
+            self.emit_tabs();
             return;
         }
         if self.type_prompt(&target, &line).is_err() {
@@ -2394,6 +2560,7 @@ impl Machine {
             let session = self.tab(&target, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&target, session, line);
             self.arm_delegate_pass();
+            self.emit_tabs();
         }
     }
 
@@ -2530,9 +2697,11 @@ impl Machine {
         *self.hub.lock().unwrap() = Some(hub);
     }
 
-    /// Remembers this machine's id from the hub's hello, so a project named by it is local.
-    pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId) {
+    /// Remembers this machine's id and name from the hub's hello, so a project named by it is
+    /// local and what this machine lists of itself reads as the hub lists it.
+    pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId, name: String) {
         *self.hub_id.lock().unwrap() = id;
+        *self.hub_name.lock().unwrap() = name;
     }
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Never call it while holding a Machine
@@ -2684,6 +2853,10 @@ impl Machine {
             }
         }
         let ids: Vec<TabId> = restored.into_iter().map(|(id, _)| id).collect();
+        // A turn that asked before the restart still waits on the user.
+        for id in ids.iter().filter(|id| self.tab(id, |t| !t.interrupted).unwrap_or(false)) {
+            self.note_question(id);
+        }
         self.emit_tabs();
         // A resumed session reports no new id, so its transcript is read here.
         for id in &ids {
@@ -2710,16 +2883,79 @@ impl Machine {
         self.orchestration.lock().unwrap().clone()
     }
 
-    /// Saves new orchestration settings, clamping the worker cap into range.
-    pub fn set_orchestration(&self, style: crate::orchestration::Style, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
+    /// Saves a new worker cap, clamped into range.
+    pub fn set_orchestration(&self, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
         let mut current = self.orchestration.lock().unwrap();
-        *current = crate::orchestration::Orchestration { style, max_workers };
+        *current = crate::orchestration::Orchestration { max_workers };
         current.clamp();
         let saved = current.clone();
         drop(current);
         saved.save(self.orchestration_dir.as_deref())?;
         *self.orchestration.lock().unwrap() = saved.clone();
         Ok(saved)
+    }
+
+    /// The account's tastes: the hub's while this machine is linked, which `taste.json` keeps for
+    /// when the hub can't answer, or else this machine's own. Waits at most `TASTE_WAIT` for the
+    /// hub; an answer that comes later still lands in `taste.json` for the next start.
+    fn tastes(&self) -> Tastes {
+        let dir = self.orchestration_dir.clone();
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            let (shared, kept) = (self.tastes_shared.clone(), dir.clone());
+            let (answer, answered) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                share_tastes(&*hub, &shared, kept.as_deref());
+                let read = hub(HubCall::GetTastes).and_then(|value| serde_json::from_value::<Tastes>(value).map_err(|e| e.to_string()));
+                if let Ok(tastes) = &read {
+                    if let Err(e) = taste::save(tastes, kept.as_deref()) {
+                        eprintln!("pinned: could not keep the account's taste: {e}");
+                    }
+                }
+                let _ = answer.send(read);
+            });
+            if let Ok(Ok(tastes)) = answered.recv_timeout(TASTE_WAIT) {
+                return tastes;
+            }
+        }
+        taste::load(dir.as_deref()).unwrap_or_default()
+    }
+
+    /// The link to the hub is up, maybe for another account than before: offers this machine's
+    /// own tastes again. Never call it while holding a Machine lock.
+    pub(crate) fn share_tastes_again(&self) {
+        self.tastes_shared.store(false, Ordering::SeqCst);
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            share_tastes(&*hub, &self.tastes_shared, self.orchestration_dir.as_deref());
+        }
+    }
+
+    /// The account's tastes as they stand: the hub's while this machine is linked, else its own.
+    /// Unlike `tastes`, a hub that can't answer is an error, so a chat never reads a stale copy.
+    fn tastes_now(&self) -> Result<Tastes, String> {
+        match self.hub.lock().unwrap().clone() {
+            Some(hub) => serde_json::from_value(hub(HubCall::GetTastes)?).map_err(|e| format!("the hub's answer did not read: {e}")),
+            None => Ok(self.local_tastes()),
+        }
+    }
+
+    /// The tastes a signed-out app keeps on this machine.
+    pub fn local_tastes(&self) -> Tastes {
+        taste::load(self.orchestration_dir.as_deref()).unwrap_or_default()
+    }
+
+    /// `Tastes::set` on this machine's own tastes.
+    pub fn set_local_taste(&self, scope: &TasteScope, patch: TastePatch) -> Result<Tastes, String> {
+        taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.set(scope, patch))
+    }
+
+    /// `Tastes::reset` on this machine's own tastes.
+    pub fn reset_local_taste_field(&self, scope: &TasteScope, field: TasteField) -> Result<Tastes, String> {
+        taste::change(self.orchestration_dir.as_deref(), |tastes| {
+            tastes.reset(scope, field);
+            Ok(())
+        })
     }
 
     /// Workers running right now: live worker threads plus active delegate tasks.
@@ -2851,7 +3087,20 @@ impl Machine {
 
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
-        self.delegates.status(&caller, id).map(|value| value.to_string())
+        let mut status = self.delegates.status(&caller, id)?;
+        // A thread's own session runs the child, so its steps are in the thread's transcript.
+        if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
+            status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+        }
+        Ok(status.to_string())
+    }
+
+    /// The task the tab's thread shows, while that task is still working. `runs` asks only for
+    /// one the tab's own session runs.
+    fn thread_task(&self, tab: &str, runs: bool) -> Option<String> {
+        let task = self.tab(tab, |t| t.task.clone()).ok().flatten()?;
+        let info = self.delegates.get(&task)?;
+        (!info.state.terminal() && (!runs || info.thread.is_some_and(|thread| thread.runs))).then_some(task)
     }
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
@@ -2972,6 +3221,11 @@ impl Machine {
             effort = None;
         }
         self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        // A child called from a tab is a worker thread under it. Claude Code runs in that thread's
+        // own session; Cursor and Codex report no turns to pinned, so they run headless and the
+        // thread shows their steps.
+        let from = caller.tab.clone();
+        let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
                 Ok(dir) => {
@@ -2979,7 +3233,7 @@ impl Machine {
                         return self.delegates.started_json(&task.id).map(|value| value.to_string());
                     }
                     cwd = dir;
-                    self.delegates.place(&task.id, cwd.clone(), true);
+                    self.delegates.place(&task.id, cwd.clone(), !runs_in_thread);
                 }
                 Err(error) => {
                     self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
@@ -2991,6 +3245,13 @@ impl Machine {
             return self.delegates.started_json(&task.id).map(|value| value.to_string());
         }
         let brief = crate::delegate::granted_brief(&request.task, &request.tools);
+        if let Some(from) = from.as_deref() {
+            let child = ThreadChild { from, task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
+            if runs_in_thread {
+                return self.run_in_thread(child, account, effort.as_deref(), access, &brief);
+            }
+            self.watch_thread(child, account.clone());
+        }
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
@@ -3038,6 +3299,172 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
+    /// Opens the worker thread a delegated Claude Code child runs in: a Worker tab under `from`,
+    /// on `account` with the task's model, effort and access, started on the brief. The task ends
+    /// with the thread's first finished turn.
+    fn run_in_thread(&self, child: ThreadChild, account: Account, effort: Option<&str>, access: crate::delegate::Access, brief: &str) -> Result<String, String> {
+        use crate::delegate::Access;
+        // A thread is titled after its prompt's first line, so the title leads the prompt.
+        let prompt = if brief.lines().next().is_some_and(|line| line.trim() == child.title) { brief.to_owned() } else { format!("{}\n\n{brief}", child.title) };
+        // A prompt starting with a dash would read as an option.
+        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
+        let mut launch = vec!["--name".to_owned(), child.title.to_owned()];
+        if let Some(effort) = effort {
+            launch.extend(["--effort".to_owned(), effort.to_owned()]);
+        }
+        match access {
+            Access::Full => {}
+            Access::Auto => launch.extend(["--permission-mode".to_owned(), "auto".to_owned()]),
+            Access::ReadOnly => launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]),
+        }
+        launch.push(prompt);
+        let id = self.add_child_tab(&child, account, launch, access == Access::Full);
+        let _ = self.tab(&id, |t| {
+            t.made = child.made.clone();
+            if access == Access::ReadOnly {
+                t.permission_mode = Some("plan".into());
+            }
+        });
+        self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
+        if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
+            self.close_tab(&id);
+            return Err(error);
+        }
+        // Cancel, the limit and quit stop the task by this pid, which is the thread's session.
+        // A new session clears the title, so it is set again.
+        if let Some(pid) = self.tab(&id, |t| {
+            t.title = Some(child.title.to_owned());
+            t.session.as_ref().and_then(pty::Session::pid)
+        }).ok().flatten() {
+            self.delegates.remember_pid(child.task, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+        self.delegates.started_json(child.task).map(|value| value.to_string())
+    }
+
+    /// Opens the worker thread that shows a headless child under `from`. It does not start while
+    /// the child works; it then resumes the child's conversation, when there is one.
+    fn watch_thread(&self, child: ThreadChild, account: Account) {
+        let id = self.add_child_tab(&child, account, vec![], false);
+        let _ = self.tab(&id, |t| t.status = Some(AgentStatus::Working));
+        self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id, runs: false });
+        self.emit_tabs();
+    }
+
+    fn add_child_tab(&self, child: &ThreadChild, account: Account, launch: Vec<String>, bypass: bool) -> TabId {
+        let project = self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd));
+        let id = self.add_tab(child.cwd.to_owned(), account, launch, role_env(Role::Worker, &project), bypass, None);
+        let _ = self.tab(&id, |t| {
+            t.spawned_by = Some(child.from.to_owned());
+            t.task = Some(child.task.to_owned());
+            t.title = Some(child.title.to_owned());
+            t.model = child.model.clone();
+        });
+        id
+    }
+
+    /// A worker thread's turn ended. When the tab runs a task still working, that ends it, and
+    /// the task's notice tells the spawner. Returns false when the news is the worker's to report.
+    fn settle_thread_task(&self, tab: &str, event: &AgentEvent) -> bool {
+        let Ok(Some(task)) = self.tab(tab, |t| t.task.clone()) else { return false };
+        let Some(info) = self.delegates.get(&task) else { return false };
+        if info.state.terminal() || !info.thread.as_ref().is_some_and(|thread| thread.runs) {
+            return false;
+        }
+        let error = match event.status {
+            AgentStatus::Done => None,
+            AgentStatus::Failed => Some(event.message.clone().unwrap_or_else(|| "the turn failed".into())),
+            _ => return false,
+        };
+        if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
+            self.delegates.set_conversation(&task, session);
+        }
+        let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
+        match parent {
+            Some(parent) if self.tabs.lock().unwrap().contains_key(&parent) => {
+                self.maybe_deliver(&parent);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the worker's turn that just ended left background work it started pending, which
+    /// Claude Code resumes the worker with once it hands back. Notes since when the worker waits.
+    fn waits_on_background(&self, tab: &str) -> bool {
+        let started = self.tab(tab, |t| t.started).ok().flatten();
+        let pending = self.transcript(tab).ok().and_then(|file| thread::pending_background(&file, started).ok()).unwrap_or_default();
+        let wait = (!pending.is_empty()).then(|| BackgroundWait { since: Instant::now(), shells_only: pending.iter().all(|b| *b == thread::Background::Shell) });
+        let _ = self.tab(tab, |t| t.background_wait = wait);
+        if wait.is_some() {
+            self.arm_delegate_pass();
+        }
+        wait.is_some()
+    }
+
+    /// Ends the wait of a worker left waiting only on background shells and quiet for as long as a
+    /// headless child is given: a shell such as a dev server never hands back, so the reply before
+    /// it is the worker's last.
+    fn end_quiet_waits(&self, now: Instant) {
+        let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
+        let ended: Vec<(String, PathBuf)> = {
+            let mut tabs = self.tabs.lock().unwrap();
+            let ripe = tabs.iter_mut().filter(|(_, t)| t.background_wait.is_some_and(|w| w.shells_only && now.saturating_duration_since(w.since) >= quiet));
+            ripe.filter_map(|(id, t)| {
+                t.background_wait = None;
+                t.status = Some(AgentStatus::Done);
+                t.updated = Some(unix_now());
+                Some((id.clone(), role_of(&t.env)?.1))
+            })
+            .collect()
+        };
+        for (tab, project) in ended {
+            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+            if !self.settle_thread_task(&tab, &event) {
+                self.report_worker(&tab, &project, &event, Some(AgentStatus::Working));
+            }
+            self.maybe_deliver(&tab);
+            self.emit_tabs();
+        }
+    }
+
+    /// The last steps of a thread's conversation, as `task_status` lists them.
+    fn thread_steps(&self, tab: &str) -> Vec<thread::Item> {
+        let Some(page) = self.transcript(tab).ok().and_then(|file| thread::read(&file, 0).ok()) else { return vec![] };
+        let skip = page.items.len().saturating_sub(crate::delegate::STEP_KEEP);
+        page.items.into_iter().skip(skip).collect()
+    }
+
+    /// A headless child's thread follows its task: it shows the end, then resumes the child's
+    /// conversation when opened. Its worktree becomes the thread's.
+    fn follow_headless_threads(&self) {
+        let watched: Vec<(String, String)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.status == Some(AgentStatus::Working) && t.session.is_none()).filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect();
+        let mut changed = false;
+        for (tab, task) in watched {
+            let Some(info) = self.delegates.get(&task) else { continue };
+            if !info.state.terminal() || info.thread.as_ref().is_none_or(|thread| thread.runs) {
+                continue;
+            }
+            let failed = matches!(info.state, crate::delegate::WorkState::Failed | crate::delegate::WorkState::Cancelled);
+            let launch = info.conversation.as_deref().map(|id| crate::delegate::resume_args(info.provider, id)).unwrap_or_default();
+            let made = (info.isolated && info.conversation.is_some()).then(|| info.cwd.clone());
+            let _ = self.tab(&tab, |t| {
+                t.status = Some(if failed { AgentStatus::Failed } else { AgentStatus::Done });
+                t.message = info.error.clone();
+                t.updated = Some(unix_now());
+                t.launch = launch;
+                t.made = made;
+            });
+            changed = true;
+        }
+        if changed {
+            self.emit_tabs();
+        }
+    }
+
     fn parent_idle(&self, tab: &str) -> bool {
         self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
     }
@@ -3073,7 +3500,8 @@ impl Machine {
             self.delegates.release_reports(tab);
         } else {
             let typed = self.delegates.drop_claimed_reports(tab);
-            self.mark_typed(&typed);
+            self.sent.lock().unwrap().typed(&typed);
+            self.emit_tabs();
         }
     }
 
@@ -3109,6 +3537,8 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.follow_headless_threads();
+                machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
@@ -3175,6 +3605,9 @@ impl Machine {
     /// Opens a finished delegated task's conversation as a thread nested under `tab`, its owner.
     fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
         use crate::delegate::Access;
+        if let Some(thread) = self.delegates.get(task).and_then(|t| t.thread).filter(|thread| self.tabs.lock().unwrap().contains_key(&thread.tab)) {
+            return Ok(thread.tab);
+        }
         let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
         let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
         let bypass = info.access == Access::Full;
@@ -3199,10 +3632,26 @@ impl Machine {
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
-            let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
+            let (before, role, waiting) = self.tab(tab, |t| (t.status, role_of(&t.env), t.background_wait.is_some())).unwrap_or_default();
+            // Claude Code's idle notice after the turn end the worker waits past.
+            if waiting && event.status == AgentStatus::NeedsInput && event.message.as_deref().is_some_and(|m| m.contains("waiting for your input")) {
+                return;
+            }
+            let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
+            let held = worker && event.status == AgentStatus::Done && self.waits_on_background(tab);
             self.record_status(tab, &event);
+            if held {
+                let _ = self.tab(tab, |t| t.status = Some(AgentStatus::Working));
+            } else if event.status == AgentStatus::Done {
+                self.note_question(tab);
+            }
             match role {
-                Some((Role::Worker, project)) => self.report_worker(tab, &project, &event, before),
+                Some((Role::Worker, _)) if held => {}
+                Some((Role::Worker, project)) => {
+                    if !self.settle_thread_task(tab, &event) {
+                        self.report_worker(tab, &project, &event, before);
+                    }
+                }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
                 _ => {}
             }
@@ -3245,13 +3694,16 @@ impl Machine {
             model: None,
             made: None,
             spawned_by: None,
+            task: None,
             turn: None,
             status: None,
             updated: None,
             title: None,
             message: None,
+            question: None,
             held: vec![],
             turn_pending: None,
+            background_wait: None,
             draft: Draft::default(),
             owes_reload: false,
             permission_mode: None,
@@ -3280,7 +3732,10 @@ impl Machine {
             return;
         }
         self.end_session(tab);
-        let _ = self.tab(tab, |t| t.session = None);
+        let _ = self.tab(tab, |t| (t.session, t.background_wait) = (None, None));
+        if let Some(task) = self.thread_task(tab, true) {
+            self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
+        }
         self.emit(Event::Exit { tab: tab.to_owned() });
         self.emit_tabs();
     }
@@ -3403,6 +3858,12 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            if matches!(event.status, AgentStatus::Working | AgentStatus::Failed) {
+                t.background_wait = None;
+            }
+            if event.status != AgentStatus::NeedsInput {
+                t.question = None;
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -3589,6 +4050,13 @@ fn machine_named(machine: &str) -> &str {
     machine.trim().trim_start_matches('@')
 }
 
+/// How many conversation items a `read_session` returns: 20 when not asked, at most 50.
+fn read_items(items: Option<usize>) -> usize {
+    items.unwrap_or(reading::DEFAULT_ITEMS).clamp(1, READ_ITEMS_MAX)
+}
+
+const READ_ITEMS_MAX: usize = 50;
+
 /// Whether `path` is absolute on macOS, Linux or Windows. A folder on another machine follows that
 /// machine's rules, not this one's.
 fn is_absolute_anywhere(path: &str) -> bool {
@@ -3743,6 +4211,25 @@ pub fn git_remote(dir: &Path) -> Option<String> {
 pub fn repo_name(repo: &str) -> Option<&str> {
     let name = repo.trim_end_matches('/').rsplit(['/', ':']).next()?.trim_end_matches(".git");
     (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
+/// Offers the tastes in `dir`, a signed-out app's or the old cost style's seed, to the account,
+/// which takes them only while it has none. The defaults are not offered: the hub answers them to
+/// an account with none anyway, and taking them would refuse a later machine's own.
+fn share_tastes(hub: &dyn Fn(HubCall) -> Result<Value, String>, shared: &AtomicBool, dir: Option<&Path>) {
+    if shared.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(tastes) = taste::load(dir).filter(|own| *own != Tastes::default()) else { return };
+    if hub(HubCall::ImportTastes { tastes }).is_ok() {
+        shared.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The taste a Capitão in `folder` follows: its project's, or every Capitão's when the folder has
+/// no origin to name the project by.
+fn captain_scope(folder: &Path) -> TasteScope {
+    git_remote(folder).and_then(|remote| repo_key(&remote)).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo })
 }
 
 fn repo_key(url: &str) -> Option<String> {
@@ -5903,8 +6390,8 @@ echo '{"type":"result","result":"ok"}'
         std::fs::create_dir_all(&config).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::new(), ..launch() }, Some(config.clone()), None, |_| {});
         assert_eq!(m.orchestration().max_workers, 100);
-        m.set_orchestration(crate::orchestration::Style::Economical, 1).unwrap();
-        assert_eq!(m.orchestration().style, crate::orchestration::Style::Economical);
+        m.set_orchestration(1).unwrap();
+        assert_eq!(m.orchestration().max_workers, 1);
         assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(config.join("orchestration.json")).unwrap()).is_ok());
         m.check_worker_cap().unwrap();
         let worker = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &dir), false, None);
@@ -6111,21 +6598,20 @@ echo '{"type":"result","result":"ok"}'
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
-        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
-        m.start_delegate(Some(tab), None, None, request).unwrap();
-        wait_for("plan argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
-        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
-        assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The access flags the child thread a `delegate_task` from `tab` starts with.
     #[cfg(unix)]
     fn argv_of(m: &Machine, tab: &str, argv: &Path) -> Vec<String> {
         let _ = std::fs::remove_file(argv);
         let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
         m.start_delegate(Some(tab.to_owned()), None, None, request).unwrap();
         wait_for("child argv", || std::fs::read(argv).is_ok_and(|bytes| !bytes.is_empty()));
-        String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect()
+        let lines: Vec<String> = String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        let mode = lines.windows(2).find(|w| w[0] == "--permission-mode").map(|w| w.to_vec()).unwrap_or_default();
+        lines.iter().filter(|arg| *arg == "--dangerously-skip-permissions").cloned().chain(mode).collect()
     }
 
     #[cfg(unix)]
@@ -6151,8 +6637,8 @@ echo '{"type":"result","result":"ok"}'
         let argv = root.join("argv");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
-        let full = ["-p", "look", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
-        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        let full = ["--dangerously-skip-permissions"].map(str::to_owned).to_vec();
+        let plan = ["--permission-mode", "plan"].map(str::to_owned).to_vec();
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), full);
         m.write_input(&tab, b"\x1b[Z").unwrap();
@@ -6189,8 +6675,7 @@ echo '{"type":"result","result":"ok"}'
         .unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
         let tab = m.restore_tabs().pop().expect("the plan session restored");
-        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
-        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6927,18 +7412,20 @@ while True:
         let tab = idle_captain(&m, &path, &file);
 
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
-        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+        assert_eq!(typed(&file, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r");
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })), "a repeat answers the first outcome");
         assert_eq!(enqueue(&m, &dir.display().to_string(), "Other.", "r-1"), Err("request_id r-1 was already used for another message".into()));
 
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "typed over the turn the first message started");
         assert_eq!(enqueue(&m, &path, "And the docs.", "r-3"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
-        assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
+        assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
+        assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
         m.record_event(hook(&tab, AgentStatus::Done));
-        let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
+        let both = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r\x1b[200~[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
+        assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-2", "r-3"], "the drained messages started the next turn");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered), "the turn r-1 started ended");
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
@@ -6962,7 +7449,7 @@ while True:
         assert_eq!(enqueue(&m, &path, "Check the build.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
         assert!(m.sent.lock().unwrap().in_flight(&project).is_empty());
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
-        assert_eq!(ask(&sock, &done), Ok("[Orquestrador] Check the build.".into()));
+        assert_eq!(ask(&sock, &done), Ok("[Orchestrator] Check the build.".into()));
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6997,12 +7484,12 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orquestrador] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
 
         let api = dir.join("api");
@@ -7012,7 +7499,7 @@ while True:
         m.start_claude(&fresh, 80, 24).unwrap();
         started(&claude, &fresh);
         assert_eq!(enqueue(&m, &api_path, "- Fix the README.", "r-3"), Ok(json!({ "outcome": "iniciado", "tab": fresh })));
-        assert_eq!(started(&claude, &fresh)[7..9], ["[Orquestrador] - Fix the README.", "--append-system-prompt"]);
+        assert_eq!(started(&claude, &fresh)[7..9], ["[Orchestrator] - Fix the README.", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7031,7 +7518,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tab = m.restore_tabs().remove(0);
         assert_eq!(enqueue(&m, &path, "Where are we?", "r-1"), Ok(json!({ "outcome": "iniciado", "tab": tab })));
-        assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orquestrador] Where are we?", "--append-system-prompt"]);
+        assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orchestrator] Where are we?", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7052,7 +7539,7 @@ while True:
         let restored = after.restore_tabs().remove(0);
         assert_ne!(restored, tab);
         assert_eq!(enqueue(&after, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
-        assert_eq!(after.delegates.claim_notice(&restored).map(|(text, _)| text), Some("[Orquestrador] Ship it.".into()), "the queue did not follow the Capitão's conversation");
+        assert_eq!(after.delegates.claim_notice(&restored).map(|(text, _)| text), Some("[Orchestrator] Ship it.".into()), "the queue did not follow the Capitão's conversation");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7085,10 +7572,10 @@ while True:
         let send = format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#);
         let sent: Value = serde_json::from_str(&tool(&global, &send).unwrap()).unwrap();
         assert_eq!(sent["outcome"], json!("iniciado"));
-        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orquestrador] Ship the form.");
+        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orchestrator] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
         assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into()));
-        assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
+        assert_eq!(tool(&global, r#""name":"agents""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, &send.replace("r-1", "r-3")), Err("only the global orchestrator has this tool".into()));
@@ -7120,7 +7607,7 @@ while True:
             _ => Err("not this test's".into()),
         }));
         let relay = |request_id: &str, machine: &str, path: &str| {
-            json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orquestrador", "busy": "queue" } })
+            json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orchestrator", "busy": "queue" } })
         };
 
         assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
@@ -7130,9 +7617,9 @@ while True:
         assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
         assert_eq!(*relayed.lock().unwrap(), [relay("r-1", "m-book", "/w/site"), relay("r-2", "m-book", "/w/site"), relay("r-4", "m-mini", &path)]);
 
-        m.set_hub_id("m-mini".into());
+        m.set_hub_id("m-mini".into(), "mini".into());
         let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
-        assert_eq!(started(&claude, here.tab())[7], "[Orquestrador] Ship it.");
+        assert_eq!(started(&claude, here.tab())[7], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
 
         let checkout = |machine: &str, name: &str, online: bool| json!({ "machine": machine, "machine_name": name, "online": online, "path": "/w/site", "captain": "livre" });
@@ -7199,7 +7686,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orquestrador", &crate::account::hostname())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7219,7 +7706,7 @@ while True:
         let folder = dir.join("config/accounts/work/projects/-site");
         std::fs::create_dir_all(&folder).unwrap();
         let lines = [
-            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orquestrador] Ship the form."}}"#.to_owned(),
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orchestrator] Ship the form."}}"#.to_owned(),
             json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-11-09T10:05:00Z", "message": { "content": [{ "type": "text", "text": text }] } }).to_string(),
         ];
         std::fs::write(folder.join(format!("{session}.jsonl")), lines.map(|l| l + "\n").concat()).unwrap();
@@ -7241,7 +7728,7 @@ while True:
         let tool = |tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{global_tab}","tool":{{{tool}}}}}"#));
         let host = crate::account::hostname();
         // As the link does on the hub's hello; the hub itself is down, so every view is this machine's.
-        m.set_hub_id("m-mini".into());
+        m.set_hub_id("m-mini".into(), host.clone());
         let projects = |captain: &str, tab: &str| {
             let checkout = json!({ "machine": "m-mini", "machine_name": host, "online": true, "version": env!("CARGO_PKG_VERSION"), "path": path, "captain": captain, "captain_tab": tab, "workers": 0 });
             let machine = json!({ "id": "m-mini", "name": host, "online": true, "version": env!("CARGO_PKG_VERSION") });
@@ -7252,14 +7739,14 @@ while True:
         let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
         let capitao = sent["tab"].as_str().unwrap().to_owned();
         assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-        assert_eq!(started(&claude, &capitao)[7], "[Orquestrador] Ship the form.");
+        assert_eq!(started(&claude, &capitao)[7], "[Orchestrator] Ship the form.");
         assert_eq!(overview(), projects("trabalhando", &capitao), "the message started its turn before any hook said so");
 
         said(&dir, "s1", "The form validates now. PR #12 is open.");
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
         ask(&sock, &done).unwrap();
         let report = format!("[pinned] Capitão site ({host}) [m-mini {capitao}]: The form validates now. PR #12 is open.");
-        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orquestrador", &host)], "the report started the global orchestrator");
+        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), format!("{}\n\n{}", global::prompt("Orchestrator", &host), taste::Taste::default().brief())], "the report started the global orchestrator");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
 
         assert_eq!(overview(), projects("livre", &capitao));
@@ -7267,7 +7754,7 @@ while True:
 
         let read: Value = serde_json::from_str(&tool(&format!(r#""name":"read_captain","project":"m-mini:{path}""#)).unwrap()).unwrap();
         let conversation = json!([
-            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orquestrador] Ship the form." },
+            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orchestrator] Ship the form." },
             { "kind": "text", "at": "2026-11-09T10:05:00Z", "text": "The form validates now. PR #12 is open." },
         ]);
         assert_eq!((&read["state"], &read["project"], &read["conversation"]["items"]), (&json!("done"), &json!(path), &conversation));
@@ -7336,6 +7823,135 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
+    fn append_transcript(dir: &Path, session: &str, lines: &[Value]) {
+        use std::io::Write;
+        let folder = dir.join("config/accounts/work/projects/-site");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("{session}.jsonl"))).unwrap();
+        file.write_all(lines.iter().map(|l| format!("{l}\n")).collect::<String>().as_bytes()).unwrap();
+    }
+
+    /// A turn's lines: the prompt, then the reply, or a tool call when it wrote no text.
+    #[cfg(unix)]
+    fn turn_lines(n: u32, prompt: &str, reply: Option<&str>) -> Vec<Value> {
+        let at = format!("2026-11-09T16:{n:02}:00Z");
+        let said = match reply {
+            Some(text) => json!({ "type": "text", "text": text }),
+            None => json!({ "type": "tool_use", "id": format!("t{n}"), "name": "Bash", "input": { "command": "ls" } }),
+        };
+        vec![
+            json!({ "type": "user", "uuid": format!("u{n}"), "timestamp": at, "message": { "content": prompt } }),
+            json!({ "type": "assistant", "uuid": format!("a{n}"), "timestamp": at, "message": { "content": [said] } }),
+        ]
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_report_reaches_the_global_orchestrator_once_however_long_the_capitaos_transcript() {
+        let dir = temp("report-once");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+
+        // The transcript passed one 8 MiB page long ago, and its first page ends on an old reply.
+        let padding = "x".repeat(64 << 10);
+        let mut old = turn_lines(0, "Earlier.", Some("OLD reply."));
+        old.extend((0..140).map(|i| json!({ "type": "user", "uuid": format!("p{i}"), "timestamp": "2026-11-09T15:00:00Z", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t0", "content": padding }] } })));
+        append_transcript(&dir, "s1", &old);
+
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let global_idle = || m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+        global_idle();
+        let reports = || -> Vec<String> {
+            read_pty(&inbox).split("\x1b[200~").skip(1).map(|pasted| pasted.split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r").to_owned()).collect()
+        };
+        let mut n = 0;
+        let mut turn = |request_id: Option<&str>, reply: Option<&str>| {
+            n += 1;
+            let prompt = match request_id {
+                Some(id) => {
+                    assert_eq!(enqueue(&m, &path, id, id).unwrap()["outcome"], "entregue");
+                    format!("[Orquestrador] {id}")
+                }
+                None => "Felipe asks directly.".to_owned(),
+            };
+            m.record_event(hook(&capitao, AgentStatus::Working));
+            append_transcript(&dir, "s1", &turn_lines(n, &prompt, reply));
+            m.record_event(hook(&capitao, AgentStatus::Done));
+        };
+
+        turn(Some("r-1"), Some("Reply one."));
+        wait_for("the first report", || reports().len() == 1);
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        global_idle();
+        turn(None, Some("Reply two."));
+        turn(Some("r-3"), None);
+        wait_for("the second report", || reports().len() == 2);
+        global_idle();
+        turn(Some("r-4"), Some("Reply four."));
+        wait_for("the third report", || reports().len() == 3);
+        global_idle();
+
+        let delivered = m.sent.lock().unwrap().in_flight(&m.global_folder());
+        let first = CaptainReport { machine: String::new(), machine_name: crate::account::hostname(), project: "site".into(), path: path.clone(), tab: capitao.clone(), text: "Reply one.".into(), answers: vec!["r-1".into()] };
+        let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
+        assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reports(), ["Reply one.", "(no reply)", "Reply four."], "each turn's own reply, each once");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
+        assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
+        let dir = temp("waits-question");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
+        let asks = |question: &str| vec![(global::WaitingKind::NeedsInput, Some(question.to_owned()))];
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(1, "Merge the fix.", Some("Merged. Quer que eu faça a release?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"));
+        m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook(&tab, AgentStatus::NeedsInput) });
+        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"), "Claude Code's idle notice a minute later");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(waiting(&m), [], "the user answered");
+        append_transcript(&dir, "s1", &turn_lines(2, "Sim.", Some("Released v0.17.21.")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(waiting(&m), [], "a turn that asked nothing");
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_lines(3, "And #89?", Some("O #89 conflita com o main. Fecho o #89?")));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        drop(m);
+        let restarted = work_machine(&dir, &claude, &sock);
+        assert_eq!(restarted.restore_tabs().len(), 1);
+        assert_eq!(waiting(&restarted), asks("Fecho o #89?"), "the question outlives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_capitao_that_claude_code_calls_idle_after_its_turn_is_free_and_takes_a_message_now() {
@@ -7351,7 +7967,7 @@ while True:
         m.record_event(hook(&tab, AgentStatus::NeedsInput));
         assert_eq!(state(), global::CaptainState::Idle, "the idle notification a minute after the turn");
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
-        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+        assert_eq!(typed(&file, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r");
 
         m.record_event(hook(&tab, AgentStatus::Working));
         m.record_event(hook(&tab, AgentStatus::NeedsInput));
@@ -7385,7 +8001,7 @@ while True:
     fn global_orchestrator_settings_are_saved_on_the_machine() {
         let dir = temp("global-settings");
         let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
-        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
+        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
         let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
         let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
         assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
@@ -7408,12 +8024,189 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_starts_with_its_projects_taste_and_the_global_orchestrator_with_its_own() {
+        let dir = temp("taste-brief");
+        let (site, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&site).unwrap();
+        git(&site, &["init", "-q"]);
+        git(&site, &["remote", "add", "origin", "git@github.com:acme/site.git"]);
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        let account = json!({
+            "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
+            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."] } },
+        });
+        let asked = Arc::new(AtomicU32::new(0));
+        let (answer, count) = (account.clone(), asked.clone());
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(answer.clone())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let path = site.display().to_string();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&tab, 80, 24).unwrap();
+        let site_brief = "Run up to 5 workers at once.
+Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
+Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
+Tell the user only at the end, with the result.
+Review each worker's diff before you accept its work.
+Deploys go through the VPS.";
+        let cap = "At most 100 workers run at once on this machine; if that blocks you, tell the user to raise it under Settings rather than working around it.";
+        let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
+        let kept: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
+        assert_eq!(kept["projects"], account["projects"], "the hub's answer is kept for when it can't answer");
+
+        m.set_hub(Arc::new(|_| Err("not connected to the hub".into())));
+        m.relaunch(&tab, 80, 24).unwrap();
+        assert_eq!(started(&claude, &tab).last(), Some(&capitao), "offline, the Capitão starts with the taste kept from the hub");
+
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&global_tab, 80, 24).unwrap();
+        let orchestrator_brief = "Run up to 6 workers at once.
+Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
+Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
+Tell the user only at the end, with the result.
+Have another model review a risky change before it goes ahead.";
+        let global_prompt = format!("{}\n\n{orchestrator_brief}", global::prompt("Orchestrator", &crate::account::hostname()));
+        assert_eq!(started(&claude, &global_tab).last(), Some(&global_prompt));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_machines_own_taste_goes_to_the_account_before_its_first_read_and_again_on_each_connect() {
+        let dir = temp("taste-share");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let calls = Arc::new(Mutex::new(vec![]));
+        let seen = calls.clone();
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(serde_json::to_value(&call).unwrap()["cmd"].clone());
+            match call {
+                HubCall::ImportTastes { tastes } => Ok(json!(tastes.captains.profile() == taste::Profile::Aggressive)),
+                HubCall::GetTastes => Ok(json!({})),
+                _ => Err("not this test's".into()),
+            }
+        }));
+        assert_eq!(m.tastes(), Tastes::default(), "the account's answer wins");
+        assert_eq!(m.tastes(), Tastes::default());
+        assert_eq!(*calls.lock().unwrap(), [json!("import_tastes"), json!("get_tastes"), json!("get_tastes")], "the seeded style went up once, before the first read");
+        m.share_tastes_again();
+        assert_eq!(calls.lock().unwrap().len(), 3, "the account's defaults, kept in taste.json, are not offered as this machine's own");
+
+        std::fs::write(config.join("taste.json"), serde_json::to_vec(&Tastes { captains: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() }).unwrap()).unwrap();
+        m.share_tastes_again();
+        assert_eq!(calls.lock().unwrap().last(), Some(&json!("import_tastes")), "a new link offers this machine's own taste again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_silent_hub_holds_a_sessions_start_only_briefly_and_its_late_answer_is_kept() {
+        let dir = temp("taste-slow");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let kept = Tastes { orchestrator: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() };
+        taste::save(&kept, Some(&config)).unwrap();
+        let late = Tastes { orchestrator: taste::Profile::Aggressive.preset().unwrap(), ..Tastes::default() };
+        let answer = serde_json::to_value(&late).unwrap();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(answer.clone())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let asked = Instant::now();
+        assert_eq!(m.tastes(), kept, "the start went on with the taste kept in taste.json");
+        assert!(asked.elapsed() < Duration::from_millis(1500), "the start waited {:?}", asked.elapsed());
+        wait_for("the late answer to be kept", || taste::load(Some(&config)) == Some(late.clone()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_signed_out_machine_changes_its_own_taste_file() {
+        let dir = temp("taste-local");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("orchestration.json"), r#"{"style":"economical","max_workers":4}"#).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the old cost style seeded the Capitães");
+        m.set_orchestration(7).unwrap();
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let set = m.set_local_taste(&site, TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&set.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": false } }));
+        let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
+        assert_eq!(serde_json::to_value(&reset.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
+        assert_eq!(m.local_tastes(), reset);
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the worker cap's save kept the seeded taste");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_taste_chat_starts_on_its_scope_and_its_session_alone_changes_the_taste_file() {
+        let dir = temp("taste-chat");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let claude = recording_claude(&dir);
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, move |e| {
+            seen.lock().unwrap().push(serde_json::to_value(e).unwrap())
+        });
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let chat = m.call(Call::OpenTasteChat { scope: site.clone(), path: Some(path.clone()) }).unwrap().as_str().unwrap().to_owned();
+        let view = m.view(&chat).unwrap();
+        assert_eq!((view.cwd.as_str(), view.taste_chat, view.role, view.running), (path.as_str(), true, None, false));
+        m.start_claude(&chat, 80, 24).unwrap();
+        let args = started(&claude, &chat);
+        assert!(args.iter().any(|a| a.starts_with("Help me adjust the way of working of the Captain of the project github.com/acme/site in pinned (scope project:github.com/acme/site).")), "{args:?}");
+
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"project:github.com/acme/site","patch":{"parallel":2}"#).unwrap()).unwrap();
+        assert_eq!((&set["scope"], &set["own"], &set["effective"]["parallel"], &set["inherits_from"]), (&json!("project:github.com/acme/site"), &json!({ "parallel": 2 }), &json!(2), &json!("captains")));
+        assert!(set["brief"].as_str().unwrap().starts_with("Run up to 2 workers at once.\n"), "{set}");
+        let written: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
+        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read, get_tastes, reads this file");
+        assert_eq!(m.local_tastes().resolve(&site).parallel, 2);
+        assert_eq!(events.lock().unwrap().iter().filter(|e| e["kind"] == "tastes-changed").count(), 1);
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"project:github.com/acme/site""#).unwrap()).unwrap();
+        assert_eq!(got, set);
+
+        let reset: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"parallel""#).unwrap()).unwrap();
+        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":9}"#), Err("parallel workers go from 1 to 8".into()));
+        assert_eq!(tool(&chat, r#""name":"taste_get","scope":"site""#), Err("unknown scope \"site\": use orchestrator, captains or project:<repo>, as in project:github.com/acme/site".into()));
+
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(tool(&plain, r#""name":"taste_set","scope":"captains","patch":{"parallel":1}"#), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
+        assert_eq!(m.local_tastes().captains.parallel, 3, "a plain thread changed the taste");
+
+        let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
+        assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");
+        assert_eq!(m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: Some(dir.join("gone").display().to_string()) }), Err(format!("{} is not a folder on this machine", dir.join("gone").display())));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7456,63 +8249,249 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A Claude Code that answers its sign-in check, records each tab's folder, role, project,
+    /// account home and arguments, then stays up as that tab's session.
+    #[cfg(unix)]
+    fn thread_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
+        let request = crate::delegate::parse_request(&args).unwrap();
+        serde_json::from_str(&m.start_delegate(Some(from.to_owned()), None, None, request).unwrap()).unwrap()
+    }
+
     #[test]
     #[cfg(unix)]
-    fn an_orchestrator_delegates_to_workers_each_in_its_own_worktree() {
+    fn a_captains_delegate_task_is_a_worker_thread_on_the_account_model_and_effort_it_names() {
+        let dir = temp("child-thread");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let claude = thread_claude(&dir);
+        let config = dir.join("config");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+
+        let reply = delegate_task(&m, &captain, json!({
+            "task": "Add a --json flag to the CLI.",
+            "title": "JSON output",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5", "options": { "effort": "high" } },
+            "isolation": "worktree",
+        }));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        assert_eq!((reply["workState"].as_str(), reply["providerInstanceId"].as_str(), reply["model"].as_str()), (Some("working"), Some("work"), Some("claude-sonnet-5-5")));
+        let view = m.view(&child).unwrap();
+        assert_eq!(
+            (view.role, view.spawned_by.as_deref(), view.account.as_str(), view.title.as_deref(), view.running),
+            (Some(Role::Worker), Some(captain.as_str()), "work", Some("JSON output"), true),
+            "the child is a running worker thread under the Captain"
+        );
+        let args = started(&claude, &child);
+        let tree = PathBuf::from(&args[0]);
+        assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
+        assert_eq!(reply["cwd"].as_str(), Some(args[0].as_str()));
+        assert_eq!(
+            args[1..],
+            [
+                "worker",
+                &path,
+                &config.join("accounts/work").display().to_string(),
+                "--settings",
+                "s",
+                "--plugin-dir",
+                "p",
+                "--name",
+                "JSON output",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "auto",
+                "JSON output\n\nAdd a --json flag to the CLI.",
+                "--model",
+                "claude-sonnet-5-5",
+                "--append-system-prompt",
+                Role::Worker.prompt(),
+            ]
+        );
+
+        assert_eq!(m.worker_count(), 1, "the thread and its task are one worker");
+        let checkout = &m.local_overview().projects[0].checkouts[0];
+        assert_eq!((checkout.path.as_str(), checkout.workers), (path.as_str(), 1), "projects() counts the child");
+        let agents = m.project_tool(&captain, ProjectTool::Agents).unwrap();
+        assert_eq!(agents, format!("{child}: JSON output (starting) in {}", tree.display()));
+        assert!(m.thread(&captain, 0).unwrap().agents.is_empty(), "the child shows as a thread, not as a card on the Captain");
+        let caller = |tab: &str| m.task_status(Some(tab.to_owned()), None, &task).map(|s| serde_json::from_str::<Value>(&s).unwrap());
+        assert_eq!(caller(&captain).unwrap()["workState"], "working");
+
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(transcripts.join("s-child.jsonl"), assistant_line("Added --json; cargo test passes.")).unwrap();
+        m.record_event(AgentEvent { cwd: Some(args[0].clone()), session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+
+        let status = caller(&captain).unwrap();
+        assert_eq!(
+            (status["workState"].as_str(), status["summary"].as_str(), status["error"].as_str(), status["tabId"].as_str(), status["conversationId"].as_str()),
+            (Some("result_available"), Some("Added --json; cargo test passes."), None, Some(child.as_str()), Some("s-child"))
+        );
+        assert_eq!(status["recentSteps"][0]["text"], "Added --json; cargo test passes.");
+        let read = reading::read(&m.view(&child).unwrap(), m.thread(&child, 0).and_then(json), reading::DEFAULT_ITEMS);
+        assert_eq!(read["conversation"]["items"][0]["text"], "Added --json; cargo test passes.", "{read}");
+        assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
+        assert_eq!(m.worker_count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Captain's thread child on the `work` account, with its transcript file and its folder.
+    #[cfg(unix)]
+    fn captain_with_thread_child(name: &str) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        let dir = temp(name);
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = thread_claude(&dir);
+        let config = dir.join("config");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": { "providerInstanceId": "work" } }));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, json!({ "type": "custom-title", "customTitle": "Board check", "sessionId": "s-child" }).to_string() + "\n").unwrap();
+        (m, dir, captain, task, child, transcript)
+    }
+
+    /// What the hook reports for `payload`, as Claude Code's hook process would send it from `tab`.
+    #[cfg(unix)]
+    fn hook_event(tab: &str, status: &str, transcript: &Path, prompt: Option<&str>) -> AgentEvent {
+        let payload = json!({ "session_id": "s-child", "transcript_path": transcript, "prompt": prompt });
+        AgentEvent { tab: Some(tab.into()), ..hooks::event_from(Some(status), &payload.to_string()).unwrap() }
+    }
+
+    #[cfg(unix)]
+    fn append(file: &Path, lines: &[Value]) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_that_ends_a_turn_with_a_background_shell_pending_finishes_after_the_turn_the_shell_resumes() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-background");
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let notification = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"cargo test\" completed</summary>\n</task-notification>";
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        let notices = || m.delegates.claim_notice(&captain).map(|(text, _)| text);
+
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check\n\nCompare the screens with the boards.")));
+        append(&transcript, &[
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "content": "Command running in background with ID: b1." }] }, "toolUseResult": { "backgroundTaskId": "b1" } }),
+            said("Looking at the screenshots."),
+        ]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook_event(&child, "needs-input", &transcript, None) });
+        assert_eq!((status()["workState"].as_str(), notices()), (Some("working"), None), "a turn end with the shell pending is not the end");
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.title.as_deref()), (Some(AgentStatus::Working), Some("Board check")));
+
+        append(&transcript, &[json!({ "type": "attachment", "attachment": { "type": "queued_command", "prompt": notification, "commandMode": "task-notification" } })]);
+        m.record_event(hook_event(&child, "working", &transcript, Some(notification)));
+        assert_eq!(m.view(&child).unwrap().title.as_deref(), Some("Board check"), "the resume renamed the thread");
+        append(&transcript, &[said("All four screens match the boards.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+
+        let notice = notices().expect("the task's end notice");
+        assert!(notice.contains(&format!("Delegated task {task} \"Board check\"")) && notice.contains("finished: result available"), "{notice}");
+        assert_eq!(notices(), None, "the notice came once");
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("All four screens match the boards.")));
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.title.as_deref()), (Some(AgentStatus::Done), Some("Board check")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_waiting_only_on_a_shell_ends_with_its_reply_after_30_quiet_minutes() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-quiet-shell");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        append(&transcript, &[
+            json!({ "type": "user", "message": { "content": [] }, "toolUseResult": { "backgroundTaskId": "dev" } }),
+            json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "The dev server runs on :3000." }] } }),
+        ]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.end_quiet_waits(Instant::now());
+        let state = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        assert_eq!(state()["workState"], "working");
+
+        let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
+        m.end_quiet_waits(Instant::now() + quiet);
+        assert_eq!((state()["workState"].as_str(), state()["summary"].as_str()), (Some("result_available"), Some("The dev server runs on :3000.")));
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_thread_fans_out_to_worker_threads_and_agents_lists_the_tree() {
         let dir = temp("delegate");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         git(&project, &["init", "-q", "-b", "main"]);
         git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
-        let claude = recording_claude(&dir);
-        let sock = dir.join("pinned.sock");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
-        m.listen(|_| Err("not the machine's".into())).unwrap();
-        let path = project.display().to_string();
+        let claude = thread_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project.clone()).display().to_string();
         let orchestrator = m.open_orchestrator(&path).unwrap();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
-        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
-        let delegate = r#""name":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
-        let worker_of = |reply: &str| reply.strip_prefix("Started worker ").and_then(|r| r.split(' ').next()).unwrap().to_owned();
+        let child = |from: &str, args: Value| delegate_task(&m, from, args)["tabId"].as_str().unwrap().to_owned();
 
-        // A plain thread fans out to workers the same way the orchestrator does.
-        let reply = tool(&plain, delegate).unwrap();
-        let worker = worker_of(&reply);
-        let args = started(&claude, &worker);
-        let tree = PathBuf::from(&args[0]);
-        assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
-        assert!(tree.file_name().unwrap().to_str().unwrap().starts_with("pinned-"));
-        assert_eq!(reply, format!("Started worker {worker} in {}. You get a message when it finishes or needs input.", tree.display()));
-        assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "JSON output\n\nAdd a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
-        assert!(!args.iter().any(|arg| arg == "--disallowedTools"), "a worker launch removed the sub-agent tool: {args:?}");
-        let view = m.view(&worker).unwrap();
-        assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
-
-        let second = worker_of(&tool(&orchestrator, r#""name":"delegate","task":"- Fix the README typo.""#).unwrap());
+        let worker = child(&plain, json!({ "task": "Add a --json flag to the CLI.", "title": "JSON output", "isolation": "worktree" }));
+        let tree = started(&claude, &worker)[0].clone();
+        let second = child(&orchestrator, json!({ "task": "- Fix the README typo.", "isolation": "worktree" }));
         let args = started(&claude, &second);
-        assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
-        assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
-
-        let nested = worker_of(&tool(&worker, r#""name":"delegate","task":"Test the flag.","title":"Flag tests""#).unwrap());
+        assert_ne!(args[0], tree, "two workers share a checkout");
+        assert_eq!(args[args.len() - 3], "\n- Fix the README typo.", "a brief starting with a dash reads as an option");
+        let nested = child(&worker, json!({ "task": "Test the flag.", "title": "Flag tests", "isolation": "worktree" }));
         let nested_tree = started(&claude, &nested)[0].clone();
-        assert_ne!(nested_tree, tree.display().to_string(), "a nested worker shares its parent's checkout");
+        assert_ne!(nested_tree, tree, "a nested worker shares its parent's checkout");
         assert_eq!(m.view(&nested).unwrap().spawned_by, Some(worker.clone()));
         assert_eq!(m.view(&worker).unwrap().spawned_by, Some(plain.clone()));
         assert_eq!(m.view(&second).unwrap().spawned_by, Some(orchestrator.clone()));
-        let agents = r#""name":"agents""#;
+        let agents = |tab: &str| m.project_tool(tab, ProjectTool::Agents);
         assert_eq!(
-            tool(&orchestrator, agents),
-            Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
+            agents(&orchestrator),
+            Ok(format!("{worker}: JSON output (starting) in {tree}\n  {nested}: Flag tests (starting) in {nested_tree}\n{second}: - Fix the README typo. (starting) in {}", args[0]))
         );
-        assert_eq!(tool(&plain, agents), Ok(format!("{worker}: JSON output (starting) in {}\n  {nested}: Flag tests (starting) in {nested_tree}", tree.display())));
-        assert_eq!(tool(&worker, agents), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
-        assert_eq!(tool(&nested, agents), Ok("No workers yet.".into()));
+        assert_eq!(agents(&plain), Ok(format!("{worker}: JSON output (starting) in {tree}\n  {nested}: Flag tests (starting) in {nested_tree}")));
+        assert_eq!(agents(&worker), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
+        assert_eq!(agents(&nested), Ok("No workers yet.".into()));
+
+        m.close_tab(&plain);
+        assert!(m.view(&worker).unwrap().running, "closing the spawner leaves its worker thread running");
+        let task = m.tab(&nested, |t| t.task.clone()).unwrap().unwrap();
+        m.close_tab(&nested);
+        assert_eq!(m.delegates.get(&task).map(|t| (t.state, t.error)), Some((crate::delegate::WorkState::Cancelled, Some("its thread was closed".into()))));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7945,6 +8924,99 @@ while True:
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A worker "Board check" on session s1 of the `work` account, whose news is typed into its
+    /// project's running orchestrator, and a reader of what was typed there.
+    #[cfg(unix)]
+    fn worker_reporting_home(name: &str) -> (Arc<Machine>, PathBuf, String, PathBuf, impl Fn() -> String) {
+        let root = temp(name);
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = config.join("accounts/work/projects/-app/s1.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let file = root.join("typed.bin");
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let app = Path::new("/work/app");
+        let orchestrator = running(&m, role_env(Role::Orchestrator, app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let work = m.accounts.get("work").unwrap();
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work, vec![], role_env(Role::Worker, app), false, Some("s1".into()));
+        m.tab(&worker, |t| t.title = Some("Board check".into())).unwrap();
+        let typed = move || String::from_utf8(std::fs::read(&file).unwrap_or_default()).unwrap();
+        (m, root, worker, transcript, typed)
+    }
+
+    /// What the hook reports for a turn of session s1, as Claude Code's hook process sends it.
+    #[cfg(unix)]
+    fn s1_hook(tab: &str, status: &str, transcript: &Path, prompt: Option<&str>) -> AgentEvent {
+        let payload = json!({ "session_id": "s1", "transcript_path": transcript, "prompt": prompt });
+        AgentEvent { tab: Some(tab.into()), ..hooks::event_from(Some(status), &payload.to_string()).unwrap() }
+    }
+
+    #[cfg(unix)]
+    fn finished(worker: &str, reply: &str) -> String {
+        format!("\x1b[200~[pinned] Worker {worker} \"Board check\" finished. Its last message:\n\n{reply}\x1b[201~\r")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_message_from_another_session_keeps_the_workers_title_and_its_notice_carries_the_answer() {
+        let (m, root, worker, transcript, typed) = worker_reporting_home("report-peer");
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        m.record_event(s1_hook(&worker, "working", &transcript, Some("Board check\n\nCompare the screens with the boards.")));
+        append(&transcript, &[
+            json!({ "type": "user", "turnPosition": { "promptIndex": 0, "turnIndex": 0 }, "message": { "content": "Compare the screens with the boards." } }),
+            said("Desktop sidebar matches. Comparing against the boards next."),
+        ]);
+        m.record_event(s1_hook(&worker, "done", &transcript, None));
+
+        let message = "<cross-session-message from=\"uds:/tmp/cc-socks/85194.sock\" from-name=\"Captain\" from-mode=\"bypass\">\nIs anything of yours still running?\n</cross-session-message>";
+        append(&transcript, &[json!({ "type": "user", "isMeta": true, "turnPosition": { "promptIndex": 1, "turnIndex": 1 }, "origin": { "kind": "peer" }, "message": { "content": format!("Another Claude session sent a message:\n{message}") } })]);
+        m.record_event(s1_hook(&worker, "working", &transcript, Some(message)));
+        assert_eq!(m.view(&worker).unwrap().title.as_deref(), Some("Board check"), "the message renamed the thread");
+        append(&transcript, &[
+            json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": "t1", "name": "SendMessage", "input": { "to": "uds:/tmp/cc-socks/85194.sock", "message": "Nothing I started is still running." } }] } }),
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "Message sent." }] } }),
+        ]);
+        m.record_event(s1_hook(&worker, "done", &transcript, None));
+
+        let expected = finished(&worker, "Desktop sidebar matches. Comparing against the boards next.") + &finished(&worker, "Nothing I started is still running.");
+        wait_for("both notices", || typed().len() >= expected.len());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(typed(), expected);
+        assert_eq!(m.view(&worker).unwrap().title.as_deref(), Some("Board check"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_second_notice_carries_its_second_turn_never_the_first() {
+        let (m, root, worker, transcript, typed) = worker_reporting_home("report-second");
+        m.record_event(s1_hook(&worker, "working", &transcript, Some("Board check\n\nAdd the boards folder.")));
+        append(&transcript, &[
+            json!({ "type": "user", "turnPosition": { "promptIndex": 0, "turnIndex": 0 }, "message": { "content": "Add the boards folder." } }),
+            json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "It already exists with the same shape; deleting my copy." }] } }),
+        ]);
+        m.record_event(s1_hook(&worker, "done", &transcript, None));
+
+        let notification = "<task-notification>\n<task-id>w1</task-id>\n<status>completed</status>\n<summary>Wakeup fired</summary>\n</task-notification>";
+        m.record_event(s1_hook(&worker, "working", &transcript, Some(notification)));
+        append(&transcript, &[
+            json!({ "type": "user", "turnPosition": { "promptIndex": 1, "turnIndex": 1 }, "origin": { "kind": "task-notification" }, "message": { "content": notification } }),
+            json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": "t2", "name": "Bash", "input": { "command": "ls boards" } }] } }),
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t2", "content": "main.png" }] } }),
+        ]);
+        m.record_event(s1_hook(&worker, "done", &transcript, None));
+
+        let expected = finished(&worker, "It already exists with the same shape; deleting my copy.") + &finished(&worker, "(none)");
+        wait_for("both notices", || typed().len() >= expected.len());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(typed(), expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Without a running orchestrator, a worker's news goes back to the plain thread that
     /// spawned it, so it works the same way there.
     #[test]
@@ -8041,6 +9113,7 @@ while True:
         .unwrap();
         m.record_event(AgentEvent { status: AgentStatus::Done, tab: Some(worker.clone()), ..done_event(&worker) });
         assert!(m.delegates.has_pending(), "the finished worker's news was dropped instead of queued");
+        assert_eq!(m.view(&orchestrator).unwrap().queued, 1, "the orchestrator's view does not count its worker's queued news");
         let _ = std::fs::remove_dir_all(root);
     }
 

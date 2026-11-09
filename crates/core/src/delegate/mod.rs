@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-const STEP_KEEP: usize = 8;
+pub const STEP_KEEP: usize = 8;
 const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
-const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
+pub const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const STDERR_CLOSE_WAIT: Duration = Duration::from_secs(1);
@@ -304,6 +304,17 @@ pub struct Task {
     pub parent_session: Option<String>,
     pub ended_by: Option<String>,
     pub run: Run,
+    /// The pinned thread that shows this child under its parent. Not saved: a restart cancels
+    /// every working task, and tab ids do not outlive the process.
+    pub thread: Option<Thread>,
+}
+
+/// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Thread {
+    pub tab: String,
+    /// The tab's own session is the child. A headless child (Cursor, Codex) runs outside it.
+    pub runs: bool,
 }
 
 #[derive(Clone, Debug)]

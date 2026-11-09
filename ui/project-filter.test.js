@@ -66,7 +66,7 @@ test("the project filter label keeps the full name as its title", () => {
     renderSyncAlert() {},
     tickDurations() {},
     scheduleWake() {},
-    shelfRows: () => [{}],
+    shelfRows: () => [{ matches: () => false }],
     searchRows: () => [],
   };
   vm.createContext(context);

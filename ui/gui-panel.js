@@ -177,7 +177,7 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "terminal") return terminalLabel(terminalsOf(s).active);
   if (s.kind === "prs") return "Pull requests";
   if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
-  if (s.kind === "memory") return isGlobalOrchestratorTab(tab) ? `Memória do ${globalOrchestratorName()}` : "Memory";
+  if (s.kind === "memory") return isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory";
   if (s.kind === "pr") return `#${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
   return s.title || hostOf(s.url) || "Browser";
 };
@@ -225,7 +225,7 @@ function addMenu() {
     { label: "Pull request", icon: "git-pull-request", kbd: "P", disabled: !pr, hint: pr ? `#${pr.number}` : "No pull request in this thread", run: () => openSurface("pr") },
     { label: "Linked pull requests", icon: "link-2", kbd: "L", disabled: !tab, run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
     { label: "Device", icon: "smartphone", kbd: "M", disabled: !tab, run: () => addSurface(tab, panelOf(tab).surfaces.find((x) => x.kind === "device") ?? { id: `device:${Date.now().toString(36)}`, kind: "device" }) },
-    { label: isGlobalOrchestratorTab(tab) ? `Memória do ${globalOrchestratorName()}` : "Memory", icon: "book-open", kbd: "Y", disabled: !hasProject(tab), hint: hasProject(tab) ? "" : "This thread is not in a project", run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
+    { label: isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory", icon: "book-open", kbd: "Y", disabled: !hasProject(tab), hint: hasProject(tab) ? "" : "This thread is not in a project", run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
   ];
 }
 

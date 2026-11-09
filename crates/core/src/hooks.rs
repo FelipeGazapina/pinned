@@ -2,6 +2,7 @@ use crate::history;
 use crate::ipc::{UnixListener, UnixStream};
 use crate::process;
 use crate::reminders;
+use crate::thread;
 use crate::agent::{
     AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
@@ -108,7 +109,10 @@ fn hook_payload() -> String {
     std::env::args().next_back().filter(|arg| arg.trim_start().starts_with('{')).unwrap_or_default()
 }
 
-/// `done` is Claude's Stop hook and Codex's `agent-turn-complete` notify.
+/// `done` is Claude's Stop hook and Codex's `agent-turn-complete` notify. A turn Claude Code starts
+/// to hand the session a finished background task carries that `<task-notification>` as its
+/// prompt; it is no prompt of the user's, so it neither names the session nor starts a user turn.
+/// A message from another session starts a turn the session answers, but names nothing either.
 pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
     let status = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)?;
     let hook: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
@@ -118,6 +122,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
         }
     }
     let field = |k: &str| hook[k].as_str().map(str::to_owned);
+    let prompt = hook["prompt"].as_str().filter(|p| !p.trim_start().starts_with("<task-notification>"));
     Some(AgentEvent {
         status,
         cwd: field("cwd"),
@@ -127,13 +132,13 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
         title: field("transcript_path")
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| title_from_transcript(BufReader::new(file)))
-            .or_else(|| hook["prompt"].as_str().and_then(title_from_prompt)),
+            .or_else(|| prompt.filter(|p| !thread::delivered(p)).and_then(title_from_prompt)),
         resume_at: (status == AgentStatus::Failed)
             .then(|| field("transcript_path"))
             .flatten()
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| limit_reset_from_transcript(BufReader::new(file))),
-        prompt: (status == AgentStatus::Working).then(|| hook["prompt"].as_str().map(history::clip_prompt)).flatten(),
+        prompt: (status == AgentStatus::Working).then(|| prompt.map(history::clip_prompt)).flatten(),
         // Taken here, in the hook Claude Code waits on, so the agent can't edit before the baseline exists.
         snapshot: matches!(status, AgentStatus::Working | AgentStatus::Done | AgentStatus::Failed)
             .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
@@ -262,21 +267,28 @@ fn limit_reset_from_transcript(transcript: impl BufRead) -> Option<u64> {
 }
 
 const AI_TITLE: &[u8] = br#""type":"ai-title""#;
+const CUSTOM_TITLE: &[u8] = br#""type":"custom-title""#;
 const PROMPT_TITLE_CHARS: usize = 60;
 
-/// The last title Claude Code gave the session in its transcript. Transcripts grow to many
-/// megabytes, so only lines that mention a title are parsed.
+/// The session's title in its transcript: the last name given with `--name` or `/rename`, else the
+/// last one Claude Code made up. Transcripts grow to many megabytes, so only lines that mention a
+/// title are parsed.
 fn title_from_transcript(transcript: impl BufRead) -> Option<String> {
-    transcript
-        .split(b'\n')
-        .map_while(Result::ok)
-        .filter(|line| line.windows(AI_TITLE.len()).any(|w| w == AI_TITLE))
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(&line).ok()?["aiTitle"].as_str().map(str::to_owned))
-        .last()
+    let (mut named, mut made) = (None, None);
+    let has = |line: &[u8], mark: &[u8]| line.windows(mark.len()).any(|w| w == mark);
+    for line in transcript.split(b'\n').map_while(Result::ok).filter(|line| has(line, AI_TITLE) || has(line, CUSTOM_TITLE)) {
+        let Ok(line) = serde_json::from_slice::<serde_json::Value>(&line) else { continue };
+        if let Some(title) = line["customTitle"].as_str() {
+            named = Some(title.to_owned());
+        } else if let Some(title) = line["aiTitle"].as_str() {
+            made = Some(title.to_owned());
+        }
+    }
+    named.or(made)
 }
 
 /// Stands in for the title until Claude Code names the session: the prompt's first line.
-fn title_from_prompt(prompt: &str) -> Option<String> {
+pub(crate) fn title_from_prompt(prompt: &str) -> Option<String> {
     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
     if line.starts_with("[pinned]") {
         return None;
@@ -399,6 +411,33 @@ mod tests {
             r#"{"type":"user","message":{"content":"thanks"}}"#,
         );
         assert_eq!(title_from_transcript(transcript.as_bytes()), Some("App update on opening".to_owned()));
+    }
+
+    #[test]
+    fn a_name_given_to_the_session_outranks_the_title_claude_made() {
+        let transcript = concat!(
+            r#"{"type":"custom-title","customTitle":"JSON output","sessionId":"s1"}"#, "\n",
+            r#"{"type":"ai-title","aiTitle":"Add a JSON flag","sessionId":"s1"}"#, "\n",
+        );
+        assert_eq!(title_from_transcript(transcript.as_bytes()), Some("JSON output".to_owned()));
+        let renamed = format!("{transcript}{}", r#"{"type":"custom-title","customTitle":"CLI flags","sessionId":"s1"}"#);
+        assert_eq!(title_from_transcript(renamed.as_bytes()), Some("CLI flags".to_owned()));
+    }
+
+    #[test]
+    fn a_turn_a_background_task_starts_is_no_prompt_and_names_nothing() {
+        let notification = r#"{"session_id":"s1","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}"#;
+        let event = event_from(Some("working"), notification).unwrap();
+        assert_eq!((event.status, event.prompt, event.title), (AgentStatus::Working, None, None));
+        let typed = event_from(Some("working"), r#"{"session_id":"s1","prompt":"fix the login page"}"#).unwrap();
+        assert_eq!((typed.prompt.as_deref(), typed.title.as_deref()), (Some("fix the login page"), Some("fix the login page")));
+    }
+
+    #[test]
+    fn a_message_from_another_session_is_a_prompt_that_names_nothing() {
+        let message = "<cross-session-message from=\"uds:/tmp/cc-socks/85194.sock\" from-name=\"Captain\">\nAnything running?\n</cross-session-message>";
+        let event = event_from(Some("working"), &serde_json::json!({ "session_id": "s1", "prompt": message }).to_string()).unwrap();
+        assert_eq!((event.prompt.as_deref(), event.title), (Some(message), None));
     }
 
     #[test]

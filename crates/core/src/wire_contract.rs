@@ -3,11 +3,12 @@
 
 use crate::account::{
     DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn,
+    SignupInfo,
 };
 use crate::connectors::{Connector, Settings, Suggestions};
 use crate::wire::{
-    AccountView, AgentRedirect, AgentRequest, ClientFrame, ExternalAgents, MachineFrame, MachineView, PairCode, ProjectView, TabView,
-    ToClient, ToMachine,
+    AccountView, AgentRedirect, AgentRequest, ClientFrame, ExternalAgents, Invites, MachineFrame, MachineView, NewInvite, PairCode, ProjectView,
+    TabView, ToClient, ToMachine,
 };
 use crate::{github, linear, slack, sync, upstash, vercel};
 use schemars::generate::SchemaSettings;
@@ -71,6 +72,9 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("Failure".into(), schemas::<Failure>());
     outbound.insert("MachineView".into(), schemas::<MachineView>());
     outbound.insert("PairCode".into(), schemas::<PairCode>());
+    outbound.insert("NewInvite".into(), schemas::<NewInvite>());
+    outbound.insert("Invites".into(), schemas::<Invites>());
+    outbound.insert("SignupInfo".into(), schemas::<SignupInfo>());
     outbound.insert("TabView".into(), schemas::<TabView>());
     outbound.insert("ProjectView".into(), schemas::<ProjectView>());
     outbound.insert("Memory".into(), schemas::<crate::memory::Memory>());
@@ -95,6 +99,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
     outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
+    outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),

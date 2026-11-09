@@ -29,6 +29,8 @@
 
 .thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: 0 1 auto; overflow: hidden; }
 .thread-row .since, .thread-row .stats { font-variant-numeric: tabular-nums; }
+/* A status stays on its 20px line. When the slot is too narrow, the time drops below the line, whole, and the icon and count stay. */
+.thread-row .stamp.status { min-width: 0; height: 20px; line-height: 20px; flex-wrap: wrap; align-content: flex-start; justify-content: flex-end; overflow: hidden; white-space: nowrap; }
 .thread-row .woke { cursor: pointer; }
 .thread-row .woke:hover { text-decoration: underline; }
 .thread-row .pin { display: flex; color: rgb(var(--g-muted-rgb) / 0.65); cursor: pointer; }
@@ -267,30 +269,45 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
   background: currentColor; box-shadow: 0 0 0 2px var(--g-control); }
 #side-update[data-state="downloading"] { box-shadow: inset 0 0 0 1.5px rgb(var(--g-side-fg-rgb) / 0.22); }
 
-/* The global orchestrator's fixed row above the projects. */
-.global-row { flex: none; display: flex; align-items: center; gap: 8px; width: 100%; margin: 2px 0 4px; padding: 8px 10px; border-radius: 8px;
-  text-align: left; font: inherit; color: var(--g-fg); background: rgb(var(--g-primary-rgb) / 0.1); }
-.global-row:hover { background: rgb(var(--g-primary-rgb) / 0.16); }
-.global-row > .i { width: 16px; height: 16px; flex: none; color: var(--g-primary); }
+/* The global orchestrator's fixed row above the projects, with how many threads wait on Felipe. */
+.global-row { flex: none; display: flex; align-items: center; gap: 10px; width: 100%; margin: 2px 0 4px; padding: 8px; border-radius: 10px;
+  text-align: left; font: inherit; color: var(--g-side-fg); }
+.global-row:hover { background: var(--g-row-hover); }
+.global-row.active { background: var(--g-row-active); }
+.global-row .mark { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 8px; background: var(--g-primary); color: var(--g-on-primary); }
+.global-row .mark .i { width: 16px; height: 16px; }
 .global-row .names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
 .global-row .name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.global-row .host { font-size: 11px; color: var(--g-side-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.global-row .projects { flex: none; padding: 2px 6px; border-radius: 6px; font-size: 11px; font-weight: 500; color: var(--g-primary); }
-.global-row .projects:hover { background: rgb(var(--g-primary-rgb) / 0.18); }
+.global-row .host { font-size: 12px; color: var(--g-side-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.global-row .count { flex: none; display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; background: var(--g-primary); color: var(--g-on-primary); }
 
 /* The threads waiting on Felipe, right under the orchestrator's row. */
-.settled-head.waiting-head { color: var(--g-warning-fg); }
-.settled-head.waiting-head:hover { color: var(--g-warning); }
-.settled-head.waiting-head .line { background: rgb(var(--g-warning-rgb) / 0.2); }
-.settled-head.waiting-head .count { flex: none; min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
-  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.18); }
-.waiting-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 1px 0; padding: 6px 10px; border-radius: 8px;
-  cursor: pointer; outline: none; }
+.waiting-head { flex: none; display: flex; align-items: center; gap: 6px; width: 100%; height: 24px; margin-top: 6px; padding: 0 8px; border-radius: 6px;
+  text-align: left; font: inherit; font-size: 12px; font-weight: 600; color: var(--g-side-muted); }
+.waiting-head:hover { color: var(--g-side-fg); }
+.waiting-head .i { width: 14px; height: 14px; flex: none; }
+.waiting-head .count { flex: none; padding: 0 6px; border-radius: 4px; font-size: 11px; font-variant-numeric: tabular-nums;
+  color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
+.waiting-head .chevron { width: 12px; height: 12px; margin-left: auto; }
+.waiting-row { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 7px 8px; border-radius: 8px; cursor: pointer; outline: none; }
 .waiting-row:hover, .waiting-row:focus-visible { background: var(--g-row-hover); }
 .waiting-row:focus-visible { box-shadow: inset 0 0 0 2px rgb(var(--g-ink-rgb) / 0.2); }
-.waiting-row .kind { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
-.waiting-row .kind.pergunta { color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
-.waiting-row .kind.falha { color: var(--g-error); background: rgb(var(--g-error-rgb) / 0.14); }
-.waiting-row .texts { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.waiting-row .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: rgb(var(--g-fg-rgb) / 0.9); }
-.waiting-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: rgb(var(--g-muted-rgb) / 0.8); }
+.waiting-row .dot { width: 8px; height: 8px; flex: none; margin-top: 6px; border-radius: 50%; background: var(--g-side-muted); }
+.waiting-row .dot.question { background: var(--g-warning); }
+.waiting-row .dot.failed { background: var(--g-error); }
+.waiting-row .texts { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.waiting-row .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--g-side-fg); }
+.waiting-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-side-muted); }
+
+/* The inbox by project: a heading, then each project's head above its Captain, workers and threads. */
+.side-heading { flex: none; display: flex; align-items: center; align-self: flex-start; height: 24px; margin-top: 10px; padding: 0 8px; border-radius: 6px;
+  font-size: 12px; font-weight: 600; color: var(--g-side-muted); }
+.side-heading[data-global-projects] { cursor: pointer; }
+.side-heading[data-global-projects]:hover { color: var(--g-side-fg); }
+.project-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px 2px; font-size: 13px; font-weight: 600; color: var(--g-side-fg); }
+.side-heading + .project-head { padding-top: 4px; }
+.project-head .name { flex: 0 1 auto; min-width: 48px; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-head :is(.state, .where) { flex: none; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--g-side-muted); white-space: nowrap; }
+.project-head .state.running { color: var(--g-success); }
+.project-head .where { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }

@@ -11,8 +11,8 @@ pub const TASK_ENV: &str = "PINNED_TASK";
 pub const ROLE_ENV: &str = "PINNED_ROLE";
 pub const PROJECT_ENV: &str = "PINNED_PROJECT";
 
-const ORCHESTRATOR_PROMPT: &str = "You are this project's Capitão in pinned: the session that leads its workers. Talk like a session, not a dispatcher: think out loud, explain your plan, and report substance. Prefer delegating over doing it yourself. Before fanning out, look up memory_search for how this project likes to work (worker counts, model preferences, conventions) and save what you learn with memory_save. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Grant each worker the tools it needs with the tools argument; an empty grant leaves that to the task. When angles genuinely disagree, run one worker per angle on the same brief marked explore-only, then compare their reports and continue with the best, telling the user what each found. When a worker is stuck or failed, first try to unblock it: re-brief with narrower scope, grant wider tools, or hand the task to another worker on a different model. Step in and do the task yourself only when reassigning won't fix it, and say so when you do. Workers are threads the user can open and steer. A worker may start workers of its own, whose news goes to it rather than to you; agents lists your whole tree. To run a task on another provider or model, such as Cursor or Codex, call orchestrator_capabilities and then delegate_task. When you start workers, answer with what you understood, how you split the work, and one line per worker saying what you asked it to do, with the key files and how it should verify. You get a message when a worker finishes or needs input: report what it did or found and what happens next, never just that it finished. A worker that needs more tools says NEEDS followed by the tools: answer with a wider grant. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
-const WORKER_PROMPT: &str = "You are a worker in pinned, started by another session of this project. Do the task you were given fully and verify it. Stay within your granted tools when the brief names any; when you need more, say NEEDS followed by the tools and keep working with what you have. An explore-only brief means investigate and report, changing nothing. When a part of the task stands on its own, you may hand it to a worker of your own with the delegate tool: you get a message when it finishes or needs input, and agents lists your workers. End with a concise report of what changed and how you verified it, which the session that started you reads. Save durable facts about the project you learn with memory_save.";
+const ORCHESTRATOR_PROMPT: &str = "You are this project's Capitão in pinned: the session that leads its workers. Talk like a session, not a dispatcher: think out loud, explain your plan, and report substance. Prefer delegating over doing it yourself. Before fanning out, look up memory_search for how this project likes to work (worker counts, model preferences, conventions) and save what you learn with memory_save. Hand every piece of work to a worker with the delegate_task tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Pass isolation \"worktree\" when a worker changes files, so it works in its own checkout. Grant each worker the tools it needs with the tools argument; an empty grant leaves that to the task. When angles genuinely disagree, run one worker per angle on the same brief marked explore-only, then compare their reports and continue with the best, telling the user what each found. When a worker is stuck or failed, first try to unblock it: re-brief with narrower scope, grant wider tools, or hand the task to another worker on a different model. Step in and do the task yourself only when reassigning won't fix it, and say so when you do. Workers are threads the user can open and steer. A worker may start workers of its own, whose news goes to it rather than to you; agents lists your whole tree. To run a worker on another account, provider, model or effort, such as Cursor or Codex, call orchestrator_capabilities and pass its choice as target. When you start workers, answer with what you understood, how you split the work, and one line per worker saying what you asked it to do, with the key files and how it should verify. You get a message when a worker finishes or needs input: report what it did or found and what happens next, never just that it finished. A worker that needs more tools says NEEDS followed by the tools: answer with a wider grant. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
+const WORKER_PROMPT: &str = "You are a worker in pinned, started by another session of this project. Do the task you were given fully and verify it. Stay within your granted tools when the brief names any; when you need more, say NEEDS followed by the tools and keep working with what you have. An explore-only brief means investigate and report, changing nothing. When a part of the task stands on its own, you may hand it to a worker of your own with the delegate_task tool: you get a message when it finishes or needs input, and agents lists your workers. End with a concise report of what changed and how you verified it, which the session that started you reads. Save durable facts about the project you learn with memory_save.";
 
 /// The part a session plays in its project's orchestration.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -68,16 +68,6 @@ pub fn role_env(role: Role, project: &Path) -> Vec<(String, String)> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "name", rename_all = "snake_case")]
 pub enum ProjectTool {
-    /// Starts a worker on `task`, in a worktree of its own when the project is a git repository.
-    Delegate {
-        task: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        title: Option<String>,
-        /// Tools the worker may use. The worker sees them as its grant; omit it to grant what
-        /// the task needs.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tools: Vec<String>,
-    },
     Agents,
     MemorySearch {
         query: String,
@@ -112,8 +102,30 @@ pub enum ProjectTool {
     },
     /// The global orchestrator's: what waits on the user across the account's machines.
     Waiting,
+    /// The global orchestrator's: every session of the account, in `project` and on `machine`
+    /// when given.
+    Sessions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: the last `items` items of the session in tab `id`.
+    ReadSession {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
+    /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
+    TasteGet { scope: String },
+    /// A taste chat's: `Tastes::set` on the account's tastes, then `TasteGet`.
+    TasteSet { scope: String, patch: crate::taste::TastePatch },
+    /// A taste chat's: `Tastes::reset` on the account's tastes, then `TasteGet`.
+    TasteReset { scope: String, field: crate::taste::TasteField },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
@@ -405,10 +417,9 @@ mod tests {
 
     #[test]
     fn a_project_tool_message_names_the_tab_and_the_tool() {
-        let line = r#"{"kind":"project","tab":"tab-3","tool":{"name":"delegate","task":"Add a --json flag","title":"JSON output"}}"#;
+        let line = r#"{"kind":"project","tab":"tab-3","tool":{"name":"agents"}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        let delegate = ProjectTool::Delegate { task: "Add a --json flag".into(), title: Some("JSON output".into()), tools: vec![] };
-        assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == delegate));
+        assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == ProjectTool::Agents));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
         let save: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":{"name":"memory_save","title":"Deploys","text":"From tags.","kind":"decision","id":2}}"#).unwrap();
         let tool = ProjectTool::MemorySave { title: "Deploys".into(), text: "From tags.".into(), kind: Some("decision".into()), id: Some(2) };

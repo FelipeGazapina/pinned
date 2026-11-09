@@ -28,6 +28,7 @@
 <link rel="stylesheet" href="gui-shell.css">
 <link rel="stylesheet" href="gui-usage.css">
 <link rel="stylesheet" href="gui-skills.css">
+<link rel="stylesheet" href="gui-taste.css">
 <link rel="stylesheet" href="gui-settings.css">
 <link rel="stylesheet" href="gui-keybindings.css">
 <link rel="stylesheet" href="gui-pulls.css">
@@ -64,6 +65,7 @@
           <button class="icon" data-open-page="pull-requests" aria-label="Pull Requests" data-tip="Pull Requests"><i data-icon="git-pull-request"></i></button>
           <button class="icon" data-open-page="usage" aria-label="Usage" data-tip="Usage"><i data-icon="chart-column"></i></button>
           <button class="icon" data-open-page="skills" aria-label="Skills" data-tip="Skills"><i data-icon="sparkles"></i></button>
+          <button class="icon" data-open-page="taste" aria-label="Way of working" data-tip="Way of working"><i data-icon="sliders-horizontal"></i></button>
           <button id="mode-terminal" class="icon" aria-label="Terminal view" data-tip="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
           <button class="back"><i data-icon="arrow-left"></i>Back</button>
           <button id="side-update" class="icon" data-app-only hidden></button></footer>
@@ -161,6 +163,7 @@
     <p class="hint">Sign in to reach your machines and their sessions.</p>
     <input name="email" type="email" placeholder="Email" autocomplete="username" required>
     <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <input name="invite" placeholder="Invite code, to create an account" autocomplete="off" spellcheck="false" autocapitalize="characters" hidden>
     <p class="error"></p>
     <div class="actions"><button type="button" class="secondary" name="signup">Create account</button><button class="primary">Sign in</button></div>
   </form>
@@ -196,6 +199,7 @@
 <script src="gui-agents.js"></script>
 <script src="composer-tags.js"></script>
 <script src="global-orchestrator.js"></script>
+<script src="taste.js"></script>
 <script src="gui-composer.js"></script>
 <script src="gui-dictation.js"></script>
 <script src="gui-panel.js"></script>
@@ -215,6 +219,7 @@
 <script src="gui-links.js"></script>
 <script src="gui-usage.js"></script>
 <script src="gui-skills.js"></script>
+<script src="gui-taste.js"></script>
 <script src="vendor/theme-palettes.js"></script>
 <script src="theme-colors.js"></script>
 <script src="gui-theme.js"></script>

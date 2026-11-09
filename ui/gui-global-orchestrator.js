@@ -19,7 +19,7 @@ const globalOrchestratorName = () => {
       .then((read) => (goSettings = read))
       .catch(() => {});
   }
-  return goSettings?.view?.name ?? "Orquestrador";
+  return goSettings?.view?.name ?? "Orchestrator";
 };
 
 /** Reads the account's setting: `global_orchestrator_settings` from every online machine, one
@@ -43,7 +43,7 @@ async function readGlobalOrchestratorSettings() {
   return { machines: list, view: mergeGlobalSettings(list) };
 }
 
-/** The "Orquestrador global" section of the General page: one setting for the whole account, saved
+/** The "Global orchestrator" section of the General page: one setting for the whole account, saved
  * to every machine at once. Machines that cannot take it yet say so under the fields. */
 async function globalOrchestratorSettingsHtml() {
   goSettings = await readGlobalOrchestratorSettings();
@@ -51,27 +51,27 @@ async function globalOrchestratorSettingsHtml() {
   goHost = view.host;
   const presets = GO_NAME_PRESETS.map((n) => `<button type="button" class="chip go-preset${n === view.name ? " active" : ""}" data-name="${esc(n)}">${esc(n)}</button>`).join("");
   const hosts = machines
-    .map((m) => `<button type="button" class="chip go-host${m.id === goHost ? " active" : ""}" data-machine="${esc(m.id)}"${m.online && !m.update ? "" : " disabled"} title="${m.update ? "precisa atualizar o pinned" : m.online ? "" : "offline"}">${esc(m.name)}</button>`)
+    .map((m) => `<button type="button" class="chip go-host${m.id === goHost ? " active" : ""}" data-machine="${esc(m.id)}"${m.online && !m.update ? "" : " disabled"} title="${m.update ? "needs to update pinned" : m.online ? "" : "offline"}">${esc(m.name)}</button>`)
     .join("");
   const busy = GO_BUSY_CHOICES.map(([v, label]) => `<option value="${v}"${v === view.busy ? " selected" : ""}>${label}</option>`).join("");
   const reports = GO_REPORT_CHOICES.map(([v, label]) => `<option value="${v}"${v === view.reports ? " selected" : ""}>${label}</option>`).join("");
   const notes = globalSettingsNotes(machines);
   const toggle = (id, on, title, about) => `<div class="side-setting" data-setting="${id}"><div><label for="go-${id}">${title}</label><p class="meta">${about}</p></div>
     <label class="switch"><input type="checkbox" id="go-${id}"${on ? " checked" : ""}><span></span></label></div>`;
-  return `<section id="global-orchestrator-settings"><h2 class="looks-title">Orquestrador global</h2>
-    <div class="side-setting" data-setting="name"><div><label for="go-name">Nome</label><p class="meta">Como ele assina os pedidos aos Capitães e os relatórios para você.</p></div>
-      <div class="go-name"><div class="chips">${presets}</div><input id="go-name" type="text" maxlength="40" value="${esc(view.name)}" aria-label="Nome"></div></div>
-    <div class="side-setting" data-setting="host"><div><label>Onde roda</label><p class="meta">Uma máquina hospeda o orquestrador da conta; as outras continuam com seus Capitães.</p></div>
+  return `<section id="global-orchestrator-settings"><h2 class="looks-title">Global orchestrator</h2>
+    <div class="side-setting" data-setting="name"><div><label for="go-name">Name</label><p class="meta">How it signs requests to the Captains and reports to you.</p></div>
+      <div class="go-name"><div class="chips">${presets}</div><input id="go-name" type="text" maxlength="40" value="${esc(view.name)}" aria-label="Name"></div></div>
+    <div class="side-setting" data-setting="host"><div><label>Where it runs</label><p class="meta">One machine hosts the account's orchestrator; the others keep their own Captains.</p></div>
       <div class="chips" id="go-host">${hosts}</div></div>
-    <div class="side-setting" data-setting="busy"><div><label for="go-busy">Capitão ocupado</label><p class="meta">O que um Capitão no meio de um turno faz com um pedido novo.</p></div>
-      <select id="go-busy" aria-label="Capitão ocupado">${busy}</select></div>
-    <div class="side-setting" data-setting="reports"><div><label for="go-reports">Relatórios</label><p class="meta">Quando os Capitães contam ao orquestrador o que fizeram.</p></div>
-      <select id="go-reports" aria-label="Relatórios">${reports}</select></div>
-    ${toggle("group-reports", view.group_reports, "Agrupar relatórios seguidos", "Relatórios um atrás do outro viram uma linha só no chat.")}
-    ${toggle("read-aloud", view.read_aloud, "Ler resumos em voz alta no celular", "O telefone lê o resumo de cada relatório que chega.")}
-    <div class="side-setting" data-setting="memory"><div><label>Memória global</label><p class="meta">O que o ${esc(view.name)} lembra da conta, guardado na máquina que o hospeda.</p></div>
-      <button type="button" class="secondary" id="go-memory">Memória do ${esc(view.name)}</button></div>
-    <div class="actions"><span class="meta" id="go-status" role="status"></span><button type="button" id="go-save">Salvar</button></div>
+    <div class="side-setting" data-setting="busy"><div><label for="go-busy">When a Captain is busy</label><p class="meta">What a Captain in the middle of a turn does with a new request.</p></div>
+      <select id="go-busy" aria-label="When a Captain is busy">${busy}</select></div>
+    <div class="side-setting" data-setting="reports"><div><label for="go-reports">Reports</label><p class="meta">When the Captains tell the orchestrator what they did.</p></div>
+      <select id="go-reports" aria-label="Reports">${reports}</select></div>
+    ${toggle("group-reports", view.group_reports, "Group consecutive reports", "Reports that arrive one after another become a single row in the chat.")}
+    ${toggle("read-aloud", view.read_aloud, "Read summaries aloud on the phone", "The phone reads out the summary of each report that arrives.")}
+    <div class="side-setting" data-setting="memory"><div><label>Global memory</label><p class="meta">What ${esc(view.name)} remembers about the account, kept on the machine that hosts it.</p></div>
+      <button type="button" class="secondary" id="go-memory">${esc(view.name)}'s memory</button></div>
+    <div class="actions"><span class="meta" id="go-status" role="status"></span><button type="button" id="go-save">Save</button></div>
     <p class="meta" id="go-notes">${notes.map((n) => esc(n)).join("<br>")}</p>
     <p class="error" id="go-error"></p></section>`;
 }
@@ -118,7 +118,7 @@ async function saveGlobalOrchestratorSettings() {
   const live = (goSettings?.machines ?? []).map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
   const host = live.find((m) => m.id === view.host);
   if (!host || !host.online || host.update) {
-    error.textContent = "Escolha em qual máquina online o orquestrador roda.";
+    error.textContent = "Choose which online machine the orchestrator runs on.";
     return;
   }
   error.textContent = "";
@@ -136,7 +136,7 @@ async function saveGlobalOrchestratorSettings() {
   const saved = outcomes.find((o) => o.machine === view.host && !o.error);
   if (!saved) {
     const failed = outcomes.find((o) => o.machine === view.host);
-    error.textContent = `Não foi possível salvar em ${host.name}: ${failed?.error ?? "sem resposta"}`;
+    error.textContent = `Could not save on ${host.name}: ${failed?.error ?? "no answer"}`;
     return;
   }
   document.dispatchEvent(new CustomEvent("global-orchestrator-settings", { detail: saved.settings }));
@@ -145,22 +145,22 @@ async function saveGlobalOrchestratorSettings() {
     section.outerHTML = await globalOrchestratorSettingsHtml();
     bindGlobalOrchestratorSettings();
     const status = document.getElementById("go-status");
-    if (status) status.textContent = "Salvo";
+    if (status) status.textContent = "Saved";
   }
 }
 
-/** The account's projects as the projects page sees them: the tag catalog with each host's running
- * worker count, named by the orchestrator Felipe chose. */
+/** The account's projects as the projects page sees them: the tag catalog, named by the
+ * orchestrator Felipe chose. */
 function globalProjectsCatalog() {
   const directory = machineDirectory();
   directory.localName = machines.get(LOCAL)?.hubView?.name ?? directory.localName;
   return tagCatalog({
-    groups: projectGroups(true),
+    // Threads started without a project share a "No project" group, which is not a project.
+    groups: projectGroups(true).filter((g) => !g.tabs.length || g.tabs.some(hasProject)),
     directory,
     phase: phaseOf,
     repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) ?? null,
     name: globalOrchestratorName(),
-    workers: (tab) => runningAgents(tab).length,
   });
 }
 
@@ -171,30 +171,49 @@ function openGlobalProjects() {
 
 SHELL_PAGES["global-projects"] = { show() { renderGlobalProjectsPage(); } };
 
+/** How the page names a `captainState`. */
+const CAPTAIN_STATE_LABELS = { working: "Working", idle: "Idle", none: "No Captain" };
+const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+
+/** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
+ * session or a headless child at work, by project slug and machine id. */
+function runningWorkers() {
+  const by = new Map();
+  for (const group of projectGroups(true)) {
+    const counts = new Map();
+    for (const tab of group.tabs) if (tab.view.role === "worker" && (tab.view.running || tab.view.status === "working")) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
+    by.set(tagSlug(group.name), counts);
+  }
+  return by;
+}
+
 function renderGlobalProjectsPage() {
   const catalog = globalProjectsCatalog();
+  const workers = runningWorkers();
   const rows = catalog.projects.map((p) => {
     const state = captainState(p.machines.map((m) => m.captain));
+    const counts = workers.get(p.slug) ?? new Map();
     const machinesHtml = p.machines
       .map((m) => {
-        const captain = m.captain === "nenhum" ? "" : `<span class="gp-captain ${m.captain}">${m.captain}</span>`;
-        const title = m.captain === "nenhum" ? ' title="Sem Capitão nesta máquina"' : "";
-        return `<button type="button" class="gp-machine${m.online ? "" : " off"}" data-project="${esc(p.slug)}" data-machine="${esc(m.id)}"${m.captain === "nenhum" || !m.online ? " disabled" : ""}${title}>${esc(m.name)}${captain}</button>`;
+        const captain = m.captain === "none" ? "" : `<span class="gp-captain ${m.captain}">${CAPTAIN_STATE_LABELS[m.captain]}</span>`;
+        const running = counts.get(m.id) ? `<span class="gp-count">${workersLabel(counts.get(m.id))}</span>` : "";
+        const title = m.captain === "none" ? ' title="No Captain on this machine"' : "";
+        return `<button type="button" class="gp-machine${m.online ? "" : " off"}" data-project="${esc(p.slug)}" data-machine="${esc(m.id)}"${m.captain === "none" || !m.online ? " disabled" : ""}${title}>${esc(m.name)}${captain}${running}</button>`;
       })
       .join("");
-    const running = p.machines.reduce((n, m) => n + (m.workers || 0), 0);
+    const running = [...counts.values()].reduce((n, c) => n + c, 0);
     return `<div class="gp-row">
-      <div class="gp-main"><span class="gp-name">${esc(p.name)}</span><span class="gp-state ${state}">${state}</span><span class="gp-repo">${esc(p.repo || "sem remote")}</span></div>
-      <div class="gp-side">${machinesHtml}<span class="gp-workers">${running ? `${running} worker${running > 1 ? "s" : ""}` : "—"}</span></div>
+      <div class="gp-main"><span class="gp-name">${esc(p.name)}</span><span class="gp-state ${state}">${CAPTAIN_STATE_LABELS[state]}</span><span class="gp-repo">${esc(p.repo || "no remote")}</span></div>
+      <div class="gp-side">${machinesHtml}<span class="gp-workers">${running ? workersLabel(running) : "—"}</span></div>
     </div>`;
   });
   setPage(
-    `${headHtml("Projetos", `<span class="range">${catalog.projects.length} projeto${catalog.projects.length === 1 ? "" : "s"} · ${catalog.machines.length} máquina${catalog.machines.length === 1 ? "" : "s"}</span>`)}
-    <div class="page-body"><div class="page-wrap gp-list">${rows.join("") || '<p class="gp-empty">Nenhum projeto nas máquinas da conta ainda.</p>'}</div></div>`,
+    `${headHtml("Projects", `<span class="range">${catalog.projects.length} project${catalog.projects.length === 1 ? "" : "s"} · ${catalog.machines.length} machine${catalog.machines.length === 1 ? "" : "s"}</span>`)}
+    <div class="page-body"><div class="page-wrap gp-list">${rows.join("") || '<p class="gp-empty">No projects on the account\'s machines yet.</p>'}</div></div>`,
   );
 }
 
-/** A project's Capitão tab on one machine, when one is open; the chips that have one open it. */
+/** A project's Captain tab on one machine, when one is open; the chips that have one open it. */
 function captainTabFor(projectSlug, machineId) {
   const group = projectGroups(true).find((g) => tagSlug(g.name) === projectSlug);
   return group?.tabs.find((t) => t.machine === machineId && t.view.role === "orchestrator") ?? null;
@@ -218,12 +237,12 @@ setInterval(() => !document.hidden && shellPage() === "global-projects" && rende
 async function openGlobalMemory() {
   const name = globalOrchestratorName();
   const host = goSettings?.machines.find((m) => m.settings?.host === true && m.online && !m.update);
-  if (!host) return tell(`Escolha primeiro em qual máquina o ${name} roda, nas configurações.`);
+  if (!host) return tell(`Choose which machine ${name} runs on in the settings first.`);
   let tab;
   try {
     tab = await revealTab(host.id, await callOn(host.id, { cmd: "open_global_orchestrator" }));
   } catch (e) {
-    return tell(`Não deu para abrir a memória do ${name}: ${esc(String(e?.message ?? e))}`, 6000);
+    return tell(`Couldn't open ${name}'s memory: ${esc(String(e?.message ?? e))}`, 6000);
   }
   addSurface(tab, { id: "memory", kind: "memory" });
 }

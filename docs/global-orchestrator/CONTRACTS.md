@@ -37,12 +37,12 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 `global_orchestrator::Settings`, schema name `GlobalOrchestratorSettings`. One file per machine, `<config dir>/global-orchestrator.json`, like `orchestration.json`.
 
 ```json
-{ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
+{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | string | `"Orquestrador"` | Chat name and message prefix. UI options: Orquestrador, Almirante, Comandante. `cleaned()` trims it, drops `[` `]` and control characters, caps it at 40 characters, and puts the default back when blank. |
+| `name` | string | `"Orchestrator"` | Chat name and message prefix. UI options: Orchestrator, Admiral, Commander. `cleaned()` trims it, drops `[` `]` and control characters, caps it at 40 characters, and puts the default back when blank. |
 | `host` | bool | `false` | This machine hosts the account's global orchestrator. One machine per account. The UI-settings unit keeps it unique across machines. |
 | `busy` | `"queue"` \| `"refuse"` | `"queue"` | `BusyPolicy`. Refuse answers `ocupado` instead of queueing. |
 | `reports` | `"auto"` \| `"tool_only"` | `"auto"` | `ReportPolicy`. Auto reports at the end of every turn that an orchestrator message started, plus `tell_orchestrator`. |
@@ -60,8 +60,9 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 | `OpenGlobalOrchestrator` | `{"cmd":"open_global_orchestrator"}` | the tab id (string). Not started. |
 | `GlobalOrchestratorSettings` | `{"cmd":"global_orchestrator_settings"}` | `Settings` |
 | `SetGlobalOrchestratorSettings` | `{"cmd":"set_global_orchestrator_settings","settings":{Settings}}` | the `Settings` saved |
+| `ReadSession` | `{"cmd":"read_session","tab":"tab-2b-7","items":5}`. `items` is optional: 20, at most 50. | `reading::read` of the tab: its state, `next`, title, question, and its last `items` conversation items, read from the end of its transcript (`reading::end_of`), so a transcript past 8 MiB returns its true last reply. Error: `no session <tab> on this machine`. |
 
-- None of them is `may_wait`. They run on the machine's in-order call queue.
+- None of them but `ReadSession` is `may_wait`. They run on the machine's in-order call queue; `ReadSession` reads the disk off it, as `Thread` does.
 - An older node answers any of them with `this machine runs pinned <v>, which can't answer that: unknown variant ...`. `pinned_core::link::is_unknown_command(err)` is true for it. The orchestrator tells Felipe that machine needs an update.
 
 ## 4. Hub calls (`HubCall`, `crates/core/src/wire.rs`)
@@ -70,6 +71,7 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 |---|---|---|
 | `Relay` | `{"cmd":"relay","request_id":"r-1","to":{RelayTo}}` | `Handoff` from the target machine |
 | `Overview` | `{"cmd":"overview"}` | `Overview` |
+| `ReadSession` | `{"cmd":"read_session","tab":"tab-2b-7","machine":"mini","items":5}`. `machine` (an id or a name) and `items` are optional. | the target node's `Call::ReadSession` answer with `id`, `machine` and `machine_name` set, or `{"state":"offline",...}` for a named offline machine. Errors: `this account has no machine <m>`, `<name> has no session <tab>`, `no online machine of this account has a session <tab>`, `<a> and <b> each have a session <tab>: pass machine`. |
 | `ReadCaptain` | `{"cmd":"read_captain","machine":"<machine id>","path":"/w/site"}` | what the node's own `read_captain` answers: `reading::read` of the Capitão with `project` set to `path`, or `{"state":"not_started",...}` when the project has no Capitão that runs or has a conversation, or `{"state":"offline",...}`. A machine id the account does not have is an error, `this account has no machine <id>` |
 
 `RelayTo` is tagged by `kind`:
@@ -83,14 +85,15 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 
 - `captain` direction: the hub takes it only from the machine that hosts the account's global orchestrator, then calls `Call::Enqueue { path, text, request_id, sender, busy }` on `machine` under `Hub::hold_captain`.
 - `orchestrator` direction: the hub takes it only from a machine whose tab `report.tab` is a Capitão (`role == orchestrator`) with `cwd == report.path`. It fills `report.machine` and `report.machine_name` from the sending socket, finds the host machine, and calls `Call::OrchestratorReport { request_id, report }` there.
-- `Overview` and `ReadCaptain`: the hub takes them only from the host, as `captain` relays. A refused machine reads `<name> does not host the global orchestrator (<host> does), so it can't list the account's projects` (or `read a Capitão`, or `send to a Capitão`).
+- `Overview`, `ReadCaptain` and `ReadSession`: the hub takes them only from the host, as `captain` relays. A refused machine reads `<name> does not host the global orchestrator (<host> does), so it can't list the account's projects` (or `read a Capitão`, `read a session`, or `send to a Capitão`).
+- `ReadSession` finds the tab in the tabs each online machine last reported (`Call::Tabs` for one that has reported none), then calls `Call::ReadSession` there. A node too old for it is read with `Call::Thread { from: 0 }`, as `ReadCaptain` reads.
 - The host is the one online machine whose `Call::GlobalOrchestratorSettings` answers `host: true`, asked each time and never cached. No host, two hosts and a silent machine each get their own error.
 - `Overview` builds one `MachineSnapshot` per machine the account has, in the order they joined, and returns `global_orchestrator::overview` of them:
   - Tabs are what each machine last reported (`MachineEvent::Tabs`). The hub asks `Call::Tabs` only of a machine that has reported none yet.
   - Each online machine is asked `Call::ListProjects` and `Call::GlobalOrchestratorSettings` at once, all machines in parallel, waiting at most 5 s (`LOOK_WAIT`). The asking machine's own settings wait 10 s (`HOST_WAIT`), as in the host check, because they decide whether it may ask.
   - A machine that refuses any of its calls with an unknown command is listed with `problem: "precisa atualizar o pinned"`, and its projects still list when `ListProjects` answered. A machine whose `ListProjects` or `Call::Tabs` does not answer in time gets `problem: "não respondeu"`, and another refusal of those its text. A missing settings answer alone is no problem. None of these fails the call.
   - The hub keeps each machine's last project list in memory (`Account::listed`). A machine that does not answer, and an offline machine, show those projects, an offline one with `online: false` and `captain: "nenhum"`.
-- `ReadCaptain` reads the tabs as `Overview` does, finds the Capitão with `captain_tab`, and reads its conversation with `Call::Thread { from: 0 }` (`reading::DEFAULT_ITEMS` items). Every node answers both calls, so a machine too old for the relay can still be read.
+- `ReadCaptain` reads the tabs as `Overview` does, finds the Capitão with `captain_tab`, and reads its conversation with `Call::ReadSession` (`reading::DEFAULT_ITEMS` items, from the end of its transcript), or with `Call::Thread { from: 0 }` on a node too old for that, so a machine too old for the relay can still be read.
 - An older hub answers any of them with `this hub runs pinned <v>, which can't answer that: unknown variant ...`, and `is_unknown_command` is true for it. The node falls back to this machine alone for `projects` and `waiting`, and answers `o hub ou a máquina precisa atualizar o pinned` for `send_to_captain` and `read_captain` (`needs_update`). Test: `a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command`.
 - `Link::call_hub` waits at most 60 s. The session socket waits 70 s for `projects`, `send_to_captain`, `read_captain`, `waiting` and `tell_orchestrator` (`reminders.rs` `send`), 10 s for other tools.
 
@@ -137,7 +140,8 @@ Tagged by `outcome`. Every variant carries the tab it went to.
   "machines": [
     { "id": "<id>", "name": "Mac mini", "online": true, "version": "0.17.19" },
     { "id": "<id>", "name": "iMac", "online": true, "version": "0.17.10", "problem": "precisa atualizar o pinned" }
-  ]
+  ],
+  "sessions": [{Session}]
 }
 ```
 
@@ -145,8 +149,45 @@ Tagged by `outcome`. Every variant carries the tab it went to.
 - `captain` is `CaptainState`: `"livre"` (idle, done, failed or stopped: a message types now or starts it; also needs-input with `interrupted` false, which is Claude Code's idle notification after a finished turn), `"trabalhando"` (running with status working, or with `TabView.orchestrator_turn`, or needs-input with `interrupted` true, a question mid-turn: a message queues), `"nenhum"` (no Capitão tab, or the machine is offline). `CaptainState::of(Option<&TabView>)` computes it. Use it on the hub and the node alike.
 - `TabView.orchestrator_turn` (`#[serde(default)]`, omitted when false) is true on a Capitão while its ledger holds a message `in_flight` for its project (`Ledger::turns`). It covers the window between `iniciado` and the Capitão's first hook, when the tab runs with no status and a second message answers `na_fila`. The node sends its tabs again after each ledger change that starts such a turn (`enqueue_to_captain` on `entregue` or `iniciado`, `mark_typed`). `record_event` sends them after the turn-end answer clears it.
 - `machines` (`#[serde(default)]`) lists every machine of the account, with or without projects. `problem` says why its projects may be missing or old.
-- A node that is not linked, or whose hub is too old, answers `projects` with itself alone, under its hub id once the link's hello gave one, else its hostname.
+- A node that is not linked, or whose hub is too old, answers `projects` with itself alone, under its hub id and hub name once the link's hello gave them (`Machine::set_hub_id`), else its hostname.
 - `WaitingKind` is `"needs_input"` or `"failed"`. Adding a kind, such as a ready PR, is an additive enum change.
+- `global_orchestrator::waiting_kind(&TabView)` decides whether a tab waits on the user, on the node and the hub alike. The sidebar's `waitingKindOf(view)` in `ui/global-chat.js` follows the same cases and returns the same strings. `crates/core/src/waiting_cases.json` lists the cases, and the Rust and node tests both read it:
+  - `failed`: status failed.
+  - `needs_input`: needs-input with `interrupted` true on a running session (a question or an approval mid-turn).
+  - `needs_input`: any status but working, when `TabView.question` is set (a finished turn that asked the user, before or after Claude Code's idle notice, and after a restart).
+  - Nothing else. Needs-input with `interrupted` false and no question is the idle notice alone. The global orchestrator's own tab never waits.
+- `TabView.question` (`#[serde(default)]`, omitted when empty) is the last sentence outside code ending in `?` of the turn's last reply (`global_orchestrator::question_in`, at most 300 characters). The node sets it on Done and on restore, and clears it on Working and Failed. `Waiting.message` is the question when there is one, else the tab's message.
+- `sessions` (`#[serde(default)]`, an `Option`) is every session `overview()` builds from the same snapshots, and `waiting` is those whose state is `waiting_on_input` (kind `needs_input`) or `error` (kind `failed`), built from the same `Session` of each tab, so the two lists never disagree. A `Waiting` takes the session's title and message and the tab's `updated` as `since`. A hub that predates `sessions` sends none, and the node then lists this machine's sessions alone. The `projects` tool drops it from its answer.
+
+### `Session`
+
+```json
+{
+  "id": "tab-2b-7", "machine": "<id>", "machine_name": "MacBook", "account": "bloom",
+  "project": { "key": "github.com/o/client-apps", "name": "client-apps", "path": "/Users/f/client-apps" },
+  "role": "worker", "captain": "tab-2b-3",
+  "title": "Someone mentioned you in the Slack thread", "branch": "felipega/fix-and-ops",
+  "pr": { "number": 418, "url": "https://github.com/o/client-apps/pull/418" },
+  "state": "waiting_on_input", "message": "Claude needs your permission to use Bash", "last_activity": 1794249424
+}
+```
+
+- One per tab on each online machine, every account included, newest `last_activity` first. The global orchestrator's own tab is left out, and an offline machine has none.
+- `project` is the folder's project (a worktree's is its repository's): the listed project's `key` and `name`, else `<machine id>:<path>` and the folder's name.
+- `role` is `captain` (`Role::Orchestrator`), `worker` (`Role::Worker`) or `thread`. `captain`, on a worker only, is the first Capitão up its `spawned_by` tabs, else its project's Capitão on that machine.
+- `title` is `TabView.title`, else `TabView.prompt_title`. A thread with no conversation yet has none.
+- `branch`, `pr` and `last_activity` come from the transcript tally the node already runs (`stats::Tally`), sent as `TabView.branch`, `TabView.pr` and `TabView.last_message_at`; `last_activity` falls back to `TabView.updated`. They are top-level `TabView` fields because the wire checker names an untagged struct inside `Option` by its keys, so a new `ThreadStats` field reads as a removed variant.
+- `message` is set only for `waiting_on_input` and `error`: `TabView.question` when there is one, else the tab's message.
+
+`SessionState::of(&TabView)`, in order. The first two are `waiting_kind`, so a session waits exactly when the sidebar's `waitingKindOf` says it does; `waiting_cases.json` holds the cases, and `a_session_waits_on_input_or_is_in_error_exactly_when_it_waits_on_the_user` checks them against the states:
+
+| State | From the tab |
+|---|---|
+| `error` | `waiting_kind` is `failed`: status failed, running or not |
+| `waiting_on_input` | `waiting_kind` is `needs_input`: a question or an approval mid-turn, or a finished turn whose last reply asked the user (`TabView.question`), a loose thread included |
+| `settled` | its session is not running |
+| `running` | status working, or `orchestrator_turn` |
+| `idle` | everything else that runs: done, the idle notice, no status yet |
 
 ## 6. Session tools
 
@@ -154,16 +195,18 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 
 | Seat | Tools |
 |---|---|
-| Global orchestrator | reminders (when on) + `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`. No delegation tools, no `delegate`, no `agents`. |
+| Global orchestrator | reminders (when on) + `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`. No delegation tools, no `agents`. |
 | Capitão | everything a plain thread sees + `tell_orchestrator` |
 | Anyone else | exactly what they saw before |
 
-`permissions()` lists all ten project tools, so each is pre-allowed. `Machine::project_tool` enforces the same rules, because the socket takes any tool name:
+`permissions()` lists all eleven project tools, so each is pre-allowed. `Machine::project_tool` enforces the same rules, because the socket takes any tool name:
 
-- `projects`, `send_to_captain`, `read_captain`, `waiting` from another tab: `only the global orchestrator has this tool`.
-- `delegate`, `agents` from the global tab: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`.
+- `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session` from another tab: `only the global orchestrator has this tool`.
+- `agents` from the global tab: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`.
 - `tell_orchestrator` from a non-Capitão: `only a project's Capitão reports to the global orchestrator`.
-- `Message::Delegate` from the global tab (`start_delegate`, the `delegate_task` path) is refused with the same text as `delegate`, so no headless child runs in the global folder.
+- `Message::Delegate` from the global tab (`start_delegate`, the `delegate_task` path) is refused with the same text as `agents`, so no child runs in the global folder.
+
+`delegate_task` is the one delegation tool; the old `delegate` tool is gone, with no alias. A child called from a tab is a worker thread: a tab with `Role::Worker` env and `spawned_by` the caller, linked to its task (`Task::thread`). A Claude Code account runs the child in that tab's own session (`Thread::runs`), with the request's model, `--effort` and access; the task ends with the tab's first `Done` (summary = its last reply) or `Failed`, and `task_cancel`, the limit and quit stop it by the session's pid. Cursor and Codex children run headless; their tab stays unstarted with status `working` and shows the task's card, then takes the task's end state and resumes its conversation. Closing the parent leaves a child thread running; closing the child thread cancels its task.
 
 | Tool | Arguments | Result (tool text) |
 |---|---|---|
@@ -171,9 +214,11 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 | `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine) | `Handoff` as one line of JSON |
 | `read_captain` | `project`, `machine` (optional), as `send_to_captain` takes them | the read as one line of JSON, from this machine or through `HubCall::ReadCaptain` |
 | `waiting` | none | `Vec<Waiting>` as one line of JSON |
+| `sessions` | `project` (optional: a key from `projects`, a name in any case, or a folder), `machine` (optional id or name, with or without `@`) | `{"sessions":[Session],"machines":[OverviewMachine]}` as one line of JSON |
+| `read_session` | `id` (a session's id), `machine` (optional), `items` (optional, 20, at most 50) | the read as one line of JSON with `id`, `machine` and `machine_name`: here when this machine has the tab, else through `HubCall::ReadSession` |
 | `tell_orchestrator` | `text` | `Handoff` as one line of JSON |
 
-`ProjectTool` variants (`crates/core/src/agent.rs`): `Projects`, `SendToCaptain { project, message, request_id, machine: Option }`, `ReadCaptain { project, machine: Option }`, `Waiting`, `TellOrchestrator { text }`.
+`ProjectTool` variants (`crates/core/src/agent.rs`): `Projects`, `SendToCaptain { project, message, request_id, machine: Option }`, `ReadCaptain { project, machine: Option }`, `Waiting`, `Sessions { project: Option, machine: Option }`, `ReadSession { id, machine: Option, items: Option }`, `TellOrchestrator { text }`.
 
 Resolution, for `send_to_captain` and `read_captain` alike:
 
@@ -214,7 +259,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 
 ## 8. Text formats
 
-**Message to a Capitão.** `[<sender>] <text>`, for example `[Orquestrador] Ship the form.` The sender is the cleaned settings name, so it has no brackets.
+**Message to a Capitão.** `[<sender>] <text>`, for example `[Orchestrator] Ship the form.` The sender is the cleaned settings name, so it has no brackets.
 
 **Report to the global orchestrator** (`CaptainReport::line`):
 
@@ -223,7 +268,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 ```
 
 - The project and machine names have `(`, `)`, `[`, `]`, `:` and control characters replaced by spaces. An unknown machine id is `-`. The text may span lines.
-- UI regex for the header: `/^\[pinned\] Capitão ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /m`. The machine id and tab id link to the thread (`machine` + `tab`).
+- UI regex for the header: `/^\[pinned\] Capitão ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /m`. The machine id and tab id link to the thread (`machine` + `tab`). The UI also reads `Captain` in place of `Capitão`; the agents keep writing `Capitão`.
 - One typed prompt may hold several reports, joined by the queue with `\n`. Each report starts at a line that matches the header and runs to the next header line or the end.
 
 **Quick replies.** The orchestrator's prompt (node-local unit) ends a reply that asks Felipe something with a last line:
@@ -232,7 +277,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 Opções: Sim | Ainda não
 ```
 
-- UI: when the last non-empty line of an assistant message matches `/^Opções: (.+)$/`, split the capture on ` | `, hide the line, and render one button per option. A click types that option's text as the user's message.
+- UI: when the last non-empty line of an assistant message matches `/^Opções: (.+)$/`, split the capture on ` | `, hide the line, and render one button per option. A click types that option's text as the user's message. `Options:` in place of `Opções:` reads the same; the agents keep writing `Opções:`.
 
 ## 9. Seams and the unit that filled each
 
@@ -241,12 +286,12 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 | Seam | Signature | Built by | What it does |
 |---|---|---|---|
 | `projects_overview` | `fn projects_overview(&self) -> Result<global::Overview, String>` | node-local, remote-reach | The hub's `Overview` when linked. This machine alone (`local_overview`, under its hub id) while unlinked or when the hub is too old. |
-| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local | `projects_overview().waiting`. A needs-input tab with `interrupted` false is Claude Code's idle notice and stays out. |
+| `waiting` | `fn waiting(&self) -> Result<Vec<global::Waiting>, String>` | node-local, sessions | `projects_overview().waiting`: the sessions waiting on input or in error (section 5). |
 | `read_captain` | `fn read_captain(&self, project: &str, machine: Option<&str>) -> Result<String, String>` | node-local, remote-reach | `reading::read` of the Capitão here, or `HubCall::ReadCaptain` to the machine `remote_checkout` finds. |
 | `route_remote` | `fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String>` | hub-bridge, remote-reach | `HubCall::Relay { to: captain }` to the checkout `remote_checkout` finds, under this machine's busy policy. |
 | `remote_checkout` | `fn remote_checkout(&self, project: &str, machine: Option<&str>) -> Result<(MachineId, String), String>` | hub-bridge, remote-reach | Section 6 resolution, steps 2 and 3. |
 | `report_up` | `fn report_up(&self, captain: &str, project: &Path, text: String, answers: Vec<String>) -> Result<Handoff, String>` | node-local, remote-reach | Builds `CaptainReport` with this machine's hub id, then `deliver_report` when `settings.host`, else `HubCall::Relay { to: orchestrator }`. |
-| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | node-local | `Ledger::answer(project)`, then under `ReportPolicy::Auto` the last reply goes up through `report_up` on its own thread. |
+| `captain_turn_ended` | `fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent)` | node-local | `Ledger::answer(project)`, then under `ReportPolicy::Auto` the turn's last reply goes up through `report_up` on its own thread. `thread::last_reply` reads it from the transcript's end and stops at the turn's prompt, so a turn that wrote no text reports `(no reply)`, never an older reply. |
 | `is_this_machine` | `fn is_this_machine(&self, machine: &str) -> bool` | hub-bridge | Matches the id from `ToMachine::Hello` (`set_hub_id`) or the hostname, with or without `@`. |
 | hub handle | `Machine::set_hub(...)`, `Machine::call_hub(HubCall)` | foundation | Installed by `link::spawn`. `Err("this machine is not linked to a hub")` when unlinked. |
 | hub calls | `crates/server/src/relay.rs` `serve` | hub-bridge (`Relay`), remote-reach (`Overview`, `ReadCaptain`) | Section 4. |

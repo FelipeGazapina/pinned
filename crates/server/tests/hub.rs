@@ -1,5 +1,5 @@
 use base64::Engine;
-use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating};
+use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating, Signup};
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
@@ -7,6 +7,7 @@ use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
+use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
 use pinned_core::wire::{Call, HubCall};
@@ -40,27 +41,28 @@ struct TestHub {
     policy: Policy,
     /// The learning database's name, when the hub runs with one.
     learning: Option<String>,
+    signup: Signup,
 }
 
 impl TestHub {
     fn start(name: &str) -> TestHub {
-        TestHub::start_with(name, true)
+        TestHub::start_with(name, Signup::Open)
     }
 
-    fn start_with(name: &str, open_signup: bool) -> TestHub {
-        TestHub::start_with_boxes(name, open_signup, Policy::default())
+    fn start_with(name: &str, signup: Signup) -> TestHub {
+        TestHub::start_with_boxes(name, signup, Policy::default())
     }
 
-    fn start_with_boxes(name: &str, open_signup: bool, policy: Policy) -> TestHub {
-        TestHub::start_full(name, open_signup, policy, false)
+    fn start_with_boxes(name: &str, signup: Signup, policy: Policy) -> TestHub {
+        TestHub::start_full(name, signup, policy, false)
     }
 
     /// A hub with a second, learning database next to its own.
     fn start_learning(name: &str) -> TestHub {
-        TestHub::start_full(name, true, Policy::default(), true)
+        TestHub::start_full(name, Signup::Open, Policy::default(), true)
     }
 
-    fn start_full(name: &str, open_signup: bool, policy: Policy, with_learning: bool) -> TestHub {
+    fn start_full(name: &str, signup: Signup, policy: Policy, with_learning: bool) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -76,12 +78,12 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning };
-        hub.serve("127.0.0.1:0", open_signup);
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup };
+        hub.serve("127.0.0.1:0");
         hub
     }
 
-    fn serve(&mut self, listen: &str, open_signup: bool) {
+    fn serve(&mut self, listen: &str) {
         let config = || pinned_server::Config {
             db: format!("{}/{}", postgres(), self.database),
             listen: listen.into(),
@@ -89,7 +91,7 @@ impl TestHub {
             downloads: self.dir.join("downloads"),
             public_url: None,
             key_file: self.dir.join("hub.key"),
-            open_signup,
+            signup: self.signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
@@ -112,7 +114,7 @@ impl TestHub {
         let addr = self.running.take().unwrap().addr;
         let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
         old.shutdown_background();
-        self.serve(&addr.to_string(), true);
+        self.serve(&addr.to_string());
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -820,6 +822,113 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
     assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a workflow session's callbacks".into()));
     node.kill();
+}
+
+#[test]
+fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_account_once() {
+    let hub = TestHub::start("taste");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let get = || json!({ "cmd": "get_tastes" });
+    assert_eq!(client.hub(get()).unwrap()["captains"]["strategy"], "escalate_on_failure", "an account with no taste reads the defaults");
+
+    let dir = temp("taste-mac");
+    std::fs::write(dir.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
+    let (machine, machine_token) = account::register_machine(&url, &token, "macbook", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
+    let opus = json!({ "model": "claude-opus-5-5" });
+    let aggressive = json!({
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+    });
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
+    assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
+    let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
+    assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
+    assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
+    client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();
+
+    let mut later = Client::connect(&url, &token);
+    later.wait("hello", |f| f["type"] == "hello");
+    let stored = later.hub(get()).unwrap();
+    assert_eq!((&stored["orchestrator"]["parallel"], &stored["orchestrator"]["context"], &stored["captains"], &stored["projects"]), (&json!(1), &json!(["Releases go out on Fridays."]), &aggressive, &json!({ "github.com/acme/site": { "review_diffs": true } })));
+
+    let link = node.link.as_ref().unwrap();
+    assert_eq!(link.call_hub(HubCall::GetTastes), Ok(stored.clone()), "a machine reads the account's taste");
+    assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Ok(json!(false)), "a later machine can't replace the account's taste");
+    let change = HubCall::SetTaste { scope: TasteScope::Captains, patch: TastePatch { parallel: Some(2), ..TastePatch::default() } };
+    assert_eq!(link.call_hub(change), Err("only a machine with a Chat to adjust thread open may change the way of working".into()));
+
+    let folder = dir.join("app");
+    std::fs::create_dir_all(&folder).unwrap();
+    let captain = node.machine.call(Call::OpenOrchestrator { path: folder.display().to_string() }).unwrap();
+    node.machine.start_claude(captain.as_str().unwrap(), 80, 24).unwrap();
+    let kept = || std::fs::read(dir.join("taste.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    assert_eq!(kept(), Some(stored), "the Capitão's start kept the account's taste for when the hub can't answer");
+}
+
+#[test]
+fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts() {
+    let hub = TestHub::start("taste_chat");
+    let url = hub.url.clone();
+    let start = |email: &str, name: &str| {
+        let (token, account) = account::signup(&url, email, "correct horse").unwrap();
+        let mut client = Client::connect(&url, &token);
+        client.wait("hello", |f| f["type"] == "hello");
+        let dir = temp(&format!("taste-chat-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        client.wait_machines(&[(name, true)]);
+        (client, node, dir)
+    };
+    let (mut ana, ana_node, ana_dir) = start("ana@acme.dev", "ana-mac");
+    let (mut bob, bob_node, bob_dir) = start("bob@acme.dev", "bob-mac");
+    let get = || json!({ "cmd": "get_tastes" });
+    let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+    let open_chat = |node: &Node, client: &mut Client| {
+        let tab = node.machine.call(Call::OpenTasteChat { scope: site.clone(), path: None }).unwrap().as_str().unwrap().to_owned();
+        client.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && t["taste_chat"] == true));
+        tab
+    };
+    let set = |parallel: u32| json!({ "name": "taste_set", "scope": "project:github.com/acme/site", "patch": { "parallel": parallel } });
+    let read = json!({ "name": "taste_get", "scope": "project:github.com/acme/site" });
+
+    let plain = ana_node.machine.open_tab(Some(ana_dir.display().to_string()), false).unwrap();
+    assert_eq!(session_tool(&ana_dir, &plain, set(2)), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
+    assert_eq!(ana_node.link.as_ref().unwrap().call_hub(HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(2), ..TastePatch::default() } }), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "a machine with no chat open can't");
+
+    let chat = open_chat(&ana_node, &mut ana);
+    let after = session_tool(&ana_dir, &chat, set(2)).unwrap();
+    assert_eq!((&after["own"], &after["effective"]["parallel"]), (&json!({ "parallel": 2 }), &json!(2)));
+    ana.wait("the page's cue to read again", |f| f["type"] == "event" && f["event"] == json!({ "kind": "tastes-changed" }));
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }), "the page's own read sees the session's change");
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()));
+
+    let bobs_set = HubCall::SetTaste { scope: site.clone(), patch: TastePatch { parallel: Some(7), ..TastePatch::default() } };
+    assert_eq!(bob_node.link.as_ref().unwrap().call_hub(bobs_set), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "ana's open chat lets no machine of bob's change a taste");
+    let bob_chat = open_chat(&bob_node, &mut bob);
+    let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
+    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
+    session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
+    assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
+    assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()), "bob's set changed ana's taste");
+    let reset = session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "parallel" })).unwrap();
+    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+    assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
+    assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
 
 struct Through<'a>(&'a Link);
@@ -1643,7 +1752,7 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
 
 #[test]
 fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
-    let hub = TestHub::start_with("closed", false);
+    let hub = TestHub::start_with("closed", Signup::First);
     let url = hub.url.clone();
     let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     assert_eq!(account::signup(&url, "bruno@acme.dev", "correct horse"), Err("this hub already has its account, so sign in with it instead".into()));
@@ -1656,6 +1765,176 @@ fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
     assert_eq!(account::login(&url, "ana@acme.dev", "correct horse"), Err("wrong email or password".into()));
     assert!(account::login(&url, "ana@acme.dev", "battery staple").is_ok());
     assert!(account::register_machine(&url, &token, "vps", "linux").is_ok(), "the login that changed the password stays signed in");
+}
+
+/// `POST /api/signup` as a browser behind the hub's proxy at `address` sends it: the status and the body.
+fn signup_from(url: &str, address: &str, body: Value) -> (u16, Value) {
+    let response = reqwest::blocking::Client::new()
+        .post(format!("{url}/api/signup"))
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", address)
+        .body(body.to_string())
+        .send()
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, serde_json::from_str(&response.text().unwrap()).unwrap())
+}
+
+const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an account";
+
+fn refused_signup() -> (u16, Value) {
+    (403, json!({ "error": INVITE_NEEDED }))
+}
+
+fn signed_in_client(url: &str, token: &str) -> Client {
+    let mut client = Client::connect(url, token);
+    client.wait("hello", |f| f["type"] == "hello");
+    client
+}
+
+#[test]
+fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
+    let hub = TestHub::start_with("invite", Signup::Invite);
+    let url = hub.url.clone();
+    let info = reqwest::blocking::get(format!("{url}/api/signup")).unwrap();
+    assert_eq!(info.headers()["access-control-allow-origin"], "*", "the app's sign-in form reads it from another origin");
+    assert_eq!(serde_json::from_str::<Value>(&info.text().unwrap()).unwrap(), json!({ "signup": "invite" }));
+
+    let (status, ana) = signup_from(&url, "10.0.0.1", json!({ "email": "ana@acme.dev", "password": "correct horse" }));
+    assert_eq!(status, 200, "the first account needs no code: {ana}");
+    let ana_token = ana["token"].as_str().unwrap().to_owned();
+    let ana_id = ana["account"]["id"].as_str().unwrap().to_owned();
+
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse" })), refused_signup());
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "ana@acme.dev", "password": "correct horse" })), refused_signup(), "a taken email gets the same answer");
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDD" })), refused_signup());
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": "  " })), refused_signup());
+
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })));
+    let invite = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let code = invite["code"].as_str().unwrap().to_owned();
+    assert_eq!((code.len(), code.matches('-').count()), (19, 3), "four groups of four: {code}");
+    let week = invite["expires_at"].as_i64().unwrap() - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert!((7 * 86400 - 60..=7 * 86400 + 60).contains(&week), "a code lasts 7 days, not {week} s");
+    let pending = ana_client.hub(json!({ "cmd": "invites" })).unwrap();
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["pending"][0]["id"], invite["id"]);
+    assert_eq!(pending["pending"][0]["hint"], code[..4]);
+    assert_eq!(pending["pending"][0]["expires_at"], invite["expires_at"]);
+
+    assert_eq!(
+        signup_from(&url, "10.0.0.3", json!({ "email": "ana@acme.dev", "password": "correct horse", "invite": code })),
+        (409, json!({ "error": "an account with that email already exists" })),
+    );
+    let typed = format!(" {} ", code.replace('-', " ").to_lowercase());
+    let (status, bruno) = signup_from(&url, "10.0.0.3", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": typed }));
+    assert_eq!(status, 200, "a taken email left the code unused, and case and spacing don't matter: {bruno}");
+    let bruno_token = bruno["token"].as_str().unwrap().to_owned();
+    assert_eq!(bruno["account"]["email"], "bruno@acme.dev");
+    assert_ne!(bruno["account"]["id"], ana_id, "the code makes a new account, not a login on Ana's");
+    assert_eq!(account::login(&url, "bruno@acme.dev", "correct horse").unwrap().1.id, bruno["account"]["id"].as_str().unwrap());
+    assert_eq!(account::login(&url, "ana@acme.dev", "correct horse").unwrap().1.id, ana_id);
+    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": code })), refused_signup(), "a code works once");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used code is no longer pending");
+
+    let expired = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '1 second' where id = '{}'", expired["id"].as_str().unwrap()));
+    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": expired["code"] })), refused_signup(), "an expired code fails");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"], json!([]));
+
+    let revoked = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let kept = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let bruno_invite = bruno_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let revoke = |id: &Value| json!({ "cmd": "revoke_invite", "id": id });
+    assert_eq!(bruno_client.hub(revoke(&revoked["id"])), Err(format!("this account has no unused invite {}", revoked["id"].as_str().unwrap())), "Bruno can't revoke Ana's code");
+    assert_eq!(ana_client.hub(revoke(&revoked["id"])), Ok(Value::Null));
+    assert_eq!(ana_client.hub(revoke(&revoked["id"])), Err(format!("this account has no unused invite {}", revoked["id"].as_str().unwrap())));
+    assert_eq!(signup_from(&url, "10.0.0.5", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": revoked["code"] })), refused_signup(), "a revoked code fails");
+
+    let ids = |list: Value| list["pending"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(ana_client.hub(json!({ "cmd": "invites" })).unwrap()), [kept["id"].as_str().unwrap()], "Ana's list never shows Bruno's code");
+    assert_eq!(ids(bruno_client.hub(json!({ "cmd": "invites" })).unwrap()), [bruno_invite["id"].as_str().unwrap()]);
+    let (status, carla) = signup_from(&url, "10.0.0.5", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": bruno_invite["code"] }));
+    assert_eq!(status, 200, "{carla}");
+    assert_eq!(ids(bruno_client.hub(json!({ "cmd": "invites" })).unwrap()), Vec::<String>::new());
+    assert_eq!(ids(ana_client.hub(json!({ "cmd": "invites" })).unwrap()), [kept["id"].as_str().unwrap()]);
+}
+
+#[test]
+fn guessing_invite_codes_hits_the_sign_up_limit() {
+    let hub = TestHub::start_with("invite_limit", Signup::Invite);
+    let url = hub.url.clone();
+    account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    for _ in 0..5 {
+        assert_eq!(signup_from(&url, "10.0.0.9", json!({ "email": "eve@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDD" })), refused_signup());
+    }
+    assert_eq!(
+        signup_from(&url, "10.0.0.9", json!({ "email": "eve@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDE" })),
+        (429, json!({ "error": "too many sign ups; try again in 15 minutes" })),
+    );
+}
+
+#[test]
+fn only_an_invite_hub_makes_invite_codes() {
+    for (name, signup, mode) in [("invite_open", Signup::Open, "open"), ("invite_first", Signup::First, "first")] {
+        let hub = TestHub::start_with(name, signup);
+        let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        assert_eq!(reqwest::blocking::get(format!("{}/api/signup", hub.url)).unwrap().text().unwrap(), format!(r#"{{"signup":"{mode}"}}"#));
+        let mut client = signed_in_client(&hub.url, &token);
+        assert_eq!(client.hub(json!({ "cmd": "create_invite" })), Err("this hub takes no invites: anyone may sign up, or only its first account".into()));
+        assert_eq!(client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": mode, "pending": [] })));
+    }
+}
+
+#[test]
+fn two_invited_accounts_see_nothing_of_each_others_machines_projects_or_memory() {
+    let hub = TestHub::start_with("invite_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, ana) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, bruno) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    assert_ne!(bruno.id, ana.id);
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+
+    let start = |client: &mut Client, token: &str, email: &str, name: &str| {
+        let dir = temp(&format!("invite-apart-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token };
+        let node = Node::start(&dir, creds);
+        client.wait_machines(&[(name, true)]);
+        (node, dir, machine.id)
+    };
+    let (ana_node, ana_home, ana_machine) = start(&mut ana_client, &ana_token, "ana@acme.dev", "ana-mac");
+    let (bruno_node, _bruno_home, bruno_machine) = start(&mut bruno_client, &bruno_token, "bruno@acme.dev", "bruno-mac");
+
+    let secret = ana_home.join("secret-project");
+    std::fs::create_dir_all(&secret).unwrap();
+    let path = ana_node.machine.open_project(secret).display().to_string();
+    let project = sync::Project { key: "github.com/ana/secret".into(), name: "secret".into(), repo: "git@github.com:ana/secret.git".into() };
+    ana_node.link.as_ref().unwrap().call_hub(HubCall::ShareProject { project }).unwrap();
+    let projects = ana_client.call(&ana_machine, json!({ "cmd": "list_projects" })).unwrap();
+    assert!(projects.as_array().unwrap().iter().any(|p| p["path"] == path), "{projects}");
+    assert_eq!(ana_client.hub(json!({ "cmd": "shared_projects" })).unwrap().as_array().unwrap().len(), 1);
+
+    let names = |client: &mut Client| client.hub(json!({ "cmd": "machines" })).unwrap().as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(names(&mut bruno_client), ["bruno-mac"]);
+    assert_eq!(names(&mut ana_client), ["ana-mac"]);
+    assert_eq!(bruno_client.hub(json!({ "cmd": "shared_projects" })), Ok(json!([])), "Bruno sees none of Ana's projects");
+    assert!(ana_client.call(&ana_machine, json!({ "cmd": "memory_status", "path": path })).is_ok(), "Ana reads her own project's memory");
+    let refused = Err(format!("this account has no machine {ana_machine}"));
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "list_projects" })), refused);
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "tabs" })), refused);
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "memory_status", "path": path })), refused, "Ana's memory lives on her machine, which Bruno can't reach");
+    assert_eq!(ana_client.call(&bruno_machine, json!({ "cmd": "tabs" })), Err(format!("this account has no machine {bruno_machine}")));
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && (f.to_string().contains(&ana_machine) || f.to_string().contains("secret"))).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine or project: {leaked:?}");
+    let (mut ana_node, mut bruno_node) = (ana_node, bruno_node);
+    ana_node.kill();
+    bruno_node.kill();
 }
 
 #[test]
@@ -1930,7 +2209,7 @@ fn issue(id: &str) -> Subject {
 
 #[test]
 fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
-    let hub = TestHub::start_with_boxes("box_run", true, fast());
+    let hub = TestHub::start_with_boxes("box_run", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -1973,7 +2252,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
 
 #[test]
 fn other_workflows_never_run_on_a_box_but_its_thread_reaches_it() {
-    let hub = TestHub::start_with_boxes("box_pool", true, fast());
+    let hub = TestHub::start_with_boxes("box_pool", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2007,7 +2286,7 @@ fn other_workflows_never_run_on_a_box_but_its_thread_reaches_it() {
 
 #[test]
 fn a_failed_boot_cleans_up_and_cools_down() {
-    let hub = TestHub::start_with_boxes("box_fail", true, fast());
+    let hub = TestHub::start_with_boxes("box_fail", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2024,7 +2303,7 @@ fn a_failed_boot_cleans_up_and_cools_down() {
 
 #[test]
 fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
-    let mut hub = TestHub::start_with_boxes("box_restart", true, fast());
+    let mut hub = TestHub::start_with_boxes("box_restart", Signup::Open, fast());
     let ana = BoxAccount::new(&hub);
     hub.boxes.state.lock().unwrap().hanging = true;
     let (dying, id, work) = (hub.hub().clone(), ana.id, ana.box_run(issue("uuid-1")));
@@ -2045,7 +2324,7 @@ fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
 
 #[test]
 fn the_sweep_deletes_this_hubs_unrecorded_boxes_only() {
-    let hub = TestHub::start_with_boxes("box_sweep", true, fast());
+    let hub = TestHub::start_with_boxes("box_sweep", Signup::Open, fast());
     let _ana = BoxAccount::new(&hub);
     let label = pinned_server::boxes::hub_label(&hub.url);
     hub.boxes.add("box_orphan", &[&label, "p:ffffffffffffffff"]);
@@ -2058,7 +2337,7 @@ fn the_sweep_deletes_this_hubs_unrecorded_boxes_only() {
 
 #[test]
 fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
-    let hub = TestHub::start_with_boxes("box_remove", true, fast());
+    let hub = TestHub::start_with_boxes("box_remove", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2080,7 +2359,7 @@ fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
 
 #[test]
 fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
-    let hub = TestHub::start_with_boxes("box_done", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let hub = TestHub::start_with_boxes("box_done", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
@@ -2098,7 +2377,7 @@ fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
 
 #[test]
 fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
-    let hub = TestHub::start_with_boxes("box_unreadable", true, fast());
+    let hub = TestHub::start_with_boxes("box_unreadable", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
@@ -2119,7 +2398,7 @@ fn set_workflow(client: &mut Client, mode: &str) {
 
 #[test]
 fn a_fresh_workflow_permission_opens_one_box_per_run() {
-    let hub = TestHub::start_with_boxes("box_fresh", true, fast());
+    let hub = TestHub::start_with_boxes("box_fresh", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2132,7 +2411,7 @@ fn a_fresh_workflow_permission_opens_one_box_per_run() {
 
 #[test]
 fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
-    let hub = TestHub::start_with_boxes("box_fixed", true, fast());
+    let hub = TestHub::start_with_boxes("box_fixed", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2145,7 +2424,7 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
 
 #[test]
 fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
-    let hub = TestHub::start_with_boxes("box_ask", true, fast());
+    let hub = TestHub::start_with_boxes("box_ask", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2164,7 +2443,7 @@ fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
 
 #[test]
 fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
-    let hub = TestHub::start_with_boxes("box_off", true, fast());
+    let hub = TestHub::start_with_boxes("box_off", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2179,7 +2458,7 @@ fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
 
 #[test]
 fn an_account_without_a_stored_box_permission_still_opens_a_box() {
-    let mut hub = TestHub::start_with_boxes("box_legacy", true, fast());
+    let mut hub = TestHub::start_with_boxes("box_legacy", Signup::Open, fast());
     let ana = BoxAccount::new(&hub);
     let account = ana.id;
     admin_on(&hub.database, "update accounts set store = store - 'boxes' - 'box_asks' - 'box_grants'");
@@ -2190,7 +2469,7 @@ fn an_account_without_a_stored_box_permission_still_opens_a_box() {
 
 #[test]
 fn a_denied_ask_opens_nothing() {
-    let hub = TestHub::start_with_boxes("box_deny", true, fast());
+    let hub = TestHub::start_with_boxes("box_deny", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2208,7 +2487,7 @@ fn a_denied_ask_opens_nothing() {
 
 #[test]
 fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
-    let hub = TestHub::start_with_boxes("box_fixed_stays", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let hub = TestHub::start_with_boxes("box_fixed_stays", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2236,7 +2515,7 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
 
 #[test]
 fn a_fresh_permission_stops_at_the_accounts_box_limit() {
-    let hub = TestHub::start_with_boxes("box_cap", true, Policy { max_open: 1, ..fast() });
+    let hub = TestHub::start_with_boxes("box_cap", Signup::Open, Policy { max_open: 1, ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2932,15 +3211,25 @@ enum RawReply {
 }
 
 /// A machine socket the test scripts, which reconnects after a hangup and logs every call it got.
+/// It sends `events` after each sign in, and the hub calls `ask` queues, as a node's sessions do.
 struct RawMachine {
     calls: Arc<Mutex<Vec<Value>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    outbox: Arc<Mutex<Vec<Value>>>,
+    replies: Arc<Mutex<Vec<Value>>>,
+    next: AtomicU64,
 }
 
 impl RawMachine {
     fn start(url: &str, token: &str, answer: impl Fn(&Value) -> RawReply + Send + 'static) -> RawMachine {
+        RawMachine::start_with(url, token, vec![], answer)
+    }
+
+    fn start_with(url: &str, token: &str, events: Vec<Value>, answer: impl Fn(&Value) -> RawReply + Send + 'static) -> RawMachine {
         let (calls, stop) = (Arc::new(Mutex::new(vec![])), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let (outbox, replies): (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>) = (Arc::default(), Arc::default());
         let (log, stopped, url, token) = (calls.clone(), stop.clone(), url.to_owned(), token.to_owned());
+        let (queued, answered) = (outbox.clone(), replies.clone());
         std::thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
@@ -2948,9 +3237,15 @@ impl RawMachine {
                     stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
                 }
                 ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+                for event in &events {
+                    ws.send(Message::text(json!({ "type": "event", "event": event }).to_string())).unwrap();
+                }
                 loop {
                     if stopped.load(Ordering::SeqCst) {
                         return;
+                    }
+                    for frame in std::mem::take(&mut *queued.lock().unwrap()) {
+                        ws.send(Message::text(frame.to_string())).unwrap();
                     }
                     let frame: Value = match ws.read() {
                         Ok(Message::Text(text)) => serde_json::from_str(&text).unwrap(),
@@ -2962,6 +3257,10 @@ impl RawMachine {
                         Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
                         Err(_) => break,
                     };
+                    if frame["type"] == "reply" {
+                        answered.lock().unwrap().push(frame);
+                        continue;
+                    }
                     if frame["type"] != "call" {
                         continue;
                     }
@@ -2980,11 +3279,28 @@ impl RawMachine {
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
-        RawMachine { calls, stop }
+        RawMachine { calls, stop, outbox, replies, next: AtomicU64::new(1) }
     }
 
     fn calls(&self, cmd: &str) -> usize {
         self.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).count()
+    }
+
+    /// A hub call from this machine, as `Link::call_hub` sends it.
+    fn ask(&self, call: Value) -> Result<Value, String> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.outbox.lock().unwrap().push(json!({ "type": "call", "id": id, "call": call }));
+        let start = Instant::now();
+        loop {
+            if let Some(reply) = self.replies.lock().unwrap().iter().find(|r| r["id"] == id) {
+                return match reply.get("err") {
+                    Some(e) => Err(e.as_str().unwrap().to_owned()),
+                    None => Ok(reply["ok"].clone()),
+                };
+            }
+            assert!(start.elapsed() < Duration::from_secs(40), "timed out waiting for the hub's answer to {call}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -3137,7 +3453,7 @@ fn origin(dir: &Path, remote: &str) {
 }
 
 fn captain(machine: &str, path: &str, text: &str) -> HubCall {
-    HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orquestrador".into(), busy: None } }
+    HubCall::Relay { request_id: "r-x".into(), to: RelayTo::Captain { machine: machine.into(), path: path.into(), text: text.into(), sender: "Orchestrator".into(), busy: None } }
 }
 
 fn report(tab: &str, path: &str, text: &str) -> HubCall {
@@ -3154,13 +3470,13 @@ fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back()
     let sent = fleet.send_to_captain(&project, "Ship the form.", "r-1").unwrap();
     let capitao = sent["tab"].as_str().unwrap().to_owned();
     assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-    wait_launch(&mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    wait_launch(&mac_dir, &capitao, "[Orchestrator] Ship the form.");
     assert_eq!(fleet.send_to_captain(&project, "Ship the form.", "r-1"), Ok(sent.clone()), "a repeat answers the first outcome");
     let queued = fleet.send_to_captain(&project, "Also the footer.", "r-2").unwrap();
     assert_eq!(queued, json!({ "outcome": "na_fila", "tab": capitao, "position": 1 }));
-    let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orquestrador" } });
+    let to_site = |text: &str| json!({ "cmd": "relay", "request_id": "r-phone", "to": { "kind": "captain", "machine": mac, "path": fleet.site, "text": text, "sender": "Orchestrator" } });
     assert_eq!(fleet.client.hub(to_site("From the phone.")), Ok(json!({ "outcome": "na_fila", "tab": capitao, "position": 2 })), "a signed-in client relays too");
-    let prompts = launches(&mac_dir, &capitao).lines().filter(|l| l.starts_with("[Orquestrador] ")).count();
+    let prompts = launches(&mac_dir, &capitao).lines().filter(|l| l.starts_with("[Orchestrator] ")).count();
     assert_eq!(prompts, 1, "the Capitão started once, and nothing was typed into it");
 
     let mac_link = fleet.mac.link.as_ref().unwrap();
@@ -3316,7 +3632,7 @@ fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_a
     let sent = tool(json!({ "name": "send_to_captain", "project": "github.com/acme/site", "machine": "@mac", "message": "Ship the form.", "request_id": "r-1" })).unwrap();
     let capitao = sent["tab"].as_str().unwrap().to_owned();
     assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-    wait_launch(&fleet.mac_dir, &capitao, "[Orquestrador] Ship the form.");
+    wait_launch(&fleet.mac_dir, &capitao, "[Orchestrator] Ship the form.");
     let overview = tool(json!({ "name": "projects" })).unwrap();
     let site = overview["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site").unwrap();
     let on_mac = site["checkouts"].as_array().unwrap().iter().find(|c| c["machine"] == mac).unwrap();
@@ -3339,4 +3655,602 @@ fn the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_a
     assert_eq!(elsewhere, json!({ "state": "not_started", "next": "message it to start it", "project": fleet.mac_dir.display().to_string() }), "a folder with no Capitão, named by machine id");
     let unknown = tool(json!({ "name": "read_captain", "project": "/w/site", "machine": "Studio" }));
     assert_eq!(unknown, Err("this account has no machine Studio".into()), "a mistyped machine is not an offline one");
+}
+
+// Isolation between accounts: two accounts share one hub, and nothing of one reaches the other.
+
+fn signed_in(url: &str, email: &str) -> (String, String, Client) {
+    let (token, account) = account::signup(url, email, "correct horse").unwrap();
+    let mut client = Client::connect(url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    (token, account.id, client)
+}
+
+/// Frames that name `needle` anywhere, after the client read all that came.
+fn mentioning(client: &mut Client, needle: &str) -> Vec<Value> {
+    settle(client);
+    client.frames.iter().filter(|f| f.to_string().contains(needle)).cloned().collect()
+}
+
+/// Every frame the machine got within `wait`.
+fn heard(sock: &mut MachineSock, wait: Duration) -> Vec<Value> {
+    let start = Instant::now();
+    let mut frames = vec![];
+    while start.elapsed() < wait {
+        frames.extend(sock.try_text());
+    }
+    frames
+}
+
+fn captain_tab(id: &str, path: &str) -> Value {
+    json!({ "id": id, "cwd": path, "bypass": false, "running": true, "status": "done", "title": null, "message": null, "resume_at": null, "opened": 1, "role": "orchestrator" })
+}
+
+#[test]
+fn another_accounts_machine_takes_no_call_attach_watch_or_change_from_this_one() {
+    let hub = TestHub::start("iso_calls");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let mut sock = MachineSock::connect(&url, &machine_token, "0.17.20");
+    bob.wait_machines(&[("bob-mac", true)]);
+    let id = machine.id.clone();
+    let none = Err(format!("this account has no machine {id}"));
+
+    for call in [json!({ "cmd": "tabs" }), json!({ "cmd": "prompt", "tab": "tab-1", "text": "rm -rf ~" }), json!({ "cmd": "close_tab", "tab": "tab-1" }), json!({ "cmd": "update_self" })] {
+        assert_eq!(ana.call(&id, call.clone()), none, "{call}");
+    }
+    assert_eq!(ana.call(&id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null), "a watch is answered by the hub, which passes it to no machine");
+    ana.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    ana.send(json!({ "type": "detach", "machine": id, "tab": "tab-1" }));
+    assert_eq!(ana.hub(json!({ "cmd": "rename_machine", "id": id, "name": "mine now" })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "remove_machine", "id": id })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "clone", "machine": id, "repo": "github.com/acme/site" })), none);
+    assert_eq!(ana.hub(json!({ "cmd": "box_status", "machine": id })), Err("this machine is no box".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "extend_box", "machine": id, "extra_usd": 5.0 })), Err("this machine is no box".into()));
+    assert_eq!(heard(&mut sock, Duration::from_millis(400)), Vec::<Value>::new(), "bob's machine heard nothing of ana's");
+    settle(&mut bob);
+    assert_eq!(bob.machines(), vec![("bob-mac".to_owned(), true)], "still bob's, under its name");
+
+    bob.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    let subscribe = sock.read_json();
+    assert_eq!((subscribe["type"].as_str(), subscribe["tab"].as_str()), (Some("subscribe"), Some("tab-1")), "bob's own attach does reach it");
+}
+
+#[test]
+fn a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients() {
+    let hub = TestHub::start("iso_fanout");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let id = machine.id.clone();
+    let mut sock = MachineSock::connect(&url, &machine_token, "0.17.20");
+    bob.wait_machines(&[("bob-mac", true)]);
+    bob.send(json!({ "type": "attach", "machine": id, "tab": "tab-1" }));
+    assert_eq!(bob.call(&id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })).err(), None);
+
+    let mut tab = captain_tab("tab-1", "/b/secret-project");
+    tab["question"] = json!("Ship the unreleased pricing page?");
+    tab["orchestrator_turn"] = json!(true);
+    tab["queued"] = json!(2);
+    for event in [
+        json!({ "kind": "tabs", "tabs": [tab] }),
+        json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 42.0, "resets_at": 1792400000 } }, "account": "claude" }),
+        json!({ "kind": "thread", "tab": "tab-1" }),
+        json!({ "kind": "exit", "tab": "tab-1" }),
+        json!({ "kind": "update", "status": { "state": "updating", "to": "0.17.21" } }),
+    ] {
+        sock.send(json!({ "type": "event", "event": event }));
+    }
+    // A machine names its viewer, so it may name any client of the hub: it still reaches only its own account's.
+    for n in 0..64 {
+        sock.send(json!({ "type": "output", "viewer": format!("client-{n}"), "tab": "tab-1", "data": "c2VjcmV0" }));
+    }
+    bob.wait("bob's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f.to_string().contains("secret-project"));
+    bob.wait("bob's thread nudge", |f| f["type"] == "event" && f["event"]["kind"] == "thread");
+    bob.wait("bob's output", |f| f["type"] == "event" && f["event"]["kind"] == "output");
+    wait_row(&mut bob, &id, "bob's update", |m| m["update"]["state"] == "updating");
+
+    assert_eq!(mentioning(&mut ana, &id), Vec::<Value>::new(), "ana got no frame about bob's machine");
+    assert_eq!(mentioning(&mut ana, "c2VjcmV0"), Vec::<Value>::new(), "nor its output");
+    assert_eq!(mentioning(&mut ana, "unreleased pricing"), Vec::<Value>::new(), "nor what its sessions ask");
+    let mut late = Client::connect(&url, &ana_token);
+    let hello = late.wait("hello", |f| f["type"] == "hello");
+    assert_eq!((&hello["machines"], &hello["tabs"]), (&json!([]), &json!({})), "a client that connects later sees none of bob's machines or tabs");
+    assert_eq!(mentioning(&mut late, &id), Vec::<Value>::new(), "nor bob's usage");
+    assert_eq!(ana.hub(json!({ "cmd": "machines" })), Ok(json!([])));
+
+    drop(sock);
+    bob.wait_machines(&[("bob-mac", false)]);
+    assert_eq!(mentioning(&mut ana, &id), Vec::<Value>::new(), "nor its going offline");
+
+    bob.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "ask" } } })).unwrap();
+    bob.wait("bob's new settings", |f| f["type"] == "settings");
+    settle(&mut ana);
+    assert_eq!(ana.frames.iter().filter(|f| f["type"] == "settings").count(), 0, "bob's settings reach only bob's clients");
+}
+
+#[test]
+fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_account() {
+    let hub = TestHub::start("iso_global");
+    let url = hub.url.clone();
+    let (ana_token, ana_id, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, bob_id, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mini", "linux").unwrap();
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let host = |path: &'static str| {
+        move |call: &Value| match call["cmd"].as_str().unwrap() {
+            "global_orchestrator_settings" => RawReply::Ok(json!({ "host": true })),
+            "list_projects" => RawReply::Ok(json!([{ "path": path, "name": path.rsplit('/').next().unwrap(), "account": "claude" }])),
+            "tabs" => RawReply::Ok(json!([])),
+            "enqueue" | "orchestrator_report" => RawReply::Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })),
+            _ => RawReply::Ok(Value::Null),
+        }
+    };
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, host("/a/site"));
+    let mut asking = captain_tab("tab-9", "/b/secret-project");
+    asking["question"] = json!("Ship the unreleased pricing page?");
+    let bob_tabs = json!({ "kind": "tabs", "tabs": [asking] });
+    let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![bob_tabs], host("/b/secret-project"));
+    ana.wait_machines(&[("ana-mini", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let (bob_m, ana_m) = (bob_machine.id.clone(), ana_machine.id.clone());
+
+    let bobs = bob.hub(json!({ "cmd": "overview" })).unwrap();
+    assert!(bobs.to_string().contains("/b/secret-project") && bobs.to_string().contains(&bob_m), "bob's own overview lists his project: {bobs}");
+    assert!(bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's question waits on bob: {bobs}");
+    for (from, overview) in [("ana's client", ana.hub(json!({ "cmd": "overview" }))), ("ana's host", ana_raw.ask(json!({ "cmd": "overview" })))] {
+        let overview = overview.unwrap().to_string();
+        assert!(overview.contains("/a/site") && overview.contains(&ana_m), "{from}: {overview}");
+        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing"), "{from} sees none of bob's: {overview}");
+    }
+
+    let none = Err(format!("this account has no machine {bob_m}"));
+    let to_bob = json!({ "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": bob_m, "path": "/b/secret-project", "text": "Push to main.", "sender": "Orchestrator" } });
+    let read_bob = json!({ "cmd": "read_captain", "machine": bob_m, "path": "/b/secret-project" });
+    assert_eq!(ana.hub(to_bob.clone()), none);
+    assert_eq!(ana_raw.ask(to_bob), none);
+    assert_eq!(ana.hub(read_bob.clone()), none);
+    assert_eq!(ana_raw.ask(read_bob), none);
+    let report = |machine: &str| {
+        json!({ "cmd": "relay", "request_id": "rep-1", "to": { "kind": "orchestrator", "report": {
+            "machine": machine, "machine_name": "x", "project": "secret-project", "path": "/b/secret-project", "tab": "tab-9", "text": "Done.", "answers": [] } } })
+    };
+    assert_eq!(ana.hub(report(&bob_m)), Err(format!("machine {bob_m} is offline")), "ana can't report as bob's Capitão");
+
+    assert_eq!(bob_raw.ask(report("m-lie")), Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })), "bob's Capitão reports to bob's own host");
+    assert_eq!((bob_raw.calls("orchestrator_report"), ana_raw.calls("orchestrator_report")), (1, 0), "the report reached bob's host only");
+    assert_eq!((bob_raw.calls("enqueue"), bob_raw.calls("thread")), (0, 0), "ana's relay and reads never reached bob's machine");
+    assert_eq!(bob_raw.calls("list_projects"), 1, "only bob's own overview listed bob's projects");
+
+    let shared = hub.hub().clone();
+    hub.runtime.block_on(async {
+        let ana = shared.account(uuid::Uuid::parse_str(&ana_id).unwrap()).await.unwrap();
+        let bob = shared.account(uuid::Uuid::parse_str(&bob_id).unwrap()).await.unwrap();
+        let _held = shared.hold_captain(&ana, &ana_m, "/w/site").await;
+        tokio::time::timeout(Duration::from_secs(1), shared.hold_captain(&bob, &ana_m, "/w/site")).await.expect("bob waits on no Capitão lock of ana's");
+        let again = tokio::time::timeout(Duration::from_millis(300), shared.hold_captain(&ana, &ana_m, "/w/site")).await;
+        assert!(again.is_err(), "ana's own second message to the Capitão still waits");
+    });
+}
+
+#[test]
+fn synced_files_skills_and_shared_projects_stay_in_their_account() {
+    let hub = TestHub::start("iso_sync");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    bob.wait_machines(&[("bob-mac", true)]);
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let project = "github.com/acme/site";
+    let memory = "claude/memory/notes.md";
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [file(memory, "ana's plans")] })).unwrap();
+    ana.hub(json!({ "cmd": "sync_push", "project": sync::PLUGINS_KEY, "files": [file(HOOK_PATH, "#!/bin/sh\necho ana")] })).unwrap();
+    ana.hub(json!({ "cmd": "share_project", "project": { "key": project, "name": "site", "repo": "git@github.com:acme/site.git" } })).unwrap();
+
+    let reads = [
+        json!({ "cmd": "sync_list", "project": project }),
+        json!({ "cmd": "sync_pull", "project": project, "paths": [memory] }),
+        json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY }),
+        json!({ "cmd": "shared_projects" }),
+    ];
+    for read in reads {
+        assert_eq!(bob.hub(read.clone()), Ok(json!([])), "bob's client: {read}");
+        let from_machine = match read["cmd"] == "shared_projects" {
+            true => Err("a machine may only forward a workflow session's callbacks".to_owned()),
+            false => Ok(json!([])),
+        };
+        assert_eq!(bob_raw.ask(read.clone()), from_machine, "bob's machine: {read}");
+    }
+    let ana_hook_sha = sha256_hex(b"#!/bin/sh\necho ana");
+    bob.hub(json!({ "cmd": "sync_mark_executable", "project": sync::PLUGINS_KEY, "repairs": [{ "path": HOOK_PATH, "sha": ana_hook_sha }] })).unwrap();
+    bob.hub(json!({ "cmd": "sync_push", "project": project, "files": [file(memory, "bob's plans")] })).unwrap();
+
+    let listed = ana.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+    assert_eq!(listed[0]["sha"], sha256_hex(b"ana's plans"), "bob's push of the same path left ana's file alone");
+    let hooks = ana.hub(json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY })).unwrap();
+    assert_eq!((hooks[0]["sha"].as_str(), hooks[0]["executable"].as_bool()), (Some(ana_hook_sha.as_str()), Some(false)), "bob's repair named ana's sha and changed nothing");
+    assert_eq!(bob.hub(json!({ "cmd": "sync_list", "project": project })).unwrap()[0]["sha"], sha256_hex(b"bob's plans"));
+}
+
+#[test]
+fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
+    let hub = TestHub::start("iso_pair");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let code = ana.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let creds = account::pair(&url, &code, "ana-mac", "linux").unwrap();
+    assert_eq!(creds.email, "ana@acme.dev");
+    ana.wait_machines(&[("ana-mac", false)]);
+    assert_eq!(account::pair(&url, &code, "bob-mac", "linux"), Err("that pairing code is unknown, used or expired".into()), "a code pairs once");
+    assert_eq!(bob.hub(json!({ "cmd": "machines" })), Ok(json!([])));
+    assert_eq!(mentioning(&mut bob, &creds.machine_id), Vec::<Value>::new());
+
+    account::logout(&url, &ana_token).unwrap();
+    let start = Instant::now();
+    while ana.pump() {
+        assert!(start.elapsed() < WAIT, "ana's client stays open after her logout");
+    }
+    assert_eq!(bob.hub(json!({ "cmd": "machines" })), Ok(json!([])), "bob's login still works");
+    let mut gone = Client::connect(&url, &ana_token);
+    while gone.pump() {}
+    assert_eq!(gone.closed, Some(u16::from(link::UNAUTHORIZED)));
+    assert!(Client::connect(&url, &bob_token).wait("hello", |f| f["type"] == "hello")["account"]["email"] == "bob@acme.dev");
+}
+
+#[test]
+fn an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in() {
+    let hub = TestHub::start("iso_agent");
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let lists = |path: &'static str| {
+        move |call: &Value| match call["cmd"].as_str().unwrap() {
+            "list_projects" => RawReply::Ok(json!([{ "path": path, "name": "app", "account": "claude" }])),
+            "tabs" => RawReply::Ok(json!([captain_tab("tab-o", path)])),
+            "open_orchestrator" => RawReply::Ok(json!("tab-o")),
+            _ => RawReply::Ok(Value::Null),
+        }
+    };
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, lists("/a/app"));
+    let _bob_raw = RawMachine::start(&url, &bob_machine_token, lists("/b/app"));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let client_id = register_agent(&url, &http);
+    let scopes = ["sessions", "orchestrator"];
+    let (ana_access, _) = connect_agent(&url, &http, &mut ana, &client_id, &scopes, json!([{ "machine": ana_machine.id, "path": "/a/app" }]));
+    let (bob_access, _) = connect_agent(&url, &http, &mut bob, &client_id, &scopes, json!([{ "machine": bob_machine.id, "path": "/b/app" }]));
+    let ana_pid = tool(&url, &http, &ana_access, "list_projects", json!({})).unwrap()["projects"][0]["id"].as_str().unwrap().to_owned();
+    let bob_projects = tool(&url, &http, &bob_access, "list_projects", json!({})).unwrap();
+    assert_eq!(bob_projects["projects"].as_array().map(Vec::len), Some(1));
+    assert_ne!(bob_projects["projects"][0]["id"], json!(ana_pid));
+
+    let refused = format!("no project {ana_pid} for this agent; call list_projects");
+    assert_eq!(tool(&url, &http, &bob_access, "message_orchestrator", json!({ "project": ana_pid, "message": "drop the tables", "request_id": "b-1" })), Err(refused.clone()));
+    assert_eq!(tool(&url, &http, &bob_access, "read_orchestrator", json!({ "project": ana_pid })), Err(refused.clone()));
+    assert_eq!(tool(&url, &http, &bob_access, "start_session", json!({ "project": ana_pid, "task": "t", "request_id": "b-2" })), Err(refused));
+    assert_eq!((ana_raw.calls("open_orchestrator"), ana_raw.calls("thread"), ana_raw.calls("run"), ana_raw.calls("prompt")), (0, 0, 0, 0), "bob's agent reached nothing on ana's machine");
+
+    let ana_agents = ana.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].clone();
+    let bob_agents = bob.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].clone();
+    assert_eq!((ana_agents.as_array().map(Vec::len), bob_agents.as_array().map(Vec::len)), (Some(1), Some(1)), "each account lists its own grant only");
+    let ana_grant = ana_agents[0]["id"].as_str().unwrap();
+    assert_ne!(bob_agents[0]["id"].as_str(), Some(ana_grant));
+    assert_eq!(bob.hub(json!({ "cmd": "revoke_agent", "id": ana_grant })), Err(format!("this account has no agent {ana_grant}")));
+    assert_eq!(tool(&url, &http, &ana_access, "list_projects", json!({})).unwrap()["projects"][0]["id"], json!(ana_pid), "ana's agent still works");
+    let request = authorize(&url, &http, &client_id, &pkce().1, "b");
+    assert!(bob.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": ["orchestrator"], "projects": [{ "machine": ana_machine.id, "path": "/a/app" }] })).unwrap_err().contains("this account has no machine"));
+}
+
+#[test]
+fn a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back() {
+    let hub = TestHub::start_learning("iso_dictation");
+    let url = hub.url.clone();
+    let (ana_token, ana) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, bob) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    account::dictation_feedback(&url, &ana_token, &dictation("ana's comet")).unwrap();
+    account::dictation_feedback(&url, &bob_token, &dictation("bob's comet")).unwrap();
+    let mut kept: Vec<(String, String)> = learning_rows(&hub.learning.clone().unwrap()).iter().map(|r| (r["account"].as_str().unwrap().to_owned(), r["raw"].as_str().unwrap().to_owned())).collect();
+    kept.sort();
+    let mut expected = vec![(ana.id, "ana's comet".to_owned()), (bob.id, "bob's comet".to_owned())];
+    expected.sort();
+    assert_eq!(kept, expected, "each row names the account whose login sent it");
+    let read = reqwest::blocking::Client::new().get(format!("{url}/api/dictation/feedback")).bearer_auth(&bob_token).send().unwrap();
+    assert_eq!(read.status(), 405, "the hub only takes dictations in");
+}
+
+#[test]
+fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
+    let hub = TestHub::start_with_boxes("iso_box", Signup::Open, fast());
+    let (bob_token, bob) = account::signup(&hub.url, "bob@acme.dev", "correct horse").unwrap();
+    let (bob_machine, _) = account::register_machine(&hub.url, &bob_token, "bob-box", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('bobs-box', '{}', '{}', 'box_bob', 'c-bob', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
+        bob.id, bob_machine.id,
+    ));
+    let mut ana = BoxAccount::new(&hub);
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fixed", "row": "bobs-box" } } })).unwrap();
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
+    assert_eq!(created(&hub), 1, "ana's run got a box of its own");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_ne!(ana.box_machine(), bob_machine.id);
+    let bobs = hub.runtime.block_on(hub.hub().db.boxes(uuid::Uuid::parse_str(&bob.id).unwrap())).unwrap();
+    assert_eq!(bobs.len(), 1, "bob's box row is still there");
+}
+
+#[test]
+fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
+    let hub = TestHub::start("iso_taste");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (_, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, |_| RawReply::Ok(Value::Null));
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let defaults = bob.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    let site = |parallel: u32| json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": parallel } });
+
+    let anas = ana.hub(site(5)).unwrap();
+    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 5);
+    assert_eq!(bob.hub(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "bob's client reads none of ana's tastes");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "nor does bob's machine");
+
+    bob.hub(site(2)).unwrap();
+    bob.hub(json!({ "cmd": "reset_taste_field", "scope": { "kind": "captains" }, "field": "hard_model" })).unwrap();
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })), Ok(anas.clone()), "bob's writes left ana's tastes alone");
+    assert_eq!(ana_raw.ask(json!({ "cmd": "get_tastes" })), Ok(anas.clone()));
+
+    let imported = json!({ "cmd": "import_tastes", "tastes": { "projects": { "github.com/acme/other": { "parallel": 7 } } } });
+    assert_eq!(ana_raw.ask(imported.clone()), Ok(json!(false)), "ana already has tastes, so her machine's import is refused");
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })), Ok(anas));
+    let (carol_token, _, mut carol) = signed_in(&url, "carol@acme.dev");
+    let (_, carol_machine_token) = account::register_machine(&url, &carol_token, "carol-mac", "linux").unwrap();
+    let carol_raw = RawMachine::start(&url, &carol_machine_token, |_| RawReply::Ok(Value::Null));
+    carol.wait_machines(&[("carol-mac", true)]);
+    assert_eq!(carol_raw.ask(imported), Ok(json!(true)), "an account with no tastes takes its machine's");
+    assert_eq!(carol.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"]["github.com/acme/other"]["parallel"], 7);
+    for (who, client) in [("ana", &mut ana), ("bob", &mut bob)] {
+        assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
+    }
+}
+
+/// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.
+fn running_tab(client: &mut Client, machine: &str, path: &str) -> String {
+    let tab = client.call(machine, json!({ "cmd": "open_tab", "path": path, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.call(machine, json!({ "cmd": "start_claude", "tab": &tab, "cols": 80, "rows": 24 })).unwrap();
+    tab
+}
+
+#[test]
+fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_reads_one_to_its_end() {
+    let mut fleet = Fleet::start("sessions");
+    let (mac, mini) = (fleet.mac_id.clone(), fleet.mini_id.clone());
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let apps = fleet.mac_dir.join("client-apps");
+    origin(&apps, "git@github.com:acme/client-apps.git");
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"];
+    assert!(pinned_core::process::command("git").arg("-C").arg(&apps).args(commit).status().unwrap().success());
+    let apps = fleet.mac.machine.open_project(apps).display().to_string();
+    fleet.mac.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Bloom".into(), auth: None, key: None }).unwrap();
+    fleet.client.call(&mac, json!({ "cmd": "set_project_account", "path": apps, "account": "bloom" })).unwrap();
+
+    let slack = "Someone mentioned you in the Slack thread";
+    let asking = running_tab(&mut fleet.client, &mac, &apps);
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": asking, "title": slack }));
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "needs-input", "tab": asking, "message": "Claude needs your permission to use Bash" }));
+    // A transcript past the 8 MiB a read from its start reaches.
+    let long = running_tab(&mut fleet.client, &mac, &apps);
+    let transcripts = fleet.mac_dir.join("accounts/bloom/projects/client-apps");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let line = |kind: &str, content: Value, at: &str| json!({ "isSidechain": false, "gitBranch": "felipega/fix-and-ops", "type": kind, "message": { "role": kind, "content": content }, "uuid": format!("{kind}-{at}"), "timestamp": at }).to_string();
+    let mut transcript = String::new();
+    for i in 0..10 {
+        transcript += &line("assistant", json!([{ "type": "text", "text": "x".repeat(1 << 20) }]), &format!("2026-11-09T11:0{i}:00.000Z"));
+        transcript.push('\n');
+    }
+    transcript += &format!("{}\n", line("user", json!("what is running?"), "2026-11-09T12:00:00.000Z"));
+    transcript += &format!("{}\n", json!({ "type": "pr-link", "prNumber": 92, "prUrl": "https://github.com/acme/client-apps/pull/92", "prRepository": "acme/client-apps", "timestamp": "2026-11-09T12:05:00.000Z" }));
+    transcript += &format!("{}\n", line("assistant", json!([{ "type": "text", "text": "Two Slack threads wait on you. Should I answer them?" }]), "2026-11-09T12:10:00.000Z"));
+    assert!(transcript.len() > 8 << 20);
+    std::fs::write(transcripts.join("s-long.jsonl"), transcript).unwrap();
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "done", "tab": long, "session": "s-long", "title": slack }));
+    let new_thread = running_tab(&mut fleet.client, &mac, &apps);
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": apps })).unwrap().as_str().unwrap().to_owned();
+    fleet.client.call(&mac, json!({ "cmd": "start_claude", "tab": &captain, "cols": 80, "rows": 24 })).unwrap();
+    hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": captain }));
+    let request = pinned_core::delegate::parse_request(&json!({ "task": "Lint the app.", "mode": "async" })).unwrap();
+    let delegate = pinned_core::agent::Message::Delegate { tab: Some(captain.clone()), task: None, tool: None, request: Box::new(request) };
+    let mut stream = std::os::unix::net::UnixStream::connect(fleet.mac_dir.join("sock")).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&delegate).unwrap()).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    let started: Value = serde_json::from_str(&serde_json::from_str::<Result<String, String>>(&reply).unwrap().unwrap()).unwrap();
+    let worker = started["tabId"].as_str().unwrap_or_else(|| panic!("no worker thread: {started}")).to_owned();
+    let stopped = fleet.client.call(&mac, json!({ "cmd": "open_tab", "path": fleet.site, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    let failed = running_tab(&mut fleet.client, &mini, &fleet.mini_dir.display().to_string());
+    hook(&fleet.mini_dir, json!({ "kind": "agent", "status": "failed", "tab": failed, "message": "API Error: 500" }));
+
+    let tool = |tool: Value| session_tool(&fleet.mini_dir, &fleet.global, tool);
+    let sessions = |project: Option<&str>| tool(json!({ "name": "sessions", "project": project })).unwrap();
+    wait_for("mac's tabs and the long transcript's tally on the hub", || {
+        let listed = sessions(None);
+        let list = listed["sessions"].as_array().unwrap();
+        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["state"] == "waiting_on_input") && list.iter().any(|s| s["id"] == worker)
+    });
+    let listed = sessions(Some("client-apps"));
+    let list = listed["sessions"].as_array().unwrap().clone();
+    let activity: Vec<u64> = list.iter().filter_map(|s| s["last_activity"].as_u64()).collect();
+    assert!(activity.windows(2).all(|w| w[0] >= w[1]), "newest activity first: {activity:?}");
+    let mut shapes: Vec<Value> = list
+        .into_iter()
+        .map(|mut s| {
+            s.as_object_mut().unwrap().remove("last_activity");
+            s
+        })
+        .collect();
+    shapes.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let project = json!({ "key": "github.com/acme/client-apps", "name": "client-apps", "path": apps });
+    let on_mac = |id: &str, role: &str, state: &str, extra: Value| {
+        let mut session = json!({ "id": id, "machine": mac, "machine_name": "mac", "account": "bloom", "project": project, "role": role, "state": state });
+        session.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        session
+    };
+    let mut expected = vec![
+        on_mac(&asking, "thread", "waiting_on_input", json!({ "title": slack, "message": "Claude needs your permission to use Bash" })),
+        on_mac(&long, "thread", "waiting_on_input", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
+        on_mac(&new_thread, "thread", "idle", json!({})),
+        on_mac(&captain, "captain", "running", json!({})),
+        on_mac(&worker, "worker", "idle", json!({ "captain": captain, "title": "Lint the app." })),
+    ];
+    expected.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    assert_eq!(shapes, expected);
+    let long_session = listed["sessions"].as_array().unwrap().iter().find(|s| s["id"] == long).unwrap().clone();
+    assert_eq!(long_session["last_activity"], 1794226200, "the time of the transcript's last message");
+    assert_eq!(listed["machines"].as_array().unwrap().len(), 2, "every machine of the account");
+
+    let everything = sessions(None);
+    let elsewhere: Vec<(&str, &str, &str, &str)> = everything["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["project"]["name"] != "client-apps")
+        .map(|s| (s["id"].as_str().unwrap(), s["machine_name"].as_str().unwrap(), s["account"].as_str().unwrap(), s["state"].as_str().unwrap()))
+        .collect();
+    let mut elsewhere = elsewhere;
+    elsewhere.sort();
+    let mut expected_elsewhere = vec![(failed.as_str(), "mini", "claude", "error"), (stopped.as_str(), "mac", "claude", "settled")];
+    expected_elsewhere.sort();
+    assert_eq!(elsewhere, expected_elsewhere, "the global orchestrator's own tab is not a session it reports");
+    assert_eq!(tool(json!({ "name": "sessions", "machine": "@MINI" })).unwrap()["sessions"].as_array().unwrap().len(), 1);
+
+    let read = tool(json!({ "name": "read_session", "id": long, "items": 3 })).unwrap();
+    assert_eq!(
+        read,
+        json!({
+            "state": "done", "next": "it may take a message now", "title": slack,
+            "conversation": { "items": [
+                { "kind": "user", "at": "2026-11-09T12:00:00.000Z", "text": "what is running?" },
+                { "kind": "pr", "at": "2026-11-09T12:05:00.000Z", "url": "https://github.com/acme/client-apps/pull/92" },
+                { "kind": "text", "at": "2026-11-09T12:10:00.000Z", "text": "Two Slack threads wait on you. Should I answer them?" },
+            ], "cursor": read["conversation"]["cursor"], "reset": false },
+            "id": long, "machine": mac, "machine_name": "mac",
+        }),
+        "a loose thread on another machine, read to the true end of a transcript past 8 MiB"
+    );
+    let waiting = tool(json!({ "name": "waiting" })).unwrap();
+    let mut waits: Vec<(&str, &str, &str)> = waiting.as_array().unwrap().iter().map(|w| (w["tab"].as_str().unwrap(), w["kind"].as_str().unwrap(), w["message"].as_str().unwrap_or(""))).collect();
+    waits.sort();
+    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (long.as_str(), "needs_input", "Should I answer them?"), (failed.as_str(), "failed", "")];
+    expected_waits.sort();
+    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, the loose thread whose last reply asked included");
+    let here = tool(json!({ "name": "read_session", "id": failed })).unwrap();
+    assert_eq!(here, json!({ "state": "failed", "next": "it may take a message now", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "id": failed, "machine": mini, "machine_name": "mini" }));
+    assert_eq!(tool(json!({ "name": "read_session", "id": "tab-0-0" })), Err("no online machine of this account has a session tab-0-0".into()));
+    assert_eq!(tool(json!({ "name": "read_session", "id": long, "machine": "mini" })), Err("mini has no session ".to_owned() + &long));
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    assert_eq!(
+        mac_link.call_hub(HubCall::ReadSession { tab: long.clone(), machine: None, items: None }),
+        Err("mac does not host the global orchestrator (mini does), so it can't read a session".into())
+    );
+    assert_eq!(session_tool(&fleet.mac_dir, &captain, json!({ "name": "sessions" })), Err("only the global orchestrator has this tool".into()));
+}
+
+/// Pairs a node for `client`'s account into `dir`, hosting that account's global orchestrator, and
+/// answers its machine id and the global orchestrator's tab.
+fn hosting_node(url: &str, client: &mut Client, name: &str, dir: &Path) -> (Node, String, String) {
+    let code = client.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    account::pair(url, &code, name, "linux").unwrap().save(dir).unwrap();
+    let creds = Credentials::load(dir).unwrap();
+    let id = creds.machine_id.clone();
+    let node = Node::start(dir, creds);
+    client.wait_machines(&[(name, true)]);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    client.call(&id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = client.call(&id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    (node, id, global)
+}
+
+#[test]
+fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_another_account() {
+    let hub = TestHub::start("iso_sessions");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_dir, bob_dir) = (temp("iso_sessions-ana"), temp("iso_sessions-bob"));
+    let (_ana_node, ana_m, ana_global) = hosting_node(&url, &mut ana, "ana-mini", &ana_dir);
+    let (bob_node, bob_m, bob_global) = hosting_node(&url, &mut bob, "bob-mac", &bob_dir);
+    for project in [ana_dir.join("secret-project"), bob_dir.join("own-project")] {
+        std::fs::create_dir_all(project).unwrap();
+    }
+    let ana_thread = running_tab(&mut ana, &ana_m, &ana_dir.join("secret-project").display().to_string());
+    hook(&ana_dir, json!({ "kind": "agent", "status": "working", "tab": ana_thread }));
+    hook(&ana_dir, json!({ "kind": "agent", "status": "needs-input", "tab": ana_thread, "message": "Ship the unreleased pricing page?" }));
+    let bob_thread = running_tab(&mut bob, &bob_m, &bob_dir.join("own-project").display().to_string());
+    hook(&bob_dir, json!({ "kind": "agent", "status": "working", "tab": bob_thread }));
+    hook(&bob_dir, json!({ "kind": "agent", "status": "needs-input", "tab": bob_thread, "message": "Rename the button?" }));
+
+    let ana_tool = |tool: Value| session_tool(&ana_dir, &ana_global, tool);
+    let bob_tool = |tool: Value| session_tool(&bob_dir, &bob_global, tool);
+    let waits_in = |sessions: &Value, tab: &str| sessions["sessions"].as_array().unwrap().iter().any(|s| s["id"] == tab && s["state"] == "waiting_on_input");
+    wait_for("ana's thread waiting on her in her own sessions()", || waits_in(&ana_tool(json!({ "name": "sessions" })).unwrap(), ana_thread.as_str()));
+    wait_for("bob's thread waiting on him in his own sessions()", || waits_in(&bob_tool(json!({ "name": "sessions" })).unwrap(), bob_thread.as_str()));
+    let anas = ana_tool(json!({ "name": "waiting" })).unwrap().to_string();
+    assert!(anas.contains(&ana_thread) && anas.contains("unreleased pricing"), "ana's own waiting() has her thread: {anas}");
+
+    let ana_marks = [ana_m.as_str(), "ana-mini", ana_thread.as_str(), ana_global.as_str(), "secret-project", "unreleased pricing"];
+    let nothing_of_ana = |from: &str, answer: &Value| {
+        let text = answer.to_string();
+        for mark in ana_marks {
+            assert!(!text.contains(mark), "{from} names ana's {mark:?}: {text}");
+        }
+    };
+    for args in [json!({ "name": "sessions" }), json!({ "name": "sessions", "machine": ana_m }), json!({ "name": "sessions", "machine": "ana-mini" }), json!({ "name": "sessions", "project": "secret-project" })] {
+        let listed = bob_tool(args.clone()).unwrap();
+        nothing_of_ana(&format!("bob's {args}"), &listed);
+        let machines: Vec<&str> = listed["machines"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(machines, [bob_m.as_str()], "bob's {args} lists his own machine alone");
+    }
+    let mine: Vec<Value> = bob_tool(json!({ "name": "sessions" })).unwrap()["sessions"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect();
+    assert_eq!(mine, [json!(bob_thread)], "bob's sessions() is his own thread, not his global orchestrator's tab nor anything of ana's");
+    let waiting = bob_tool(json!({ "name": "waiting" })).unwrap();
+    nothing_of_ana("bob's waiting()", &waiting);
+    let waits: Vec<&str> = waiting.as_array().unwrap().iter().map(|w| w["tab"].as_str().unwrap()).collect();
+    assert_eq!(waits, [bob_thread.as_str()], "bob's waiting() is his own question alone");
+
+    // Ana's tabs and machine read as tabs and machines that do not exist, from the tool and from bob's machine straight to the hub.
+    let unknown_tab = |tab: &str| Err(format!("no online machine of this account has a session {tab}"));
+    let unknown_machine = |machine: &str| Err(format!("this account has no machine {machine}"));
+    let made_up = uuid::Uuid::new_v4().to_string();
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0" })), unknown_tab("tab-0-0"));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": made_up })), unknown_machine(&made_up));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": "Studio" })), unknown_machine("Studio"));
+    let bob_link = bob_node.link.as_ref().unwrap();
+    for tab in [ana_thread.as_str(), ana_global.as_str()] {
+        assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab })), unknown_tab(tab));
+        assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: None, items: None }), unknown_tab(tab));
+        for machine in [ana_m.as_str(), "ana-mini", "@ana-mini"] {
+            let named = machine.trim_start_matches('@');
+            assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab, "machine": machine })), unknown_machine(named), "{tab} on {machine}");
+            assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: Some(named.to_owned()), items: Some(5) }), unknown_machine(named), "{tab} on {machine}");
+        }
+    }
+    let overview = bob_link.call_hub(HubCall::Overview).unwrap();
+    nothing_of_ana("bob's machine's overview", &overview);
+    assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
+    let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
+    assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
 }

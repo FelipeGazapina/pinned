@@ -22,17 +22,17 @@ const macMini = (over = {}) => ({ id: "mm", name: "Mac mini", online: true, sett
 test("the account's view takes the host's fields and names the host machine", () => {
   const { mergeGlobalSettings } = pure();
   const view = here(mergeGlobalSettings([
-    macMini({ settings: { name: "Almirante", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }),
-    { id: "mb", name: "MacBook", online: true, settings: { name: "Orquestrador", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
+    macMini({ settings: { name: "Admiral", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }),
+    { id: "mb", name: "MacBook", online: true, settings: { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
   ]));
-  assert.deepEqual(view, { name: "Almirante", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true });
+  assert.deepEqual(view, { name: "Admiral", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true });
 });
 
 test("with no host the first machine that answered speaks for the account", () => {
   const { mergeGlobalSettings } = pure();
   const view = here(mergeGlobalSettings([
     { id: "mb", name: "MacBook", online: true, settings: { name: "Comandante", host: false }, update: false, error: null },
-    macMini({ settings: { name: "Almirante", host: false } }),
+    macMini({ settings: { name: "Admiral", host: false } }),
   ]));
   assert.deepEqual(view, { name: "Comandante", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
 });
@@ -40,13 +40,13 @@ test("with no host the first machine that answered speaks for the account", () =
 test("machines that never answered leave the defaults standing", () => {
   const { mergeGlobalSettings } = pure();
   const view = here(mergeGlobalSettings([macMini({ online: false }), { id: "mb", name: "MacBook", online: true, update: true }]));
-  assert.deepEqual(view, { name: "Orquestrador", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(view, { name: "Orchestrator", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
 });
 
 test("a save writes every online machine, the host flag only to the chosen one", () => {
   const { globalSettingsWrites } = pure();
   const writes = here(globalSettingsWrites(
-    { name: "Almirante", host: "mm", busy: "refuse", reports: "auto", group_reports: false, read_aloud: true },
+    { name: "Admiral", host: "mm", busy: "refuse", reports: "auto", group_reports: false, read_aloud: true },
     [
       macMini(),
       { id: "mb", name: "MacBook", online: true, settings: null, update: false, error: null },
@@ -55,8 +55,8 @@ test("a save writes every online machine, the host flag only to the chosen one",
     ],
   ));
   assert.deepEqual(writes, [
-    { machine: "mm", settings: { name: "Almirante", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
-    { machine: "mb", settings: { name: "Almirante", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
+    { machine: "mm", settings: { name: "Admiral", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
+    { machine: "mb", settings: { name: "Admiral", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
   ]);
 });
 
@@ -68,7 +68,7 @@ test("the notes name every machine the save could not reach, each in its own wor
     { id: "vps", name: "Linux VPS", online: false, update: false, error: null },
     { id: "mb", name: "MacBook", online: true, update: false, error: "timed out" },
   ]));
-  assert.deepEqual(notes, ["Old Mac precisa atualizar o pinned", "Linux VPS está offline; atualiza quando reconectar", "MacBook: timed out"]);
+  assert.deepEqual(notes, ["Old Mac needs to update pinned", "Linux VPS is offline; it updates when it reconnects", "MacBook: timed out"]);
 });
 
 test("an older node's unknown command and an older hub's refusal both read as needing an update", () => {
@@ -115,7 +115,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
       calls.push([machine, call]);
       if (call.cmd === "global_orchestrator_settings") {
         if (machine === "mb" && older) throw new Error("this machine runs pinned 0.8.0, which can't answer that: unknown variant GlobalOrchestratorSettings");
-        return { name: "Orquestrador", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, ...settings[machine] };
+        return { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, ...settings[machine] };
       }
       if (call.cmd === "set_global_orchestrator_settings") return { ...call.settings };
       if (call.cmd === "open_global_orchestrator") return "g-1";
@@ -157,24 +157,24 @@ function page({ settings = {}, older = false, offline = false } = {}) {
 }
 
 test("the section renders one account-wide setting and the machines that cannot take it", async () => {
-  const { context } = page({ settings: { mm: { name: "Almirante", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }, older: true });
+  const { context } = page({ settings: { mm: { name: "Admiral", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }, older: true });
   const html = await context.globalOrchestratorSettingsHtml();
-  assert.match(html, /<h2 class="looks-title">Orquestrador global<\/h2>/);
-  assert.match(html, /value="Almirante"/);
-  assert.match(html, /class="chip go-preset active" data-name="Almirante"/);
+  assert.match(html, /<h2 class="looks-title">Global orchestrator<\/h2>/);
+  assert.match(html, /value="Admiral"/);
+  assert.match(html, /class="chip go-preset active" data-name="Admiral"/);
   assert.match(html, /class="chip go-host active" data-machine="mm"/);
   assert.match(html, /data-machine="mb" disabled/);
   assert.match(html, /value="refuse" selected/);
   assert.match(html, /value="tool_only" selected/);
   assert.match(html, /id="go-read-aloud" checked/);
   assert.doesNotMatch(html, /id="go-group-reports" checked/);
-  assert.match(html, /Memória do Almirante/);
-  assert.match(html, /MacBook precisa atualizar o pinned/);
-  assert.match(html, /Linux VPS está offline; atualiza quando reconectar/);
+  assert.match(html, /Admiral's memory/);
+  assert.match(html, /MacBook needs to update pinned/);
+  assert.match(html, /Linux VPS is offline; it updates when it reconnects/);
 });
 
 test("saving writes the shared fields everywhere and tells the page through the event", async () => {
-  const { context, element, calls, events } = page({ settings: { mm: { name: "Almirante", host: true } } });
+  const { context, element, calls, events } = page({ settings: { mm: { name: "Admiral", host: true } } });
   await context.globalOrchestratorSettingsHtml();
   const presets = [element("go-preset-comandante")];
   element("global-orchestrator-settings").querySelectorAll = (sel) => (sel === ".go-preset" ? presets : []);
@@ -195,7 +195,7 @@ test("saving writes the shared fields everywhere and tells the page through the 
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "global-orchestrator-settings");
   assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true });
-  assert.equal(element("go-status").textContent, "Salvo");
+  assert.equal(element("go-status").textContent, "Saved");
   assert.equal(element("go-error").textContent, "");
 });
 
@@ -207,7 +207,7 @@ test("saving refuses a host that cannot take the write, without sending any", as
   context.bindGlobalOrchestratorSettings();
   hosts[0].onclick();
   await element("go-save").onclick();
-  assert.equal(element("go-error").textContent, "Escolha em qual máquina online o orquestrador roda.");
+  assert.equal(element("go-error").textContent, "Choose which online machine the orchestrator runs on.");
   assert.equal(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").length, 0);
 });
 
@@ -227,13 +227,14 @@ test("without a host the memory says to pick one first", async () => {
   await context.openGlobalMemory();
   assert.deepEqual(activated, []);
   assert.deepEqual(surfaces, []);
-  assert.match(told[0], /Escolha primeiro em qual máquina o Orquestrador roda/);
+  assert.match(told[0], /Choose which machine Orchestrator runs on in the settings first/);
 });
 
-// The projects page: rows out of the catalog, and a machine's chip opening its Capitão.
+// The projects page: rows out of the catalog, and a machine's chip opening its Captain.
 function projectsPage() {
   const captain = { machine: "mm", view: { id: "cap-1", role: "orchestrator" } };
-  const groups = [{ name: "site", tabs: [captain], checkouts: [] }];
+  const worker = (machine, running) => ({ machine, view: { role: "worker", running } });
+  const groups = [{ name: "site", tabs: [captain, worker("mm", true), worker("mm", true), worker("mm", false), worker("local", true)], checkouts: [] }];
   const catalog = {
     projects: [
       {
@@ -241,18 +242,18 @@ function projectsPage() {
         name: "site",
         repo: "github.com/felipe/site",
         machines: [
-          { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "trabalhando", workers: 1 },
-          { id: "local", slug: "this-mac", name: "This Mac", online: true, captain: "nenhum", workers: 0 },
+          { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "working", workers: 1 },
+          { id: "local", slug: "this-mac", name: "This Mac", online: true, captain: "none", workers: 0 },
         ],
       },
-      { slug: "infra", name: "infra", repo: "", machines: [{ id: "vps", slug: "linux-vps", name: "Linux VPS", online: false, captain: "nenhum", workers: 0 }] },
+      { slug: "infra", name: "infra", repo: "", machines: [{ id: "vps", slug: "linux-vps", name: "Linux VPS", online: false, captain: "none", workers: 0 }] },
     ],
     machines: [
       { slug: "mac-mini", name: "Mac mini", online: true },
       { slug: "this-mac", name: "This Mac", online: true },
       { slug: "linux-vps", name: "Linux VPS", online: false },
     ],
-    name: "Orquestrador",
+    name: "Orchestrator",
   };
   const harness = page();
   Object.assign(harness.context, {
@@ -262,28 +263,50 @@ function projectsPage() {
     machineDirectory: () => ({ localId: "local", localName: "This Mac", names: {}, online: {} }),
     phaseOf: () => "working",
     projectRepos: new Map(),
-    runningAgents: () => [{ state: "running" }],
+    hasProject: () => true,
   });
   return { ...harness, captain, catalog, click: harness.click };
 }
 
-test("the projects page lists every project with its machines, Capitão and workers", () => {
+test("threads started without a project are not a row on the projects page", () => {
+  const harness = page();
+  const tab = (machine, cwd, scratch) => ({ machine, scratch, view: { id: cwd, cwd } });
+  Object.assign(harness.context, {
+    machines: new Map(),
+    projectGroups: () => [
+      { name: "No project", tabs: [tab("mm", "/scratch/1", true), tab("mm", "/scratch/2", true)], checkouts: [{ machine: "mm", path: "/scratch/1", thread: true }] },
+      { name: "site", tabs: [tab("mm", "/work/site", false)], checkouts: [{ machine: "mm", path: "/work/site", thread: true }] },
+      { name: "infra", tabs: [], checkouts: [{ machine: "mm", path: "/work/infra" }] },
+    ],
+    machineDirectory: () => ({ localId: "local", localName: "This Mac", names: { mm: "Mac mini" }, online: { mm: true } }),
+    phaseOf: () => "idle",
+    projectRepos: new Map(),
+    hasProject: (t) => !t.scratch,
+  });
+  harness.context.renderGlobalProjectsPage();
+  const html = harness.pages.at(-1);
+  assert.deepEqual([...html.matchAll(/<span class="gp-name">([^<]*)<\/span>/g)].map((m) => m[1]), ["site", "infra"]);
+  assert.match(html, /2 projects · 1 machine/);
+});
+
+test("the projects page lists every project with its machines, Captain and running workers", () => {
   const { context, pages } = projectsPage();
   context.openGlobalProjects();
   context.renderGlobalProjectsPage();
   const html = pages.at(-1);
-  assert.match(html, /<h1>Projetos<\/h1>/);
-  assert.match(html, /2 projetos · 3 máquinas/);
+  assert.match(html, /<h1>Projects<\/h1>/);
+  assert.match(html, /2 projects · 3 machines/);
   assert.match(html, /<span class="gp-name">site<\/span>/);
-  assert.match(html, /<span class="gp-state trabalhando">trabalhando<\/span>/);
+  assert.match(html, /<span class="gp-state working">Working<\/span>/);
   assert.match(html, /<span class="gp-repo">github.com\/felipe\/site<\/span>/);
-  assert.match(html, /data-project="site" data-machine="mm"/);
-  assert.match(html, /data-project="site" data-machine="local" disabled/);
-  assert.match(html, /<span class="gp-workers">1 worker<\/span>/);
-  assert.match(html, /<span class="gp-repo">sem remote<\/span>/);
+  assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">2 workers<\/span><\/button>/);
+  assert.match(html, /data-project="site" data-machine="local" disabled title="No Captain on this machine">This Mac<span class="gp-count">1 worker<\/span><\/button>/);
+  assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
+  assert.match(html, /<span class="gp-repo">no remote<\/span>/);
+  assert.match(html, /<span class="gp-state none">No Captain<\/span><span class="gp-repo">no remote<\/span><\/div>\s*<div class="gp-side"><button[^>]*>Linux VPS<\/button><span class="gp-workers">—<\/span>/);
 });
 
-test("a project's machine opens its Capitão tab when one is open", () => {
+test("a project's machine opens its Captain tab when one is open", () => {
   const { context, activated, captain, click } = projectsPage();
   context.renderGlobalProjectsPage();
   const chip = { dataset: { project: "site", machine: "mm" }, disabled: false };

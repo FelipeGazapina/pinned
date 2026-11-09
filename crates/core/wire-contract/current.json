@@ -2,6 +2,7 @@
   "version": "current",
   "routes": [
     "POST /api/signup",
+    "GET /api/signup",
     "POST /api/login",
     "POST /api/logout",
     "POST /api/password",
@@ -912,6 +913,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -939,6 +963,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -2978,14 +3027,61 @@
               "text"
             ]
           },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -4507,6 +4603,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -4845,6 +4984,109 @@
                   "cmd",
                   "machine",
                   "path"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -6324,6 +6566,323 @@
               }
             ]
           },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "orchestrator",
+              "captains",
+              "projects"
+            ]
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
           "Target2": {
             "type": "object",
             "properties": {
@@ -7222,6 +7781,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -7249,6 +7831,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -9264,14 +9871,61 @@
               "text"
             ]
           },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -10765,6 +11419,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -11098,6 +11795,109 @@
                   "cmd",
                   "machine",
                   "path"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -12522,6 +13322,307 @@
               }
             ]
           },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            }
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
+          },
           "Target2": {
             "type": "object",
             "properties": {
@@ -12985,6 +14086,19 @@
                   "kind",
                   "scopes"
                 ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -13102,6 +14216,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -13127,6 +14275,23 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -13233,6 +14398,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -14135,6 +15318,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -14473,6 +15699,109 @@
                   "cmd",
                   "machine",
                   "path"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -16011,6 +17340,370 @@
               "tab",
               "text"
             ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "orchestrator",
+              "captains",
+              "projects"
+            ]
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
           }
         }
       },
@@ -16320,6 +18013,19 @@
                   "kind",
                   "scopes"
                 ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -16437,6 +18143,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -16462,6 +18202,23 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -16561,6 +18318,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -17450,6 +19225,49 @@
                 ]
               },
               {
+                "description": "`NewInvite`: a single-use code that lets one person create their own account on this hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "create_invite"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Invites`: the hub's signup mode and the account's codes nobody has used yet.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. The code stops working; an error when the account has no such unused code.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "A signed-out app's connectors, moved to the account on its first sign-in.",
                 "type": "object",
                 "properties": {
@@ -17783,6 +19601,109 @@
                   "cmd",
                   "machine",
                   "path"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
+              },
+              {
+                "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               }
             ]
@@ -19264,6 +21185,354 @@
               "tab",
               "text"
             ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            }
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
           }
         }
       }
@@ -19402,6 +21671,13 @@
           },
           "password": {
             "type": "string"
+          },
+          "invite": {
+            "description": "The invite code a hub in `invite` mode asks a new account for. Sign in ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -19420,6 +21696,13 @@
           },
           "password": {
             "type": "string"
+          },
+          "invite": {
+            "description": "The invite code a hub in `invite` mode asks a new account for. Sign in ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -22232,9 +24515,9 @@
         "type": "object",
         "properties": {
           "name": {
-            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
             "type": "string",
-            "default": "Orquestrador"
+            "default": "Orchestrator"
           },
           "host": {
             "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -22308,9 +24591,9 @@
         "type": "object",
         "properties": {
           "name": {
-            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
             "type": "string",
-            "default": "Orquestrador"
+            "default": "Orchestrator"
           },
           "host": {
             "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -22532,6 +24815,148 @@
             ]
           }
         ]
+      }
+    },
+    "Invites": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Invites",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/InviteView"
+            }
+          }
+        },
+        "required": [
+          "signup",
+          "pending"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          },
+          "InviteView": {
+            "description": "An invite code nobody has used yet, named by its first characters.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "expires_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "hint",
+              "created_at",
+              "expires_at"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Invites",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/InviteView"
+            }
+          }
+        },
+        "required": [
+          "signup",
+          "pending"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          },
+          "InviteView": {
+            "description": "An invite code nobody has used yet, named by its first characters.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "hint": {
+                "type": "string"
+              },
+              "created_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "expires_at": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "hint",
+              "created_at",
+              "expires_at"
+            ]
+          }
+        }
       }
     },
     "LinearAccount": {
@@ -23038,6 +25463,56 @@
         }
       }
     },
+    "NewInvite": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "NewInvite",
+        "description": "An invite code, shown this once: the hub keeps only its hash.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "expires_at"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "NewInvite",
+        "description": "An invite code, shown this once: the hub keeps only its hash.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "expires_at"
+        ]
+      }
+    },
     "Overview": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -23065,6 +25540,16 @@
               "$ref": "#/$defs/OverviewMachine"
             },
             "default": []
+          },
+          "sessions": {
+            "description": "Every session on the account's online machines, newest activity first; `waiting` is those\nthat wait on the user. Absent from a hub that predates the `sessions` tool.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Session"
+            }
           }
         },
         "required": [
@@ -23261,6 +25746,174 @@
               "online",
               "version"
             ]
+          },
+          "Session": {
+            "description": "One session of the account, as the global orchestrator's `sessions` tool lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The tab's id, which `read_session` takes.",
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "account": {
+                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "project": {
+                "$ref": "#/$defs/SessionProject"
+              },
+              "role": {
+                "$ref": "#/$defs/SessionRole"
+              },
+              "captain": {
+                "description": "The Capitão a worker works for: the first Capitão up the tabs that started it, else its\nproject's Capitão on that machine.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/SessionState"
+              },
+              "message": {
+                "description": "What it asks the user, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_activity": {
+                "description": "Unix seconds of its last message, else of its last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "account",
+              "project",
+              "role",
+              "state"
+            ]
+          },
+          "SessionProject": {
+            "description": "The project a session works in: the project its folder belongs to, a worktree's being its\nrepository's.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The key `projects` lists, or `<machine id>:<path>` for a folder the machine does not list.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "path"
+            ]
+          },
+          "SessionRole": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread the user opened, which no Capitão runs.",
+                "type": "string",
+                "const": "thread"
+              }
+            ]
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
+          "SessionState": {
+            "description": "What a session is doing, from what its machine knows of its tab.",
+            "oneOf": [
+              {
+                "description": "Its session runs a turn: status working, or a message from the global orchestrator started\nit before its first hook.",
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "description": "Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.",
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "type": "string",
+                "const": "waiting_on_input"
+              },
+              {
+                "description": "It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).",
+                "type": "string",
+                "const": "error"
+              },
+              {
+                "description": "Its session is not running. A message starts it again.",
+                "type": "string",
+                "const": "settled"
+              }
+            ]
           }
         }
       },
@@ -23290,6 +25943,16 @@
               "$ref": "#/$defs/OverviewMachine"
             },
             "default": []
+          },
+          "sessions": {
+            "description": "Every session on the account's online machines, newest activity first; `waiting` is those\nthat wait on the user. Absent from a hub that predates the `sessions` tool.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Session"
+            }
           }
         },
         "required": [
@@ -23481,6 +26144,174 @@
               "id",
               "name",
               "online"
+            ]
+          },
+          "Session": {
+            "description": "One session of the account, as the global orchestrator's `sessions` tool lists it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The tab's id, which `read_session` takes.",
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string"
+              },
+              "account": {
+                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "project": {
+                "$ref": "#/$defs/SessionProject"
+              },
+              "role": {
+                "$ref": "#/$defs/SessionRole"
+              },
+              "captain": {
+                "description": "The Capitão a worker works for: the first Capitão up the tabs that started it, else its\nproject's Capitão on that machine.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/SessionState"
+              },
+              "message": {
+                "description": "What it asks the user, or the error that stopped it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_activity": {
+                "description": "Unix seconds of its last message, else of its last status.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "account",
+              "project",
+              "role",
+              "state"
+            ]
+          },
+          "SessionProject": {
+            "description": "The project a session works in: the project its folder belongs to, a worktree's being its\nrepository's.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The key `projects` lists, or `<machine id>:<path>` for a folder the machine does not list.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "name",
+              "path"
+            ]
+          },
+          "SessionRole": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread the user opened, which no Capitão runs.",
+                "type": "string",
+                "const": "thread"
+              }
+            ]
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
+          "SessionState": {
+            "description": "What a session is doing, from what its machine knows of its tab.",
+            "oneOf": [
+              {
+                "description": "Its session runs a turn: status working, or a message from the global orchestrator started\nit before its first hook.",
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "description": "Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.",
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "type": "string",
+                "const": "waiting_on_input"
+              },
+              {
+                "description": "It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).",
+                "type": "string",
+                "const": "error"
+              },
+              {
+                "description": "Its session is not running. A message starts it again.",
+                "type": "string",
+                "const": "settled"
+              }
             ]
           }
         }
@@ -27356,6 +30187,80 @@
         }
       }
     },
+    "SignupInfo": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SignupInfo",
+        "description": "`GET /api/signup` answers this, before anyone signs in.",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          }
+        },
+        "required": [
+          "signup"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SignupInfo",
+        "description": "`GET /api/signup` answers this, before anyone signs in.",
+        "type": "object",
+        "properties": {
+          "signup": {
+            "$ref": "#/$defs/Signup"
+          }
+        },
+        "required": [
+          "signup"
+        ],
+        "$defs": {
+          "Signup": {
+            "description": "Who may create an account on a hub.",
+            "oneOf": [
+              {
+                "description": "Only the hub's first account.",
+                "type": "string",
+                "const": "first"
+              },
+              {
+                "description": "Anyone who reaches the hub.",
+                "type": "string",
+                "const": "open"
+              },
+              {
+                "description": "The first account, then whoever holds an invite code an account made.",
+                "type": "string",
+                "const": "invite"
+              }
+            ]
+          }
+        }
+      }
+    },
     "SlackAccount": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -27807,6 +30712,40 @@
               }
             ]
           },
+          "branch": {
+            "description": "The git branch of the conversation's last message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "description": "The last pull request the conversation opened or worked on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PrLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_message_at": {
+            "description": "Unix seconds of the conversation's last message.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "prompt_title": {
+            "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "role": {
             "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
             "anyOf": [
@@ -27832,6 +30771,23 @@
           "orchestrator_turn": {
             "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
             "type": "boolean"
+          },
+          "queued": {
+            "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "taste_chat": {
+            "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+            "type": "boolean"
+          },
+          "question": {
+            "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -27938,6 +30894,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -28072,6 +31046,40 @@
               }
             ]
           },
+          "branch": {
+            "description": "The git branch of the conversation's last message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "description": "The last pull request the conversation opened or worked on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PrLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_message_at": {
+            "description": "Unix seconds of the conversation's last message.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "prompt_title": {
+            "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "role": {
             "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
             "anyOf": [
@@ -28097,6 +31105,23 @@
           "orchestrator_turn": {
             "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
             "type": "boolean"
+          },
+          "queued": {
+            "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "taste_chat": {
+            "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+            "type": "boolean"
+          },
+          "question": {
+            "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -28197,6 +31222,24 @@
               }
             }
           },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
+          },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
@@ -28211,6 +31254,604 @@
                 "const": "worker"
               }
             ]
+          }
+        }
+      }
+    },
+    "Tastes": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Tastes",
+        "description": "An account's tastes.",
+        "type": "object",
+        "properties": {
+          "orchestrator": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "captains": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "projects": {
+            "description": "Each project's changes over `captains`, by repo.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/TastePatch"
+            },
+            "default": {}
+          }
+        },
+        "required": [
+          "orchestrator",
+          "captains",
+          "projects"
+        ],
+        "$defs": {
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Tastes",
+        "description": "An account's tastes.",
+        "type": "object",
+        "properties": {
+          "orchestrator": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "captains": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "projects": {
+            "description": "Each project's changes over `captains`, by repo.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/TastePatch"
+            },
+            "default": {}
+          }
+        },
+        "$defs": {
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -28610,6 +32251,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -28635,6 +32310,23 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -28741,6 +32433,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -28951,6 +32661,19 @@
                 "required": [
                   "kind",
                   "scopes"
+                ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -31060,6 +34783,40 @@
                   }
                 ]
               },
+              "branch": {
+                "description": "The git branch of the conversation's last message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pr": {
+                "description": "The last pull request the conversation opened or worked on.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PrLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_message_at": {
+                "description": "Unix seconds of the conversation's last message.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "prompt_title": {
+                "description": "The conversation's first prompt, its first line cut short. It stands in for `title`, which\na restored tab has lost until its next prompt.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "role": {
                 "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
                 "anyOf": [
@@ -31085,6 +34842,23 @@
               "orchestrator_turn": {
                 "description": "The tab is a Capitão running a turn that a message from the global orchestrator started,\nwhich it may not have reported yet: a message to it queues.",
                 "type": "boolean"
+              },
+              "queued": {
+                "description": "How many messages wait for the tab to go idle before they are typed into it: its workers'\nnews and the global orchestrator's requests.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "taste_chat": {
+                "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
+                "type": "boolean"
+              },
+              "question": {
+                "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -31184,6 +34958,24 @@
                 "format": "double"
               }
             }
+          },
+          "PrLink": {
+            "description": "A pull request a conversation opened or worked on.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url"
+            ]
           },
           "Role": {
             "description": "The part a session plays in its project's orchestration.",
@@ -31392,6 +35184,19 @@
                 "required": [
                   "kind",
                   "scopes"
+                ]
+              },
+              {
+                "description": "A taste chat's session changed the account's tastes. An open Way of working page reads them again.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tastes-changed"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -34092,6 +37897,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -34119,6 +37947,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -36158,14 +40011,61 @@
               "text"
             ]
           },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -38183,6 +42083,29 @@
                 ]
               },
               {
+                "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_taste_chat"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -38210,6 +42133,31 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_session"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
                 ]
               },
               {
@@ -40225,14 +44173,61 @@
               "text"
             ]
           },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",

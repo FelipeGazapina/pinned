@@ -11,8 +11,9 @@ use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
 use crate::workspace::{DiffScope, PrAction};
-use crate::stats::ThreadStats;
+use crate::stats::{PrLink, ThreadStats};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, RelayTo};
+use crate::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
@@ -110,6 +111,19 @@ pub struct TabView {
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
+    /// The git branch of the conversation's last message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The last pull request the conversation opened or worked on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrLink>,
+    /// Unix seconds of the conversation's last message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<u64>,
+    /// The conversation's first prompt, its first line cut short. It stands in for `title`, which
+    /// a restored tab has lost until its next prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_title: Option<String>,
     /// The tab is its project's orchestrator, or a worker the orchestrator started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
@@ -125,6 +139,18 @@ pub struct TabView {
     /// which it may not have reported yet: a message to it queues.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrator_turn: bool,
+    /// How many messages wait for the tab to go idle before they are typed into it: its workers'
+    /// news and the global orchestrator's requests.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued: u32,
+    /// The tab was opened from the Way of working page to adjust the account's tastes by talking,
+    /// and its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub taste_chat: bool,
+    /// What the session's last finished turn asked the user, read from its last reply. Cleared when
+    /// the next turn starts or fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -269,10 +295,25 @@ pub enum Call {
     /// The id of this machine's global orchestrator tab: the one already open, else a new one, not
     /// yet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.
     OpenGlobalOrchestrator,
+    /// The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with
+    /// the taste tools and whose first prompt says so. It opens in the project folder `path`, or
+    /// in the folder for threads without a project.
+    OpenTasteChat {
+        scope: crate::taste::TasteScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
     SetGlobalOrchestratorSettings { settings: global::Settings },
+    /// `reading::read` of the tab's session: its state and the last `items` items of its
+    /// conversation, 20 when not given, read from the end of its transcript however long it is.
+    ReadSession {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
     /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
     /// latest ones for an empty query.
     MemorySearch {
@@ -595,6 +636,10 @@ pub enum Call {
     ResetSync,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 fn skill_md() -> String {
     "SKILL.md".into()
 }
@@ -618,6 +663,7 @@ impl Call {
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
+                | Call::ReadSession { .. }
                 | Call::Workspace { .. }
                 | Call::ProjectHistory { .. }
                 | Call::Diff { .. }
@@ -792,6 +838,8 @@ pub enum MachineEvent {
     Update { status: Option<UpdateStatus> },
     /// Skills in these scopes changed on disk, by a save or a sync pull. An open Skills page lists again.
     SkillsChanged { scopes: Vec<crate::skills::Scope> },
+    /// A taste chat's session changed the account's tastes. An open Way of working page reads them again.
+    TastesChanged,
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -875,6 +923,12 @@ pub enum HubCall {
     RemoveMachine { id: MachineId },
     /// `PairCode`.
     PairCode,
+    /// `NewInvite`: a single-use code that lets one person create their own account on this hub.
+    CreateInvite,
+    /// `Invites`: the hub's signup mode and the account's codes nobody has used yet.
+    Invites,
+    /// `null`. The code stops working; an error when the account has no such unused code.
+    RevokeInvite { id: String },
     /// A signed-out app's connectors, moved to the account on its first sign-in.
     Import {
         store: Value,
@@ -923,6 +977,24 @@ pub enum HubCall {
     /// From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as
     /// `reading::read` answers them, with `project` set to `path`.
     ReadCaptain { machine: MachineId, path: String },
+    /// `taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it
+    /// starts a Capitão or the global orchestrator.
+    GetTastes,
+    /// `taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.
+    SetTaste { scope: TasteScope, patch: TastePatch },
+    /// `taste::Tastes`, once `field` of `scope` is back to what it inherits.
+    ResetTasteField { scope: TasteScope, field: TasteField },
+    /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
+    ImportTastes { tastes: Tastes },
+    /// From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on
+    /// the online machine that has that tab, with `id`, `machine` and `machine_name` set.
+    ReadSession {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1007,6 +1079,32 @@ pub struct PairCode {
     /// Unix seconds.
     pub expires_at: i64,
     pub command: String,
+}
+
+/// An invite code, shown this once: the hub keeps only its hash.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct NewInvite {
+    pub id: String,
+    pub code: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// An invite code nobody has used yet, named by its first characters.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct InviteView {
+    pub id: String,
+    pub hint: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Invites {
+    pub signup: crate::account::Signup,
+    pub pending: Vec<InviteView>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, schemars::JsonSchema)]
@@ -1165,10 +1263,17 @@ mod tests {
             session: Some("s1".into()),
             interrupted: false,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
+            branch: Some("felipe/forms".into()),
+            pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
+            last_message_at: Some(1_794_226_200),
+            prompt_title: Some("Fix the build".into()),
             role: None,
             spawned_by: None,
             orchestrator_global: false,
+            taste_chat: false,
             orchestrator_turn: false,
+            queued: 0,
+            question: None,
         }
     }
 
@@ -1195,10 +1300,25 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_carries_its_transcripts_branch_pr_and_last_message_and_an_older_tab_reads_without_them() {
+        let sent = serde_json::to_value(tab_view()).unwrap();
+        assert_eq!(
+            (&sent["branch"], &sent["pr"], &sent["last_message_at"]),
+            (&json!("felipe/forms"), &json!({ "number": 92, "url": "https://github.com/o/site/pull/92" }), &json!(1_794_226_200))
+        );
+        let mut older = sent;
+        for key in ["branch", "pr", "last_message_at", "prompt_title"] {
+            older.as_object_mut().unwrap().remove(key);
+        }
+        let read: TabView = serde_json::from_value(older).unwrap();
+        assert_eq!((read.branch, read.pr, read.last_message_at, read.prompt_title), (None, None, None, None));
+    }
+
+    #[test]
     fn global_orchestrator_calls_keep_their_wire_shape() {
         round_trip(
-            Call::Enqueue { path: "/w/site".into(), text: "Ship the form.".into(), request_id: "r-1".into(), sender: "Orquestrador".into(), busy: Some(BusyPolicy::Refuse) },
-            json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship the form.", "request_id": "r-1", "sender": "Orquestrador", "busy": "refuse" }),
+            Call::Enqueue { path: "/w/site".into(), text: "Ship the form.".into(), request_id: "r-1".into(), sender: "Orchestrator".into(), busy: Some(BusyPolicy::Refuse) },
+            json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship the form.", "request_id": "r-1", "sender": "Orchestrator", "busy": "refuse" }),
         );
         let bare: Call = serde_json::from_value(json!({ "cmd": "enqueue", "path": "/w/site", "text": "x", "request_id": "r-2" })).unwrap();
         assert_eq!(bare, Call::Enqueue { path: "/w/site".into(), text: "x".into(), request_id: "r-2".into(), sender: String::new(), busy: None });
@@ -1212,8 +1332,8 @@ mod tests {
             json!({ "cmd": "orchestrator_report", "request_id": "report-1", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } }),
         );
         round_trip(
-            MachineFrame::Call { id: 9, call: HubCall::Relay { request_id: "r-1".into(), to: RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orquestrador".into(), busy: None } } },
-            json!({ "type": "call", "id": 9, "call": { "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": "m2", "path": "/w/site", "text": "Ship it.", "sender": "Orquestrador" } } }),
+            MachineFrame::Call { id: 9, call: HubCall::Relay { request_id: "r-1".into(), to: RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orchestrator".into(), busy: None } } },
+            json!({ "type": "call", "id": 9, "call": { "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": "m2", "path": "/w/site", "text": "Ship it.", "sender": "Orchestrator" } } }),
         );
         round_trip(
             MachineFrame::Call { id: 10, call: HubCall::Relay { request_id: "report-1".into(), to: RelayTo::Orchestrator { report } } },
@@ -1224,6 +1344,12 @@ mod tests {
             MachineFrame::Call { id: 11, call: HubCall::ReadCaptain { machine: "m2".into(), path: "/w/site".into() } },
             json!({ "type": "call", "id": 11, "call": { "cmd": "read_captain", "machine": "m2", "path": "/w/site" } }),
         );
+        round_trip(
+            MachineFrame::Call { id: 12, call: HubCall::ReadSession { tab: "tab-2b-7".into(), machine: None, items: Some(5) } },
+            json!({ "type": "call", "id": 12, "call": { "cmd": "read_session", "tab": "tab-2b-7", "items": 5 } }),
+        );
+        let bare: Call = serde_json::from_value(json!({ "cmd": "read_session", "tab": "tab-2b-7" })).unwrap();
+        assert_eq!(bare, Call::ReadSession { tab: "tab-2b-7".into(), items: None });
     }
 
     #[test]
@@ -1396,6 +1522,8 @@ mod tests {
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
+                "branch": "felipe/forms", "pr": { "number": 92, "url": "https://github.com/o/site/pull/92" }, "last_message_at": 1794226200,
+                "prompt_title": "Fix the build",
             }] }),
         );
         round_trip(
@@ -1451,6 +1579,19 @@ mod tests {
         match serde_json::from_value::<HubCall>(before_vercel).unwrap() {
             HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
             _ => panic!("not an import"),
+        }
+        round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(
+            HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
+            json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),
+        );
+        round_trip(
+            HubCall::ResetTasteField { scope: TasteScope::Captains, field: TasteField::HardModel },
+            json!({ "cmd": "reset_taste_field", "scope": { "kind": "captains" }, "field": "hard_model" }),
+        );
+        match serde_json::from_value::<HubCall>(json!({ "cmd": "import_tastes", "tastes": { "projects": { "github.com/acme/site": { "parallel": 5 } } } })).unwrap() {
+            HubCall::ImportTastes { tastes } => assert_eq!(serde_json::to_value(tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } })),
+            _ => panic!("not an import of tastes"),
         }
     }
 

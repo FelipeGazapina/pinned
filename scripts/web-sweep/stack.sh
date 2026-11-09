@@ -7,7 +7,8 @@
 #
 # SWEEP_DIR (default $TMPDIR/pinned-web-sweep) holds every file; SWEEP_PG_PORT (5497) and
 # SWEEP_HUB_PORT (8797) pick the ports; CARGO runs cargo (default `cargo`). Nothing outside
-# SWEEP_DIR is written: the node runs with HOME set inside it.
+# SWEEP_DIR is written: the node runs with HOME set inside it. SWEEP_SIGNUP (open) is the hub's
+# --signup mode; the stack's account is the hub's first, so it needs no invite code.
 #
 # SWEEP_REAL_CLAUDE=<path to claude> runs that claude for every OpenCode Go session, against
 # mock-opencode-go's Messages endpoint; every other session keeps fake-claude.
@@ -24,7 +25,7 @@ PASSWORD="sweep password 1"
 SERVER=${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned-server
 
 stop() {
-  for name in node hub go; do
+  for name in node node-b hub go; do
     [ -f "$DIR/$name.pid" ] && kill "$(cat "$DIR/$name.pid")" 2>/dev/null || true
     rm -f "$DIR/$name.pid"
   done
@@ -53,7 +54,7 @@ start() {
   psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d postgres -qc "create database pinned"
 
   "$SERVER" hub --db "postgres://pinned@127.0.0.1:$PG_PORT/pinned" --listen "127.0.0.1:$HUB_PORT" --ui "$REPO/ui" \
-    --downloads "$DIR/downloads" --key-file "$DIR/hub.key" --public-url "$HUB" --signup open >"$DIR/hub.log" 2>&1 &
+    --downloads "$DIR/downloads" --key-file "$DIR/hub.key" --public-url "$HUB" --signup "${SWEEP_SIGNUP:-open}" >"$DIR/hub.log" 2>&1 &
   echo $! >"$DIR/hub.pid"
   wait_for "curl -fs $HUB/" hub
 

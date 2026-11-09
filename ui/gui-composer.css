@@ -80,8 +80,8 @@
 #tag-popover .about { font-size: 12px; color: var(--g-muted); }
 #tag-popover .about .off { opacity: 0.55; }
 #tag-popover .state { flex: none; font-size: 12px; color: var(--g-muted); }
-#tag-popover .state.trabalhando { color: var(--g-warning); }
-#tag-popover .state.livre { color: var(--g-success); }
+#tag-popover .state.working { color: var(--g-warning); }
+#tag-popover .state.idle { color: var(--g-success); }
 #tag-popover .none { margin: 0; padding: 8px 10px; font-size: 13px; color: var(--g-muted); }
 
 #tag-route { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }

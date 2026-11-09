@@ -11,8 +11,9 @@ use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::sync;
+use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
-use pinned_core::wire::{AccountView, AgentProject, AgentView, MachineView};
+use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -32,8 +33,15 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   name text not null, os text not null, token_hash bytea unique not null,
   created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
 alter table machines add column if not exists version text not null default '';
+-- Null until the account first sets or imports its tastes.
+alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
+-- A code one account made that lets one person create their own account, on a hub in invite mode.
+create table if not exists invites (id uuid primary key, code_hash bytea unique not null,
+  account uuid not null references accounts on delete cascade, hint text not null,
+  created_at timestamptz not null default now(), expires_at timestamptz not null,
+  used_by uuid references accounts on delete set null, used_at timestamptz);
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
   path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
   primary key (account, project, path));
@@ -78,6 +86,7 @@ const SYNC_QUOTA: i64 = 1 << 30;
 
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
+const INVITE_GROUPS: usize = 4;
 /// A login unused this long stops working; every use pushes it back.
 const LOGIN_IDLE_DAYS: i32 = 90;
 
@@ -135,6 +144,25 @@ pub fn hash(token: &str) -> Vec<u8> {
 
 pub fn pair_code() -> String {
     (0..CODE_LEN).map(|_| CODE_ALPHABET[OsRng.next_u32() as usize % CODE_ALPHABET.len()] as char).collect()
+}
+
+/// A fresh invite code, such as `K7QM-2XRP-9HTB-WNCE`.
+pub fn invite_code() -> String {
+    (0..INVITE_GROUPS).map(|_| pair_code()[..4].to_owned()).collect::<Vec<_>>().join("-")
+}
+
+/// The hash an invite code is kept as. Case, spaces and dashes don't matter.
+pub fn invite_hash(code: &str) -> Vec<u8> {
+    hash(&code.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect::<String>())
+}
+
+/// What spending an invite code on a new account came to.
+pub enum Invited {
+    Created(AccountView),
+    /// The code is unknown, used, revoked or expired. The account was not made.
+    NoInvite,
+    /// The code is good but the email is taken. The code stays unused.
+    EmailTaken,
 }
 
 pub struct MachineRow {
@@ -582,9 +610,10 @@ impl Db {
         Ok(n == 1)
     }
 
-    /// The row, or what is left of one this hub cannot read. `None` when no row has this id.
-    pub async fn box_by_id(&self, id: &str) -> Result<Option<Result<BoxRow, Remains>>, String> {
-        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where id = $1"), &[&id]).await.map_err(err)?;
+    /// The account's row, or what is left of one this hub cannot read. `None` when the account has
+    /// no row with this id. The id comes from the account's settings, which its client writes.
+    pub async fn box_by_id(&self, account: Uuid, id: &str) -> Result<Option<Result<BoxRow, Remains>>, String> {
+        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where id = $1 and account = $2"), &[&id, &account]).await.map_err(err)?;
         Ok(row.as_ref().map(box_row))
     }
 
@@ -628,6 +657,63 @@ impl Db {
         }
     }
 
+    pub async fn create_invite(&self, account: Uuid) -> Result<NewInvite, String> {
+        let client = self.client().await?;
+        client.execute("delete from invites where used_at is null and expires_at < now()", &[]).await.map_err(err)?;
+        let (id, code) = (Uuid::new_v4(), invite_code());
+        let row = client
+            .query_one(
+                "insert into invites (id, code_hash, account, hint, expires_at) values ($1, $2, $3, $4, now() + interval '7 days')
+                 returning extract(epoch from expires_at)::bigint",
+                &[&id, &invite_hash(&code), &account, &code[..4].to_owned()],
+            )
+            .await
+            .map_err(err)?;
+        Ok(NewInvite { id: id.to_string(), code, expires_at: row.get(0) })
+    }
+
+    /// The account's codes nobody has used yet, newest first.
+    pub async fn invites(&self, account: Uuid) -> Result<Vec<InviteView>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "select id, hint, extract(epoch from created_at)::bigint, extract(epoch from expires_at)::bigint from invites
+                 where account = $1 and used_at is null and expires_at > now() order by created_at desc",
+                &[&account],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| InviteView { id: r.get::<_, Uuid>(0).to_string(), hint: r.get(1), created_at: r.get(2), expires_at: r.get(3) }).collect())
+    }
+
+    /// False when the account has no unused code `id`.
+    pub async fn revoke_invite(&self, account: Uuid, id: Uuid) -> Result<bool, String> {
+        let deleted = self.client().await?.execute("delete from invites where id = $1 and account = $2 and used_at is null", &[&id, &account]).await.map_err(err)?;
+        Ok(deleted == 1)
+    }
+
+    /// Makes the account and spends the code in one statement, so two sign ups can't share a code
+    /// and a taken email leaves the code unused.
+    pub async fn create_invited_account(&self, code_hash: &[u8], email: &str, password_hash: &str) -> Result<Invited, String> {
+        let id = Uuid::new_v4();
+        let row = self
+            .client().await?
+            .query_one(
+                "with invite as (select id from invites where code_hash = $1 and used_at is null and expires_at > now() for update),
+                 made as (insert into accounts (id, email, password_hash) select $2, $3, $4 from invite on conflict (email) do nothing returning id),
+                 spent as (update invites set used_by = made.id, used_at = now() from made, invite where invites.id = invite.id returning invites.id)
+                 select exists (select 1 from invite), exists (select 1 from made), exists (select 1 from spent)",
+                &[&code_hash, &id, &email, &password_hash],
+            )
+            .await
+            .map_err(err)?;
+        Ok(match (row.get(0), row.get(1)) {
+            (false, _) => Invited::NoInvite,
+            (true, false) => Invited::EmailTaken,
+            (true, true) => Invited::Created(AccountView { id: id.to_string(), email: email.to_owned() }),
+        })
+    }
+
     /// Spends a pairing code: the account it was made for, or None when it is unknown, used or expired.
     pub async fn take_pair_code(&self, code: &str) -> Result<Option<(Uuid, String)>, String> {
         let row = self
@@ -656,6 +742,24 @@ impl Db {
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+    }
+
+    pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {
+        let row = self.client().await?.query_one("select tastes from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let stored: Option<Value> = row.get(0);
+        stored.map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))).transpose()
+    }
+
+    pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
+        let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
+        self.client().await?.execute("update accounts set tastes = $2 where id = $1", &[&account, &tastes]).await.map_err(err).map(drop)
+    }
+
+    /// Stores `tastes` only when the account has none, and answers whether it did.
+    pub async fn import_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<bool, String> {
+        let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
+        let updated = self.client().await?.execute("update accounts set tastes = $2 where id = $1 and tastes is null", &[&account, &tastes]).await.map_err(err)?;
+        Ok(updated == 1)
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {

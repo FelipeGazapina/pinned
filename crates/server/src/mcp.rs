@@ -745,10 +745,17 @@ mod tests {
             session: None,
             interrupted: false,
             stats: None,
+            branch: None,
+            pr: None,
+            last_message_at: None,
+            prompt_title: None,
             role: None,
             spawned_by: None,
             orchestrator_global: false,
+            taste_chat: false,
             orchestrator_turn: false,
+            queued: 0,
+            question: None,
         }
     }
 
