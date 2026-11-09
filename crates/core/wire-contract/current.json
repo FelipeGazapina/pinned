@@ -2983,9 +2983,9 @@
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -9269,9 +9269,9 @@
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -22244,9 +22244,9 @@
         "type": "object",
         "properties": {
           "name": {
-            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
             "type": "string",
-            "default": "Orquestrador"
+            "default": "Orchestrator"
           },
           "host": {
             "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -22320,9 +22320,9 @@
         "type": "object",
         "properties": {
           "name": {
-            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+            "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
             "type": "string",
-            "default": "Orquestrador"
+            "default": "Orchestrator"
           },
           "host": {
             "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -36199,9 +36199,9 @@
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
@@ -40266,9 +40266,9 @@
             "type": "object",
             "properties": {
               "name": {
-                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orquestrador] `.",
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
                 "type": "string",
-                "default": "Orquestrador"
+                "default": "Orchestrator"
               },
               "host": {
                 "description": "This machine hosts the account's global orchestrator. One machine of the account does.",

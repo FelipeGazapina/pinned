@@ -167,14 +167,14 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 .usage .usage-warn span, .pulls .pr-warn span { flex: 1; }
 .usage .usage-warn .i, .pulls .pr-warn .i { flex: none; }
 
-/* The account's projects page: every project of every machine, its Capitão and its workers. */
+/* The account's projects page: every project of every machine, its Captain and its workers. */
 .gp-list { display: flex; flex-direction: column; gap: 10px; }
 .gp-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--g-border); border-radius: 12px; }
 .gp-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .gp-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gp-state { flex: none; padding: 1px 9px; border: 1px solid var(--g-border); border-radius: 999px; color: var(--g-muted); font-size: 12px; }
-.gp-state.trabalhando { color: var(--g-info); border-color: rgb(var(--g-info-rgb) / 0.4); }
-.gp-state.livre { color: var(--g-success); border-color: color-mix(in srgb, var(--g-success) 40%, transparent); }
+.gp-state.working { color: var(--g-info); border-color: rgb(var(--g-info-rgb) / 0.4); }
+.gp-state.idle { color: var(--g-success); border-color: color-mix(in srgb, var(--g-success) 40%, transparent); }
 .gp-repo { color: var(--g-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gp-side { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .gp-machine { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px; border: 1px solid var(--g-input); border-radius: 999px;
@@ -182,8 +182,8 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 .gp-machine:hover:not(:disabled) { background: var(--g-hover); }
 .gp-machine:disabled { opacity: 0.55; }
 .gp-machine .gp-captain { font-size: 11px; color: var(--g-muted); }
-.gp-machine .gp-captain.trabalhando { color: var(--g-info); }
-.gp-machine .gp-captain.livre { color: var(--g-success); }
+.gp-machine .gp-captain.working { color: var(--g-info); }
+.gp-machine .gp-captain.idle { color: var(--g-success); }
 .gp-machine .gp-count { font-size: 11px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 .gp-machine .gp-count::before { content: "· "; }
 .gp-workers { margin-left: auto; color: var(--g-muted); font-size: 12px; }

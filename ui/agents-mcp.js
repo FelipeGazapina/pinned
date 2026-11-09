@@ -4,7 +4,7 @@
  * the agent in. The agent never sees the account's login. */
 const AGENT_SCOPES = {
   sessions: "Start coding sessions in the projects you pick, send them messages and read them",
-  orchestrator: "Message the Capitão of the projects you pick and read its replies",
+  orchestrator: "Message the Captain of the projects you pick and read its replies",
 };
 const AGENT_REQUEST_KEY = "pinned-agent-request";
 
@@ -136,7 +136,7 @@ function externalAgentsCardHtml() {
       <p class="error" id="agents-error">${esc(agentsUi.error)}</p>`;
   }
   return `<div class="card" id="external-agents">
-      <div class="card-head"><span class="logo agents">⇄</span><div><b>External agents (MCP)</b><div class="hint">Let an agent such as Grok start coding sessions or talk to a project's Capitão.</div></div>
+      <div class="card-head"><span class="logo agents">⇄</span><div><b>External agents (MCP)</b><div class="hint">Let an agent such as Grok start coding sessions or talk to a project's Captain.</div></div>
         <span class="badge" data-on="${count > 0}">${count ? `${count} connected` : "Not connected"}</span></div>
       ${body}
     </div>`;

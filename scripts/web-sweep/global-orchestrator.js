@@ -105,7 +105,7 @@ function seed() {
   await page.evaluate(() => openSettings());
   await waitFor("the Global orchestrator section", () => page.evaluate(() => !!document.getElementById("global-orchestrator-settings")));
   await waitFor("the section's notes about the machines that cannot take it", () =>
-    page.evaluate(() => /Old Mac precisa atualizar o pinned/.test(document.getElementById("go-notes").textContent) && /Linux VPS está offline/.test(document.getElementById("go-notes").textContent)));
+    page.evaluate(() => /Old Mac needs to update pinned/.test(document.getElementById("go-notes").textContent) && /Linux VPS is offline/.test(document.getElementById("go-notes").textContent)));
   const hosts = await page.evaluate(() => [...document.querySelectorAll("#go-host .go-host")].map((b) => `${b.textContent}:${b.dataset.machine}:${b.disabled ? "off" : "on"}`));
   console.log("host chips:", JSON.stringify(hosts));
   for (const n of nodes) check(hosts.includes(`${n.name}:${n.id}:on`), `no online ${n.name} chip: ${hosts}`);
@@ -115,7 +115,7 @@ function seed() {
     window.__goEvent = null;
     document.addEventListener("global-orchestrator-settings", (e) => (window.__goEvent = e.detail));
   });
-  await page.click('#global-orchestrator-settings .go-preset[data-name="Almirante"]');
+  await page.click('#global-orchestrator-settings .go-preset[data-name="Admiral"]');
   // Host the orchestrator on whichever node does not host it now, so the save moves it.
   const before = await page.evaluate(() => document.querySelector("#go-host .go-host.active")?.dataset.machine ?? null);
   const chosen = nodes.find((n) => n.id !== before) ?? nodes[1];
@@ -130,12 +130,12 @@ function seed() {
   console.log("highlighted host chip:", JSON.stringify(highlighted), "read back host:true on:", JSON.stringify(hosted));
   check(JSON.stringify(hosted) === JSON.stringify([chosen.name]), `host:true on ${JSON.stringify(hosted)}, chose ${chosen.name}`);
   check(JSON.stringify(highlighted) === JSON.stringify(hosted), `highlighted chip ${JSON.stringify(highlighted)} is not the host ${JSON.stringify(hosted)}`);
-  check(perNode.every((s) => s.name === "Almirante"), `names: ${JSON.stringify(perNode)}`);
+  check(perNode.every((s) => s.name === "Admiral"), `names: ${JSON.stringify(perNode)}`);
   const hostSettings = perNode[nodes.indexOf(chosen)];
   check(JSON.stringify(await page.evaluate(() => window.__goEvent)) === JSON.stringify(hostSettings), `event detail: ${JSON.stringify(await page.evaluate(() => window.__goEvent))}`);
 
-  // Every option reads whole in its select, and the save status sits inside the section, at the
-  // desktop width and at a phone's.
+  // Every option reads whole in its select, every button's label inside the button, and the save
+  // status inside the section, at the desktop width and at a phone's.
   const fits = () =>
     page.evaluate(() => {
       const section = document.getElementById("global-orchestrator-settings");
@@ -150,6 +150,10 @@ function seed() {
       const box = section.getBoundingClientRect();
       const status = document.getElementById("go-status").getBoundingClientRect();
       if (status.right > box.right || status.left < box.left || status.right > document.documentElement.clientWidth) cut.push(`Saved at ${status.left}-${status.right}, section ${box.left}-${box.right}`);
+      for (const button of section.querySelectorAll("button")) {
+        const edge = button.getBoundingClientRect().right;
+        if (button.scrollWidth > button.clientWidth + 1 || edge > box.right + 1) cut.push(`"${button.textContent}" needs ${button.scrollWidth}px, has ${button.clientWidth}px, ends at ${edge} of ${box.right}`);
+      }
       return cut;
     });
   const desktopCut = await fits();
@@ -216,7 +220,7 @@ function seed() {
   await page.click("#go-memory");
   await waitFor("the global memory panel", () => page.evaluate(() => document.querySelector('#panel [data-panel="memory"]') && document.querySelector("#panel .memory-add")));
   const memoryTitle = await page.evaluate(() => document.querySelector('#panel [data-panel="memory"]').getAttribute("title"));
-  check(/Memória do Almirante/.test(memoryTitle), `panel title: ${memoryTitle}`);
+  check(/Admiral's memory/.test(memoryTitle), `panel title: ${memoryTitle}`);
   await page.fill("#panel .memory-add [name=title]", "Deploy pela manhã");
   await page.fill("#panel .memory-add [name=text]", "O orquestrador manda deploys sempre pela manhã, nunca à noite.");
   await page.click("#panel .memory-add button[type=submit]");

@@ -37,12 +37,12 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 `global_orchestrator::Settings`, schema name `GlobalOrchestratorSettings`. One file per machine, `<config dir>/global-orchestrator.json`, like `orchestration.json`.
 
 ```json
-{ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
+{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | string | `"Orquestrador"` | Chat name and message prefix. UI options: Orquestrador, Almirante, Comandante. `cleaned()` trims it, drops `[` `]` and control characters, caps it at 40 characters, and puts the default back when blank. |
+| `name` | string | `"Orchestrator"` | Chat name and message prefix. UI options: Orchestrator, Admiral, Commander. `cleaned()` trims it, drops `[` `]` and control characters, caps it at 40 characters, and puts the default back when blank. |
 | `host` | bool | `false` | This machine hosts the account's global orchestrator. One machine per account. The UI-settings unit keeps it unique across machines. |
 | `busy` | `"queue"` \| `"refuse"` | `"queue"` | `BusyPolicy`. Refuse answers `ocupado` instead of queueing. |
 | `reports` | `"auto"` \| `"tool_only"` | `"auto"` | `ReportPolicy`. Auto reports at the end of every turn that an orchestrator message started, plus `tell_orchestrator`. |
@@ -214,7 +214,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 
 ## 8. Text formats
 
-**Message to a Capitão.** `[<sender>] <text>`, for example `[Orquestrador] Ship the form.` The sender is the cleaned settings name, so it has no brackets.
+**Message to a Capitão.** `[<sender>] <text>`, for example `[Orchestrator] Ship the form.` The sender is the cleaned settings name, so it has no brackets.
 
 **Report to the global orchestrator** (`CaptainReport::line`):
 
@@ -223,7 +223,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 ```
 
 - The project and machine names have `(`, `)`, `[`, `]`, `:` and control characters replaced by spaces. An unknown machine id is `-`. The text may span lines.
-- UI regex for the header: `/^\[pinned\] Capitão ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /m`. The machine id and tab id link to the thread (`machine` + `tab`).
+- UI regex for the header: `/^\[pinned\] Capitão ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /m`. The machine id and tab id link to the thread (`machine` + `tab`). The UI also reads `Captain` in place of `Capitão`; the agents keep writing `Capitão`.
 - One typed prompt may hold several reports, joined by the queue with `\n`. Each report starts at a line that matches the header and runs to the next header line or the end.
 
 **Quick replies.** The orchestrator's prompt (node-local unit) ends a reply that asks Felipe something with a last line:
@@ -232,7 +232,7 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 Opções: Sim | Ainda não
 ```
 
-- UI: when the last non-empty line of an assistant message matches `/^Opções: (.+)$/`, split the capture on ` | `, hide the line, and render one button per option. A click types that option's text as the user's message.
+- UI: when the last non-empty line of an assistant message matches `/^Opções: (.+)$/`, split the capture on ` | `, hide the line, and render one button per option. A click types that option's text as the user's message. `Options:` in place of `Opções:` reads the same; the agents keep writing `Opções:`.
 
 ## 9. Seams and the unit that filled each
 

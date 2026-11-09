@@ -6934,18 +6934,18 @@ while True:
         let tab = idle_captain(&m, &path, &file);
 
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
-        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+        assert_eq!(typed(&file, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r");
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })), "a repeat answers the first outcome");
         assert_eq!(enqueue(&m, &dir.display().to_string(), "Other.", "r-1"), Err("request_id r-1 was already used for another message".into()));
 
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "typed over the turn the first message started");
         assert_eq!(enqueue(&m, &path, "And the docs.", "r-3"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
-        assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
+        assert_eq!(std::fs::read(&file).unwrap().len(), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r".len(), "a queued message was typed while the Capitão worked");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
         m.record_event(hook(&tab, AgentStatus::Done));
-        let both = b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r\x1b[200~[Orquestrador] Then the footer.\n[Orquestrador] And the docs.\x1b[201~\r";
+        let both = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r\x1b[200~[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-2", "r-3"], "the drained messages started the next turn");
@@ -6971,7 +6971,7 @@ while True:
         assert_eq!(enqueue(&m, &path, "Check the build.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
         assert!(m.sent.lock().unwrap().in_flight(&project).is_empty());
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
-        assert_eq!(ask(&sock, &done), Ok("[Orquestrador] Check the build.".into()));
+        assert_eq!(ask(&sock, &done), Ok("[Orchestrator] Check the build.".into()));
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7006,12 +7006,12 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orquestrador] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
 
         let api = dir.join("api");
@@ -7021,7 +7021,7 @@ while True:
         m.start_claude(&fresh, 80, 24).unwrap();
         started(&claude, &fresh);
         assert_eq!(enqueue(&m, &api_path, "- Fix the README.", "r-3"), Ok(json!({ "outcome": "iniciado", "tab": fresh })));
-        assert_eq!(started(&claude, &fresh)[7..9], ["[Orquestrador] - Fix the README.", "--append-system-prompt"]);
+        assert_eq!(started(&claude, &fresh)[7..9], ["[Orchestrator] - Fix the README.", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7040,7 +7040,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tab = m.restore_tabs().remove(0);
         assert_eq!(enqueue(&m, &path, "Where are we?", "r-1"), Ok(json!({ "outcome": "iniciado", "tab": tab })));
-        assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orquestrador] Where are we?", "--append-system-prompt"]);
+        assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orchestrator] Where are we?", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7061,7 +7061,7 @@ while True:
         let restored = after.restore_tabs().remove(0);
         assert_ne!(restored, tab);
         assert_eq!(enqueue(&after, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
-        assert_eq!(after.delegates.claim_notice(&restored).map(|(text, _)| text), Some("[Orquestrador] Ship it.".into()), "the queue did not follow the Capitão's conversation");
+        assert_eq!(after.delegates.claim_notice(&restored).map(|(text, _)| text), Some("[Orchestrator] Ship it.".into()), "the queue did not follow the Capitão's conversation");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7094,7 +7094,7 @@ while True:
         let send = format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#);
         let sent: Value = serde_json::from_str(&tool(&global, &send).unwrap()).unwrap();
         assert_eq!(sent["outcome"], json!("iniciado"));
-        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orquestrador] Ship the form.");
+        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orchestrator] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
         assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into()));
         assert_eq!(tool(&global, r#""name":"delegate","task":"Fix it.""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
@@ -7129,7 +7129,7 @@ while True:
             _ => Err("not this test's".into()),
         }));
         let relay = |request_id: &str, machine: &str, path: &str| {
-            json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orquestrador", "busy": "queue" } })
+            json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orchestrator", "busy": "queue" } })
         };
 
         assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
@@ -7141,7 +7141,7 @@ while True:
 
         m.set_hub_id("m-mini".into());
         let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
-        assert_eq!(started(&claude, here.tab())[7], "[Orquestrador] Ship it.");
+        assert_eq!(started(&claude, here.tab())[7], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
 
         let checkout = |machine: &str, name: &str, online: bool| json!({ "machine": machine, "machine_name": name, "online": online, "path": "/w/site", "captain": "livre" });
@@ -7208,7 +7208,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orquestrador", &crate::account::hostname())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orchestrator", &crate::account::hostname())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7228,7 +7228,7 @@ while True:
         let folder = dir.join("config/accounts/work/projects/-site");
         std::fs::create_dir_all(&folder).unwrap();
         let lines = [
-            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orquestrador] Ship the form."}}"#.to_owned(),
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-09T10:00:00Z","message":{"content":"[Orchestrator] Ship the form."}}"#.to_owned(),
             json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-11-09T10:05:00Z", "message": { "content": [{ "type": "text", "text": text }] } }).to_string(),
         ];
         std::fs::write(folder.join(format!("{session}.jsonl")), lines.map(|l| l + "\n").concat()).unwrap();
@@ -7261,14 +7261,14 @@ while True:
         let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
         let capitao = sent["tab"].as_str().unwrap().to_owned();
         assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-        assert_eq!(started(&claude, &capitao)[7], "[Orquestrador] Ship the form.");
+        assert_eq!(started(&claude, &capitao)[7], "[Orchestrator] Ship the form.");
         assert_eq!(overview(), projects("trabalhando", &capitao), "the message started its turn before any hook said so");
 
         said(&dir, "s1", "The form validates now. PR #12 is open.");
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
         ask(&sock, &done).unwrap();
         let report = format!("[pinned] Capitão site ({host}) [m-mini {capitao}]: The form validates now. PR #12 is open.");
-        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orquestrador", &host)], "the report started the global orchestrator");
+        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orchestrator", &host)], "the report started the global orchestrator");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
 
         assert_eq!(overview(), projects("livre", &capitao));
@@ -7276,7 +7276,7 @@ while True:
 
         let read: Value = serde_json::from_str(&tool(&format!(r#""name":"read_captain","project":"m-mini:{path}""#)).unwrap()).unwrap();
         let conversation = json!([
-            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orquestrador] Ship the form." },
+            { "kind": "user", "at": "2026-11-09T10:00:00Z", "text": "[Orchestrator] Ship the form." },
             { "kind": "text", "at": "2026-11-09T10:05:00Z", "text": "The form validates now. PR #12 is open." },
         ]);
         assert_eq!((&read["state"], &read["project"], &read["conversation"]["items"]), (&json!("done"), &json!(path), &conversation));
@@ -7360,7 +7360,7 @@ while True:
         m.record_event(hook(&tab, AgentStatus::NeedsInput));
         assert_eq!(state(), global::CaptainState::Idle, "the idle notification a minute after the turn");
         assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
-        assert_eq!(typed(&file, b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orquestrador] Ship the form.\x1b[201~\r");
+        assert_eq!(typed(&file, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"), b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r");
 
         m.record_event(hook(&tab, AgentStatus::Working));
         m.record_event(hook(&tab, AgentStatus::NeedsInput));
@@ -7394,7 +7394,7 @@ while True:
     fn global_orchestrator_settings_are_saved_on_the_machine() {
         let dir = temp("global-settings");
         let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
-        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orquestrador", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
+        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
         let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
         let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
         assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
@@ -7417,7 +7417,7 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
@@ -7465,7 +7465,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orquestrador", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);

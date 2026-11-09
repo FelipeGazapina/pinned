@@ -284,15 +284,15 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("the turn to end", () => page.evaluate(() => document.getElementById("thread").innerText.includes("echo:")));
     s = await page.evaluate(state);
     console.log("reports:", JSON.stringify({ fold: s.fold, rows: s.reportRows }));
-    check(s.fold === "2 atualizações · Capitão site, Capitão pinned", `fold: ${s.fold}`);
+    check(s.fold === "2 updates · Captain site, Captain pinned", `fold: ${s.fold}`);
     check(s.reportRows.length === 0, "the reports show expanded while folded");
     await page.screenshot(path.join(SCREENS, "global-chat-reports-folded.png"));
 
     await page.click(".report-fold");
     await waitFor("the reports to expand", () => page.evaluate(() => document.querySelectorAll(".report-row").length === 2));
     s = await page.evaluate(state);
-    check(s.reportRows[0].startsWith("Capitão site · sweep-node") && s.reportRows[0].includes("Publiquei a v2"), `site row: ${s.reportRows[0]}`);
-    check(s.reportRows[1].startsWith("Capitão pinned · sweep-node") && s.reportRows[1].includes("Fechei o PR #12"), `pinned row: ${s.reportRows[1]}`);
+    check(s.reportRows[0].startsWith("Captain site · sweep-node") && s.reportRows[0].includes("Publiquei a v2"), `site row: ${s.reportRows[0]}`);
+    check(s.reportRows[1].startsWith("Captain pinned · sweep-node") && s.reportRows[1].includes("Fechei o PR #12"), `pinned row: ${s.reportRows[1]}`);
     await page.screenshot(path.join(SCREENS, "global-chat-reports-open.png"));
 
     await page.click(".report-row .who");
@@ -330,7 +330,7 @@ const sendText = (page, text) => page.evaluate((t) => {
 
     await page.evaluate((k) => activate(tabByKey(k)), keys.site);
     await sendText(page, "/question");
-    await waitFor("Esperando você", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
+    await waitFor("Waiting on you", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
     s = await page.evaluate(state);
     console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
     check(s.waitingHead === "Waiting on you 1", `head: ${s.waitingHead}`);

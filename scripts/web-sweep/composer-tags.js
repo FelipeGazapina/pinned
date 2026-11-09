@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drives #projeto / @máquina in the global orchestrator's composer on the real page, by keyboard.
+// Drives #project / @machine in the global orchestrator's composer on the real page, by keyboard.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/composer-tags.js
@@ -32,7 +32,7 @@ const waitFor = async (what, fn, timeout = 20000) => {
 };
 
 // Runs in the page: the account's other machines and every machine's projects, the global
-// orchestrator tab, and a working Capitão on site (a tab opened in site's folder).
+// orchestrator tab, and a working Captain on site (a tab opened in site's folder).
 function seed({ node, keys }) {
   const work = tabs.find((t) => t.key === keys.orch).view.cwd.replace(/\/[^/]+$/, "");
   const fake = (id, name, online, projects) => {
@@ -107,9 +107,9 @@ const state = () => ({
   await page.keyboard.type("no #si");
   let s = await read();
   console.log("typed 'no #si':", JSON.stringify(s));
-  check(s.popover?.startsWith("Projetos"), "# did not open the project list");
-  check(/site\ngithub.com\/felipe\/site · sweep-node · MacBook\ntrabalhando/.test(s.popover), `site row: ${s.popover}`);
-  check(/sistema-notas\nsem remote · sweep-node\nnenhum/.test(s.popover), `sistema-notas row: ${s.popover}`);
+  check(s.popover?.startsWith("Projects"), "# did not open the project list");
+  check(/site\ngithub.com\/felipe\/site · sweep-node · MacBook\nworking/.test(s.popover), `site row: ${s.popover}`);
+  check(/sistema-notas\nno remote · sweep-node\nnone/.test(s.popover), `sistema-notas row: ${s.popover}`);
   check(!s.fileOrPrMenu, "the pull request menu opened too");
   await page.screenshot({ path: path.join(DIR, "composer-tags-popover.png") });
   const first = s.highlight;
@@ -123,7 +123,7 @@ const state = () => ({
 
   await page.keyboard.type("@");
   s = await read();
-  check(s.popover?.startsWith("Máquinas") && /Linux VPS\noffline\n@linux-vps/.test(s.popover), `@ list: ${s.popover}`);
+  check(s.popover?.startsWith("Machines") && /Linux VPS\noffline\n@linux-vps/.test(s.popover), `@ list: ${s.popover}`);
   check(!s.fileOrPrMenu, "the file menu opened too");
   await page.screenshot({ path: path.join(DIR, "composer-tags-machines.png") });
   await page.keyboard.press("Escape");
@@ -148,10 +148,10 @@ const state = () => ({
   console.log("four paragraphs:", JSON.stringify(s));
   check(
     JSON.stringify(s.route) === JSON.stringify([
-      "ambiguous: site existe em 2 máquinas [@sweep-node] [@macbook]",
-      "routed: → Capitão pinned · sweep-node",
-      "untagged: sem projeto: o Orquestrador decide",
-      "unknown: projeto desconhecido #fantasma",
+      "ambiguous: site is on 2 machines [@sweep-node] [@macbook]",
+      "routed: → Captain pinned · sweep-node",
+      "untagged: no project: Orchestrator decides",
+      "unknown: unknown project #fantasma",
     ]),
     `route: ${JSON.stringify(s.route)}`,
   );
@@ -160,7 +160,7 @@ const state = () => ({
   await page.click('#tag-route [data-machine="macbook"]');
   s = await read();
   check(s.text.startsWith("no #site @macbook, corrige o login.\n\nno #pinned, sobe a versão."), `button wrote ${JSON.stringify(s.text)}`);
-  check(s.route[0] === "routed: → Capitão site · MacBook" && s.route[1] === "routed: → Capitão pinned · sweep-node", `route after the button: ${s.route}`);
+  check(s.route[0] === "routed: → Captain site · MacBook" && s.route[1] === "routed: → Captain pinned · sweep-node", `route after the button: ${s.route}`);
   check(s.mirror.includes("tag machine:@macbook"), `mirror after the button: ${s.mirror}`);
   await page.screenshot({ path: path.join(DIR, "composer-tags-route-picked.png") });
 

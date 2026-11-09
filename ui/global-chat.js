@@ -4,8 +4,9 @@
 // and gui-timeline.js paint from them, and only in the global orchestrator's own tab.
 
 /** A Captain's report line, as the contracts fix it:
- * `[pinned] Capitão <project> (<machine name>) [<machine id> <tab id>]: <text>`. */
-const REPORT_HEADER = /^\[pinned\] Capitão ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /gm;
+ * `[pinned] Capitão <project> (<machine name>) [<machine id> <tab id>]: <text>`. The agents write
+ * `Capitão`; `Captain` reads the same. */
+const REPORT_HEADER = /^\[pinned\] (?:Capitão|Captain) ([^()\[\]\n]+) \(([^()\[\]\n]*)\) \[(\S+) (\S+)\]: /gm;
 
 /** The report blocks one user prompt holds, in order. A block runs from its header line to the
  * next header or the end, so words between two headers belong to the earlier block; `start` is
@@ -25,17 +26,17 @@ function reportBlocks(text) {
 
 /** The one-line summary of several reports: how many came, and which Captains, each named once. */
 function reportFoldLabel(blocks) {
-  const names = [...new Set(blocks.map((b) => `Capitão ${b.project}`))];
-  return `${blocks.length} atualizações · ${names.join(", ")}`;
+  const names = [...new Set(blocks.map((b) => `Captain ${b.project}`))];
+  return `${blocks.length} ${blocks.length === 1 ? "update" : "updates"} · ${names.join(", ")}`;
 }
 
-/** The quick replies an answer offers: its last non-empty line must read `Opções: a | b`. Returns
+/** The quick replies an answer offers: its last non-empty line must read `Opções: a | b` (`Options: a | b` reads the same). Returns
  * the options and the answer without that line, or null when it offers nothing. */
 function quickReplyOf(text) {
   const lines = String(text ?? "").split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i].trim()) continue;
-    const found = lines[i].match(/^Opções: (.+)$/);
+    const found = lines[i].match(/^(?:Opções|Options): (.+)$/);
     if (!found) return null;
     const options = found[1].split(" | ").map((option) => option.trim()).filter(Boolean);
     if (!options.length) return null;
@@ -49,23 +50,23 @@ function quickReplyOf(text) {
  * line, on one line. An unclosed code fence swallows the rest, as it does on screen. */
 function speechTextOf(text) {
   const outside = String(text ?? "").split("```").filter((_, i) => i % 2 === 0).join(" ");
-  const kept = outside.split("\n").filter((line) => !/^Opções: /.test(line.trim()));
+  const kept = outside.split("\n").filter((line) => !/^(?:Opções|Options): /.test(line.trim()));
   return kept.join(" ").replace(/\s+/g, " ").trim();
 }
 
-/** Why a thread waits on Felipe: `pergunta` for a question mid-turn (needs-input with a live menu
- * or interrupted), `falha` for a failure. A thread Claude Code is merely done with is not waiting,
+/** Why a thread waits on Felipe: `question` for a question mid-turn (needs-input with a live menu
+ * or interrupted), `failed` for a failure. A thread Claude Code is merely done with is not waiting,
  * which is the idle notice: needs-input without a menu and without interrupted. */
 function waitingKindOf(view, hasMenu) {
   if (!view) return null;
-  if (view.status === "failed") return "falha";
-  if (view.status === "needs-input" && (hasMenu || view.interrupted === true)) return "pergunta";
+  if (view.status === "failed") return "failed";
+  if (view.status === "needs-input" && (hasMenu || view.interrupted === true)) return "question";
   return null;
 }
 
 /** The settings as the contracts default them; a machine's answer or a save only overrides what
  * it names. */
-const GLOBAL_SETTINGS_DEFAULTS = { name: "Orquestrador", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+const GLOBAL_SETTINGS_DEFAULTS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
 /** The one settings cache the UI reads. Written by the ask below and by the
  * `global-orchestrator-settings` event the settings page dispatches after a save. */
 const globalSettings = { ...GLOBAL_SETTINGS_DEFAULTS };

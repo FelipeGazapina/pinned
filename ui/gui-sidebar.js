@@ -325,7 +325,7 @@ function globalSidebarTop() {
 }
 
 /** What each `waitingKindOf` answer reads as, and the tone of its dot. */
-const WAITING_LOOKS = { pergunta: ["Question", "question"], falha: ["Failed", "failed"] };
+const WAITING_LOOKS = { question: ["Question", "question"], failed: ["Failed", "failed"] };
 
 /** Every thread on every machine that waits on Felipe, newest first: a question mid-turn or a
  * failure, each with its title, where it is and since when. */

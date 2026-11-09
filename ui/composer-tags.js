@@ -1,4 +1,4 @@
-// #projeto and @máquina in the global orchestrator's composer. The parser, the catalog and the
+// #project and @machine in the global orchestrator's composer. The parser, the catalog and the
 // popover keys live here so node --test can drive them without the page; gui-composer.js wires
 // them to the prompt, and only while the open tab is the account's global orchestrator.
 
@@ -75,25 +75,25 @@ function paragraphTags(text) {
 
 /** Where one paragraph goes. `catalog` is what `tagCatalog` builds. Kinds: `routed`, `ambiguous`
  * (the repo is on 2+ machines and no @ decides), `untagged`, `unknown`. Advisory only. */
-function routeParagraph(text, { projects = [], machines = [], name = "Orquestrador" } = {}) {
+function routeParagraph(text, { projects = [], machines = [], name = "Orchestrator" } = {}) {
   const tags = paragraphTags(text);
   const flat = String(text ?? "").replace(/\s+/g, " ").trim();
   const preview = flat.length > 50 ? `${flat.slice(0, 50)}…` : flat;
-  if (!tags.project) return { preview, kind: "untagged", text: `sem projeto: o ${name} decide` };
+  if (!tags.project) return { preview, kind: "untagged", text: `no project: ${name} decides` };
   const project = projects.find((p) => p.slug === tags.project);
-  if (!project) return { preview, kind: "unknown", text: `projeto desconhecido #${tags.project}` };
+  if (!project) return { preview, kind: "unknown", text: `unknown project #${tags.project}` };
   const hosts = project.machines;
   if (!tags.machine && hosts.length >= 2) {
     return {
       preview,
       kind: "ambiguous",
-      text: `${project.name} existe em ${hosts.length} máquinas`,
+      text: `${project.name} is on ${hosts.length} machines`,
       choices: hosts.map((m) => m.slug),
     };
   }
   const named = tags.machine && (hosts.find((m) => m.slug === tags.machine) ?? machines.find((m) => m.slug === tags.machine));
-  const where = tags.machine ? named?.name ?? tags.machine : hosts[0]?.name ?? "nenhuma máquina";
-  return { preview, kind: "routed", text: `→ Capitão ${project.name} · ${where}` };
+  const where = tags.machine ? named?.name ?? tags.machine : hosts[0]?.name ?? "no machine";
+  return { preview, kind: "routed", text: `→ Captain ${project.name} · ${where}` };
 }
 
 /** One routing row per paragraph, each read from that paragraph's tags alone. */
@@ -101,7 +101,7 @@ function routePreview(text, catalog) {
   return composerParagraphs(text).map((p) => ({ ...routeParagraph(p.text, catalog), index: p.index }));
 }
 
-/** Writes `@slug` into paragraph `index` only: after its first `#projeto`, or at its start. A
+/** Writes `@slug` into paragraph `index` only: after its first `#project`, or at its start. A
  * paragraph that already names a machine stays as it is. */
 function tagParagraph(text, index, slug) {
   const source = String(text ?? "");
@@ -147,11 +147,11 @@ function tagOptions(token, { projects = [], machines = [] } = {}) {
   return machines.filter((m) => m.slug.startsWith(q) || m.name.toLowerCase().startsWith(q));
 }
 
-/** A project's Capitão across its machines: trabalhando when any is mid-turn, livre when one is
- * open, nenhum otherwise. */
+/** A project's Captain across its machines: working when any is mid-turn, idle when one is
+ * open, none otherwise. */
 function captainState(states) {
-  if (states.includes("trabalhando")) return "trabalhando";
-  return states.includes("livre") ? "livre" : "nenhum";
+  if (states.includes("working")) return "working";
+  return states.includes("idle") ? "idle" : "none";
 }
 
 /** The account's projects and machines as tags see them. `groups` is the sidebar's
@@ -159,7 +159,7 @@ function captainState(states) {
  * `machineDirectory()`, `phase(tab)` is `phaseOf`, and `repoAt(machine, path)` the repo a folder
  * reported. `workers(tab)`, when given, adds each host's running worker count to its entry. A
  * group holding only the global orchestrator's own folder is not a project. */
-function tagCatalog({ groups, directory, phase, repoAt, name = "Orquestrador", workers }) {
+function tagCatalog({ groups, directory, phase, repoAt, name = "Orchestrator", workers }) {
   const nameOf = (id) => (id === directory.localId ? directory.localName : directory.names[id] ?? "machine");
   const machineOf = (id) => ({ slug: tagSlug(nameOf(id)), name: nameOf(id), online: directory.online[id] === true });
   const projects = [];
@@ -170,7 +170,7 @@ function tagCatalog({ groups, directory, phase, repoAt, name = "Orquestrador", w
       if (hosts.some((m) => m.id === machine)) continue;
       const captains = group.tabs.filter((tab) => tab.machine === machine && tab.view.role === "orchestrator");
       const busy = captains.some((tab) => !["done", "idle"].includes(phase(tab)));
-      const host = { id: machine, ...machineOf(machine), captain: !captains.length ? "nenhum" : busy ? "trabalhando" : "livre" };
+      const host = { id: machine, ...machineOf(machine), captain: !captains.length ? "none" : busy ? "working" : "idle" };
       if (workers) host.workers = captains.reduce((n, tab) => n + (Number(workers(tab)) || 0), 0);
       hosts.push(host);
     }
@@ -195,12 +195,12 @@ function tagLineHtml(line, known, esc) {
 /** The popover's rows for a token: a heading, then each option with what it inserts. */
 function composerTagPopoverHtml(token, options, hi, esc) {
   const project = token.sign === "#";
-  const heading = `<p class="heading">${project ? "Projetos" : "Máquinas"}</p>`;
-  if (!options.length) return `${heading}<p class="none">${project ? "Nenhum projeto" : "Nenhuma máquina"} com '${esc(token.query)}'</p>`;
+  const heading = `<p class="heading">${project ? "Projects" : "Machines"}</p>`;
+  if (!options.length) return `${heading}<p class="none">No ${project ? "project" : "machine"} matches '${esc(token.query)}'</p>`;
   return heading + options.map((opt, i) => {
     const offline = project ? opt.machines.length > 0 && opt.machines.every((m) => !m.online) : !opt.online;
     const about = project
-      ? [esc(opt.repo || "sem remote"), ...opt.machines.map((m) => `<span class="${m.online ? "" : "off"}">${esc(m.name)}</span>`)].join(" · ")
+      ? [esc(opt.repo || "no remote"), ...opt.machines.map((m) => `<span class="${m.online ? "" : "off"}">${esc(m.name)}</span>`)].join(" · ")
       : opt.online ? "online" : "offline";
     const state = project ? (offline ? "offline" : captainState(opt.machines.map((m) => m.captain))) : `@${opt.slug}`;
     return `<button type="button" class="${i === hi ? "highlight" : ""}"${offline ? ` data-offline="true"` : ""}><span class="sigil ${project ? "project" : "machine"}">${token.sign}</span><span class="text"><span class="name">${esc(opt.name)}</span><span class="about">${about}</span></span><span class="state${project ? ` ${state}` : ""}">${esc(state)}</span></button>`;

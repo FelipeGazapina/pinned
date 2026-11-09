@@ -3,19 +3,19 @@
 // so node --test can drive it without the page; gui-global-orchestrator.js renders and wires it.
 
 /** The names the settings offer. Anything else is custom text, which the node cleans. */
-const GO_NAME_PRESETS = ["Orquestrador", "Almirante", "Comandante"];
+const GO_NAME_PRESETS = ["Orchestrator", "Admiral", "Commander"];
 
 /** CONTRACTS §2's defaults, for machines that never answered. */
-const GO_DEFAULT_SETTINGS = { name: "Orquestrador", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
 
 /** The busy policy and the report policy, each value with the words the section shows. */
 const GO_BUSY_CHOICES = [
-  ["queue", "Pôr na fila"],
-  ["refuse", "Recusar e tentar depois"],
+  ["queue", "Queue the message"],
+  ["refuse", "Refuse and retry later"],
 ];
 const GO_REPORT_CHOICES = [
-  ["auto", "Automático no fim do turno"],
-  ["tool_only", "Só quando o Capitão chamar"],
+  ["auto", "Automatic, at end of turn"],
+  ["tool_only", "Only when the Captain calls"],
 ];
 
 /** An older node answers an unknown command and an older hub refuses the call; both wordings
@@ -59,8 +59,8 @@ function globalSettingsNotes(machines) {
   return machines
     .filter((m) => m.update || !m.online || m.error)
     .map((m) =>
-      m.update ? `${m.name} precisa atualizar o pinned`
-      : !m.online ? `${m.name} está offline; atualiza quando reconectar`
+      m.update ? `${m.name} needs to update pinned`
+      : !m.online ? `${m.name} is offline; it updates when it reconnects`
       : `${m.name}: ${m.error}`,
     );
 }

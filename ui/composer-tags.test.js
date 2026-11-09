@@ -27,15 +27,15 @@ const tagCatalog = call("tagCatalog");
 const tagLineHtml = call("tagLineHtml");
 const composerTagPopoverHtml = call("composerTagPopoverHtml");
 
-const host = (id, name, slug, online, captain = "nenhum") => ({ id, name, slug, online, captain });
+const host = (id, name, slug, online, captain = "none") => ({ id, name, slug, online, captain });
 const catalog = {
   projects: [
-    { slug: "pinned", name: "pinned", repo: "github.com/felipe/pinned", machines: [host("mm", "Mac mini", "mac-mini", true, "livre")] },
+    { slug: "pinned", name: "pinned", repo: "github.com/felipe/pinned", machines: [host("mm", "Mac mini", "mac-mini", true, "idle")] },
     {
       slug: "site",
       name: "site",
       repo: "github.com/felipe/site",
-      machines: [host("mb", "MacBook", "macbook", true, "trabalhando"), host("mm", "Mac mini", "mac-mini", true)],
+      machines: [host("mb", "MacBook", "macbook", true, "working"), host("mm", "Mac mini", "mac-mini", true)],
     },
     { slug: "sistema-notas", name: "sistema-notas", repo: "", machines: [host("mm", "Mac mini", "mac-mini", true)] },
     { slug: "infra", name: "infra", repo: "github.com/felipe/infra", machines: [host("vps", "Linux VPS", "linux-vps", false)] },
@@ -45,7 +45,7 @@ const catalog = {
     { slug: "macbook", name: "MacBook", online: true },
     { slug: "linux-vps", name: "Linux VPS", online: false },
   ],
-  name: "Orquestrador",
+  name: "Orchestrator",
 };
 
 test("only a tab whose view says orchestrator_global is the global orchestrator", () => {
@@ -101,11 +101,11 @@ test("the first # and the first @ of a paragraph decide it", () => {
   assert.deepEqual(paragraphTags("sem tag nenhuma"), { project: "", machine: "" });
 });
 
-test("a paragraph routes to its project's Capitão on the one machine it is on", () => {
+test("a paragraph routes to its project's Captain on the one machine it is on", () => {
   assert.deepEqual(routeParagraph("sobe a v0.17.19 no #pinned", catalog), {
     preview: "sobe a v0.17.19 no #pinned",
     kind: "routed",
-    text: "→ Capitão pinned · Mac mini",
+    text: "→ Captain pinned · Mac mini",
   });
 });
 
@@ -113,28 +113,28 @@ test("a repo on two machines with no @ is ambiguous and offers each machine", ()
   assert.deepEqual(routeParagraph("corrige o login no #site", catalog), {
     preview: "corrige o login no #site",
     kind: "ambiguous",
-    text: "site existe em 2 máquinas",
+    text: "site is on 2 machines",
     choices: ["macbook", "mac-mini"],
   });
 });
 
 test("an @ picks the machine for its paragraph", () => {
-  assert.equal(routeParagraph("#site @mac-mini publica", catalog).text, "→ Capitão site · Mac mini");
-  assert.equal(routeParagraph("#site @macbook publica", catalog).text, "→ Capitão site · MacBook");
-  assert.equal(routeParagraph("#pinned @linux-vps sobe", catalog).text, "→ Capitão pinned · Linux VPS");
+  assert.equal(routeParagraph("#site @mac-mini publica", catalog).text, "→ Captain site · Mac mini");
+  assert.equal(routeParagraph("#site @macbook publica", catalog).text, "→ Captain site · MacBook");
+  assert.equal(routeParagraph("#pinned @linux-vps sobe", catalog).text, "→ Captain pinned · Linux VPS");
 });
 
 test("an untagged paragraph is the orchestrator's call, and an unknown project is flagged", () => {
   assert.deepEqual(routeParagraph("olha isso aqui", catalog), {
     preview: "olha isso aqui",
     kind: "untagged",
-    text: "sem projeto: o Orquestrador decide",
+    text: "no project: Orchestrator decides",
   });
-  assert.equal(routeParagraph("olha isso", { ...catalog, name: "Almirante" }).text, "sem projeto: o Almirante decide");
+  assert.equal(routeParagraph("olha isso", { ...catalog, name: "Admiral" }).text, "no project: Admiral decides");
   assert.deepEqual(routeParagraph("no #fantasma", catalog), {
     preview: "no #fantasma",
     kind: "unknown",
-    text: "projeto desconhecido #fantasma",
+    text: "unknown project #fantasma",
   });
   assert.equal(
     routeParagraph("uma frase bem comprida que passa de cinquenta letras no #pinned", catalog).preview,
@@ -147,10 +147,10 @@ test("a tag routes only its own paragraph", () => {
   assert.deepEqual(
     routePreview(text, catalog).map((row) => [row.index, row.kind, row.text]),
     [
-      [0, "routed", "→ Capitão site · MacBook"],
-      [1, "untagged", "sem projeto: o Orquestrador decide"],
-      [2, "ambiguous", "site existe em 2 máquinas"],
-      [3, "unknown", "projeto desconhecido #fantasma"],
+      [0, "routed", "→ Captain site · MacBook"],
+      [1, "untagged", "no project: Orchestrator decides"],
+      [2, "ambiguous", "site is on 2 machines"],
+      [3, "unknown", "unknown project #fantasma"],
     ],
   );
 });
@@ -195,7 +195,7 @@ test("# filters projects by slug and @ filters machines by slug or name", () => 
   assert.deepEqual(tagOptions(null, catalog), []);
 });
 
-test("the catalog groups projects by repo as the sidebar does and reads each Capitão", () => {
+test("the catalog groups projects by repo as the sidebar does and reads each Captain", () => {
   const capWorking = { machine: "mb", view: { role: "orchestrator", status: "working" } };
   const capIdle = { machine: "mm", view: { role: "orchestrator", status: "idle" } };
   const global = { machine: "mm", view: { orchestrator_global: true } };
@@ -230,27 +230,27 @@ test("the catalog groups projects by repo as the sidebar does and reads each Cap
         name: "site",
         repo: "github.com/felipe/site",
         machines: [
-          { id: "mb", slug: "macbook", name: "MacBook", online: true, captain: "trabalhando" },
-          { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "nenhum" },
+          { id: "mb", slug: "macbook", name: "MacBook", online: true, captain: "working" },
+          { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "none" },
         ],
       },
       {
         slug: "pinned",
         name: "pinned",
         repo: "github.com/felipe/pinned",
-        machines: [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "livre" }],
+        machines: [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "idle" }],
       },
       {
         slug: "sistema-notas",
         name: "Sistema Notas",
         repo: "",
-        machines: [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "nenhum" }],
+        machines: [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "none" }],
       },
       {
         slug: "infra",
         name: "infra",
         repo: "github.com/felipe/infra",
-        machines: [{ id: "vps", slug: "linux-vps", name: "Linux VPS", online: false, captain: "nenhum" }],
+        machines: [{ id: "vps", slug: "linux-vps", name: "Linux VPS", online: false, captain: "none" }],
       },
     ],
     machines: [
@@ -258,7 +258,7 @@ test("the catalog groups projects by repo as the sidebar does and reads each Cap
       { slug: "macbook", name: "MacBook", online: true },
       { slug: "linux-vps", name: "Linux VPS", online: false },
     ],
-    name: "Orquestrador",
+    name: "Orchestrator",
   });
   assert.equal(tagCatalog({ groups: [], directory: { localId: "local", localName: "This Mac", names: {}, online: {} }, phase: () => "idle", repoAt: () => null }).machines.length, 0);
 });
@@ -277,9 +277,9 @@ test("a workers callback counts each host's running workers, and without it the 
     repoAt: () => "github.com/felipe/site",
   };
   assert.deepEqual(tagCatalog({ ...args, workers: () => 2 }).projects[0].machines, [
-    { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "trabalhando", workers: 2 },
+    { id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "working", workers: 2 },
   ]);
-  assert.deepEqual(tagCatalog(args).projects[0].machines, [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "trabalhando" }]);
+  assert.deepEqual(tagCatalog(args).projects[0].machines, [{ id: "mm", slug: "mac-mini", name: "Mac mini", online: true, captain: "working" }]);
 });
 
 test("the mirror paints a known project blue, a known machine green and an unknown tag red, letter for letter", () => {
@@ -291,16 +291,16 @@ test("the mirror paints a known project blue, a known machine green and an unkno
   );
 });
 
-test("the popover lists repo or sem remote, machines with offline ones dimmed, and the Capitão state", () => {
+test("the popover lists repo or no remote, machines with offline ones dimmed, and the Captain state", () => {
   const esc = (text) => text;
   const projects = tagOptions({ sign: "#", query: "" }, catalog);
   const html = composerTagPopoverHtml({ sign: "#", query: "" }, projects, 1, esc);
-  assert.match(html, /^<p class="heading">Projetos<\/p>/);
-  assert.match(html, /<button type="button" class="highlight"><span class="sigil project">#<\/span><span class="text"><span class="name">site<\/span><span class="about">github.com\/felipe\/site · <span class="">MacBook<\/span> · <span class="">Mac mini<\/span><\/span><\/span><span class="state trabalhando">trabalhando<\/span><\/button>/);
-  assert.match(html, /<span class="name">pinned<\/span>.*<span class="state livre">livre<\/span>/);
-  assert.match(html, /<span class="about">sem remote · <span class="">Mac mini<\/span><\/span><\/span><span class="state nenhum">nenhum<\/span>/);
+  assert.match(html, /^<p class="heading">Projects<\/p>/);
+  assert.match(html, /<button type="button" class="highlight"><span class="sigil project">#<\/span><span class="text"><span class="name">site<\/span><span class="about">github.com\/felipe\/site · <span class="">MacBook<\/span> · <span class="">Mac mini<\/span><\/span><\/span><span class="state working">working<\/span><\/button>/);
+  assert.match(html, /<span class="name">pinned<\/span>.*<span class="state idle">idle<\/span>/);
+  assert.match(html, /<span class="about">no remote · <span class="">Mac mini<\/span><\/span><\/span><span class="state none">none<\/span>/);
   assert.match(html, /<button type="button" class="" data-offline="true">.*<span class="about">github.com\/felipe\/infra · <span class="off">Linux VPS<\/span><\/span><\/span><span class="state offline">offline<\/span>/);
   const machinesHtml = composerTagPopoverHtml({ sign: "@", query: "" }, tagOptions({ sign: "@", query: "" }, catalog), 0, esc);
   assert.match(machinesHtml, /<span class="name">Linux VPS<\/span><span class="about">offline<\/span><\/span><span class="state">@linux-vps<\/span>/);
-  assert.equal(composerTagPopoverHtml({ sign: "#", query: "zz" }, [], 0, esc), `<p class="heading">Projetos</p><p class="none">Nenhum projeto com 'zz'</p>`);
+  assert.equal(composerTagPopoverHtml({ sign: "#", query: "zz" }, [], 0, esc), `<p class="heading">Projects</p><p class="none">No project matches 'zz'</p>`);
 });
