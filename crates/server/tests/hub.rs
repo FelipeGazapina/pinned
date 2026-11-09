@@ -4114,3 +4114,87 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     );
     assert_eq!(session_tool(&fleet.mac_dir, &captain, json!({ "name": "sessions" })), Err("only the global orchestrator has this tool".into()));
 }
+
+/// Pairs a node for `client`'s account into `dir`, hosting that account's global orchestrator, and
+/// answers its machine id and the global orchestrator's tab.
+fn hosting_node(url: &str, client: &mut Client, name: &str, dir: &Path) -> (Node, String, String) {
+    let code = client.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    account::pair(url, &code, name, "linux").unwrap().save(dir).unwrap();
+    let creds = Credentials::load(dir).unwrap();
+    let id = creds.machine_id.clone();
+    let node = Node::start(dir, creds);
+    client.wait_machines(&[(name, true)]);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    client.call(&id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = client.call(&id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    (node, id, global)
+}
+
+#[test]
+fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_another_account() {
+    let hub = TestHub::start("iso_sessions");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_dir, bob_dir) = (temp("iso_sessions-ana"), temp("iso_sessions-bob"));
+    let (_ana_node, ana_m, ana_global) = hosting_node(&url, &mut ana, "ana-mini", &ana_dir);
+    let (bob_node, bob_m, bob_global) = hosting_node(&url, &mut bob, "bob-mac", &bob_dir);
+    for project in [ana_dir.join("secret-project"), bob_dir.join("own-project")] {
+        std::fs::create_dir_all(project).unwrap();
+    }
+    let ana_thread = running_tab(&mut ana, &ana_m, &ana_dir.join("secret-project").display().to_string());
+    hook(&ana_dir, json!({ "kind": "agent", "status": "needs-input", "tab": ana_thread, "message": "Ship the unreleased pricing page?" }));
+    let bob_thread = running_tab(&mut bob, &bob_m, &bob_dir.join("own-project").display().to_string());
+    hook(&bob_dir, json!({ "kind": "agent", "status": "needs-input", "tab": bob_thread, "message": "Rename the button?" }));
+
+    let ana_tool = |tool: Value| session_tool(&ana_dir, &ana_global, tool);
+    let bob_tool = |tool: Value| session_tool(&bob_dir, &bob_global, tool);
+    let waits_in = |sessions: &Value, tab: &str| sessions["sessions"].as_array().unwrap().iter().any(|s| s["id"] == tab && s["state"] == "waiting_on_input");
+    wait_for("ana's thread waiting on her in her own sessions()", || waits_in(&ana_tool(json!({ "name": "sessions" })).unwrap(), ana_thread.as_str()));
+    wait_for("bob's thread waiting on him in his own sessions()", || waits_in(&bob_tool(json!({ "name": "sessions" })).unwrap(), bob_thread.as_str()));
+    let anas = ana_tool(json!({ "name": "waiting" })).unwrap().to_string();
+    assert!(anas.contains(&ana_thread) && anas.contains("unreleased pricing"), "ana's own waiting() has her thread: {anas}");
+
+    let ana_marks = [ana_m.as_str(), "ana-mini", ana_thread.as_str(), ana_global.as_str(), "secret-project", "unreleased pricing"];
+    let nothing_of_ana = |from: &str, answer: &Value| {
+        let text = answer.to_string();
+        for mark in ana_marks {
+            assert!(!text.contains(mark), "{from} names ana's {mark:?}: {text}");
+        }
+    };
+    for args in [json!({ "name": "sessions" }), json!({ "name": "sessions", "machine": ana_m }), json!({ "name": "sessions", "machine": "ana-mini" }), json!({ "name": "sessions", "project": "secret-project" })] {
+        let listed = bob_tool(args.clone()).unwrap();
+        nothing_of_ana(&format!("bob's {args}"), &listed);
+        let machines: Vec<&str> = listed["machines"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(machines, [bob_m.as_str()], "bob's {args} lists his own machine alone");
+    }
+    let mine: Vec<Value> = bob_tool(json!({ "name": "sessions" })).unwrap()["sessions"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect();
+    assert_eq!(mine, [json!(bob_thread)], "bob's sessions() is his own thread, not his global orchestrator's tab nor anything of ana's");
+    let waiting = bob_tool(json!({ "name": "waiting" })).unwrap();
+    nothing_of_ana("bob's waiting()", &waiting);
+    let waits: Vec<&str> = waiting.as_array().unwrap().iter().map(|w| w["tab"].as_str().unwrap()).collect();
+    assert_eq!(waits, [bob_thread.as_str()], "bob's waiting() is his own question alone");
+
+    // Ana's tabs and machine read as tabs and machines that do not exist, from the tool and from bob's machine straight to the hub.
+    let unknown_tab = |tab: &str| Err(format!("no online machine of this account has a session {tab}"));
+    let unknown_machine = |machine: &str| Err(format!("this account has no machine {machine}"));
+    let made_up = uuid::Uuid::new_v4().to_string();
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0" })), unknown_tab("tab-0-0"));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": made_up })), unknown_machine(&made_up));
+    assert_eq!(bob_tool(json!({ "name": "read_session", "id": "tab-0-0", "machine": "Studio" })), unknown_machine("Studio"));
+    let bob_link = bob_node.link.as_ref().unwrap();
+    for tab in [ana_thread.as_str(), ana_global.as_str()] {
+        assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab })), unknown_tab(tab));
+        assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: None, items: None }), unknown_tab(tab));
+        for machine in [ana_m.as_str(), "ana-mini", "@ana-mini"] {
+            let named = machine.trim_start_matches('@');
+            assert_eq!(bob_tool(json!({ "name": "read_session", "id": tab, "machine": machine })), unknown_machine(named), "{tab} on {machine}");
+            assert_eq!(bob_link.call_hub(HubCall::ReadSession { tab: tab.to_owned(), machine: Some(named.to_owned()), items: Some(5) }), unknown_machine(named), "{tab} on {machine}");
+        }
+    }
+    let overview = bob_link.call_hub(HubCall::Overview).unwrap();
+    nothing_of_ana("bob's machine's overview", &overview);
+    assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
+    let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
+    assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
+}
