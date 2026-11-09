@@ -1,7 +1,7 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
-use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
+use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
@@ -432,6 +432,8 @@ pub struct Machine {
     me: Weak<Machine>,
     gate: Mutex<Gate>,
     sync_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[allow(clippy::type_complexity)]
+    hub: Mutex<Option<Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>>>,
 }
 
 pub trait SelfUpdate: Send + Sync {
@@ -574,6 +576,7 @@ impl Machine {
             me: me.clone(),
             gate: Mutex::new(Gate::default()),
             sync_waker: Mutex::new(None),
+            hub: Mutex::new(None),
         })
     }
 
@@ -2393,6 +2396,21 @@ impl Machine {
         *self.sync_waker.lock().unwrap() = Some(wake);
     }
 
+    pub(crate) fn set_hub(&self, hub: Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>) {
+        *self.hub.lock().unwrap() = Some(hub);
+    }
+
+    /// Asks the hub, blocking up to 60 seconds for the answer. Never call it while holding a Machine
+    /// lock.
+    #[allow(dead_code)] // The global orchestrator's later units call it.
+    pub(crate) fn call_hub(&self, call: HubCall) -> Result<Value, String> {
+        let hub = self.hub.lock().unwrap().clone();
+        match hub {
+            Some(hub) => hub(call),
+            None => Err("this machine is not linked to a hub".into()),
+        }
+    }
+
     fn shared_plugin_dirs(&self, account: &Account) -> Vec<PathBuf> {
         let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()) else { return vec![] };
         sync::plugin_dirs(&self.accounts.home(account), &config.join("synced-plugins"))
@@ -3732,6 +3750,20 @@ pub(crate) mod tests {
 
     fn machine() -> Arc<Machine> {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
+    }
+
+    #[test]
+    fn call_hub_reaches_the_installed_hub_and_refuses_while_unlinked() {
+        let machine = machine();
+        assert_eq!(machine.call_hub(HubCall::Overview).unwrap_err(), "this machine is not linked to a hub");
+        let overview = Arc::new(AtomicBool::new(false));
+        let seen = overview.clone();
+        machine.set_hub(Arc::new(move |call| {
+            seen.store(matches!(call, HubCall::Overview), Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        }));
+        assert_eq!(machine.call_hub(HubCall::Overview).unwrap(), json!({"ok": true}));
+        assert!(overview.load(Ordering::SeqCst), "the hub was not handed the Overview");
     }
 
     #[test]
