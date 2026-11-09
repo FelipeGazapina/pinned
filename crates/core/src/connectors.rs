@@ -26,6 +26,11 @@ const GITHUB_KEY: &str = "github-key";
 const VERCEL_KEY: &str = "vercel-key";
 const UPSTASH_KEY: &str = "upstash-box-key";
 const CLAUDE_TOKEN: &str = "claude-oauth-token";
+
+/// Where the Claude token kept for the pinned account `name` is stored.
+fn named_claude_key(name: &str) -> String {
+    format!("{CLAUDE_TOKEN}:{name}")
+}
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -410,7 +415,7 @@ pub struct BoxStep {
 }
 
 /// Serialized names match Upstash's `size`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxSize {
     Small,
@@ -726,6 +731,9 @@ struct Store {
     vercel: Option<vercel::Account>,
     #[serde(default)]
     upstash: Option<upstash::Account>,
+    /// The last characters of each Claude token kept for a pinned account name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    box_claude_tokens: BTreeMap<String, String>,
     #[serde(default)]
     boxes: BoxAccess,
     #[serde(default)]
@@ -983,6 +991,10 @@ pub struct Settings {
     pub vercel: Option<vercel::Account>,
     #[serde(default)]
     pub upstash: Option<upstash::Account>,
+    /// The last characters of each Claude token kept for a pinned account name, which a worker box
+    /// signs in with when `delegate_task` names that account.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_claude_tokens: BTreeMap<String, String>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
     /// Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.
@@ -3506,6 +3518,7 @@ impl Connectors {
             github: store.github.clone(),
             vercel: store.vercel.clone(),
             upstash: store.upstash.clone(),
+            box_claude_tokens: store.box_claude_tokens.clone(),
             connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
             boxes: store.boxes.clone(),
@@ -3613,7 +3626,8 @@ impl Connectors {
         self.key(GITHUB_KEY)
     }
 
-    /// Keeps the Box key and the Claude token, which the hub checked with Upstash first.
+    /// Keeps the Box key and the Claude token, which the hub checked with Upstash first. The
+    /// tokens kept for named accounts stay.
     pub fn connect_upstash(&self, keys: &upstash::Keys) -> Result<upstash::Account, String> {
         self.storage.write_key(UPSTASH_KEY, &keys.api_key)?;
         self.storage.write_key(CLAUDE_TOKEN, &keys.claude_token)?;
@@ -3628,6 +3642,9 @@ impl Connectors {
         self.storage.remove_key(UPSTASH_KEY);
         self.storage.remove_key(CLAUDE_TOKEN);
         let mut store = self.store.lock().unwrap();
+        for name in std::mem::take(&mut store.box_claude_tokens).keys() {
+            self.storage.remove_key(&named_claude_key(name));
+        }
         store.upstash = None;
         self.save(&store)
     }
@@ -3635,6 +3652,50 @@ impl Connectors {
     /// What the hub creates and boots boxes with. Never serialized, never sent to a client.
     pub fn box_keys(&self) -> Option<upstash::Keys> {
         Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
+    }
+
+    /// Keeps a Claude token for boxes that run as the pinned account `name`. Answers every name
+    /// with its token's last characters.
+    pub fn set_box_claude_token(&self, name: &str, token: &str) -> Result<BTreeMap<String, String>, String> {
+        let name = name.trim();
+        let named = !name.is_empty() && name.len() <= 40 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b));
+        if !named {
+            return Err("name the pinned account with letters, digits, dots, dashes or underscores, as in claude or bloom".into());
+        }
+        let token = upstash::claude_token(token)?;
+        let mut store = self.store.lock().unwrap();
+        if store.upstash.is_none() {
+            return Err("connect Upstash Box first".into());
+        }
+        self.storage.write_key(&named_claude_key(name), &token)?;
+        store.box_claude_tokens.insert(name.to_owned(), upstash::hint(&token));
+        self.save(&store)?;
+        Ok(store.box_claude_tokens.clone())
+    }
+
+    pub fn remove_box_claude_token(&self, name: &str) -> Result<BTreeMap<String, String>, String> {
+        let mut store = self.store.lock().unwrap();
+        if store.box_claude_tokens.remove(name).is_none() {
+            return Err(format!("no Claude token is kept for {name}"));
+        }
+        self.storage.remove_key(&named_claude_key(name));
+        self.save(&store)?;
+        Ok(store.box_claude_tokens.clone())
+    }
+
+    /// The Claude token a box signs in with for the pinned account `name`: the one kept for it, or
+    /// the connection's own for none.
+    pub fn box_claude_token(&self, name: Option<&str>) -> Result<String, String> {
+        let default = || self.key(CLAUDE_TOKEN).ok_or_else(|| "Upstash Box is not connected: connect it in pinned's Connectors settings".to_owned());
+        let Some(name) = name.filter(|name| !name.is_empty()) else { return default() };
+        if let Some(token) = self.key(&named_claude_key(name)) {
+            return Ok(token);
+        }
+        // The token the connection was made with signs in the default account.
+        if name == crate::accounts::default_account() {
+            return default();
+        }
+        Err(format!("no Claude token is kept for {name}: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token"))
     }
 
     pub fn box_access(&self) -> BoxAccess {
@@ -5234,6 +5295,34 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_token_per_account_stays_in_storage_and_the_connection_token_is_the_default() {
+        let (connectors, dir) = stored("box-tokens", vec![]);
+        assert_eq!(connectors.set_box_claude_token("bloom", "sk-ant-oat01-bb11"), Err("connect Upstash Box first".into()));
+        connectors.connect_upstash(&upstash::Keys::parse("box_abcdA1b2", "sk-ant-oat01-default").unwrap()).unwrap();
+        assert_eq!(connectors.set_box_claude_token("bl oom", "sk-ant-oat01-bb11"), Err("name the pinned account with letters, digits, dots, dashes or underscores, as in claude or bloom".into()));
+        assert_eq!(connectors.set_box_claude_token("bloom", "nope"), Err("a Claude token from `claude setup-token` starts with sk-ant-oat01-".into()));
+        let kept = connectors.set_box_claude_token(" bloom ", " sk-ant-oat01-bb11 ").unwrap();
+        assert_eq!(kept, BTreeMap::from([("bloom".to_owned(), "…bb11".to_owned())]));
+        assert_eq!(connectors.box_claude_token(Some("bloom")), Ok("sk-ant-oat01-bb11".into()));
+        assert_eq!(connectors.box_claude_token(None), Ok("sk-ant-oat01-default".into()));
+        assert_eq!(connectors.box_claude_token(Some("claude")), Ok("sk-ant-oat01-default".into()), "the connection's token signs in the default account");
+        assert_eq!(
+            connectors.box_claude_token(Some("work")),
+            Err("no Claude token is kept for work: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token".into())
+        );
+        let settings = serde_json::to_value(connectors.get_settings()).unwrap();
+        assert_eq!(settings["box_claude_tokens"], serde_json::json!({ "bloom": "…bb11" }));
+        assert!(!settings.to_string().contains("sk-ant-oat01"), "{settings}");
+        assert_eq!(connectors.remove_box_claude_token("bloom").unwrap(), BTreeMap::new());
+        assert!(connectors.box_claude_token(Some("bloom")).is_err());
+        connectors.set_box_claude_token("bloom", "sk-ant-oat01-bb11").unwrap();
+        connectors.disconnect_upstash().unwrap();
+        assert_eq!(connectors.get_settings().box_claude_tokens, BTreeMap::new());
+        assert!(connectors.storage.key("claude-oauth-token:bloom").is_none(), "disconnecting drops every kept token");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn upstash_keys_stay_in_storage_and_only_their_hints_reach_settings() {
         let (connectors, dir) = stored("upstash", vec![]);
         assert!(connectors.box_keys().is_none());
@@ -5640,6 +5729,7 @@ mod tests {
             prompt_title: None,
             role: None,
             spawned_by: None,
+            spawned_on: None,
             orchestrator_global: false,
             taste_chat: false,
             orchestrator_turn: false,

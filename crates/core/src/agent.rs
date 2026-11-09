@@ -93,6 +93,9 @@ pub enum ProjectTool {
         request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
+        /// Opens the Capitão in an Upstash Box instead: `true`, or `{ size }`.
+        #[serde(default, rename = "box", skip_serializing_if = "Option::is_none", deserialize_with = "crate::delegate::box_or_true")]
+        boxed: Option<crate::delegate::BoxTarget>,
     },
     /// The global orchestrator's: the latest replies of `project`'s Capitão.
     ReadCaptain {

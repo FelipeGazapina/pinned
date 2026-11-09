@@ -334,6 +334,17 @@ A child cannot be given a wider mode than the session. A bypassed session can ha
 `auto`. `plan` is read-only. Omit the model on a different provider to use that provider's
 default.
 
+A thread can run a worker elsewhere. `target.machine` names another machine of your account, by
+the id or name `projects()` lists. The worker opens there in that machine's checkout of the same
+repository, cloned when it has none, and nests under the thread that asked. `target.box` (`true`,
+or `{ "size", "repo" }`) runs the worker in a new Upstash Box that the hub opens with your
+account's Upstash connection. The **Workers** box permission in Connectors decides whether a box
+may open. `providerInstanceId` picks the Claude token the box signs in with: the Upstash card
+keeps one token per account name, and the token you connected with is the default. The box is
+deleted when the task ends or is cancelled. `task_status`, `task_cancel` and the notice work the
+same from the thread that asked. An unknown or offline machine is an error, and the worker never
+falls back to this machine.
+
 Codex and Cursor tabs have no transcript. Their children show in a strip under the terminal
 note, with the same state, **Cancel**, **Open as thread**, and **Send to session** once the
 child has finished and the notice has not been typed.

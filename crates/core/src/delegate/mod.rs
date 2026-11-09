@@ -48,7 +48,8 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
 
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Access {
     Full,
     Auto,
@@ -175,6 +176,53 @@ pub struct Target {
     /// Set when the request named `driverKind`, so a custom account can be checked against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_kind: Option<String>,
+    /// Another machine of the account, by id or name, that runs the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// A new Upstash Box, opened with the account's connection on the hub, that runs the child.
+    #[serde(default, rename = "box", skip_serializing_if = "Option::is_none")]
+    pub boxed: Option<BoxTarget>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
+pub struct BoxTarget {
+    #[serde(default)]
+    pub size: crate::connectors::BoxSize,
+    /// The repository the box clones. None clones the caller's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+/// The tab on another machine that delegated a task here. The hub stamps `machine` from the
+/// socket the request came on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct Origin {
+    pub machine: String,
+    #[serde(default)]
+    pub machine_name: String,
+    pub tab: String,
+    /// The caller's own id for the task, which the end notice names.
+    pub task: String,
+    /// The widest access the caller may hand a child.
+    pub access: Access,
+}
+
+impl Origin {
+    /// The parent a task started for this origin has in the registry. No local tab has this id.
+    pub fn parent_key(&self) -> String {
+        format!("remote:{}:{}", self.machine, self.tab)
+    }
+}
+
+/// How a task that runs on another machine ended, as that machine reports it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoteEnd {
+    /// `result_available`, `failed` or `cancelled`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The delegation request, after the MCP arguments have been read once.
@@ -307,6 +355,20 @@ pub struct Task {
     /// The pinned thread that shows this child under its parent. Not saved: a restart cancels
     /// every working task, and tab ids do not outlive the process.
     pub thread: Option<Thread>,
+    /// The machine that runs this task for its parent here, when it runs elsewhere. Not saved.
+    pub remote: Option<RemoteTarget>,
+}
+
+/// Where a task delegated to another machine or a box runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteTarget {
+    /// The hub's id for the machine, a box's included.
+    pub machine: String,
+    pub name: String,
+    /// The worker thread there, once it opened.
+    pub tab: Option<String>,
+    /// When this machine last asked that machine how the task goes.
+    pub looked: Option<Instant>,
 }
 
 /// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
@@ -628,6 +690,8 @@ mod tests {
                     model: Some("grok-4.7".into()),
                     effort: Some("high".into()),
                     driver_kind: None,
+                    machine: None,
+                    boxed: None,
                 },
                 isolation: Isolation::Worktree,
                 mode: Mode::Wait,
@@ -641,6 +705,16 @@ mod tests {
                 client_request_id: None,
             }
         );
+        let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
+        assert_eq!(on(json!({"machine": " mini "})), Ok((Some("mini".into()), None)));
+        assert_eq!(on(json!({"box": true})), Ok((None, Some(BoxTarget { size: crate::connectors::BoxSize::Medium, repo: None }))));
+        assert_eq!(
+            on(json!({"box": {"size": "large", "repo": "acme/site"}})),
+            Ok((None, Some(BoxTarget { size: crate::connectors::BoxSize::Large, repo: Some("acme/site".into()) })))
+        );
+        assert_eq!(on(json!({"box": false})), Ok((None, None)));
+        assert_eq!(on(json!({"box": "yes"})), Err("target.box must be true or { size, repo }, not \"yes\"".into()));
+        assert_eq!(on(json!({"machine": "mini", "box": true})), Err("pass target.machine or target.box, not both".into()));
         let effort = json!({"task": "x", "target": {"options": {"effort": "low"}}});
         assert_eq!(
             parse_request(&effort).unwrap().target.effort.as_deref(),
@@ -675,6 +749,8 @@ mod tests {
                     model: None,
                     effort: None,
                     driver_kind: None,
+                    machine: None,
+                    boxed: None,
                 },
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
@@ -2289,6 +2365,35 @@ exec '{real}' "$@"
         let start = Instant::now();
         assert_eq!(delegates.cursor_catalog(missing, None), "");
         assert!(start.elapsed() < Duration::from_millis(200), "a cached miss waited {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_task_on_another_machine_ends_only_from_that_machine_and_shows_no_card_here() {
+        let delegates = Delegates::default();
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Slow suite".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None });
+        assert_eq!(delegates.cards("tab-1"), vec![], "its thread on mini nests under tab-1 instead");
+        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None };
+        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-other", &end), "another machine can't end it");
+        assert!(!delegates.settle_remote(&task.id, "tab-2", "m-mini", &end), "nor can it end another tab's task");
+        assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end));
+        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), "an end lands once");
+        let (text, _) = delegates.claim_notice("tab-1").unwrap();
+        assert_eq!(text, format!("[pinned] Delegated task {} \"Slow suite\" (Claude Code) finished: result available. It ran on mini, in thread tab-9. Call task_status with taskId \"{}\".", task.id, task.id));
     }
 
     #[test]

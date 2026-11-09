@@ -131,6 +131,10 @@ pub struct TabView {
     /// delegated task this tab reopened. The sidebar nests the tab under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<TabId>,
+    /// The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a
+    /// thread there delegated here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_on: Option<MachineId>,
     /// The tab is the account's global orchestrator, the chat above every project's Capitão. Its
     /// `role` is empty, so an older app shows it as a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -303,6 +307,32 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker
+    /// thread here for a tab on another machine of the account. `origin.machine` is the hub's
+    /// stamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names
+    /// the checkout it works in, cloned with `token` when this machine has none. A repeat of
+    /// `origin.task` answers the task it started.
+    Delegate {
+        origin: crate::delegate::Origin,
+        request: Box<crate::delegate::Request>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
+    /// The task's status JSON, as `task_status` answers it, or its state once cancelled when
+    /// `cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and
+    /// `task` of `origin_machine`, the hub's stamp of the machine that asks.
+    RemoteTask {
+        origin_machine: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancel: Option<String>,
+    },
+    /// `null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`
+    /// ended there. `from` is the hub's stamp of the machine that reports it.
+    RemoteEnded { from: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
@@ -995,6 +1025,35 @@ pub enum HubCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box
+    /// its target names, for the asking machine's tab `tab`, whose own id for the task is `task`.
+    /// `repo` is the caller's git origin, which the worker's checkout is found or cloned by;
+    /// `access` is the widest the caller may hand a child.
+    Delegate {
+        tab: TabId,
+        task: String,
+        request: Box<crate::delegate::Request>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        access: crate::delegate::Access,
+    },
+    /// From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,
+    /// or its state once cancelled when `cancel` gives a reason.
+    RemoteTask {
+        machine: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancel: Option<String>,
+    },
+    /// From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated
+    /// here as `task`.
+    RemoteEnded { to: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// `connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for
+    /// boxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.
+    SetBoxClaudeToken { name: String, token: String },
+    /// `connectors::Settings::box_claude_tokens`, without the token kept for `name`.
+    RemoveBoxClaudeToken { name: String },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1269,6 +1328,7 @@ mod tests {
             prompt_title: Some("Fix the build".into()),
             role: None,
             spawned_by: None,
+            spawned_on: None,
             orchestrator_global: false,
             taste_chat: false,
             orchestrator_turn: false,
@@ -1580,6 +1640,25 @@ mod tests {
             HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
             _ => panic!("not an import"),
         }
+        round_trip(HubCall::SetBoxClaudeToken { name: "bloom".into(), token: "sk-ant-oat01-1".into() }, json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-1" }));
+        round_trip(HubCall::RemoveBoxClaudeToken { name: "bloom".into() }, json!({ "cmd": "remove_box_claude_token", "name": "bloom" }));
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        round_trip(
+            HubCall::RemoteEnded { to: "m1".into(), tab: "tab-1".into(), task: "task-1".into(), end: end.clone() },
+            json!({ "cmd": "remote_ended", "to": "m1", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        );
+        round_trip(
+            HubCall::RemoteTask { machine: "m2".into(), tab: "tab-1".into(), task: "task-1".into(), cancel: Some("not now".into()) },
+            json!({ "cmd": "remote_task", "machine": "m2", "tab": "tab-1", "task": "task-1", "cancel": "not now" }),
+        );
+        round_trip(
+            Call::RemoteEnded { from: "m2".into(), tab: "tab-1".into(), task: "task-1".into(), end },
+            json!({ "cmd": "remote_ended", "from": "m2", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        );
+        let request = crate::delegate::parse_request(&json!({ "task": "Fix it.", "target": { "box": { "size": "large" } } })).unwrap();
+        let delegate = serde_json::to_value(HubCall::Delegate { tab: "tab-1".into(), task: "task-1".into(), request: Box::new(request), repo: Some("git@github.com:o/r.git".into()), access: crate::delegate::Access::ReadOnly }).unwrap();
+        assert_eq!((delegate["cmd"].as_str(), delegate["access"].as_str()), (Some("delegate"), Some("read_only")));
+        assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
@@ -1638,7 +1717,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();

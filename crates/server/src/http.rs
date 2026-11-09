@@ -635,7 +635,15 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
                 // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
-                // and serve the global orchestrator and the Capitães, which `relay` checks against this socket.
+                // and serve the global orchestrator and the Capitães, which `relay` checks against this socket,
+                // and a thread's workers on other machines, which `remote` stamps with this socket.
+                if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
+                    let result = crate::remote::serve(&hub, &account, &machine, call).await;
+                    if let Err(e) = &result {
+                        eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
+                    }
+                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+                }
                 if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
                     let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
                     if let Err(e) = &result {

@@ -34,6 +34,9 @@ const NOT_LINKED: &str = "this machine is not linked to a hub";
 const TASTE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TASTE_WAIT: Duration = Duration::from_millis(500);
+/// How often a remote task's status asks the machine running it, and an end that did not get
+/// through is sent again.
+const REMOTE_LOOK: Duration = Duration::from_secs(3);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -239,8 +242,27 @@ impl Screen {
 }
 
 /// A child `delegate_task` starts from the tab `from`, as the worker thread that shows it.
+/// Who a new child is for: a tab or a task here, or a tab on another machine (`origin`), with
+/// what it inherits.
+struct ChildParent {
+    parent: crate::delegate::Parent,
+    caller_key: String,
+    client_request_id: Option<String>,
+    /// The tab here that asked, which must stay open.
+    tab: Option<TabId>,
+    origin: Option<crate::delegate::Origin>,
+    account: Option<accounts::AccountId>,
+    inherited_model: Option<String>,
+    provider: Provider,
+    auth: Auth,
+    cwd: PathBuf,
+    ceiling: crate::delegate::Access,
+}
+
 struct ThreadChild<'a> {
     from: &'a str,
+    /// The tab on another machine the thread is for. `from` then names no tab here.
+    origin: Option<crate::delegate::Origin>,
     task: &'a str,
     title: &'a str,
     cwd: &'a Path,
@@ -288,6 +310,9 @@ struct Tab {
     /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
     /// once this tab is closed.
     spawned_by: Option<TabId>,
+    /// The tab on another machine that delegated this worker here. Its end goes back through the
+    /// hub, and its tab id is never looked up among this machine's tabs.
+    origin: Option<crate::delegate::Origin>,
     /// The `delegate_task` task this worker thread shows. Its first finished turn ends the task
     /// when the tab runs it; a headless child's thread follows the task instead.
     task: Option<String>,
@@ -379,7 +404,8 @@ impl Tab {
             prompt_title: self.tally.prompt_title.clone(),
             orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
             role: role.map(|(role, _)| role),
-            spawned_by: self.spawned_by.clone(),
+            spawned_by: self.origin.as_ref().map(|o| o.tab.clone()).or_else(|| self.spawned_by.clone()),
+            spawned_on: self.origin.as_ref().map(|o| o.machine.clone()),
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
@@ -460,6 +486,8 @@ pub struct Machine {
     usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
+    /// Ends of tasks run here for another machine's tabs that the hub could not pass on yet.
+    remote_ends: Mutex<Vec<(Instant, HubCall)>>,
     memories: Arc<memory::Memories>,
     orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
@@ -621,6 +649,7 @@ impl Machine {
             usage_refreshed: Mutex::default(),
             agents: Mutex::default(),
             delegates,
+            remote_ends: Mutex::default(),
             memories,
             orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
@@ -861,6 +890,9 @@ impl Machine {
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
             Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
+            Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
+            Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
+            Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
@@ -2141,6 +2173,32 @@ impl Machine {
         }
     }
 
+    /// `send_to_captain` with `box`: the hub opens the Capitão of `project`'s repository in an
+    /// Upstash Box, with the account's connection, or hands the message to the box that runs it.
+    fn send_to_captain_box(&self, project: &str, machine: Option<&str>, boxed: crate::delegate::BoxTarget, message: &str, request_id: &str) -> Result<Value, String> {
+        let repo = match boxed.repo {
+            Some(repo) => repo,
+            None => self.project_origin(project, machine)?,
+        };
+        let settings = self.global_settings();
+        let to = global::RelayTo::CaptainBox { repo, size: boxed.size, text: message.to_owned(), sender: settings.name, busy: Some(settings.busy) };
+        self.call_hub(HubCall::Relay { request_id: request_id.to_owned(), to }).map_err(needs_update)
+    }
+
+    /// The git origin of `project`: its checkout here, else the repo the hub's overview lists for it.
+    fn project_origin(&self, project: &str, machine: Option<&str>) -> Result<String, String> {
+        if let Some(remote) = self.local_project(project, machine).as_deref().and_then(git_remote) {
+            return Ok(remote);
+        }
+        let overview = self.projects_overview()?;
+        let listed = overview.projects.iter().find(|p| p.key == project || p.repo.as_deref() == Some(project) || p.checkouts.iter().any(|c| c.path == project));
+        match listed {
+            Some(p) => p.repo.clone().ok_or_else(|| format!("{project} has no git origin, so no box can clone it")),
+            None if project.contains('/') && !is_absolute_anywhere(project) => Ok(project.to_owned()),
+            None => Err(format!("{project} is not a project of this account")),
+        }
+    }
+
     /// The folder on this machine that `project` names, as a key `projects` lists (`repo`, or
     /// `<machine>:<path>`) or as a folder, unless `machine` names another machine.
     fn local_project(&self, project: &str, machine: Option<&str>) -> Option<PathBuf> {
@@ -2375,7 +2433,11 @@ impl Machine {
                 only_global()?;
                 self.read_session(&id, machine.as_deref(), items)
             }
-            ProjectTool::SendToCaptain { project, message, request_id, machine } => {
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
+                only_global()?;
+                text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
+            }
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
                 text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
             }
@@ -2527,6 +2589,10 @@ impl Machine {
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+        // A worker for another machine's tab reports only its task's end, through the hub.
+        if self.tab(worker, |t| t.origin.is_some()).unwrap_or(false) {
+            return;
+        }
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
             AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
@@ -3088,6 +3154,17 @@ impl Machine {
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let mut status = self.delegates.status(&caller, id)?;
+        if let Some(remote) = self.delegates.get(id).and_then(|t| t.remote) {
+            let steps = match (caller.tab.as_deref(), self.delegates.remote_due(id, Instant::now(), REMOTE_LOOK)) {
+                (Some(tab), Some(due)) => self.look_remote(tab, id, &due),
+                _ => None,
+            };
+            status = self.delegates.status(&caller, id)?;
+            if let Some(steps) = steps {
+                status["recentSteps"] = steps;
+            }
+            return Ok(with_remote(status, &remote).to_string());
+        }
         // A thread's own session runs the child, so its steps are in the thread's transcript.
         if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
@@ -3105,7 +3182,147 @@ impl Machine {
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
+        let remote = self.delegates.get(id).filter(|t| !t.state.terminal()).and_then(|t| t.remote);
+        if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
+            self.delegates.status(&caller, id)?;
+            if !remote.machine.is_empty() {
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                let answer = self.call_hub(cancel).map_err(|e| format!("{} did not take the cancel: {}", remote.name, needs_update(e)))?;
+                self.settle_from(tab, id, &remote, &answer);
+            }
+        }
         self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+    }
+
+    /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
+    /// machine keeps the task, under its own id, for the caller's `task_status` and notice.
+    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
+        let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
+        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
+        let access = resolve_access(ceiling, &request)?;
+        let repo = request.target.boxed.as_ref().and_then(|b| b.repo.clone()).or_else(|| git_remote(&cwd));
+        if repo.is_none() {
+            return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
+        }
+        let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
+        let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
+        let place = request.target.machine.clone().unwrap_or_else(|| "an Upstash Box".into());
+        let task = match self.delegates.claim(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool,
+            title: request.title.clone(),
+            account,
+            provider,
+            model: request.target.model.clone(),
+            cwd,
+            mode: request.mode,
+            access,
+            isolated: false,
+            caller_key: caller.key(),
+            client_request_id: request.client_request_id.clone(),
+            role: request.role.clone(),
+        }) {
+            Claim::Existing(id) => return self.remote_started(&id),
+            Claim::Fresh(task) => *task,
+        };
+        self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
+        self.delegates.note_parent(&task.id, session);
+        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
+        let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling };
+        match self.call_hub(asked) {
+            Ok(answer) => {
+                let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
+                let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
+                let tab = answer["tabId"].as_str().map(str::to_owned);
+                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+                self.arm_delegate_pass();
+                self.remote_started(&task.id)
+            }
+            Err(error) => {
+                let error = needs_update(error);
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                Err(error)
+            }
+        }
+    }
+
+    fn remote_started(&self, id: &str) -> Result<String, String> {
+        let body = self.delegates.started_json(id)?;
+        Ok(match self.delegates.get(id).and_then(|t| t.remote) {
+            Some(remote) => with_remote(body, &remote),
+            None => body,
+        }
+        .to_string())
+    }
+
+    /// Asks the machine that runs a remote task how it goes. A finished task ends here too; a
+    /// working one gives its latest steps. None while that machine can't answer, as while its box boots.
+    fn look_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget) -> Option<Value> {
+        if remote.machine.is_empty() {
+            return None;
+        }
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let answer = self.call_hub(asked).ok()?;
+        self.settle_from(tab, id, remote, &answer);
+        Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
+    }
+
+    /// Ends the remote task when `answer`, the status its machine gave, says it ended.
+    fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
+        let state = answer["workState"].as_str().unwrap_or_default();
+        if !matches!(state, "result_available" | "failed" | "cancelled") {
+            return;
+        }
+        let end = crate::delegate::RemoteEnd {
+            state: state.to_owned(),
+            summary: answer["summary"].as_str().map(str::to_owned),
+            error: answer["error"].as_str().map(str::to_owned),
+        };
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+            self.emit_tabs();
+        }
+    }
+
+    /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
+    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
+        if !self.delegates.settle_remote(task, tab, from, end) {
+            return false;
+        }
+        self.maybe_deliver(tab);
+        self.emit_tabs();
+        true
+    }
+
+    /// `Call::RemoteTask`: the status of the task started here for `task` of `tab` on `origin`, or
+    /// its state once cancelled.
+    fn remote_task(&self, origin: &str, tab: &str, task: &str, cancel: Option<&str>) -> Result<Value, String> {
+        let key = crate::delegate::Origin { machine: origin.to_owned(), machine_name: String::new(), tab: tab.to_owned(), task: task.to_owned(), access: crate::delegate::Access::ReadOnly }.parent_key();
+        let id = self.delegates.for_origin(&key, task).ok_or_else(|| format!("no task {task} of that thread runs here"))?;
+        let caller = crate::delegate::Caller { tab: Some(key), task: None };
+        if let Some(reason) = cancel {
+            return self.delegates.cancel(&caller, &id, reason, self.launch.path_env.as_deref());
+        }
+        let mut status = self.delegates.status(&caller, &id)?;
+        if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
+            status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+        }
+        Ok(status)
+    }
+
+    /// Sends the end of each task that a tab on another machine delegated here back through the
+    /// hub. An end the hub could not pass on waits for the next pass, at most every `REMOTE_LOOK`.
+    fn send_remote_ends(&self, now: Instant) {
+        let fresh = self.delegates.claim_remote_ends().into_iter().map(|(_, machine, tab, task, end)| HubCall::RemoteEnded { to: machine, tab, task, end });
+        let held = std::mem::take(&mut *self.remote_ends.lock().unwrap());
+        let (again, mut waiting): (Vec<_>, Vec<_>) = held.into_iter().partition(|(at, _)| now.saturating_duration_since(*at) >= REMOTE_LOOK);
+        for call in fresh.chain(again.into_iter().map(|(_, call)| call)) {
+            if let Err(e) = self.call_hub(call.clone()) {
+                eprintln!("pinned: could not send a delegated task's end back: {e}");
+                waiting.push((now, call));
+            }
+        }
+        self.remote_ends.lock().unwrap().extend(waiting);
     }
 
     /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
@@ -3140,30 +3357,65 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        use crate::delegate::Parent;
         let caller = Self::require_caller(tab, parent_task)?;
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
                 return Err(NO_PROJECT_WORK.into());
             }
         }
+        if request.target.machine.is_some() || request.target.boxed.is_some() {
+            return self.delegate_elsewhere(&caller, tool, request);
+        }
         self.check_worker_cap()?;
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
-        let parent = if let Some(tab) = caller.tab.clone() {
-            Parent::Tab(tab)
+        let side = if let Some(tab) = caller.tab.clone() {
+            let (account, model, provider, auth, cwd, ceiling) = self.tab(&tab, |t| (t.account.id.clone(), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?;
+            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling }
         } else {
-            Parent::Task(caller.task.clone().unwrap_or_default())
+            let id = caller.task.clone().unwrap_or_default();
+            let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
+            let auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
+            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access }
         };
-        let (account_id, inherited_model, parent_provider, parent_auth, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?
-        } else {
-            let id = caller.task.as_deref().unwrap_or_default();
-            let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
-            let parent_auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
-            (Some(task.account), task.model, task.provider, parent_auth, task.cwd, task.access)
+        self.launch_child(side, tool, request)
+    }
+
+    /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
+    /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
+    /// the project's account unless the request names one.
+    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+        let key = origin.parent_key();
+        if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
+            return self.delegates.started_json(&id).map(|value| value.to_string());
+        }
+        self.check_worker_cap()?;
+        let repo = repo.ok_or("the thread that asked works in a folder with no git origin, so this machine can't find its project")?;
+        let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
+        let account = self.account_for(None, &cwd)?;
+        (request.target.machine, request.target.boxed) = (None, None);
+        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let side = ChildParent {
+            parent: crate::delegate::Parent::Tab(key),
+            caller_key,
+            client_request_id: Some(origin.task.clone()),
+            tab: None,
+            account: Some(account.id),
+            inherited_model: None,
+            provider: account.provider,
+            auth: account.auth,
+            cwd,
+            ceiling: origin.access,
+            origin: Some(origin),
         };
+        self.launch_child(side, None, request)
+    }
+
+    fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
+        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling } = side;
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
         } else if let Some(id) = account_id {
@@ -3186,7 +3438,7 @@ impl Machine {
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
-        self.ensure_parent(caller.tab.as_deref(), None)?;
+        self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
             parent,
@@ -3199,19 +3451,19 @@ impl Machine {
             mode: request.mode,
             access,
             isolated: false,
-            caller_key: caller.key(),
-            client_request_id: request.client_request_id.clone(),
+            caller_key,
+            client_request_id,
             role: request.role.clone(),
         }) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
         self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
-        if let Some(tab) = caller.tab.as_deref() {
+        if let Some(tab) = parent_tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         if account.provider == Provider::Cursor {
             if let Some(name) = model.clone() {
                 let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
@@ -3220,11 +3472,11 @@ impl Machine {
             }
             effort = None;
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         // A child called from a tab is a worker thread under it. Claude Code runs in that thread's
         // own session; Cursor and Codex report no turns to pinned, so they run headless and the
-        // thread shows their steps.
-        let from = caller.tab.clone();
+        // thread shows their steps. A child for a tab on another machine is a thread here.
+        let from = parent_tab.clone().or_else(|| origin.as_ref().map(crate::delegate::Origin::parent_key));
         let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
@@ -3246,7 +3498,7 @@ impl Machine {
         }
         let brief = crate::delegate::granted_brief(&request.task, &request.tools);
         if let Some(from) = from.as_deref() {
-            let child = ThreadChild { from, task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
+            let child = ThreadChild { from, origin: origin.clone(), task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
             if runs_in_thread {
                 return self.run_in_thread(child, account, effort.as_deref(), access, &brief);
             }
@@ -3354,10 +3606,14 @@ impl Machine {
     }
 
     fn add_child_tab(&self, child: &ThreadChild, account: Account, launch: Vec<String>, bypass: bool) -> TabId {
-        let project = self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd));
+        let project = match child.origin {
+            Some(_) => history::project_of(child.cwd),
+            None => self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd)),
+        };
         let id = self.add_tab(child.cwd.to_owned(), account, launch, role_env(Role::Worker, &project), bypass, None);
         let _ = self.tab(&id, |t| {
-            t.spawned_by = Some(child.from.to_owned());
+            t.spawned_by = child.origin.is_none().then(|| child.from.to_owned());
+            t.origin = child.origin.clone();
             t.task = Some(child.task.to_owned());
             t.title = Some(child.title.to_owned());
             t.model = child.model.clone();
@@ -3382,6 +3638,11 @@ impl Machine {
             self.delegates.set_conversation(&task, session);
         }
         let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // A thread for another machine's tab sends its end back through the hub on the next pass.
+        if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
+            self.arm_delegate_pass();
+            return true;
+        }
         // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
         match parent {
             Some(parent) if self.tabs.lock().unwrap().contains_key(&parent) => {
@@ -3537,6 +3798,7 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.send_remote_ends(Instant::now());
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
@@ -3694,6 +3956,7 @@ impl Machine {
             model: None,
             made: None,
             spawned_by: None,
+            origin: None,
             task: None,
             turn: None,
             status: None,
@@ -4065,6 +4328,13 @@ fn is_absolute_anywhere(path: &str) -> bool {
 }
 
 /// The hub's error, or which side needs an update when it is an older hub's or machine's refusal.
+/// A remote task's status or start, naming the machine that runs it and its thread there.
+fn with_remote(mut body: Value, remote: &crate::delegate::RemoteTarget) -> Value {
+    body["machine"] = json!(remote.name);
+    body["tabId"] = json!(remote.tab);
+    body
+}
+
 fn needs_update(e: String) -> String {
     if crate::link::is_unknown_command(&e) {
         "o hub ou a máquina precisa atualizar o pinned".to_owned()

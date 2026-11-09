@@ -2,7 +2,7 @@
 //! are stored as their sha256, so the database alone can't sign anyone in. A second, optional
 //! database keeps what users chose to share to improve the app, such as rated dictations.
 
-use crate::boxes::{BoxRow, Phase, Remains};
+use crate::boxes::{BoxRow, BoxWork, Phase, Remains};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
@@ -250,6 +250,10 @@ fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
         connector: r.get(4),
         subject: serde_json::from_value(r.get(5)).map_err(unreadable)?,
         spec: serde_json::from_value(r.get(6)).map_err(unreadable)?,
+        work: match r.get::<_, Value>(6).get("work") {
+            Some(work) => serde_json::from_value(work.clone()).map_err(unreadable)?,
+            None => BoxWork::Run,
+        },
         size: serde_json::from_value(Value::String(r.get(7))).map_err(unreadable)?,
         phase: Phase::load(r.get(8), r.get(9)),
         age: std::time::Duration::from_secs_f64(r.get::<_, f64>(10).max(0.0)),
@@ -552,7 +556,10 @@ impl Db {
     /// row, and whether it is the one just written.
     pub async fn reserve_box(&self, row: &BoxRow) -> Result<(BoxRow, bool), String> {
         let client = self.client().await?;
-        let (subject, spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        let (subject, mut spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        if row.work != BoxWork::Run {
+            spec["work"] = serde_json::to_value(&row.work).unwrap();
+        }
         let (phase, reason) = row.phase.stored();
         let size = serde_json::to_value(row.size).unwrap().as_str().unwrap().to_owned();
         let inserted = client
