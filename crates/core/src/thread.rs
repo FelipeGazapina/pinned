@@ -193,16 +193,13 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let replaced = from > len;
     let from = if replaced { 0 } else { from };
     f.seek(SeekFrom::Start(from))?;
-    let mut bytes = vec![];
-    (&mut f).take(READ_LIMIT).read_to_end(&mut bytes)?;
-    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
+    let (lines, whole, bytes) = whole_lines(&mut f)?;
     let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
     let context = lines.iter().rev().find_map(context_of);
     let branch = lines.iter().rev().find_map(|l| l["gitBranch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned));
     let todos = lines.iter().rev().find_map(todos_of);
     let mut next = from + whole as u64;
-    if whole == 0 && bytes.len() as u64 == READ_LIMIT {
+    if whole == 0 && bytes as u64 == READ_LIMIT {
         if let Some(rest) = rest_of_line(&mut f)? {
             next = from + READ_LIMIT + rest;
             items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
@@ -217,18 +214,31 @@ pub fn last_page(file: &Path) -> u64 {
     std::fs::metadata(file).map_or(0, |m| m.len().saturating_sub(READ_LIMIT))
 }
 
-/// The last text the assistant wrote, read from the end of `file`, or None when a prompt came after
-/// it, so a turn that wrote nothing never passes for the turn before. A slash command such as the
-/// `/reload-skills` pinned types into an idle session is no prompt.
+/// The parsed whole lines from where `f` stands, `READ_LIMIT` bytes at most, side chains left out;
+/// with the length of those whole lines and the bytes read.
+fn whole_lines(f: &mut std::fs::File) -> std::io::Result<(Vec<Value>, usize, usize)> {
+    let mut bytes = vec![];
+    Read::take(&mut *f, READ_LIMIT).read_to_end(&mut bytes)?;
+    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let lines = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
+    Ok((lines, whole, bytes.len()))
+}
+
+/// What the assistant said last in the latest turn, read from the end of `file`: its last text, or
+/// else the message it sent another session. None when the latest turn said nothing yet, so a turn
+/// never passes for the turn before.
 pub fn last_reply(file: &Path) -> std::io::Result<Option<String>> {
-    let len = std::fs::metadata(file)?.len();
+    let mut f = std::fs::File::open(file)?;
+    let len = f.metadata()?.len();
     for back in [REPLY_LOOK, READ_LIMIT] {
         let from = len.saturating_sub(back);
-        for item in read(file, from)?.items.into_iter().rev() {
-            match item {
-                Item::Text { text, .. } => return Ok(Some(text)),
-                Item::User { text, .. } if !is_command(&text) => return Ok(None),
-                _ => {}
+        f.seek(SeekFrom::Start(from))?;
+        for line in whole_lines(&mut f)?.0.iter().rev() {
+            if opens_turn(line) {
+                return Ok(None);
+            }
+            if let Some(said) = said_in(line) {
+                return Ok(Some(said));
             }
         }
         if from == 0 {
@@ -236,6 +246,41 @@ pub fn last_reply(file: &Path) -> std::io::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// Whether a prompt is one Claude Code delivers on its own, not one the user typed: a background
+/// task handing back, or a message from another session.
+pub fn delivered(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    let prompt = prompt.strip_prefix("Another Claude session sent a message:").map_or(prompt, str::trim_start);
+    prompt.starts_with("<task-notification>") || prompt.starts_with("<cross-session-message")
+}
+
+/// Whether the line is the prompt a turn opens on: one the user typed or queued, a message from
+/// another session, a background task handing back. Claude Code marks each with `turnPosition`;
+/// older transcripts lack the mark. A slash command such as the `/reload-skills` pinned types into
+/// an idle session opens none.
+fn opens_turn(line: &Value) -> bool {
+    if line["type"] != "user" {
+        return false;
+    }
+    if line["message"]["content"].as_str().is_some_and(delivered) {
+        return true;
+    }
+    let items = items_of(line);
+    let command = items.iter().any(|item| matches!(item, Item::User { text, .. } if is_command(text)));
+    !command && (line.get("turnPosition").is_some() || items.iter().any(|item| matches!(item, Item::User { .. })))
+}
+
+/// The last text of an assistant line, else the message it sends another session.
+fn said_in(line: &Value) -> Option<String> {
+    if line["type"] != "assistant" || line["isApiErrorMessage"].as_bool() == Some(true) || line["isMeta"].as_bool() == Some(true) {
+        return None;
+    }
+    let blocks = line["message"]["content"].as_array()?;
+    let text = blocks.iter().rev().find_map(|b| b["text"].as_str().filter(|t| b["type"] == "text" && !t.trim().is_empty()));
+    let sent = || blocks.iter().rev().find_map(|b| b["input"]["message"].as_str().filter(|_| b["type"] == "tool_use" && b["name"] == "SendMessage"));
+    text.or_else(sent).map(str::to_owned)
 }
 
 /// Work a session runs in the background, which hands back to it when it ends.
@@ -702,6 +747,32 @@ mod tests {
         assert_eq!(reply(&[said("Shipped."), user("/Users/f/notes.md has the plan, read it")]), None, "a prompt that starts with a path");
         let long: Vec<String> = [said("Before the tools.")].into_iter().chain((0..5).map(|_| output(100 << 10))).collect();
         assert_eq!(reply(&long), Some("Before the tools.".into()), "a reply further back than the first look");
+    }
+
+    #[test]
+    fn a_turn_another_session_or_a_background_task_opens_has_its_own_reply() {
+        use serde_json::json;
+        let reply = |lines: &[Value]| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            last_reply(file.path()).unwrap()
+        };
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let message = "<cross-session-message from=\"uds:/tmp/cc-socks/85194.sock\" from-name=\"Captain\">\nAnything running?\n</cross-session-message>";
+        let peer = json!({ "type": "user", "isMeta": true, "turnPosition": { "promptIndex": 1, "turnIndex": 1 }, "origin": { "kind": "peer" }, "message": { "content": format!("Another Claude session sent a message:\n{message}") } });
+        let older_peer = json!({ "type": "user", "isMeta": true, "message": { "content": format!("Another Claude session sent a message:\n{message}") } });
+        let notified = json!({ "type": "user", "message": { "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>" } });
+        let answered = json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": "t1", "name": "SendMessage", "input": { "to": "uds:/tmp/cc-socks/85194.sock", "message": "Nothing I started is still running." } }] } });
+        let sent = json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "Message sent." }] } });
+        let earlier = said("Desktop sidebar matches. Comparing against the boards next.");
+
+        assert_eq!(reply(&[earlier.clone(), peer.clone()]), None, "the message's turn wrote nothing yet");
+        assert_eq!(reply(&[earlier.clone(), older_peer]), None, "a message without the turn mark");
+        assert_eq!(reply(&[earlier.clone(), notified]), None, "a background task's turn wrote nothing yet");
+        assert_eq!(reply(&[earlier.clone(), peer.clone(), answered.clone(), sent.clone()]), Some("Nothing I started is still running.".into()), "the message it sent is its reply");
+        assert_eq!(reply(&[earlier, peer, answered, sent, said("Told the Captain.")]), Some("Told the Captain.".into()), "text after it wins");
     }
 
     #[test]
