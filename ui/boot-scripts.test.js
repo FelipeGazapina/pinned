@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 // A deferred classic script runs after every plain one, so a plain script that follows it
 // and uses its globals throws at boot and the login screen never shows.
@@ -42,4 +43,15 @@ test("no two classic scripts declare the same top-level name", () => {
     }
   }
   assert.deepEqual(clashes, []);
+});
+
+// icons.js swaps each <i data-icon> in index.html for its svg as it loads, so an icon that a later
+// script adds to ICON_PATHS draws as an empty box there.
+test("every icon index.html names is in icons.js when it loads", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const context = { document: { querySelectorAll: () => [] } };
+  vm.createContext(context);
+  vm.runInContext(`${readFileSync(new URL("./icons.js", import.meta.url), "utf8")}\nthis.paths = ICON_PATHS;`, context);
+  const named = [...new Set([...html.matchAll(/data-icon="([^"]+)"/g)].map((match) => match[1]))];
+  assert.deepEqual(named.filter((name) => !(name in context.paths) && !["claude", "opencode", "github"].includes(name)), []);
 });
