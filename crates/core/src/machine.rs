@@ -3,6 +3,7 @@ use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Messa
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
+use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -27,6 +28,12 @@ const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// How long a session's start waits for the account's taste before it takes the one `taste.json`
+/// kept. A Capitão can start while a Machine lock is held, so a silent hub must not hold it long.
+#[cfg(not(test))]
+const TASTE_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const TASTE_WAIT: Duration = Duration::from_millis(500);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -425,6 +432,9 @@ pub struct Machine {
     memories: Arc<memory::Memories>,
     orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
+    /// Whether the hub has seen this machine's own tastes since the link last connected, so the
+    /// account can take them.
+    tastes_shared: Arc<AtomicBool>,
     global: Mutex<global::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
@@ -539,6 +549,9 @@ impl Machine {
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let sent = global::Ledger::load(dir.as_deref());
+        // Seeds taste.json from the old cost style now, before a change to the worker cap rewrites
+        // orchestration.json without it.
+        taste::load(dir.as_deref());
         let home = home();
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
@@ -578,6 +591,7 @@ impl Machine {
             memories,
             orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
+            tastes_shared: Arc::default(),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
@@ -1461,10 +1475,13 @@ impl Machine {
             prompt.push(crate::device::AGENT_PROMPT.to_owned());
         }
         let settings = self.global_settings();
+        let role = role_of(&env).map(|(role, _)| role);
+        let tastes = (global::is_global(&env) || role == Some(Role::Orchestrator)).then(|| self.tastes());
         if global::is_global(&env) {
             prompt.push(global::prompt(&settings.name, &crate::account::hostname()));
+            prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
         }
-        if let Some((role, _)) = role_of(&env) {
+        if let Some(role) = role {
             if !role.disallowed_tools().is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
                 args.push("--disallowedTools".to_owned());
@@ -1472,6 +1489,7 @@ impl Machine {
             }
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
+                prompt.extend(tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)).brief()));
                 prompt.push(self.orchestration.lock().unwrap().hint());
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
@@ -2716,16 +2734,70 @@ impl Machine {
         self.orchestration.lock().unwrap().clone()
     }
 
-    /// Saves new orchestration settings, clamping the worker cap into range.
-    pub fn set_orchestration(&self, style: crate::orchestration::Style, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
+    /// Saves a new worker cap, clamped into range.
+    pub fn set_orchestration(&self, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
         let mut current = self.orchestration.lock().unwrap();
-        *current = crate::orchestration::Orchestration { style, max_workers };
+        *current = crate::orchestration::Orchestration { max_workers };
         current.clamp();
         let saved = current.clone();
         drop(current);
         saved.save(self.orchestration_dir.as_deref())?;
         *self.orchestration.lock().unwrap() = saved.clone();
         Ok(saved)
+    }
+
+    /// The account's tastes: the hub's while this machine is linked, which `taste.json` keeps for
+    /// when the hub can't answer, or else this machine's own. Waits at most `TASTE_WAIT` for the
+    /// hub; an answer that comes later still lands in `taste.json` for the next start.
+    fn tastes(&self) -> Tastes {
+        let dir = self.orchestration_dir.clone();
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            let (shared, kept) = (self.tastes_shared.clone(), dir.clone());
+            let (answer, answered) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                share_tastes(&*hub, &shared, kept.as_deref());
+                let read = hub(HubCall::GetTastes).and_then(|value| serde_json::from_value::<Tastes>(value).map_err(|e| e.to_string()));
+                if let Ok(tastes) = &read {
+                    if let Err(e) = taste::save(tastes, kept.as_deref()) {
+                        eprintln!("pinned: could not keep the account's taste: {e}");
+                    }
+                }
+                let _ = answer.send(read);
+            });
+            if let Ok(Ok(tastes)) = answered.recv_timeout(TASTE_WAIT) {
+                return tastes;
+            }
+        }
+        taste::load(dir.as_deref()).unwrap_or_default()
+    }
+
+    /// The link to the hub is up, maybe for another account than before: offers this machine's
+    /// own tastes again. Never call it while holding a Machine lock.
+    pub(crate) fn share_tastes_again(&self) {
+        self.tastes_shared.store(false, Ordering::SeqCst);
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            share_tastes(&*hub, &self.tastes_shared, self.orchestration_dir.as_deref());
+        }
+    }
+
+    /// The tastes a signed-out app keeps on this machine.
+    pub fn local_tastes(&self) -> Tastes {
+        taste::load(self.orchestration_dir.as_deref()).unwrap_or_default()
+    }
+
+    /// `Tastes::set` on this machine's own tastes.
+    pub fn set_local_taste(&self, scope: &TasteScope, patch: TastePatch) -> Result<Tastes, String> {
+        taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.set(scope, patch))
+    }
+
+    /// `Tastes::reset` on this machine's own tastes.
+    pub fn reset_local_taste_field(&self, scope: &TasteScope, field: TasteField) -> Result<Tastes, String> {
+        taste::change(self.orchestration_dir.as_deref(), |tastes| {
+            tastes.reset(scope, field);
+            Ok(())
+        })
     }
 
     /// Workers running right now: live worker threads plus active delegate tasks.
@@ -3750,6 +3822,25 @@ pub fn git_remote(dir: &Path) -> Option<String> {
 pub fn repo_name(repo: &str) -> Option<&str> {
     let name = repo.trim_end_matches('/').rsplit(['/', ':']).next()?.trim_end_matches(".git");
     (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
+/// Offers the tastes in `dir`, a signed-out app's or the old cost style's seed, to the account,
+/// which takes them only while it has none. The defaults are not offered: the hub answers them to
+/// an account with none anyway, and taking them would refuse a later machine's own.
+fn share_tastes(hub: &dyn Fn(HubCall) -> Result<Value, String>, shared: &AtomicBool, dir: Option<&Path>) {
+    if shared.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(tastes) = taste::load(dir).filter(|own| *own != Tastes::default()) else { return };
+    if hub(HubCall::ImportTastes { tastes }).is_ok() {
+        shared.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The taste a Capitão in `folder` follows: its project's, or every Capitão's when the folder has
+/// no origin to name the project by.
+fn captain_scope(folder: &Path) -> TasteScope {
+    git_remote(folder).and_then(|remote| repo_key(&remote)).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo })
 }
 
 fn repo_key(url: &str) -> Option<String> {
@@ -5910,8 +6001,8 @@ echo '{"type":"result","result":"ok"}'
         std::fs::create_dir_all(&config).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::new(), ..launch() }, Some(config.clone()), None, |_| {});
         assert_eq!(m.orchestration().max_workers, 100);
-        m.set_orchestration(crate::orchestration::Style::Economical, 1).unwrap();
-        assert_eq!(m.orchestration().style, crate::orchestration::Style::Economical);
+        m.set_orchestration(1).unwrap();
+        assert_eq!(m.orchestration().max_workers, 1);
         assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(config.join("orchestration.json")).unwrap()).is_ok());
         m.check_worker_cap().unwrap();
         let worker = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &dir), false, None);
@@ -7006,7 +7097,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
@@ -7208,7 +7299,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &global::prompt("Orchestrator", &crate::account::hostname())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7268,7 +7359,7 @@ while True:
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
         ask(&sock, &done).unwrap();
         let report = format!("[pinned] Capitão site ({host}) [m-mini {capitao}]: The form validates now. PR #12 is open.");
-        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), global::prompt("Orchestrator", &host)], "the report started the global orchestrator");
+        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), format!("{}\n\n{}", global::prompt("Orchestrator", &host), taste::Taste::default().brief())], "the report started the global orchestrator");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
 
         assert_eq!(overview(), projects("livre", &capitao));
@@ -7417,12 +7508,139 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_starts_with_its_projects_taste_and_the_global_orchestrator_with_its_own() {
+        let dir = temp("taste-brief");
+        let (site, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&site).unwrap();
+        git(&site, &["init", "-q"]);
+        git(&site, &["remote", "add", "origin", "git@github.com:acme/site.git"]);
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        let account = json!({
+            "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
+            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."] } },
+        });
+        let asked = Arc::new(AtomicU32::new(0));
+        let (answer, count) = (account.clone(), asked.clone());
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(answer.clone())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let path = site.display().to_string();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&tab, 80, 24).unwrap();
+        let site_brief = "Run up to 5 workers at once.
+Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
+Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
+Tell the user only at the end, with the result.
+Review each worker's diff before you accept its work.
+Deploys go through the VPS.";
+        let cap = "At most 100 workers run at once on this machine; if that blocks you, tell the user to raise it under Settings rather than working around it.";
+        let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
+        let kept: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
+        assert_eq!(kept["projects"], account["projects"], "the hub's answer is kept for when it can't answer");
+
+        m.set_hub(Arc::new(|_| Err("not connected to the hub".into())));
+        m.relaunch(&tab, 80, 24).unwrap();
+        assert_eq!(started(&claude, &tab).last(), Some(&capitao), "offline, the Capitão starts with the taste kept from the hub");
+
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&global_tab, 80, 24).unwrap();
+        let orchestrator_brief = "Run up to 6 workers at once.
+Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
+Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
+Tell the user only at the end, with the result.
+Have another model review a risky change before it goes ahead.";
+        let global_prompt = format!("{}\n\n{orchestrator_brief}", global::prompt("Orchestrator", &crate::account::hostname()));
+        assert_eq!(started(&claude, &global_tab).last(), Some(&global_prompt));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_machines_own_taste_goes_to_the_account_before_its_first_read_and_again_on_each_connect() {
+        let dir = temp("taste-share");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let calls = Arc::new(Mutex::new(vec![]));
+        let seen = calls.clone();
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(serde_json::to_value(&call).unwrap()["cmd"].clone());
+            match call {
+                HubCall::ImportTastes { tastes } => Ok(json!(tastes.captains.profile() == taste::Profile::Aggressive)),
+                HubCall::GetTastes => Ok(json!({})),
+                _ => Err("not this test's".into()),
+            }
+        }));
+        assert_eq!(m.tastes(), Tastes::default(), "the account's answer wins");
+        assert_eq!(m.tastes(), Tastes::default());
+        assert_eq!(*calls.lock().unwrap(), [json!("import_tastes"), json!("get_tastes"), json!("get_tastes")], "the seeded style went up once, before the first read");
+        m.share_tastes_again();
+        assert_eq!(calls.lock().unwrap().len(), 3, "the account's defaults, kept in taste.json, are not offered as this machine's own");
+
+        std::fs::write(config.join("taste.json"), serde_json::to_vec(&Tastes { captains: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() }).unwrap()).unwrap();
+        m.share_tastes_again();
+        assert_eq!(calls.lock().unwrap().last(), Some(&json!("import_tastes")), "a new link offers this machine's own taste again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_silent_hub_holds_a_sessions_start_only_briefly_and_its_late_answer_is_kept() {
+        let dir = temp("taste-slow");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let kept = Tastes { orchestrator: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() };
+        taste::save(&kept, Some(&config)).unwrap();
+        let late = Tastes { orchestrator: taste::Profile::Aggressive.preset().unwrap(), ..Tastes::default() };
+        let answer = serde_json::to_value(&late).unwrap();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(answer.clone())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let asked = Instant::now();
+        assert_eq!(m.tastes(), kept, "the start went on with the taste kept in taste.json");
+        assert!(asked.elapsed() < Duration::from_millis(1500), "the start waited {:?}", asked.elapsed());
+        wait_for("the late answer to be kept", || taste::load(Some(&config)) == Some(late.clone()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_signed_out_machine_changes_its_own_taste_file() {
+        let dir = temp("taste-local");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("orchestration.json"), r#"{"style":"economical","max_workers":4}"#).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the old cost style seeded the Capitães");
+        m.set_orchestration(7).unwrap();
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let set = m.set_local_taste(&site, TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&set.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": false } }));
+        let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
+        assert_eq!(serde_json::to_value(&reset.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
+        assert_eq!(m.local_tastes(), reset);
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the worker cap's save kept the seeded taste");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7465,7 +7683,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);

@@ -11,6 +11,7 @@ mod navigation;
 
 use pinned_core::machine::{Launch, Machine, SelfUpdate};
 use pinned_core::wire::{Call, MachineEvent, TabId, UpdateStatus};
+use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -199,9 +200,24 @@ fn get_orchestration(machine: State<Arc<Machine>>) -> pinned_core::orchestration
 }
 
 #[tauri::command]
-fn set_orchestration(machine: State<Arc<Machine>>, style: String, max_workers: u32) -> Result<pinned_core::orchestration::Orchestration, String> {
-    let style = pinned_core::orchestration::Style::parse(&style).ok_or_else(|| "style is economical, balanced or quality".to_string())?;
-    machine.set_orchestration(style, max_workers)
+fn set_orchestration(machine: State<Arc<Machine>>, max_workers: u32) -> Result<pinned_core::orchestration::Orchestration, String> {
+    machine.set_orchestration(max_workers)
+}
+
+/// The tastes of a signed-out app, as `HubCall::GetTastes` answers a signed-in one.
+#[tauri::command]
+fn get_tastes(machine: State<Arc<Machine>>) -> Tastes {
+    machine.local_tastes()
+}
+
+#[tauri::command]
+fn set_taste(machine: State<Arc<Machine>>, scope: TasteScope, patch: TastePatch) -> Result<Tastes, String> {
+    machine.set_local_taste(&scope, patch)
+}
+
+#[tauri::command]
+fn reset_taste_field(machine: State<Arc<Machine>>, scope: TasteScope, field: TasteField) -> Result<Tastes, String> {
+    machine.reset_local_taste_field(&scope, field)
 }
 
 fn opacity_file(app: &AppHandle) -> Option<PathBuf> {
@@ -406,6 +422,9 @@ fn main() {
             get_usage,
             get_orchestration,
             set_orchestration,
+            get_tastes,
+            set_taste,
+            reset_taste_field,
             commands::get_settings,
             commands::open_linear_keys,
             commands::connect_linear,

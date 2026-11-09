@@ -7,6 +7,7 @@ use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
+use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
 use pinned_core::wire::{Call, HubCall};
@@ -820,6 +821,59 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
     assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a workflow session's callbacks".into()));
     node.kill();
+}
+
+#[test]
+fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_account_once() {
+    let hub = TestHub::start("taste");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let get = || json!({ "cmd": "get_tastes" });
+    assert_eq!(client.hub(get()).unwrap()["captains"]["strategy"], "escalate_on_failure", "an account with no taste reads the defaults");
+
+    let dir = temp("taste-mac");
+    std::fs::write(dir.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
+    let (machine, machine_token) = account::register_machine(&url, &token, "macbook", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
+    let opus = json!({ "model": "claude-opus-5-5" });
+    let aggressive = json!({
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+    });
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
+    assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
+    let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
+    assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
+    assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
+    client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();
+
+    let mut later = Client::connect(&url, &token);
+    later.wait("hello", |f| f["type"] == "hello");
+    let stored = later.hub(get()).unwrap();
+    assert_eq!((&stored["orchestrator"]["parallel"], &stored["orchestrator"]["context"], &stored["captains"], &stored["projects"]), (&json!(1), &json!(["Releases go out on Fridays."]), &aggressive, &json!({ "github.com/acme/site": { "review_diffs": true } })));
+
+    let link = node.link.as_ref().unwrap();
+    assert_eq!(link.call_hub(HubCall::GetTastes), Ok(stored.clone()), "a machine reads the account's taste");
+    assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Ok(json!(false)), "a later machine can't replace the account's taste");
+    let change = HubCall::SetTaste { scope: TasteScope::Captains, patch: TastePatch { parallel: Some(2), ..TastePatch::default() } };
+    assert_eq!(link.call_hub(change), Err("a machine may only forward a workflow session's callbacks".into()));
+
+    let folder = dir.join("app");
+    std::fs::create_dir_all(&folder).unwrap();
+    let captain = node.machine.call(Call::OpenOrchestrator { path: folder.display().to_string() }).unwrap();
+    node.machine.start_claude(captain.as_str().unwrap(), 80, 24).unwrap();
+    let kept = || std::fs::read(dir.join("taste.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    assert_eq!(kept(), Some(stored), "the Capitão's start kept the account's taste for when the hub can't answer");
 }
 
 struct Through<'a>(&'a Link);
