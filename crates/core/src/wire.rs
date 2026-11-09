@@ -888,6 +888,12 @@ pub enum HubCall {
     RemoveMachine { id: MachineId },
     /// `PairCode`.
     PairCode,
+    /// `NewInvite`: a single-use code that lets one person create their own account on this hub.
+    CreateInvite,
+    /// `Invites`: the hub's signup mode and the account's codes nobody has used yet.
+    Invites,
+    /// `null`. The code stops working; an error when the account has no such unused code.
+    RevokeInvite { id: String },
     /// A signed-out app's connectors, moved to the account on its first sign-in.
     Import {
         store: Value,
@@ -1029,6 +1035,32 @@ pub struct PairCode {
     /// Unix seconds.
     pub expires_at: i64,
     pub command: String,
+}
+
+/// An invite code, shown this once: the hub keeps only its hash.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct NewInvite {
+    pub id: String,
+    pub code: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// An invite code nobody has used yet, named by its first characters.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct InviteView {
+    pub id: String,
+    pub hint: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Invites {
+    pub signup: crate::account::Signup,
+    pub pending: Vec<InviteView>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, schemars::JsonSchema)]

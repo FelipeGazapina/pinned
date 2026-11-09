@@ -1,5 +1,5 @@
 use base64::Engine;
-use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating};
+use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating, Signup};
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
@@ -41,27 +41,28 @@ struct TestHub {
     policy: Policy,
     /// The learning database's name, when the hub runs with one.
     learning: Option<String>,
+    signup: Signup,
 }
 
 impl TestHub {
     fn start(name: &str) -> TestHub {
-        TestHub::start_with(name, true)
+        TestHub::start_with(name, Signup::Open)
     }
 
-    fn start_with(name: &str, open_signup: bool) -> TestHub {
-        TestHub::start_with_boxes(name, open_signup, Policy::default())
+    fn start_with(name: &str, signup: Signup) -> TestHub {
+        TestHub::start_with_boxes(name, signup, Policy::default())
     }
 
-    fn start_with_boxes(name: &str, open_signup: bool, policy: Policy) -> TestHub {
-        TestHub::start_full(name, open_signup, policy, false)
+    fn start_with_boxes(name: &str, signup: Signup, policy: Policy) -> TestHub {
+        TestHub::start_full(name, signup, policy, false)
     }
 
     /// A hub with a second, learning database next to its own.
     fn start_learning(name: &str) -> TestHub {
-        TestHub::start_full(name, true, Policy::default(), true)
+        TestHub::start_full(name, Signup::Open, Policy::default(), true)
     }
 
-    fn start_full(name: &str, open_signup: bool, policy: Policy, with_learning: bool) -> TestHub {
+    fn start_full(name: &str, signup: Signup, policy: Policy, with_learning: bool) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -77,12 +78,12 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning };
-        hub.serve("127.0.0.1:0", open_signup);
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup };
+        hub.serve("127.0.0.1:0");
         hub
     }
 
-    fn serve(&mut self, listen: &str, open_signup: bool) {
+    fn serve(&mut self, listen: &str) {
         let config = || pinned_server::Config {
             db: format!("{}/{}", postgres(), self.database),
             listen: listen.into(),
@@ -90,7 +91,7 @@ impl TestHub {
             downloads: self.dir.join("downloads"),
             public_url: None,
             key_file: self.dir.join("hub.key"),
-            open_signup,
+            signup: self.signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
@@ -113,7 +114,7 @@ impl TestHub {
         let addr = self.running.take().unwrap().addr;
         let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
         old.shutdown_background();
-        self.serve(&addr.to_string(), true);
+        self.serve(&addr.to_string());
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -1697,7 +1698,7 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
 
 #[test]
 fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
-    let hub = TestHub::start_with("closed", false);
+    let hub = TestHub::start_with("closed", Signup::First);
     let url = hub.url.clone();
     let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     assert_eq!(account::signup(&url, "bruno@acme.dev", "correct horse"), Err("this hub already has its account, so sign in with it instead".into()));
@@ -1710,6 +1711,176 @@ fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
     assert_eq!(account::login(&url, "ana@acme.dev", "correct horse"), Err("wrong email or password".into()));
     assert!(account::login(&url, "ana@acme.dev", "battery staple").is_ok());
     assert!(account::register_machine(&url, &token, "vps", "linux").is_ok(), "the login that changed the password stays signed in");
+}
+
+/// `POST /api/signup` as a browser behind the hub's proxy at `address` sends it: the status and the body.
+fn signup_from(url: &str, address: &str, body: Value) -> (u16, Value) {
+    let response = reqwest::blocking::Client::new()
+        .post(format!("{url}/api/signup"))
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", address)
+        .body(body.to_string())
+        .send()
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, serde_json::from_str(&response.text().unwrap()).unwrap())
+}
+
+const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an account";
+
+fn refused_signup() -> (u16, Value) {
+    (403, json!({ "error": INVITE_NEEDED }))
+}
+
+fn signed_in_client(url: &str, token: &str) -> Client {
+    let mut client = Client::connect(url, token);
+    client.wait("hello", |f| f["type"] == "hello");
+    client
+}
+
+#[test]
+fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
+    let hub = TestHub::start_with("invite", Signup::Invite);
+    let url = hub.url.clone();
+    let info = reqwest::blocking::get(format!("{url}/api/signup")).unwrap();
+    assert_eq!(info.headers()["access-control-allow-origin"], "*", "the app's sign-in form reads it from another origin");
+    assert_eq!(serde_json::from_str::<Value>(&info.text().unwrap()).unwrap(), json!({ "signup": "invite" }));
+
+    let (status, ana) = signup_from(&url, "10.0.0.1", json!({ "email": "ana@acme.dev", "password": "correct horse" }));
+    assert_eq!(status, 200, "the first account needs no code: {ana}");
+    let ana_token = ana["token"].as_str().unwrap().to_owned();
+    let ana_id = ana["account"]["id"].as_str().unwrap().to_owned();
+
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse" })), refused_signup());
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "ana@acme.dev", "password": "correct horse" })), refused_signup(), "a taken email gets the same answer");
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDD" })), refused_signup());
+    assert_eq!(signup_from(&url, "10.0.0.2", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": "  " })), refused_signup());
+
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })));
+    let invite = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let code = invite["code"].as_str().unwrap().to_owned();
+    assert_eq!((code.len(), code.matches('-').count()), (19, 3), "four groups of four: {code}");
+    let week = invite["expires_at"].as_i64().unwrap() - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert!((7 * 86400 - 60..=7 * 86400 + 60).contains(&week), "a code lasts 7 days, not {week} s");
+    let pending = ana_client.hub(json!({ "cmd": "invites" })).unwrap();
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["pending"][0]["id"], invite["id"]);
+    assert_eq!(pending["pending"][0]["hint"], code[..4]);
+    assert_eq!(pending["pending"][0]["expires_at"], invite["expires_at"]);
+
+    assert_eq!(
+        signup_from(&url, "10.0.0.3", json!({ "email": "ana@acme.dev", "password": "correct horse", "invite": code })),
+        (409, json!({ "error": "an account with that email already exists" })),
+    );
+    let typed = format!(" {} ", code.replace('-', " ").to_lowercase());
+    let (status, bruno) = signup_from(&url, "10.0.0.3", json!({ "email": "bruno@acme.dev", "password": "correct horse", "invite": typed }));
+    assert_eq!(status, 200, "a taken email left the code unused, and case and spacing don't matter: {bruno}");
+    let bruno_token = bruno["token"].as_str().unwrap().to_owned();
+    assert_eq!(bruno["account"]["email"], "bruno@acme.dev");
+    assert_ne!(bruno["account"]["id"], ana_id, "the code makes a new account, not a login on Ana's");
+    assert_eq!(account::login(&url, "bruno@acme.dev", "correct horse").unwrap().1.id, bruno["account"]["id"].as_str().unwrap());
+    assert_eq!(account::login(&url, "ana@acme.dev", "correct horse").unwrap().1.id, ana_id);
+    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": code })), refused_signup(), "a code works once");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used code is no longer pending");
+
+    let expired = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '1 second' where id = '{}'", expired["id"].as_str().unwrap()));
+    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": expired["code"] })), refused_signup(), "an expired code fails");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"], json!([]));
+
+    let revoked = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let kept = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let bruno_invite = bruno_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let revoke = |id: &Value| json!({ "cmd": "revoke_invite", "id": id });
+    assert_eq!(bruno_client.hub(revoke(&revoked["id"])), Err(format!("this account has no unused invite {}", revoked["id"].as_str().unwrap())), "Bruno can't revoke Ana's code");
+    assert_eq!(ana_client.hub(revoke(&revoked["id"])), Ok(Value::Null));
+    assert_eq!(ana_client.hub(revoke(&revoked["id"])), Err(format!("this account has no unused invite {}", revoked["id"].as_str().unwrap())));
+    assert_eq!(signup_from(&url, "10.0.0.5", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": revoked["code"] })), refused_signup(), "a revoked code fails");
+
+    let ids = |list: Value| list["pending"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(ana_client.hub(json!({ "cmd": "invites" })).unwrap()), [kept["id"].as_str().unwrap()], "Ana's list never shows Bruno's code");
+    assert_eq!(ids(bruno_client.hub(json!({ "cmd": "invites" })).unwrap()), [bruno_invite["id"].as_str().unwrap()]);
+    let (status, carla) = signup_from(&url, "10.0.0.5", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": bruno_invite["code"] }));
+    assert_eq!(status, 200, "{carla}");
+    assert_eq!(ids(bruno_client.hub(json!({ "cmd": "invites" })).unwrap()), Vec::<String>::new());
+    assert_eq!(ids(ana_client.hub(json!({ "cmd": "invites" })).unwrap()), [kept["id"].as_str().unwrap()]);
+}
+
+#[test]
+fn guessing_invite_codes_hits_the_sign_up_limit() {
+    let hub = TestHub::start_with("invite_limit", Signup::Invite);
+    let url = hub.url.clone();
+    account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    for _ in 0..5 {
+        assert_eq!(signup_from(&url, "10.0.0.9", json!({ "email": "eve@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDD" })), refused_signup());
+    }
+    assert_eq!(
+        signup_from(&url, "10.0.0.9", json!({ "email": "eve@acme.dev", "password": "correct horse", "invite": "AAAA-BBBB-CCCC-DDDE" })),
+        (429, json!({ "error": "too many sign ups; try again in 15 minutes" })),
+    );
+}
+
+#[test]
+fn only_an_invite_hub_makes_invite_codes() {
+    for (name, signup, mode) in [("invite_open", Signup::Open, "open"), ("invite_first", Signup::First, "first")] {
+        let hub = TestHub::start_with(name, signup);
+        let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        assert_eq!(reqwest::blocking::get(format!("{}/api/signup", hub.url)).unwrap().text().unwrap(), format!(r#"{{"signup":"{mode}"}}"#));
+        let mut client = signed_in_client(&hub.url, &token);
+        assert_eq!(client.hub(json!({ "cmd": "create_invite" })), Err("this hub takes no invites: anyone may sign up, or only its first account".into()));
+        assert_eq!(client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": mode, "pending": [] })));
+    }
+}
+
+#[test]
+fn two_invited_accounts_see_nothing_of_each_others_machines_projects_or_memory() {
+    let hub = TestHub::start_with("invite_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, ana) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, bruno) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    assert_ne!(bruno.id, ana.id);
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+
+    let start = |client: &mut Client, token: &str, email: &str, name: &str| {
+        let dir = temp(&format!("invite-apart-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token };
+        let node = Node::start(&dir, creds);
+        client.wait_machines(&[(name, true)]);
+        (node, dir, machine.id)
+    };
+    let (ana_node, ana_home, ana_machine) = start(&mut ana_client, &ana_token, "ana@acme.dev", "ana-mac");
+    let (bruno_node, _bruno_home, bruno_machine) = start(&mut bruno_client, &bruno_token, "bruno@acme.dev", "bruno-mac");
+
+    let secret = ana_home.join("secret-project");
+    std::fs::create_dir_all(&secret).unwrap();
+    let path = ana_node.machine.open_project(secret).display().to_string();
+    let project = sync::Project { key: "github.com/ana/secret".into(), name: "secret".into(), repo: "git@github.com:ana/secret.git".into() };
+    ana_node.link.as_ref().unwrap().call_hub(HubCall::ShareProject { project }).unwrap();
+    let projects = ana_client.call(&ana_machine, json!({ "cmd": "list_projects" })).unwrap();
+    assert!(projects.as_array().unwrap().iter().any(|p| p["path"] == path), "{projects}");
+    assert_eq!(ana_client.hub(json!({ "cmd": "shared_projects" })).unwrap().as_array().unwrap().len(), 1);
+
+    let names = |client: &mut Client| client.hub(json!({ "cmd": "machines" })).unwrap().as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(names(&mut bruno_client), ["bruno-mac"]);
+    assert_eq!(names(&mut ana_client), ["ana-mac"]);
+    assert_eq!(bruno_client.hub(json!({ "cmd": "shared_projects" })), Ok(json!([])), "Bruno sees none of Ana's projects");
+    assert!(ana_client.call(&ana_machine, json!({ "cmd": "memory_status", "path": path })).is_ok(), "Ana reads her own project's memory");
+    let refused = Err(format!("this account has no machine {ana_machine}"));
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "list_projects" })), refused);
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "tabs" })), refused);
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "memory_status", "path": path })), refused, "Ana's memory lives on her machine, which Bruno can't reach");
+    assert_eq!(ana_client.call(&bruno_machine, json!({ "cmd": "tabs" })), Err(format!("this account has no machine {bruno_machine}")));
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && (f.to_string().contains(&ana_machine) || f.to_string().contains("secret"))).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine or project: {leaked:?}");
+    let (mut ana_node, mut bruno_node) = (ana_node, bruno_node);
+    ana_node.kill();
+    bruno_node.kill();
 }
 
 #[test]
@@ -1984,7 +2155,7 @@ fn issue(id: &str) -> Subject {
 
 #[test]
 fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
-    let hub = TestHub::start_with_boxes("box_run", true, fast());
+    let hub = TestHub::start_with_boxes("box_run", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2027,7 +2198,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
 
 #[test]
 fn other_workflows_never_run_on_a_box_but_its_thread_reaches_it() {
-    let hub = TestHub::start_with_boxes("box_pool", true, fast());
+    let hub = TestHub::start_with_boxes("box_pool", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2061,7 +2232,7 @@ fn other_workflows_never_run_on_a_box_but_its_thread_reaches_it() {
 
 #[test]
 fn a_failed_boot_cleans_up_and_cools_down() {
-    let hub = TestHub::start_with_boxes("box_fail", true, fast());
+    let hub = TestHub::start_with_boxes("box_fail", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2078,7 +2249,7 @@ fn a_failed_boot_cleans_up_and_cools_down() {
 
 #[test]
 fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
-    let mut hub = TestHub::start_with_boxes("box_restart", true, fast());
+    let mut hub = TestHub::start_with_boxes("box_restart", Signup::Open, fast());
     let ana = BoxAccount::new(&hub);
     hub.boxes.state.lock().unwrap().hanging = true;
     let (dying, id, work) = (hub.hub().clone(), ana.id, ana.box_run(issue("uuid-1")));
@@ -2099,7 +2270,7 @@ fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
 
 #[test]
 fn the_sweep_deletes_this_hubs_unrecorded_boxes_only() {
-    let hub = TestHub::start_with_boxes("box_sweep", true, fast());
+    let hub = TestHub::start_with_boxes("box_sweep", Signup::Open, fast());
     let _ana = BoxAccount::new(&hub);
     let label = pinned_server::boxes::hub_label(&hub.url);
     hub.boxes.add("box_orphan", &[&label, "p:ffffffffffffffff"]);
@@ -2112,7 +2283,7 @@ fn the_sweep_deletes_this_hubs_unrecorded_boxes_only() {
 
 #[test]
 fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
-    let hub = TestHub::start_with_boxes("box_remove", true, fast());
+    let hub = TestHub::start_with_boxes("box_remove", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2134,7 +2305,7 @@ fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
 
 #[test]
 fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
-    let hub = TestHub::start_with_boxes("box_done", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let hub = TestHub::start_with_boxes("box_done", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
@@ -2152,7 +2323,7 @@ fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
 
 #[test]
 fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
-    let hub = TestHub::start_with_boxes("box_unreadable", true, fast());
+    let hub = TestHub::start_with_boxes("box_unreadable", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
@@ -2173,7 +2344,7 @@ fn set_workflow(client: &mut Client, mode: &str) {
 
 #[test]
 fn a_fresh_workflow_permission_opens_one_box_per_run() {
-    let hub = TestHub::start_with_boxes("box_fresh", true, fast());
+    let hub = TestHub::start_with_boxes("box_fresh", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2186,7 +2357,7 @@ fn a_fresh_workflow_permission_opens_one_box_per_run() {
 
 #[test]
 fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
-    let hub = TestHub::start_with_boxes("box_fixed", true, fast());
+    let hub = TestHub::start_with_boxes("box_fixed", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2199,7 +2370,7 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
 
 #[test]
 fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
-    let hub = TestHub::start_with_boxes("box_ask", true, fast());
+    let hub = TestHub::start_with_boxes("box_ask", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2218,7 +2389,7 @@ fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
 
 #[test]
 fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
-    let hub = TestHub::start_with_boxes("box_off", true, fast());
+    let hub = TestHub::start_with_boxes("box_off", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2233,7 +2404,7 @@ fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
 
 #[test]
 fn an_account_without_a_stored_box_permission_still_opens_a_box() {
-    let mut hub = TestHub::start_with_boxes("box_legacy", true, fast());
+    let mut hub = TestHub::start_with_boxes("box_legacy", Signup::Open, fast());
     let ana = BoxAccount::new(&hub);
     let account = ana.id;
     admin_on(&hub.database, "update accounts set store = store - 'boxes' - 'box_asks' - 'box_grants'");
@@ -2244,7 +2415,7 @@ fn an_account_without_a_stored_box_permission_still_opens_a_box() {
 
 #[test]
 fn a_denied_ask_opens_nothing() {
-    let hub = TestHub::start_with_boxes("box_deny", true, fast());
+    let hub = TestHub::start_with_boxes("box_deny", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2262,7 +2433,7 @@ fn a_denied_ask_opens_nothing() {
 
 #[test]
 fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
-    let hub = TestHub::start_with_boxes("box_fixed_stays", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let hub = TestHub::start_with_boxes("box_fixed_stays", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -2290,7 +2461,7 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
 
 #[test]
 fn a_fresh_permission_stops_at_the_accounts_box_limit() {
-    let hub = TestHub::start_with_boxes("box_cap", true, Policy { max_open: 1, ..fast() });
+    let hub = TestHub::start_with_boxes("box_cap", Signup::Open, Policy { max_open: 1, ..fast() });
     let mut ana = BoxAccount::new(&hub);
     let account = ana.id;
     let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
@@ -3746,7 +3917,7 @@ fn a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back
 
 #[test]
 fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
-    let hub = TestHub::start_with_boxes("iso_box", true, fast());
+    let hub = TestHub::start_with_boxes("iso_box", Signup::Open, fast());
     let (bob_token, bob) = account::signup(&hub.url, "bob@acme.dev", "correct horse").unwrap();
     let (bob_machine, _) = account::register_machine(&hub.url, &bob_token, "bob-box", "linux").unwrap();
     admin_on(&hub.database, &format!(
