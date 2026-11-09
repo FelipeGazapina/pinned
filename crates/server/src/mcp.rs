@@ -728,9 +728,7 @@ async fn message_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, Stri
         Begin::Unknown(_) => return Ok(unknown_delivery("an earlier call with this request_id lost the machine's answer")),
     }
     let machine = project.machine.as_str();
-    // Two messages at once would both see it stopped and start it twice, the second restarting the first.
-    let lock = ctx.hub.agent_lock(&format!("{}:{machine}:{}", ctx.account.id, project.path));
-    let _held = lock.lock().await;
+    let _held = ctx.hub.hold_captain(&ctx.account, machine, &project.path).await;
     let opened = ctx.hub.call_machine(&ctx.account, machine, Call::OpenOrchestrator { path: project.path.clone() }, CALL_WAIT).await;
     // Opening is idempotent on the machine, so a lost answer did nothing a retry would repeat.
     let tab = match opened.map(|v| v.as_str().map(str::to_owned)) {
