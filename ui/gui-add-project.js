@@ -161,30 +161,85 @@ async function cloneTo(dest) {
   }
 }
 
-/** The repository step: a Git URL goes on as typed, a GitHub `owner/repo` is looked up first. */
+/** Most repositories the list shows at once; typing narrows the rest in. */
+const REPOSITORY_ROWS = 50;
+/** The row Enter takes for the typed text: an exact name, else the best match, unless the text
+ * names some other `owner/repo`, which is looked up instead. */
+function repositoryPick(rows, query) {
+  const name = query.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").toLowerCase();
+  const exact = rows.find((i) => i.fullName.toLowerCase() === name);
+  return exact ?? (GITHUB_SHORTHAND.test(name) ? null : rows[0] ?? null);
+}
+/** Highlights that row, so Enter picks what the list shows; none means Enter looks the text up. */
+function highlightRepository(query) {
+  const rows = PALETTE_VIEWS["add-repository"].groups(query).flatMap((g) => g.items);
+  palette.hi = rows.indexOf(repositoryPick(rows, query));
+}
+/** Lists the connected account's repositories once for the GitHub and Box sources. */
+function loadGithubRepos(flow) {
+  Object.assign(flow, { repos: null, reposError: "" });
+  connectorCall("github_repos").then(
+    (repos) => (flow.repos = repos),
+    (e) => Object.assign(flow, { repos: [], reposError: String(e?.message ?? e) }),
+  ).then(() => {
+    if (palette.adding !== flow || !paletteOpen() || paletteView().view !== "add-repository") return;
+    highlightRepository(paletteView().query);
+    renderPalette();
+  });
+}
+function chooseRepository(flow, input, repository) {
+  if (flow.source === "box") confirmBox({ input, repository, remoteUrl: repository.url });
+  else confirmClone({ input, repository, remoteUrl: repository.url });
+}
+
+/** The repository step: a Git URL goes on as typed; GitHub and Box search the account's
+ * repositories, and any other `owner/repo` is looked up. */
 PALETTE_VIEWS["add-repository"] = {
-  placeholder: () => (palette.adding.source === "url" ? "Enter Git clone URL" : "Enter GitHub repository (owner/repo)"),
+  placeholder: () => (palette.adding.source === "url" ? "Enter Git clone URL" : "Search your repositories, or enter owner/repo"),
   lead: () => (palette.adding.source === "url" ? "link" : "github"),
   unhighlighted: true,
   accessory() {
-    const label = palette.adding.looking ? "Working" : palette.adding.source === "url" ? "Continue" : "Lookup";
-    return submitButton(label, "Enter", !paletteView().query.trim() || palette.adding.looking);
+    const flow = palette.adding;
+    const label = flow.looking ? "Working" : flow.source === "url" ? "Continue" : palette.hi >= 0 ? "Select" : "Lookup";
+    return submitButton(label, "Enter", (palette.hi < 0 && !paletteView().query.trim()) || flow.looking);
   },
-  footerAction: () => (palette.adding.source === "url" ? "Continue" : "Lookup"),
-  empty: () => (palette.adding.source === "url" ? "Enter a Git clone URL and press Enter to continue." : "Enter a repository path and press Enter to look it up."),
-  groups: () => [],
+  footerAction: () => (palette.adding.source === "url" ? "Continue" : palette.hi >= 0 ? "Select" : "Lookup"),
+  onQuery: (query) => palette.adding.source !== "url" && highlightRepository(query),
+  empty(query) {
+    const { source, repos, reposError } = palette.adding;
+    if (source === "url") return "Enter a Git clone URL and press Enter to continue.";
+    if (!repos) return "Loading your repositories...";
+    if (reposError) return `Could not list your repositories (${reposError}). Enter owner/repo and press Enter to look it up.`;
+    if (!query.trim()) return "No repositories on this GitHub account. Enter owner/repo and press Enter to look it up.";
+    return "No repository matches. Enter owner/repo and press Enter to look it up on GitHub.";
+  },
+  groups(query) {
+    const flow = palette.adding;
+    if (flow.source === "url" || !flow.repos?.length) return [];
+    const items = flow.repos.map((r) => ({
+      icon: "github",
+      title: esc(r.full_name),
+      sub: [r.private ? "Private" : "", r.description].filter(Boolean).join(" · "),
+      fullName: r.full_name,
+      terms: [r.full_name, r.description],
+      keep: true,
+      run: () => chooseRepository(flow, r.full_name, { nameWithOwner: r.full_name, url: r.clone_url }),
+    }));
+    return filterGroups([{ label: "Your repositories", items }], query).map((g) => ({ ...g, items: g.items.slice(0, REPOSITORY_ROWS) }));
+  },
   async submit(query) {
     const typed = query.trim();
     const flow = palette.adding;
-    if (!typed || flow.looking) return;
+    if (flow.looking) return;
+    if (palette.hi >= 0) return runPaletteItem(palette.shown[palette.hi]);
+    if (!typed) return;
     if (flow.source === "url") return confirmClone({ input: typed, repository: null, remoteUrl: pastedCloneUrl(typed) });
     flow.looking = true;
     renderPalette();
     try {
       const repository = await lookupGithub(typed);
       if (palette.adding !== flow) return;
-      if (flow.source === "box") confirmBox({ input: typed, repository, remoteUrl: repository.url });
-      else confirmClone({ input: typed, repository, remoteUrl: repository.url });
+      chooseRepository(flow, typed, repository);
     } catch (e) {
       tell(`<b>Repository lookup failed</b> ${esc(e?.message ?? e)}`, 6000);
     } finally {
@@ -323,7 +378,7 @@ PALETTE_VIEWS["add-sources"] = {
     const machine = palette.adding.machine;
     const ready = !!palette.adding.github;
     const boxed = !!palette.adding.upstash;
-    const github = { icon: "github", title: "GitHub repository", sub: "Clone GitHub owner/repo", terms: ["clone", "remote", "repository", "repo", "git", "GitHub", ...(ready ? [] : ["setup required"])], keep: true, run: () => pickSource("github") };
+    const github = { icon: "github", title: "GitHub repository", sub: "Search your GitHub repositories", terms: ["clone", "remote", "repository", "repo", "git", "GitHub", ...(ready ? [] : ["setup required"])], keep: true, run: () => pickSource("github") };
     const box = { icon: "server", title: "Box", sub: "Open a GitHub repo on a new Upstash Box", terms: ["box", "upstash", "cloud", "remote", "github", ...(boxed ? [] : ["setup required"])], keep: true, run: () => pickSource("box") };
     const items = [
       { icon: "folder-git-2", title: "New project", sub: "Start a new Git repository from a name", terms: ["new project", "create", "empty", "repository", "git init"], keep: true, run: () => newProjectOn(machine) },
@@ -337,6 +392,7 @@ PALETTE_VIEWS["add-sources"] = {
 };
 function pickSource(source) {
   Object.assign(palette.adding, { source, repository: null, remoteUrl: "", input: "" });
+  if (source !== "url") loadGithubRepos(palette.adding);
   palette.views.push({ view: "add-repository", query: "" });
   paletteInput.value = "";
   palette.hi = -1;
