@@ -11,6 +11,7 @@ use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::sync;
+use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
 use pinned_core::wire::{AccountView, AgentProject, AgentView, MachineView};
 use serde_json::Value;
@@ -32,6 +33,8 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   name text not null, os text not null, token_hash bytea unique not null,
   created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
 alter table machines add column if not exists version text not null default '';
+-- Null until the account first sets or imports its tastes.
+alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
@@ -656,6 +659,24 @@ impl Db {
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+    }
+
+    pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {
+        let row = self.client().await?.query_one("select tastes from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let stored: Option<Value> = row.get(0);
+        stored.map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))).transpose()
+    }
+
+    pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
+        let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
+        self.client().await?.execute("update accounts set tastes = $2 where id = $1", &[&account, &tastes]).await.map_err(err).map(drop)
+    }
+
+    /// Stores `tastes` only when the account has none, and answers whether it did.
+    pub async fn import_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<bool, String> {
+        let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
+        let updated = self.client().await?.execute("update accounts set tastes = $2 where id = $1 and tastes is null", &[&account, &tastes]).await.map_err(err)?;
+        Ok(updated == 1)
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {

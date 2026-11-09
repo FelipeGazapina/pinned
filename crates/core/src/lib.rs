@@ -43,6 +43,7 @@ pub mod slack;
 pub mod stats;
 pub mod subagents;
 pub mod sync;
+pub mod taste;
 pub mod thread;
 pub mod titles;
 pub mod uploads;

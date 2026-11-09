@@ -4846,6 +4846,78 @@
                   "machine",
                   "path"
                 ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
               }
             ]
           },
@@ -6322,6 +6394,370 @@
                   "report"
                 ]
               }
+            ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "orchestrator",
+              "captains",
+              "projects"
+            ]
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
             ]
           },
           "Target2": {
@@ -11099,6 +11535,78 @@
                   "machine",
                   "path"
                 ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
               }
             ]
           },
@@ -12521,6 +13029,354 @@
                 ]
               }
             ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            }
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
           },
           "Target2": {
             "type": "object",
@@ -14487,6 +15343,78 @@
                   "machine",
                   "path"
                 ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
               }
             ]
           },
@@ -16023,6 +16951,370 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "orchestrator",
+              "captains",
+              "projects"
+            ]
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
             ]
           }
         }
@@ -17810,6 +19102,78 @@
                   "machine",
                   "path"
                 ]
+              },
+              {
+                "description": "`taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it\nstarts a Capitão or the global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_tastes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_taste"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/TastePatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `field` of `scope` is back to what it inherits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_taste_field"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/TasteScope"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/TasteField"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "scope",
+                  "field"
+                ]
+              },
+              {
+                "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_tastes"
+                  },
+                  "tastes": {
+                    "$ref": "#/$defs/Tastes"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tastes"
+                ]
               }
             ]
           },
@@ -19290,6 +20654,354 @@
               "tab",
               "text"
             ]
+          },
+          "TasteScope": {
+            "oneOf": [
+              {
+                "description": "The global orchestrator.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Every project's Capitão.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captains"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "One project's Capitão, by its repo as in `github.com/acme/site`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "project"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo"
+                ]
+              }
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TasteField": {
+            "description": "One knob of a `Taste`, named as its JSON field.",
+            "type": "string",
+            "enum": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Tastes": {
+            "description": "An account's tastes.",
+            "type": "object",
+            "properties": {
+              "orchestrator": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "captains": {
+                "$ref": "#/$defs/Taste",
+                "default": {
+                  "strategy": "escalate_on_failure",
+                  "ladder": [
+                    {
+                      "model": "glm-5.3"
+                    },
+                    {
+                      "model": "claude-sonnet-5-5"
+                    },
+                    {
+                      "model": "claude-opus-5-5"
+                    }
+                  ],
+                  "hard_model": {
+                    "model": "claude-opus-5-5"
+                  },
+                  "parallel": 3,
+                  "autonomy": "decide_and_tell",
+                  "review_diffs": true,
+                  "second_opinion": false,
+                  "skills": [],
+                  "context": []
+                }
+              },
+              "projects": {
+                "description": "Each project's changes over `captains`, by repo.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/TastePatch"
+                },
+                "default": {}
+              }
+            }
+          },
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
           }
         }
       }
@@ -28263,6 +29975,604 @@
                 "const": "worker"
               }
             ]
+          }
+        }
+      }
+    },
+    "Tastes": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Tastes",
+        "description": "An account's tastes.",
+        "type": "object",
+        "properties": {
+          "orchestrator": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "captains": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "projects": {
+            "description": "Each project's changes over `captains`, by repo.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/TastePatch"
+            },
+            "default": {}
+          }
+        },
+        "required": [
+          "orchestrator",
+          "captains",
+          "projects"
+        ],
+        "$defs": {
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "strategy",
+              "ladder",
+              "hard_model",
+              "parallel",
+              "autonomy",
+              "review_diffs",
+              "second_opinion",
+              "skills",
+              "context"
+            ]
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Tastes",
+        "description": "An account's tastes.",
+        "type": "object",
+        "properties": {
+          "orchestrator": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "captains": {
+            "$ref": "#/$defs/Taste",
+            "default": {
+              "strategy": "escalate_on_failure",
+              "ladder": [
+                {
+                  "model": "glm-5.3"
+                },
+                {
+                  "model": "claude-sonnet-5-5"
+                },
+                {
+                  "model": "claude-opus-5-5"
+                }
+              ],
+              "hard_model": {
+                "model": "claude-opus-5-5"
+              },
+              "parallel": 3,
+              "autonomy": "decide_and_tell",
+              "review_diffs": true,
+              "second_opinion": false,
+              "skills": [],
+              "context": []
+            }
+          },
+          "projects": {
+            "description": "Each project's changes over `captains`, by repo.",
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/TastePatch"
+            },
+            "default": {}
+          }
+        },
+        "$defs": {
+          "Taste": {
+            "description": "Every knob of one scope, fully resolved.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "$ref": "#/$defs/Strategy",
+                "default": "escalate_on_failure"
+              },
+              "ladder": {
+                "description": "Cheapest first, at least one.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                },
+                "default": [
+                  {
+                    "model": "glm-5.3"
+                  },
+                  {
+                    "model": "claude-sonnet-5-5"
+                  },
+                  {
+                    "model": "claude-opus-5-5"
+                  }
+                ]
+              },
+              "hard_model": {
+                "description": "Where hard work goes. None is the top rung of the ladder.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": {
+                  "model": "claude-opus-5-5"
+                }
+              },
+              "parallel": {
+                "description": "Workers at once, 1 to 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "autonomy": {
+                "$ref": "#/$defs/Autonomy",
+                "default": "decide_and_tell"
+              },
+              "review_diffs": {
+                "type": "boolean",
+                "default": true
+              },
+              "second_opinion": {
+                "type": "boolean",
+                "default": false
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "context": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
+          },
+          "Strategy": {
+            "description": "How a worker climbs the model ladder.",
+            "oneOf": [
+              {
+                "description": "The cheapest rung with a detailed brief, re-briefed narrower before it moves up.",
+                "type": "string",
+                "const": "cheap_with_guidance"
+              },
+              {
+                "description": "The cheapest rung, one rung up after two failures.",
+                "type": "string",
+                "const": "escalate_on_failure"
+              },
+              {
+                "description": "The hard model from the start.",
+                "type": "string",
+                "const": "strongest_first"
+              }
+            ]
+          },
+          "ModelRef": {
+            "description": "A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.",
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          },
+          "Autonomy": {
+            "description": "What the agents decide without the user.",
+            "type": "string",
+            "enum": [
+              "ask_first",
+              "decide_and_tell",
+              "report_at_end"
+            ]
+          },
+          "SkillRef": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "enabled"
+            ]
+          },
+          "TastePatch": {
+            "description": "A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.",
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Strategy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ModelRef"
+                }
+              },
+              "hard_model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "parallel": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "autonomy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Autonomy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "review_diffs": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "second_opinion": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "skills": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                }
+              },
+              "context": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }

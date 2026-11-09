@@ -1,17 +1,17 @@
 #sidebar footer .back { display: none; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: 8px; color: var(--g-side-muted); font-size: 13px; }
 #sidebar footer .back:hover { background: var(--g-hover); color: var(--g-fg); }
 #sidebar footer .back .i { width: 16px; height: 16px; }
-body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #sidebar footer > :not(.back) { display: none; }
-body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #sidebar footer .back { display: flex; }
+body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #sidebar footer > :not(.back) { display: none; }
+body:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #sidebar footer .back { display: flex; }
 
 #page-view { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #expanded > header { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #chat { display: none; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #expanded > header { display: none; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #chat { display: none; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="pull-requests"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
   background: var(--g-bg); color: var(--g-fg); }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
-body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"]) #panel { visibility: hidden; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="usage"], [data-page="skills"], [data-page="global-projects"], [data-page="taste"]) #panel { visibility: hidden; }
 #page-view [hidden] { display: none !important; }
 #page-view .page-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--topbar); padding: 0 16px; user-select: none; }
 #page-view .page-head h1 { margin: 0; font-size: 14px; font-weight: 500; white-space: nowrap; }

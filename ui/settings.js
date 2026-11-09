@@ -2114,7 +2114,8 @@ document.querySelector("#settings-nav .links").addEventListener("click", (e) => 
 });
 settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
   { title: "Keep this Mac awake", terms: ["sleep display power"] },
-  { title: "Captain and workers", terms: ["orchestration cost style economical balanced quality max workers orchestrator captain capitao capitão"] },
+  { title: "Captain and workers", terms: ["orchestration max workers orchestrator captain capitao capitão"] },
+  { title: "Way of working", terms: ["taste profile economical balanced aggressive custom strategy model ladder hard work parallel workers pace autonomy review diff second opinion context notes orchestrator captain capitao capitão"] },
   { title: "Global orchestrator", terms: ["global orchestrator orquestrador orchestrator admiral commander host machine busy queue refuse reports memory name"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },

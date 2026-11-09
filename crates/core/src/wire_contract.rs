@@ -95,6 +95,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
     outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
+    outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),

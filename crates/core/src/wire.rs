@@ -13,6 +13,7 @@ use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, RelayTo};
+use crate::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
@@ -935,6 +936,15 @@ pub enum HubCall {
     /// From a machine: the latest replies of the Capitão of the project at `path` on `machine`, as
     /// `reading::read` answers them, with `project` set to `path`.
     ReadCaptain { machine: MachineId, path: String },
+    /// `taste::Tastes`: the account's, or the defaults while it has none. A machine asks too, when it
+    /// starts a Capitão or the global orchestrator.
+    GetTastes,
+    /// `taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.
+    SetTaste { scope: TasteScope, patch: TastePatch },
+    /// `taste::Tastes`, once `field` of `scope` is back to what it inherits.
+    ResetTasteField { scope: TasteScope, field: TasteField },
+    /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
+    ImportTastes { tastes: Tastes },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1465,6 +1475,19 @@ mod tests {
         match serde_json::from_value::<HubCall>(before_vercel).unwrap() {
             HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
             _ => panic!("not an import"),
+        }
+        round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(
+            HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
+            json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),
+        );
+        round_trip(
+            HubCall::ResetTasteField { scope: TasteScope::Captains, field: TasteField::HardModel },
+            json!({ "cmd": "reset_taste_field", "scope": { "kind": "captains" }, "field": "hard_model" }),
+        );
+        match serde_json::from_value::<HubCall>(json!({ "cmd": "import_tastes", "tastes": { "projects": { "github.com/acme/site": { "parallel": 5 } } } })).unwrap() {
+            HubCall::ImportTastes { tastes } => assert_eq!(serde_json::to_value(tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } })),
+            _ => panic!("not an import of tastes"),
         }
     }
 
