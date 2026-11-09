@@ -33,10 +33,11 @@ const REASONING = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra Hi
 const ALL_REASONING = Object.keys(REASONING);
 const NO_ULTRACODE = ALL_REASONING.filter((e) => e !== "ultracode");
 const CLAUDE_MODELS = [
-  { slug: "claude-fable-5-1", name: "Claude Fable 5.1", menu: "Fable", efforts: ALL_REASONING, context: 1e6 },
+  { slug: "claude-fable-5-2", name: "Claude Fable 5.2", menu: "Fable", efforts: ALL_REASONING, context: 1e6 },
   { slug: "claude-opus-5-5", name: "Claude Opus 5.5", menu: "Opus", efforts: ALL_REASONING, fast: true, context: 1e6 },
   { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", menu: "Sonnet", efforts: NO_ULTRACODE, context: 1e6 },
   { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", menu: "Haiku", efforts: NO_ULTRACODE, context: 1e6, isNew: true },
+  { slug: "claude-fable-5-1", name: "Claude Fable 5.1", legacy: true, efforts: ALL_REASONING, context: 1e6 },
   { slug: "claude-fable-5", name: "Claude Fable 5", legacy: true, efforts: ALL_REASONING, context: 1e6 },
   { slug: "claude-opus-5", name: "Claude Opus 5", legacy: true, efforts: ALL_REASONING, fast: true, context: 1e6 },
   { slug: "claude-opus-4-8", name: "Claude Opus 4.8", legacy: true, efforts: ALL_REASONING, fast: true, context: 1e6 },
