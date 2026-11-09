@@ -336,7 +336,7 @@ function globalWaitingRows() {
       row.dataset.waiting = tab.key;
       row.setAttribute("role", "button");
       row.tabIndex = 0;
-      row.innerHTML = `<span class="kind ${kind}">${kind}</span><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}</span>`;
+      row.innerHTML = `<span class="kind ${kind}">${kind}</span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}</span></span>`;
       return row;
     });
 }

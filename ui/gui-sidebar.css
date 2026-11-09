@@ -284,12 +284,13 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .settled-head.waiting-head .line { background: rgb(var(--g-warning-rgb) / 0.2); }
 .settled-head.waiting-head .count { flex: none; min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
   font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.18); }
-.waiting-row { flex: none; display: flex; align-items: center; gap: 8px; height: 34px; margin: 1px 0; padding: 0 10px; border-radius: 8px;
+.waiting-row { flex: none; display: flex; align-items: center; gap: 8px; margin: 1px 0; padding: 6px 10px; border-radius: 8px;
   cursor: pointer; outline: none; }
 .waiting-row:hover, .waiting-row:focus-visible { background: var(--g-row-hover); }
 .waiting-row:focus-visible { box-shadow: inset 0 0 0 2px rgb(var(--g-ink-rgb) / 0.2); }
 .waiting-row .kind { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
 .waiting-row .kind.pergunta { color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
 .waiting-row .kind.falha { color: var(--g-error); background: rgb(var(--g-error-rgb) / 0.14); }
-.waiting-row .l2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: rgb(var(--g-fg-rgb) / 0.9); }
-.waiting-row .where { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.8); }
+.waiting-row .texts { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.waiting-row .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: rgb(var(--g-fg-rgb) / 0.9); }
+.waiting-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: rgb(var(--g-muted-rgb) / 0.8); }

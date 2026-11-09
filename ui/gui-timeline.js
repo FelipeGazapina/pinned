@@ -975,12 +975,12 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
   // A live turn reads top-down while it runs: what claude already said comes before the work in
   // progress and the agents, so the orchestrator's plan leads instead of trailing the cards.
-  // The global orchestrator's latest answer hides its quick-reply line and offers it as buttons.
-  const quick = !live && latest && globalLane(tab) && turn.answer ? quickReplyOf(turn.answer.text) : null;
+  // A global orchestrator's answer hides its quick-reply line; only the latest offers it as buttons.
+  const quick = !live && globalLane(tab) && turn.answer ? quickReplyOf(turn.answer.text) : null;
   const answerShown = quick ? { ...turn.answer, text: quick.text } : turn.answer;
   const saidSteps = quick ? shown.map((s) => (s === turn.answer ? answerShown : s)) : shown;
   const said = saidSteps.map((s) => shownHtml(s, cwd, t, live ? null : answerShown, t.editable === true)).join("");
-  const replies = quick ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
+  const replies = quick && latest ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
   return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? said : ""}${fold}${agentCardsHtml(tab, turn, latest)}
     ${live ? "" : said}${replies}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
