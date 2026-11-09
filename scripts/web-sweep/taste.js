@@ -166,12 +166,18 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
     openPage("taste");
   });
   await waitFor("the watching page", () => watcher.isVisible(".taste-split"));
+  await small.evaluate(() => {
+    closePage();
+    openPage("taste");
+  });
+  await waitFor("the phone page again", () => small.isVisible(".taste-split"));
   await small.click('.taste-scopes button:text-is("Captains (all)")');
   for (const p of [watcher, small]) {
     await waitFor("4 workers on the open pages", async () => (await brief(p)).startsWith("Run up to 4 workers at once."));
     await p.evaluate(() => (window.sweepSameLoad = true));
   }
   await shot(watcher, "taste-chat-before");
+  await small.locator(".taste-stepper").evaluate((el) => el.scrollIntoView({ block: "center" }));
   await shot(small, "taste-chat-before-phone");
 
   check((await page.textContent(".page-head .taste-chat")) === "Chat to adjust", "the page head offers Chat to adjust");
@@ -180,6 +186,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   await waitFor("the chat thread", () => page.evaluate(() => document.body.dataset.page !== "taste" && !!document.querySelector("#prompt")));
   const chatLaunch = await waitFor("the chat session's launch", () => fs.existsSync(LAUNCHES) && fs.readFileSync(LAUNCHES, "utf8").includes("Help me adjust") && fs.readFileSync(LAUNCHES, "utf8"));
   check(chatLaunch.includes("every project's Captain (Captains (all))") && chatLaunch.includes("(scope captains)"), "the chat's first prompt names the Captains' scope");
+  check(chatLaunch.includes("project: followed by the project's repo") && !chatLaunch.includes("<repo>"), "the prompt names a project scope in words a thread can show");
   check(["taste_get", "taste_set", "taste_reset"].every((tool) => chatLaunch.includes(tool)), "the first prompt explains the three tools");
   await waitFor("the first answer in the thread", () => page.evaluate(() => document.body.innerText.includes("echo: Help me adjust")));
   await shot(page, "taste-chat-thread");
@@ -201,6 +208,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   await waitFor("the tool calls in the thread", () => page.evaluate(() => document.body.innerText.includes("Done: taste_set, taste_get.")));
   await shot(page, "taste-chat-applied");
   await shot(watcher, "taste-chat-after");
+  await small.locator(".taste-stepper").evaluate((el) => el.scrollIntoView({ block: "center" }));
   await shot(small, "taste-chat-after-phone");
 
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);
