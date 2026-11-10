@@ -131,3 +131,10 @@ test("a phone shows the version in the drawer and Account, and not over the page
   assert.match(css, /@media \(max-width: 639px\) \{\s*body\[data-mode="gui"\] #version \{ display: none; \}/);
   assert.match(css, /#sidebar \.brand b\[data-version\]::after \{ content: attr\(data-version\)/);
 });
+
+test("the header's cost shows alone on a phone and the whole label elsewhere", () => {
+  const css = read("gui-sidebar.css");
+  assert.match(css, /\.stats \.usd \{ display: none; \}/);
+  const phone = css.slice(css.indexOf("@media (max-width: 768px)"));
+  assert.match(phone, /#chat-head \.crumb \.stats \.long \{ display: none; \}\s*#chat-head \.crumb \.stats \.usd \{ display: inline; \}/);
+});

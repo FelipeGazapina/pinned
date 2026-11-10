@@ -306,7 +306,7 @@ function markThreadSeen(tab) {
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
 /** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
-function statsLabel(tab) {
+function statsLabel(tab, costOnly = false) {
   const stats = tab?.view.stats;
   const work = tab?.view.work;
   if (!stats && !work) return "";
@@ -315,7 +315,7 @@ function statsLabel(tab) {
   // A thread that delegated shows the cost of the whole piece of work: its own session and its workers.
   const usd = work ? work.usd : stats?.cost_usd;
   const cost = usd == null ? "" : costLabel(usd, work?.unknown);
-  return [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
+  return costOnly ? cost : [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
 }
 /** A cost as `$1.26`, with a `+` when parts of it have no known cost, so it is a floor. */
 const costLabel = (usd, unknown = 0) => `${usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`}${unknown ? "+" : ""}`;
@@ -342,7 +342,8 @@ function statsHtml(tab) {
   const label = statsLabel(tab);
   const work = tab.view.work;
   const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
-  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</span>` : "";
+  // The header on a phone has room for the cost only, so the label comes twice and the style shows one.
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${esc(label)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
 }
 /** A menu on screen is a question, not an approval, when the hooks said the session needs input
  * rather than permission (an AskUserQuestion menu). */
@@ -1179,8 +1180,11 @@ function tickDurations() {
   const now = linkDownAt ?? nowS();
   for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
   for (const el of document.querySelectorAll("[data-stats]")) {
-    const text = statsLabel(tabByKey(el.dataset.stats));
-    if (el.textContent !== text) el.textContent = text;
+    const tab = tabByKey(el.dataset.stats);
+    for (const [part, text] of [[".long", statsLabel(tab)], [".usd", statsLabel(tab, true)]]) {
+      const at = el.querySelector(part);
+      if (at && at.textContent !== text) at.textContent = text;
+    }
   }
 }
 visibleInterval(() => guiOn() && tickDurations(), 1000);

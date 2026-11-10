@@ -306,6 +306,12 @@ function showMachinesPage() {
   field?.select();
 }
 
+// Which machines are behind depends on the newest version, which can arrive after the page opened.
+document.addEventListener("newest-version", () => {
+  if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
+  if (settingsOpen() && page === "account") showAccount();
+});
+
 let machinesPoll = null;
 
 /** While Settings › Machines is open, asks the hub every 15 s for the machines, so the load shown keeps up:

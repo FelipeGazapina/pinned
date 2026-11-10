@@ -61,6 +61,7 @@
 .thread-row .remote { display: flex; color: rgb(var(--g-side-muted-rgb) / 0.7); }
 .thread-row .remote .i { width: 14px; height: 14px; }
 /* A project on more than one machine names the machine on each card, as text a phone can read. */
+.stats .usd { display: none; }
 .thread-row .remote.named { align-items: center; gap: 4px; min-width: 0; font-size: 11px; white-space: nowrap; }
 .thread-row .remote.named .name { min-width: 0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
 .thread-row .account { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-side-muted); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -248,8 +249,9 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 
 @media (max-width: 768px) {
   #sidebar-resize { display: none; }
-  /* The cost stays in the header on a phone; a long label gives way before the title does. */
-  #chat-head .crumb .stats { flex: 0 1 auto; min-width: 0; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The cost stays in the header on a phone, alone, so the title keeps its room. */
+  #chat-head .crumb .stats .long { display: none; }
+  #chat-head .crumb .stats .usd { display: inline; }
   /* Its icon says which project; the name makes room for the title and the cost. */
   #chat-head .crumb .project > span { display: none; }
   /* The row's actions are what the pointer came for. Drop the role badge while they show so they
@@ -351,7 +353,9 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .project-head :is(.state, .where) { flex: none; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--g-side-muted); white-space: nowrap; }
 .project-head .state.running { color: var(--g-success); }
 .thread-row .remote.box.unavailable { color: var(--g-warning, rgb(var(--g-side-muted-rgb) / 0.7)); gap: 4px; font-size: 11px; white-space: nowrap; }
-.project-head .where { flex: 0 100 auto; min-width: 0; white-space: normal; text-align: right; }
+/* The machines drop to their own line when the head has no room beside them. */
+.project-head { flex-wrap: wrap; }
+.project-head .where { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: auto; white-space: normal; text-align: right; }
 /* The machines break between names, never inside one. */
 .project-head .where .m { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 

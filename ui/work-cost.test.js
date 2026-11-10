@@ -43,3 +43,10 @@ test("a project adds its top-level threads once: a Captain's total already holds
   assert.equal(projectCostLabel([idle]), "");
   assert.equal(projectCostLabel([tab({ stats: { cost_usd: 0.003 } })]), "<$0.01");
 });
+
+test("a phone's header gets the cost alone, with the plus for a floor, and nothing when none is known", () => {
+  const { statsLabel } = load();
+  assert.equal(statsLabel(tab({ stats: { active_ms: 72 * 60000, cost_usd: 0.84 }, work: { usd: 1.26, unknown: 0, workers: 2 } }), true), "$1.26");
+  assert.equal(statsLabel(tab({ stats: { active_ms: 60000, cost_usd: 0.2 }, work: { usd: 0.5, unknown: 1, workers: 3 } }), true), "$0.50+");
+  assert.equal(statsLabel(tab({ stats: { active_ms: 5000 } }), true), "");
+});
