@@ -35361,7 +35361,7 @@
                 "$ref": "#/$defs/SessionState"
               },
               "message": {
-                "description": "What it asks the user, or the error that stopped it.",
+                "description": "What it asks the user, or the error that stopped it. An idle session's is the offer its\nfinished turn ended on, which waits on nobody.",
                 "type": [
                   "string",
                   "null"
@@ -35456,7 +35456,7 @@
                 "const": "idle"
               },
               {
-                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending\nmid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
@@ -35769,7 +35769,7 @@
                 "$ref": "#/$defs/SessionState"
               },
               "message": {
-                "description": "What it asks the user, or the error that stopped it.",
+                "description": "What it asks the user, or the error that stopped it. An idle session's is the offer its\nfinished turn ended on, which waits on nobody.",
                 "type": [
                   "string",
                   "null"
@@ -35864,7 +35864,7 @@
                 "const": "idle"
               },
               {
-                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending\nmid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
