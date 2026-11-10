@@ -249,6 +249,9 @@ pub enum Call {
     SearchThreads { query: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
+    /// The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation
+    /// for an agent this way, which then starts it with `start_claude`, under the limits.
+    OpenRun { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
     /// The absolute path the file was saved under, in a private folder of the machine, for a
@@ -1214,7 +1217,8 @@ pub struct PairCode {
 pub struct NewInvite {
     pub id: String,
     pub code: String,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
 
@@ -1225,9 +1229,15 @@ pub struct InviteView {
     pub hint: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
+
+/// The `expires_at` of a code that never expires: the last second of the year 9999. Apps older than
+/// 0.17.22 still read `expires_at` and show it as a date, so the hub keeps sending this instead of
+/// nothing.
+pub const NEVER_EXPIRES: i64 = 253402300799;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Invites {
