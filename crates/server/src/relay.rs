@@ -13,6 +13,7 @@ use pinned_core::link::is_unknown_command;
 use pinned_core::reading;
 use pinned_core::wire::{Call, HubCall, MachineId, ProjectView, TabView};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Each machine answers whether it hosts from its in-order call queue, behind whatever it was doing.
@@ -30,7 +31,7 @@ pub enum Source<'a> {
 }
 
 /// Answers the global orchestrator's hub calls: `Relay`, `Overview`, `ReadCaptain` and `ReadSession`.
-pub async fn serve(hub: &Hub, account: &Account, from: Source<'_>, call: HubCall) -> Result<Value, String> {
+pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: Source<'_>, call: HubCall) -> Result<Value, String> {
     match call {
         HubCall::Relay { request_id, to } => relay(hub, account, from, request_id, to).await,
         HubCall::Overview => overview(hub, account, from).await,
@@ -40,8 +41,12 @@ pub async fn serve(hub: &Hub, account: &Account, from: Source<'_>, call: HubCall
     }
 }
 
-async fn relay(hub: &Hub, account: &Account, from: Source<'_>, request_id: String, to: RelayTo) -> Result<Value, String> {
+async fn relay(hub: &Arc<Hub>, account: &Arc<Account>, from: Source<'_>, request_id: String, to: RelayTo) -> Result<Value, String> {
     match to {
+        RelayTo::CaptainBox { repo, size, text, sender, busy } => {
+            only_host(hub, account, &from, "open a Capitão in a box").await?;
+            hub.boxes.open_captain(hub, account, request_id, &repo, size, text, sender, busy).await
+        }
         RelayTo::Captain { machine, path, text, sender, busy } => {
             only_host(hub, account, &from, "send to a Capitão").await?;
             let _held = hub.hold_captain(account, &machine, &path).await;

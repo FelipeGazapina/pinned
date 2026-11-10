@@ -218,7 +218,7 @@ const sendText = (page, text) => page.evaluate((t) => {
       `the Captain with both children nested under it: ${JSON.stringify(tokens.slice(at, at + 3))}`);
     const slot = await page.evaluate((k) => document.querySelector(`.thread-row[data-tab="${k}"]`)?.innerText.replace(/\s+/g, " ").trim(), captain.key);
     console.log("captain card:", JSON.stringify(slot));
-    check(/1 agent working/.test(slot), `the Captain's card sums up its working child: ${slot}`);
+    check(/Captain.* 1 working/.test(slot), `the Captain's card sums up its working child: ${slot}`);
     await page.screenshot(path.join(SCREENS, "child-threads.png"));
 
     await page.click(`.thread-row[data-tab="${children[0].key}"]`);

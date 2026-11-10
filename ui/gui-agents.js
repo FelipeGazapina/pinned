@@ -5,9 +5,15 @@ Object.assign(ICON_PATHS, {
 /** The agents claude spawned in the thread, as the last page listed them. An older pinned lists none. */
 const agentsOf = (tab) => threadOf(tab).agents ?? [];
 const runningAgents = (tab) => agentsOf(tab).filter((a) => a.state === "running");
+/** The key of the tab that started `t`: on `t`'s own machine, or on the machine `spawned_on` names
+ * for a worker another machine's thread delegated there. */
+function spawnerKey(t) {
+  if (!t.view.spawned_by) return null;
+  return `${t.view.spawned_on ? localIdOf(t.view.spawned_on) : t.machine}:${t.view.spawned_by}`;
+}
 /** The worker threads `tab` started that are still at work, as far down as `depth` threads. */
 const workingChildren = (tab, depth = 8) =>
-  depth ? tabs.filter((t) => t.machine === tab.machine && t.view.spawned_by === tab.view.id && t !== tab && (statusOf(t) === "working" || workingChildren(t, depth - 1).length || runningAgents(t).length)) : [];
+  depth ? tabs.filter((t) => spawnerKey(t) === `${tab.machine}:${tab.view.id}` && t !== tab && (statusOf(t) === "working" || workingChildren(t, depth - 1).length || runningAgents(t).length)) : [];
 /** How many of the thread's agents and worker threads are at work. */
 const busyUnder = (tab) => runningAgents(tab).length + workingChildren(tab).length;
 const agentsWorking = (n) => `${n} ${n === 1 ? "agent" : "agents"} working`;

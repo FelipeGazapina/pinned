@@ -241,7 +241,7 @@ function tasteSpeed(taste) {
 }
 
 /** The models the page offers, in two groups: Claude's current ones, then OpenCode Go's, without
- * the ones Claude already lists. Pass the composer's CLAUDE_MODELS and OPENCODE_GO_MODELS. */
+ * the ones Claude already lists. Pass the composer's claudeModels() and OPENCODE_GO_MODELS. */
 function tasteCatalog(claudeModels, opencodeModels) {
   const claude = claudeModels.filter((m) => !m.legacy);
   const listed = new Set(claude.map((m) => m.slug));

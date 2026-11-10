@@ -290,8 +290,22 @@ fn delegation_tools() -> Vec<Value> {
                     "title": { "type": "string", "description": "Short label for the card. The first line of task is used when this is omitted." },
                     "target": {
                         "type": "object",
-                        "description": "Which account and model run the child. Omit providerInstanceId to use this session's account.",
+                        "description": "Which account and model run the child, and where. Omit providerInstanceId to use this session's account. Omit machine and box to run it on this machine.",
                         "properties": {
+                            "machine": { "type": "string", "description": "Another machine of this pinned account, by the id or name projects() lists. The worker runs there, in that machine's checkout of this repo (cloned when it has none), as a thread nested under this one; task_status, task_cancel and the end notice work from here. An offline or unknown machine is an error, never this machine." },
+                            "box": {
+                                "description": "Run the worker in a new Upstash Box that the hub opens with this account's Upstash connection, cloning this repo (or repo). providerInstanceId picks which Claude token, stored on the Upstash card in Connectors, the box signs in with; the stored default when omitted. The box is deleted when the task ends or is cancelled. The Workers box permission in Connectors decides whether a box may open.",
+                                "oneOf": [
+                                    { "type": "boolean" },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "size": { "type": "string", "enum": ["small", "medium", "large"] },
+                                            "repo": { "type": "string", "description": "owner/repo or a GitHub clone URL. Defaults to this checkout's origin." },
+                                        },
+                                    },
+                                ],
+                            },
                             "providerInstanceId": { "type": "string", "description": "An account id from orchestrator_capabilities." },
                             "driverKind": { "type": "string", "description": "claude, codex, or cursor. When providerInstanceId is omitted, this is that provider's builtin account." },
                             "model": { "type": "string", "description": "A model id that account lists. Omit it on the same provider to keep this session's model. Omit it on a different provider to use that provider's default." },
@@ -492,6 +506,13 @@ fn project_tools() -> [(Audience, serde_json::Value); 16] {
                     "message": { "type": "string", "description": "What the Capitão should do, written so it stands alone." },
                     "request_id": { "type": "string", "description": "A new id for each message, such as a UUID. Sending again with the same id is safe." },
                     "machine": machine,
+                    "box": {
+                        "description": "Open the Capitão in a new Upstash Box instead of on a machine: the hub clones the project's repo there with the account's own Upstash and GitHub connections and starts the Capitão on this message; a later message goes to the box that runs it. Answers iniciado with the box's machine at once; it boots in a few minutes and goes once its Capitão stays idle. The Captains box permission in Connectors decides whether a box may open.",
+                        "oneOf": [
+                            { "type": "boolean" },
+                            { "type": "object", "properties": { "size": { "type": "string", "enum": ["small", "medium", "large"] } } },
+                        ],
+                    },
                 },
                 "required": ["project", "message", "request_id"],
             },

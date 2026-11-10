@@ -78,6 +78,8 @@ impl Delegator {
 pub enum RunTarget {
     #[default]
     Local,
+    /// On another machine of the account than its delegator's, which `machine` names.
+    Machine,
     #[serde(rename = "box")]
     UpstashBox,
 }
