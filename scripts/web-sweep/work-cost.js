@@ -166,11 +166,13 @@ const AS = { captain: { active_ms: 72 * 60000, cost_usd: 0.84 }, worker: { activ
 /** What the node would send for a Captain with two workers, one of them on another machine. */
 const patch = () => {
   const captain = tabs.find((t) => t.view.role === "orchestrator");
-  const workers = tabs.filter((t) => t.view.role === "worker").slice(0, 2);
+  const workers = tabs.filter((t) => t !== captain).slice(0, 2);
   if (!captain || workers.length < 2) return false;
+  window.__keep ??= setInterval(window.__patch, 150);
   captain.view.stats = window.AS.captain;
   captain.view.work = { usd: 1.56, unknown: 0, workers: 2 };
   workers.forEach((w, i) => {
+    w.view.role = "worker";
     w.view.spawned_by = captain.view.id;
     w.view.stats = i ? window.AS.remote : window.AS.worker;
     w.view.status = "working";
@@ -179,6 +181,7 @@ const patch = () => {
   renderSidebar();
   return true;
 };
+const keepPatched = (p) => p.evaluate(`window.__patch = ${patch};`);
 
 const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !== "open") document.getElementById("chat-sidebar-toggle")?.click(); });
 
@@ -197,7 +200,6 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
       await openRemote(machine, dir, false);
     }, { machine: node, dir });
     await page.evaluate((as) => { window.AS = as; }, AS);
-    await page.evaluate(() => { for (const t of tabs.filter((t) => t.view.role !== "orchestrator").slice(0, 2)) t.view.role = "worker"; });
     for (const [name, phone] of [["1440x900", false], ["390x844", true]]) {
       const p = phone ? await browser.tab(true) : page;
       if (phone) {
@@ -205,8 +207,8 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
         await p.evaluate(async ({ machine, dir }) => { await openRemote(machine, dir, false); }, { machine: node, dir }).catch(() => {});
         await p.evaluate((as) => { window.AS = as; }, AS);
         await waitFor("the threads on the phone", () => p.evaluate(() => tabs.length >= 3));
-        await p.evaluate(() => { for (const t of tabs.filter((t) => t.view.role !== "orchestrator").slice(0, 2)) t.view.role = "worker"; });
       }
+      await keepPatched(p);
       const draw = () => p.evaluate(patch);
       await waitFor("the Captain and two workers", draw);
       if (phone) await openDrawer(p);
@@ -233,7 +235,6 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
       // A box tab whose box_status fails keeps its chip and says why. The real refresh runs and fails: this node is no box.
       await p.evaluate((m) => { machines.get(m).view.name = "Box · gamma"; }, node);
       await p.evaluate(() => refreshBoxInfo());
-      await p.evaluate(patch);
       await p.evaluate(() => activate(tabs.find((x) => x.view.role === "orchestrator")));
       if (phone) await openDrawer(p);
       await sleepMs(500);
