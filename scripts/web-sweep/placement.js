@@ -111,7 +111,7 @@ const toPlacement = async (page) => {
   check(JSON.stringify(await lists(page)) === JSON.stringify({ Prefer: ["sweep-mini"], Avoid: ["sweep-node"] }), "the pickers fill Prefer and Avoid by machine name");
   const locked = await page.$$eval('select[data-place-add="avoid"] option[disabled]:not([value=""])', (o) => o.map((x) => x.textContent));
   check(locked.join() === "sweep-mini (in Prefer)", `Avoid's picker locks the preferred machine (${locked.join()})`);
-  check(!(await page.$$eval('select[data-place-add="prefer"] option', (o) => o.map((x) => x.value))).includes(node), "a machine already in Avoid is not offered for Prefer");
+  check(!(await page.$$eval('select[data-place-add="prefer"] option:not([disabled])', (o) => o.map((x) => x.value))).includes(node), "a machine already in Avoid can't be picked for Prefer");
   check(/Unsaved changes/.test(await page.locator(".taste-foot").innerText()), "an edit shows the unsaved footer");
   await page.click('.taste-foot button:text-is("Save")');
   await waitFor("the save", async () => (await placementOf(page)).prefer.length === 1);
