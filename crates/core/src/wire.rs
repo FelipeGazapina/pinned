@@ -147,6 +147,10 @@ pub struct TabView {
     /// news and the global orchestrator's requests.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: u32,
+    /// What the thread and the workers it delegated cost so far, on the thread that delegated
+    /// them. Workers are not counted again under it: its card is the one place the total shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::delegate::WorkTotal>,
     /// The tab was opened from the Way of working page to adjust the account's tastes by talking,
     /// and its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1546,6 +1550,7 @@ mod tests {
             taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
+            work: None,
             question: None,
         }
     }

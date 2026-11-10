@@ -421,7 +421,7 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
@@ -453,6 +453,7 @@ impl Tab {
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
+            work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
         }
     }
@@ -1404,7 +1405,8 @@ impl Machine {
     pub fn tabs(&self) -> Vec<TabView> {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued)).collect();
+        let work = self.delegates.work_costs();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
@@ -1412,7 +1414,8 @@ impl Machine {
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
-        self.tab(tab, |t| t.view(tab, &turns, &queued))
+        let work = self.delegates.work_costs();
+        self.tab(tab, |t| t.view(tab, &turns, &queued, &work))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -2422,7 +2425,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
         };
         let looked = Instant::now();
         {
@@ -2901,6 +2904,9 @@ impl Machine {
         match tool {
             ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
+            ProjectTool::WorkCost { .. } if global => Err(NO_PROJECT_WORK.into()),
+            ProjectTool::WorkCost { task: Some(id) } => text_json(self.delegates.work_cost_of_task(&Self::caller(Some(tab.to_owned()), None), &id)?),
+            ProjectTool::WorkCost { task: None } => text_json(self.work_cost(tab)?),
             ProjectTool::Projects => {
                 only_global()?;
                 // The sessions tool lists them; here they would bury the projects.
@@ -3294,10 +3300,16 @@ impl Machine {
         }
     }
 
+    /// What the thread in `tab` cost: its own session and every worker it delegated, theirs in turn included.
+    fn work_cost(&self, tab: &str) -> Result<crate::delegate::WorkCost, String> {
+        let own = self.tab(tab, |t| t.tally.stats().cost_usd)?;
+        Ok(self.delegates.work_cost_of_tab(tab).with_own(own))
+    }
+
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new())).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -6122,6 +6134,82 @@ pub(crate) mod tests {
         assert_eq!(view.session.as_deref(), Some("s1"));
         assert!(view.running);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn work_cost_adds_the_captain_and_every_worker_it_started_here_elsewhere_and_in_a_box() {
+        use crate::delegate::{NewTask, Parent, RemoteEnd, RemoteTarget};
+        use crate::usage::TaskUsage;
+        let dir = temp("work-cost");
+        let sock = dir.join("pinned.sock");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        m.tab(&captain, |t| t.tally.costs.insert(1, 0.84)).unwrap();
+        let start = |parent: Parent, title: &str, provider: Provider, model: &str| {
+            m.delegates
+                .begin(NewTask {
+                    parent,
+                    tool: None,
+                    title: title.into(),
+                    account: "claude".into(),
+                    provider,
+                    model: Some(model.into()),
+                    cwd: dir.clone(),
+                    mode: crate::delegate::Mode::Async,
+                    access: crate::delegate::Access::Auto,
+                    isolated: false,
+                    caller_key: format!("tab:{captain}"),
+                    client_request_id: None,
+                    role: None,
+                })
+                .id
+        };
+        let usage = |cost: Option<f64>, tokens: (u64, u64), box_usd: Option<f64>| TaskUsage { tokens_in: tokens.0, tokens_out: tokens.1, cost_usd: cost, wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 1_800_000) };
+        let local = start(Parent::Tab(captain.clone()), "Local suite", Provider::Claude, "claude-sonnet-5-5");
+        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], None);
+        let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
+        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
+        let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
+        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None });
+        let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
+        assert!(m.delegates.settle_remote(&remote, &captain, "m-mini", &end(usage(Some(0.30), (2000, 800), None))).is_some());
+        let boxed = start(Parent::Tab(captain.clone()), "Box suite", Provider::Claude, "claude-sonnet-5-5");
+        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None });
+        assert!(m.delegates.settle_remote(&boxed, &captain, "m-box", &end(usage(Some(0.10), (500, 250), Some(0.05)))).is_some());
+        let cursor = start(Parent::Tab(captain.clone()), "Cursor review", Provider::Cursor, "composer-2.5");
+
+        // The Captain asks the way its MCP tool does: over the socket, as its tab.
+        let ask_cost = |args: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{captain}","tool":{{"name":"work_cost"{args}}}}}"#)).map(|body| serde_json::from_str::<Value>(&body).unwrap());
+        let cost = ask_cost("").unwrap();
+        let cents = |v: &Value| (v.as_f64().unwrap() * 100.0).round() as i64;
+        assert_eq!(cents(&cost["total_usd"]), 179, "0.84 own + 0.42 + 0.08 + 0.30 + 0.10 agents + 0.05 box: {cost}");
+        assert_eq!((cents(&cost["own_usd"]), cents(&cost["agents_usd"]), cents(&cost["box_usd"])), (84, 90, 5));
+        assert_eq!((cost["workers"].as_u64(), cost["unknown"].as_u64()), (Some(5), Some(1)), "the Cursor worker is unknown, not zero: {cost}");
+        assert_eq!((cost["tokens_in"].as_u64(), cost["tokens_out"].as_u64()), (Some(3700), Some(1650)));
+        let tasks = cost["tasks"].as_array().unwrap();
+        let row = |id: &str| tasks.iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} missing: {cost}")).clone();
+        assert_eq!((row(&local)["machine"].as_str(), row(&local)["depth"].as_u64(), cents(&row(&local)["cost_usd"])), (Some("this machine"), Some(0), 42));
+        assert_eq!((row(&grandchild)["depth"].as_u64(), row(&grandchild)["model"].as_str()), (Some(1), Some("claude-haiku-5-5")));
+        assert_eq!((row(&remote)["machine"].as_str(), row(&remote)["state"].as_str(), cents(&row(&remote)["cost_usd"])), (Some("mini"), Some("result_available"), 30));
+        assert_eq!((row(&boxed)["machine"].as_str(), cents(&row(&boxed)["box_usd"])), (Some("box-1"), 5));
+        let unknown = row(&cursor);
+        assert_eq!((unknown["cost_usd"].is_null(), unknown["state"].as_str(), unknown["model"].as_str()), (true, Some("working"), Some("composer-2.5")), "no cost is reported as none: {unknown}");
+        assert!(!unknown.as_object().unwrap().contains_key("cost_usd"));
+
+        let one = ask_cost(&format!(r#","taskId":"{local}""#)).unwrap();
+        assert_eq!((cents(&one["total_usd"]), one["workers"].as_u64(), one["own_usd"].is_null()), (50, Some(2), true), "a task and the worker under it: {one}");
+        assert!(ask_cost(r#","taskId":"task-nope""#).is_err());
+
+        // The Captain's card reads the same sum, its own session included.
+        let work = m.view(&captain).unwrap().work.unwrap();
+        assert_eq!((work.usd * 100.0).round() as i64, 179);
+        assert_eq!((work.workers, work.unknown), (5, 1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn temp(name: &str) -> PathBuf {

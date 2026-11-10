@@ -188,5 +188,7 @@ body[data-page="global-projects"] #page-view .page-head .range { display: block;
 .gp-machine .gp-captain.idle { color: var(--g-success); }
 .gp-machine .gp-count { font-size: 11px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 .gp-machine .gp-count::before { content: "· "; }
+.gp-cost { margin-left: auto; color: var(--g-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.gp-cost + .gp-workers { margin-left: 0; }
 .gp-workers { margin-left: auto; color: var(--g-muted); font-size: 12px; }
 .gp-empty { margin: 0; padding: 40px 0; text-align: center; color: var(--g-muted); }
