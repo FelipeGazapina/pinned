@@ -464,7 +464,7 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: Option<&crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
@@ -496,7 +496,7 @@ impl Tab {
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
-            work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
+            work: work.map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
             ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
         }
@@ -1477,7 +1477,7 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, work.get(id))).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
@@ -1485,8 +1485,8 @@ impl Machine {
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
-        let work = self.delegates.work_costs();
-        self.tab(tab, |t| t.view(tab, &turns, &queued, &work))
+        let work = self.delegates.work_cost_if_any(tab);
+        self.tab(tab, |t| t.view(tab, &turns, &queued, work.as_ref()))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -2557,7 +2557,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, None), t.idle_for_archive())).collect()
         };
         let looked = Instant::now();
         {
@@ -3444,7 +3444,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), None)).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -4476,7 +4476,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?;
+        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), None)).ok()?;
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
