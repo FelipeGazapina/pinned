@@ -12,7 +12,7 @@ use std::path::Path;
 pub const DEFAULT_ITEMS: usize = 20;
 const ITEM_TEXT: usize = 4000;
 
-/// What a tab's session is doing, in the words the tools use, and what it asks the user.
+/// What a tab's session is doing, in the words the tools use, and what it asks the user or why it failed.
 pub fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
     if !tab.running {
         return ("ended", None);
@@ -30,7 +30,7 @@ pub fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
             _ => "waiting_for_input",
         },
     };
-    (state, message.filter(|_| matches!(state, "needs_permission" | "waiting_for_input")))
+    (state, message.filter(|_| matches!(state, "needs_permission" | "waiting_for_input" | "failed")))
 }
 
 pub fn next_for(state: &str) -> &'static str {
@@ -86,13 +86,13 @@ pub fn end_of(file: &Path, limit: usize) -> Result<Value, String> {
     serde_json::to_value(page).map_err(|e| e.to_string())
 }
 
-/// A read of `tab`: its state, what to do next, its title, the question it asks the user, and the
-/// last `limit` items of `page`, the tab's `Call::Thread` answer, or why that failed.
+/// A read of `tab`: its state, what to do next, its title, the question it asks the user or why it
+/// failed, and the last `limit` items of `page`, the tab's `Call::Thread` answer, or why that failed.
 pub fn read(tab: &TabView, page: Result<Value, String>, limit: usize) -> Value {
     let (state, question) = state_of(tab);
     let mut out = json!({ "state": state, "next": next_for(state), "title": tab.title });
-    if let Some(question) = question {
-        out["question"] = json!(question);
+    if let Some(said) = question {
+        out[if state == "failed" { "error" } else { "question" }] = json!(said);
     }
     match page {
         Ok(page) => out["conversation"] = conversation(&page, limit),

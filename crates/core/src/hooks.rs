@@ -35,6 +35,9 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
         "hooks": hooks,
         "statusLine": { "type": "command", "command": statusline_command(exe) },
         "permissions": { "allow": reminders::permissions() },
+        // A session pinned starts with bypass would otherwise wait on Claude Code's warning, in a
+        // tab no one may be watching. Without the bypass flag the warning never shows.
+        "skipDangerousModePermissionPrompt": true,
     }))?)
 }
 
@@ -651,6 +654,7 @@ mod tests {
             settings["statusLine"],
             serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
         );
+        assert_eq!(settings["skipDangerousModePermissionPrompt"], true, "a bypass session must not wait on Claude Code's warning");
         let _ = std::fs::remove_file(file);
     }
 

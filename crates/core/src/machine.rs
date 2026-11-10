@@ -27,6 +27,10 @@ const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// About when a parent should hear that its worker can't start without the user.
+const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
+/// How many times the first-run watch reads a starting session's screen before it stops.
+const FIRST_RUN_LOOKS: u32 = 10;
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
@@ -82,6 +86,9 @@ pub struct Launch {
     pub sock: PathBuf,
     /// Whether project memory also searches by meaning, with a model it downloads on first use.
     pub vector_search: bool,
+    /// How long a Claude Code session may sit in "starting" before its screen is read for a
+    /// first-run prompt.
+    pub first_run_wait: Duration,
 }
 
 impl Launch {
@@ -115,6 +122,7 @@ impl Launch {
             tutorial_helper,
             sock: files.join("pinned.sock"),
             vector_search: true,
+            first_run_wait: FIRST_RUN_WAIT,
         })
     }
 
@@ -508,6 +516,10 @@ pub struct Machine {
     device_agents: Option<PathBuf>,
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
+    /// The folders pinned cloned or made, which its sessions may trust without asking.
+    made_folders: crate::first_run::Made,
+    /// The config file of the built-in Claude account, where its onboarding and folder trust live.
+    builtin_claude_config: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
     sending_records: AtomicBool,
@@ -655,6 +667,13 @@ impl Machine {
         // Seeds taste.json from the old cost style, then moves the old worker cap into it.
         taste::migrate_worker_cap(dir.as_deref());
         let home = home();
+        // A test must never write the user's own claude config.
+        let builtin_claude_config = match (test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
+            (true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (false, Some(config)) => PathBuf::from(config),
+            (false, None) => home.clone(),
+        }
+        .join(".claude.json");
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
@@ -684,6 +703,8 @@ impl Machine {
             device_agents: dir.as_ref().map(|d| d.join("device-agents")),
             pr_watches: Default::default(),
             clones: home.join("pinned"),
+            made_folders: crate::first_run::Made::load(dir.as_ref().map(|d| d.join("made-folders.json"))),
+            builtin_claude_config,
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
             sending_records: AtomicBool::new(false),
@@ -880,6 +901,7 @@ impl Machine {
             Call::Browse { path } => json(projects::browse(&path, &home())?),
             Call::CreateProject { name } => {
                 let mut created = scaffold::create(&self.clones, &name, self.launch.path_env.as_deref())?;
+                self.made_folders.add(Path::new(&created.path));
                 created.path = self.open_project(created.path.into()).display().to_string();
                 json(created)
             }
@@ -1643,42 +1665,8 @@ impl Machine {
         Ok(())
     }
 
-    /// Claude's TUI places each word with a cursor command, so the refusal is not one contiguous
-    /// sentence in the pty bytes.
     fn resume_refused(screen: &str) -> bool {
-        let mut flat = String::new();
-        let mut chars = screen.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                match chars.peek() {
-                    Some('[') => {
-                        chars.next();
-                        for next in chars.by_ref() {
-                            if next.is_ascii_alphabetic() {
-                                break;
-                            }
-                        }
-                    }
-                    Some(']') => {
-                        chars.next();
-                        for next in chars.by_ref() {
-                            if next == '\u{7}' || next == '\u{1b}' {
-                                break;
-                            }
-                        }
-                    }
-                    Some(_) => {
-                        chars.next();
-                    }
-                    None => {}
-                }
-                continue;
-            }
-            if c.is_ascii_alphanumeric() {
-                flat.push(c.to_ascii_lowercase());
-            }
-        }
-        flat.contains("noconversationfound")
+        crate::first_run::flat(screen).contains("noconversationfound")
     }
 
     fn screen_text(&self, id: &str) -> String {
@@ -1786,14 +1774,94 @@ impl Machine {
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
+        let first_run = program == Program::Agent && account.provider == Provider::Claude;
+        if first_run {
+            self.seed_first_run(&account, &cwd);
+        }
         let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
         if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
             let _ = self.tab(tab, |t| t.starting = false);
             return Err(error);
         }
+        if first_run {
+            self.watch_first_run(tab);
+        }
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
+    }
+
+    /// The config file Claude Code keeps `account`'s onboarding and folder trust in.
+    fn claude_config(&self, account: &Account) -> PathBuf {
+        if account.is_builtin() {
+            self.builtin_claude_config.clone()
+        } else {
+            self.accounts.home(account).join(".claude.json")
+        }
+    }
+
+    /// Answers Claude Code's first-run screens in `account`'s config before the session would show
+    /// them: onboarding and a theme, and trust when pinned made `cwd`. The settings every session
+    /// loads skip the bypass warning.
+    fn seed_first_run(&self, account: &Account, cwd: &Path) {
+        let trust = self.made_folders.covers(cwd).then_some(cwd);
+        if let Err(e) = crate::first_run::seed(&self.claude_config(account), trust) {
+            eprintln!("pinned: {e}");
+        }
+    }
+
+    /// Reads the screen of a Claude Code session still starting after `first_run_wait`. A
+    /// first-run screen there is answered when that is safe, and otherwise ends the start with
+    /// what the user has to do.
+    fn watch_first_run(&self, tab: &str) {
+        let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
+        let session = screen.lock().unwrap().session;
+        let (me, tab, wait) = (self.me.clone(), tab.to_owned(), self.launch.first_run_wait);
+        std::thread::spawn(move || {
+            let mut answered = vec![];
+            let mut pause = wait;
+            for _ in 0..FIRST_RUN_LOOKS {
+                std::thread::sleep(pause);
+                pause = wait;
+                let Some(machine) = me.upgrade() else { return };
+                if screen.lock().unwrap().session != session {
+                    return;
+                }
+                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.status.is_none() && t.session.is_some()).then(|| (t.cwd.clone(), t.bypass))) else { return };
+                let Some(found) = crate::first_run::showing(&machine.screen_text(&tab)) else { continue };
+                if answered.contains(&found) {
+                    continue;
+                }
+                match crate::first_run::answer(found, &cwd, machine.made_folders.covers(&cwd), bypass) {
+                    Ok(keys) => {
+                        for (i, key) in keys.iter().enumerate() {
+                            // Each key alone, or the TUI takes them as one paste.
+                            if i > 0 {
+                                std::thread::sleep(Duration::from_millis(300));
+                            }
+                            let _ = machine.tab(&tab, |t| t.session.as_mut().map(|s| s.write(key.as_bytes())));
+                        }
+                        answered.push(found);
+                        // The next screen follows at once.
+                        pause = wait.min(Duration::from_secs(2));
+                    }
+                    Err(reason) => return machine.end_start(&tab, reason),
+                }
+            }
+        });
+    }
+
+    /// Ends a start that waits on the user with `reason`: the tab shows it as failed, and a task
+    /// the tab runs fails with it, so its parent hears.
+    fn end_start(&self, tab: &str, reason: String) {
+        let _ = self.tab(tab, |t| {
+            t.status = Some(AgentStatus::Failed);
+            t.message = Some(reason.clone());
+            t.updated = Some(unix_now());
+        });
+        let event = AgentEvent { status: AgentStatus::Failed, cwd: None, message: Some(reason), tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        self.settle_thread_task(tab, &event);
+        self.emit_tabs();
     }
 
     /// Moves the tab's conversation to `account` and restarts it there, returning its folder. The
@@ -1898,7 +1966,7 @@ impl Machine {
         let project = history::project_of(&cwd);
         let target = match worktree {
             None => project.clone(),
-            Some("new") => branches::new_worktree(&cwd, path)?,
+            Some("new") => self.new_worktree(&cwd)?,
             Some(dir) => {
                 let dir = PathBuf::from(dir);
                 if !dir.is_dir() || history::project_of(&dir) != project {
@@ -4135,7 +4203,7 @@ impl Machine {
         let from = parent_tab.clone().or_else(|| origin.as_ref().map(crate::delegate::Origin::parent_key));
         let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
-            match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
+            match self.new_worktree(&cwd) {
                 Ok(dir) => {
                     if self.startup_stopped(&task.id, Some(&dir)) {
                         return self.delegates.started_json(&task.id).map(|value| value.to_string());
@@ -4879,6 +4947,13 @@ impl Machine {
         });
     }
 
+    /// A new worktree of the repository holding `cwd`, which pinned's sessions may trust.
+    fn new_worktree(&self, cwd: &Path) -> Result<PathBuf, String> {
+        let dir = branches::new_worktree(cwd, self.launch.path_env.as_deref())?;
+        self.made_folders.add(&dir);
+        Ok(dir)
+    }
+
     /// Clones `repo` into `dest`, as T3 Code's Add project clones to the folder picked, and opens it as a project.
     fn clone_into(&self, repo: &str, dest: &str, token: Option<&str>) -> Result<PathBuf, String> {
         let target = projects::expand(dest, &home());
@@ -4886,6 +4961,7 @@ impl Machine {
             return Err(format!("{} already holds files", target.display()));
         }
         clone(repo, &target, token)?;
+        self.made_folders.add(&target);
         Ok(self.open_project(target))
     }
 
@@ -4924,6 +5000,7 @@ impl Machine {
         let target = self.clones.join(name);
         if !target.exists() {
             clone(repo, &target, token)?;
+            self.made_folders.add(&target);
         } else if !same(&target) {
             return Err(format!("{} exists and is not a clone of {repo}", target.display()));
         }
@@ -5338,6 +5415,7 @@ pub(crate) mod tests {
             tutorial_helper: "t".into(),
             sock: "k".into(),
             vector_search: false,
+            first_run_wait: Duration::from_millis(300),
         }
     }
 
@@ -6992,6 +7070,132 @@ pub(crate) mod tests {
         let moved = m.open_tab(Some(own_app.display().to_string()), false).unwrap();
         m.set_folder(&moved, &work_app.display().to_string()).unwrap();
         assert_eq!(m.view(&moved).unwrap().account, "work", "a tab moved to another project takes that project's account");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The `.claude.json` at `file`, or null when there is none.
+    fn claude_config_at(file: &Path) -> Value {
+        std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null)
+    }
+
+    fn trusted(config: &Value, folder: &Path) -> bool {
+        config["projects"][dunce::canonicalize(folder).unwrap().display().to_string()]["hasTrustDialogAccepted"] == true
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_clone_pinned_made_is_trusted_in_the_launching_accounts_config_and_nowhere_else() {
+        let root = temp("first-run-seed");
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Side".into(), auth: None, key: None }).unwrap();
+        let work = root.join("config/accounts/work/.claude.json");
+        std::fs::create_dir_all(work.parent().unwrap()).unwrap();
+        std::fs::write(&work, r#"{"numStartups":3,"userID":"u1","projects":{"/old":{"allowedTools":["Bash"]}}}"#).unwrap();
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q", "-b", "main"]);
+        git(&source, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let clone = root.join("clone");
+        m.call(Call::Clone { repo: source.display().to_string(), token: None, dest: Some(clone.display().to_string()) }).unwrap();
+        let by_hand = root.join("by-hand");
+        std::fs::create_dir_all(&by_hand).unwrap();
+        m.open_project(by_hand.clone());
+        for app in [&clone, &by_hand] {
+            m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
+            first_line(&m, &m.open_tab(Some(app.display().to_string()), false).unwrap());
+        }
+        let config = claude_config_at(&work);
+        assert!(trusted(&config, &clone), "the clone pinned made is trusted: {config}");
+        assert!(!trusted(&config, &by_hand), "a folder the user opened stays the user's call: {config}");
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(config["theme"], "dark");
+        assert_eq!((&config["numStartups"], &config["userID"], &config["projects"]["/old"]), (&json!(3), &json!("u1"), &json!({"allowedTools": ["Bash"]})), "every other key is kept");
+        assert!(!root.join("config/accounts/side/.claude.json").exists(), "the other account's config is never written");
+        assert!(!root.join("config/home/.claude.json").exists(), "the built-in account's config is never written");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A fake `claude` that draws `screens` in turn, each waiting for a line typed into it, and
+    /// appends each line it got to the returned file.
+    #[cfg(unix)]
+    fn claude_on_screens(root: &Path, screens: &[&str]) -> (PathBuf, PathBuf) {
+        let (claude, keys) = (root.join("claude"), root.join("keys"));
+        let mut body = String::from("#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\n");
+        for screen in screens {
+            body += &format!("printf '%s\\r\\n' '{screen}'\nIFS= read -r line\nprintf '%s\\n' \"$line\" >> '{}'\n", keys.display());
+        }
+        body += "sleep 30\n";
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        (claude, keys)
+    }
+
+    const THEME_SCREEN: &str = " Choose the text style that looks best with your terminal";
+    const TRUST_SCREEN: &str = " Quick safety check: Is this a project you created or one you trust?  No, exit  Yes, I trust this folder";
+    const BYPASS_SCREEN: &str = " WARNING: Claude Code running in Bypass Permissions mode  No, exit  Yes, I accept";
+
+    /// Starts a worker thread from a tab in `parent_dir` and returns its task id.
+    #[cfg(unix)]
+    fn delegate_from(m: &Machine, parent_dir: &Path, isolation: &str) -> String {
+        let parent = m.add_tab(parent_dir.to_owned(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async", "isolation": isolation })).unwrap();
+        let started: Value = serde_json::from_str(&m.start_delegate(Some(parent), None, None, request).unwrap()).unwrap();
+        started["taskId"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_on_a_trust_prompt_in_a_folder_pinned_did_not_make_fails_its_task_with_the_reason() {
+        let root = temp("first-run-trust-fail");
+        let (claude, keys) = claude_on_screens(&root, &[TRUST_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        wait_for("the task to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = format!("Claude Code is waiting on its folder-trust prompt in {}; open the session to answer it", app.display());
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason.as_str())));
+        let thread = m.view(&info.thread.unwrap().tab).unwrap();
+        assert_eq!((thread.running, thread.status, thread.message.as_deref()), (true, Some(AgentStatus::Failed), Some(reason.as_str())), "the session stays open for the user to answer");
+        assert!(!keys.exists(), "the trust prompt of a folder pinned did not make is never answered");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_in_a_worktree_pinned_made_gets_its_theme_and_trust_answered() {
+        let root = temp("first-run-answer");
+        let (claude, keys) = claude_on_screens(&root, &[THEME_SCREEN, TRUST_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let task = delegate_from(&m, &repo, "worktree");
+        wait_for("both screens answered", || std::fs::read_to_string(&keys).is_ok_and(|got| got.lines().count() == 2));
+        assert_eq!(std::fs::read_to_string(&keys).unwrap(), "\n\u{1b}[B\n", "Enter on the theme, then down to \"Yes, I trust this folder\" and Enter");
+        let info = m.delegates.get(&task).unwrap();
+        assert!(!info.state.terminal(), "an answered start goes on: {:?}", info.error);
+        let config = claude_config_at(&root.join("config/home/.claude.json"));
+        assert!(trusted(&config, &info.cwd), "the worktree pinned made is trusted before the session starts: {config}");
+        assert!(!trusted(&config, &repo), "the repository the user opened is not: {config}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_bypass_warning_is_never_accepted_for_a_session_started_without_bypass() {
+        let root = temp("first-run-bypass");
+        let (claude, keys) = claude_on_screens(&root, &[BYPASS_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let tab = m.open_tab(Some(root.display().to_string()), false).unwrap();
+        m.start_claude(&tab, 120, 32).unwrap();
+        wait_for("the start to end", || m.view(&tab).unwrap().status == Some(AgentStatus::Failed));
+        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some("Claude Code is waiting on its bypass-permissions warning; open the session to answer it"));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!keys.exists(), "nothing was typed into the warning");
         let _ = std::fs::remove_dir_all(root);
     }
 
