@@ -99,6 +99,11 @@ impl Delegates {
         delegates
     }
 
+    /// How many tasks still at work run in `project`, the repository their folders belong to.
+    pub fn working_in(&self, project: &Path) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
+    }
+
     /// The folder of each task still at work.
     #[cfg(test)]
     pub fn working_cwds(&self) -> Vec<PathBuf> {

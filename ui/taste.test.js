@@ -173,12 +173,22 @@ test("cost and speed for each preset, and an empty ladder costs only its extras"
   assert.equal(tasteCost(economical, () => "high"), "$1.10–2.29", "the tier lookup comes from the caller");
 });
 
-test("a model's tier comes from hints in its id, as Rust's cost_of reads them", () => {
-  const { tasteModelTier } = taste();
-  assert.deepEqual(
-    ["deepseek-v4.1-flash", "claude-haiku-5-5", "o4-mini", "glm-5.3", "gpt-6-luna", "claude-opus-5-5", "kimi-k3.1-pro", "Qwen3.8-MAX"].map(tasteModelTier),
-    ["low", "low", "low", "mid", "mid", "high", "high", "high"],
-  );
+test("a model's tier is the cost its machine lists, and a guess from words of its id for any other", () => {
+  const { tasteModelTier, tasteCost } = taste();
+  const ids = ["deepseek-v4.1-flash", "claude-haiku-5-5", "o4-mini", "glm-5.3", "gpt-6-luna", "claude-opus-5-5", "kimi-k3.1-pro", "Qwen3.8-MAX", "minimax-m3", "claude-opus-fast"];
+  assert.deepEqual(ids.map((id) => tasteModelTier(id)), ["low", "low", "low", "mid", "mid", "high", "high", "high", "mid", "high"], "an older node sends no list");
+  const listed = [
+    { slug: "claude-fable-5-3", name: "Claude Fable 5.3", cost: "mid" },
+    { slug: "claude-haiku-6", name: "Claude Haiku 6", cost: "low" },
+    { slug: "claude-opus-5-5", name: "Claude Opus 5.5", cost: "mid" },
+    { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
+  ];
+  assert.deepEqual(["claude-fable-5-3", "claude-haiku-6", "claude-opus-5-5"].map((id) => tasteModelTier(id, listed)), ["mid", "low", "mid"], "the list wins over the words of the id");
+  assert.equal(tasteModelTier("claude-sonnet-5-5", listed), "mid", "a listed model with no cost falls back to its id");
+  assert.equal(tasteModelTier("glm-5.3-flash", listed), "low", "a model the list lacks falls back to its id");
+  const { economical } = fixture.presets;
+  const priced = (cost) => tasteCost(economical, (id) => tasteModelTier(id, [{ slug: id, cost }]));
+  for (const tier of ["low", "mid", "high"]) assert.equal(priced(tier), tasteCost(economical, () => tier), `the cost estimate follows the listed tier ${tier}`);
 });
 
 test("the catalog offers current Claude models, then OpenCode Go's that Claude does not list", () => {
