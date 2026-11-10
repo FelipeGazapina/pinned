@@ -145,6 +145,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
             .flatten(),
         permission_mode: field("permission_mode"),
         hook_feedback: false,
+        reply: (status == AgentStatus::Done).then(|| field("last_assistant_message").or_else(|| field("last-assistant-message"))).flatten().filter(|text| !text.trim().is_empty()),
     })
 }
 
@@ -570,7 +571,7 @@ mod tests {
         })
         .unwrap();
         let sock = sock.display().to_string();
-        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false };
+        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
         assert_eq!(
             deliver(&sock, event(AgentStatus::Working, Some("how do we deploy?"))),
             Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
@@ -698,5 +699,21 @@ mod tests {
         assert_eq!(claude.permission_mode, None);
         let plan = event_from(Some("working"), r#"{"permission_mode":"plan","prompt":"look"}"#).unwrap();
         assert_eq!(plan.permission_mode.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn a_stop_hook_hands_over_the_turns_last_message_and_nothing_else_does() {
+        let stop = r#"{"session_id":"s1","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"Pronto. O PR #7 está verde."}"#;
+        assert_eq!(event_from(Some("done"), stop).unwrap().reply.as_deref(), Some("Pronto. O PR #7 está verde."));
+        let codex = r#"{"type":"agent-turn-complete","thread-id":"thr-9","last-assistant-message":"ok"}"#;
+        assert_eq!(event_from(Some("done"), codex).unwrap().reply.as_deref(), Some("ok"));
+        let empty = r#"{"session_id":"s1","last_assistant_message":"  "}"#;
+        assert_eq!(event_from(Some("done"), empty).unwrap().reply, None, "a turn that ended on a tool call has no text to hand over");
+        assert_eq!(event_from(Some("done"), r#"{"session_id":"s1"}"#).unwrap().reply, None);
+        let failed = r#"{"session_id":"s1","error":"rate_limit","last_assistant_message":"Parti"}"#;
+        assert_eq!(event_from(Some("failed"), failed).unwrap().reply, None);
+        let event = event_from(Some("done"), stop).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&serde_json::to_string(&event).unwrap()).unwrap().reply, event.reply, "it survives the socket to the machine");
+        assert!(!serde_json::to_string(&AgentEvent { reply: None, ..event }).unwrap().contains("reply"), "an event sent on carries no reply field");
     }
 }

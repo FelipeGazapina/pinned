@@ -193,6 +193,12 @@ pub struct AgentEvent {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub hook_feedback: bool,
+    /// The turn's last assistant message, as the Stop hook hands it over. Claude Code runs that hook
+    /// before the message reaches the transcript, so a reader of the file can miss it. It stays on
+    /// the way from the hook to the machine: out of the schema, and cleared before the event is sent on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub reply: Option<String>,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.
