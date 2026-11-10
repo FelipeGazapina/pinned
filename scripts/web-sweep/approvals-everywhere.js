@@ -96,7 +96,7 @@ const send = (page, key, text) =>
     const node = ids["sweep-node"];
 
     // The Captain on sweep-node starts a worker on sweep-mini, whose first step is a permission prompt.
-    fs.writeFileSync(path.join(DIR, "home", "delegate-calls.jsonl"), JSON.stringify({ task: "/ask", title: "Apply the orders migration", target: { machine: "sweep-mini" } }));
+    fs.writeFileSync(path.join(DIR, "home", "delegate-calls.jsonl"), JSON.stringify({ task: "Apply the orders migration. [ask]", title: "Apply the orders migration", target: { machine: "sweep-mini" } }));
     const captain = await page.evaluate(async ({ machine, alpha }) => {
       const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path: alpha }));
       activate(tab);
@@ -119,7 +119,7 @@ const send = (page, key, text) =>
     await loose("Pick who opens the PR", "/questions");
     await loose("Fix the flaky checkout test", "limited");
 
-    // The worker's brief is `/ask`, which the fake claude answers with a Bash permission prompt.
+    // The worker's brief is marked [ask], which the fake claude answers with a Bash permission prompt.
     await waitFor("three rows in Waiting on you", () => page.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 40000).catch(async (e) => {
       console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => ({ title: t.view.title, machine: machines.get(t.machine)?.view.name, status: t.view.status, running: t.view.running, interrupted: t.view.interrupted, message: t.view.message, detail: t.view.ask_detail, menu: !!t.menu }))), null, 1));
       throw e;
