@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tower_http::compression::CompressionLayer;
+use tower_http::compression::Compression;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
@@ -90,8 +90,8 @@ pub const ROUTES: &[&str] = &[
 
 /// Compresses the web app's files for a client that accepts gzip. Only these: the downloads are
 /// binaries, and the API answers are small.
-fn gzipped<S>(files: S) -> tower_http::compression::Compression<S> {
-    CompressionLayer::new().gzip(true).layer(files)
+fn gzipped<S>(files: S) -> Compression<S> {
+    Compression::new(files).gzip(true)
 }
 
 fn route(spec: &str) -> &str {
