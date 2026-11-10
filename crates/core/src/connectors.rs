@@ -3786,19 +3786,11 @@ impl Connectors {
         Ok(store.box_claude_tokens.clone())
     }
 
-    /// The Claude token a box signs in with for the pinned account `name`: the one kept for it, or
-    /// the connection's own for none.
-    pub fn box_claude_token(&self, name: Option<&str>) -> Result<String, String> {
-        let default = || self.key(CLAUDE_TOKEN).ok_or_else(|| "Upstash Box is not connected: connect it in pinned's Connectors settings".to_owned());
-        let Some(name) = name.filter(|name| !name.is_empty()) else { return default() };
-        if let Some(token) = self.key(&named_claude_key(name)) {
-            return Ok(token);
-        }
-        // The token the connection was made with signs in the default account.
-        if name == crate::accounts::default_account() {
-            return default();
-        }
-        Err(format!("no Claude token is kept for {name}: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token"))
+    /// The Claude token a box signs in with for the pinned account `name`: the one kept for it,
+    /// else for the default account the connection's own. None when neither is kept, since a box
+    /// never signs in as another account.
+    pub fn box_claude_token(&self, name: &str) -> Option<String> {
+        self.key(&named_claude_key(name)).or_else(|| (name == crate::accounts::default_account()).then(|| self.key(CLAUDE_TOKEN)).flatten())
     }
 
     pub fn box_access(&self) -> BoxAccess {
@@ -5697,18 +5689,14 @@ mod tests {
         assert_eq!(connectors.set_box_claude_token("bloom", "nope"), Err("a Claude token from `claude setup-token` starts with sk-ant-oat01-".into()));
         let kept = connectors.set_box_claude_token(" bloom ", " sk-ant-oat01-bb11 ").unwrap();
         assert_eq!(kept, BTreeMap::from([("bloom".to_owned(), "…bb11".to_owned())]));
-        assert_eq!(connectors.box_claude_token(Some("bloom")), Ok("sk-ant-oat01-bb11".into()));
-        assert_eq!(connectors.box_claude_token(None), Ok("sk-ant-oat01-default".into()));
-        assert_eq!(connectors.box_claude_token(Some("claude")), Ok("sk-ant-oat01-default".into()), "the connection's token signs in the default account");
-        assert_eq!(
-            connectors.box_claude_token(Some("work")),
-            Err("no Claude token is kept for work: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token".into())
-        );
+        assert_eq!(connectors.box_claude_token("bloom").as_deref(), Some("sk-ant-oat01-bb11"));
+        assert_eq!(connectors.box_claude_token("claude").as_deref(), Some("sk-ant-oat01-default"), "the connection's token signs in the default account");
+        assert_eq!(connectors.box_claude_token("work"), None, "no other account's token stands in for work's");
         let settings = serde_json::to_value(connectors.get_settings()).unwrap();
         assert_eq!(settings["box_claude_tokens"], serde_json::json!({ "bloom": "…bb11" }));
         assert!(!settings.to_string().contains("sk-ant-oat01"), "{settings}");
         assert_eq!(connectors.remove_box_claude_token("bloom").unwrap(), BTreeMap::new());
-        assert!(connectors.box_claude_token(Some("bloom")).is_err());
+        assert_eq!(connectors.box_claude_token("bloom"), None);
         connectors.set_box_claude_token("bloom", "sk-ant-oat01-bb11").unwrap();
         connectors.disconnect_upstash().unwrap();
         assert_eq!(connectors.get_settings().box_claude_tokens, BTreeMap::new());

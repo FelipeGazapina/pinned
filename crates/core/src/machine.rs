@@ -498,6 +498,7 @@ pub struct Machine {
     rates_file: Option<PathBuf>,
     /// The model rows claude's /model menu showed last on this machine, kept in `model_menu_file`.
     model_menu: Mutex<Vec<crate::claude_models::MenuRow>>,
+    setup_tokens: crate::setup_token::SetupTokens,
     model_menu_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
@@ -676,6 +677,7 @@ impl Machine {
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
             model_menu: Mutex::new(dir.as_ref().and_then(|d| std::fs::read(d.join(MODEL_MENU_FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
+            setup_tokens: Default::default(),
             model_menu_file: dir.as_ref().map(|d| d.join(MODEL_MENU_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
@@ -977,6 +979,9 @@ impl Machine {
             Call::MemoryForget { path, id } => json(self.memories.forget(&self.known_project(&path)?, id)?),
             Call::MemoryStatus { path } => json(self.memories.status(&self.known_project(&path)?)?),
             Call::SignIn { account } => json(self.sign_in(&account)?),
+            // The link to the hub answers it itself, so the token goes to the hub alone.
+            Call::SetupToken { .. } => Err("only the hub asks this machine for a Claude token for boxes".into()),
+            Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
@@ -1393,6 +1398,20 @@ impl Machine {
     fn headless_strip(&self, tab: &str) -> Result<&'static [&'static str], String> {
         let account = self.tab(tab, |t| t.account.clone())?;
         Ok(if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] })
+    }
+
+    /// The long-lived token `claude setup-token` prints for this machine's Claude account `id`,
+    /// once the user approves it in the browser. Only the hub link asks for it: `call` refuses it.
+    pub fn setup_token(&self, id: &str) -> Result<String, String> {
+        let account = self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?;
+        if account.provider != Provider::Claude || account.auth != Auth::Login {
+            return Err(format!("{id} is no Claude Code login, so it has no Claude token for boxes"));
+        }
+        let mut env = self.accounts.env(&account);
+        if let Some(path) = &self.launch.path_env {
+            env.push(("PATH".into(), path.clone()));
+        }
+        self.setup_tokens.run(id, &self.launch.bin(Provider::Claude), &env, crate::setup_token::WAIT)
     }
 
     /// Who each account's CLI says is signed in, asked of every account at once.

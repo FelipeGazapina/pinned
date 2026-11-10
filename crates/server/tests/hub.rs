@@ -2198,6 +2198,8 @@ fn fast() -> Policy {
 /// A signed-in account with Upstash connected and a workflow whose sessions run in a box.
 struct BoxAccount {
     client: Client,
+    /// Its login, for an app that locks it.
+    token: String,
     id: uuid::Uuid,
     connector: String,
     repo: PathBuf,
@@ -2229,7 +2231,7 @@ impl BoxAccount {
         assert_eq!(connector["machine"], json!({ "kind": "upstash-box", "size": "small" }));
         let settings = client.wait("settings with Upstash", |f| f["type"] == "settings" && !f["settings"]["upstash"].is_null());
         assert!(!settings.to_string().contains(BOX_KEY) && !settings.to_string().contains(CLAUDE_TOKEN), "clients never see the keys");
-        BoxAccount { client, id: uuid::Uuid::parse_str(&account.id).unwrap(), connector: connector["id"].as_str().unwrap().into(), repo }
+        BoxAccount { client, token, id: uuid::Uuid::parse_str(&account.id).unwrap(), connector: connector["id"].as_str().unwrap().into(), repo }
     }
 
     fn run(&self, subject: Subject, runs_on: RunsOn) -> Work {
@@ -4754,7 +4756,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
     assert_eq!(
         delegate_from(&mac_dir, &captain, to_box.clone()),
-        Err("no Claude token is kept for bloom: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token".into())
+        Err("No Claude token is kept for bloom: add it in Settings › Integrations › Upstash Box › Claude token per account.".into())
     );
     assert_eq!(ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": " sk-ant-oat01-bloomtoken " })), Ok(json!({ "bloom": "…oken" })));
     let settings = ana.client.wait("settings with bloom's token", |f| f["type"] == "settings" && f["settings"]["box_claude_tokens"]["bloom"] == "…oken");
@@ -6029,8 +6031,8 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     };
     assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
     assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
-    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
-    assert_eq!(bob_decides(&mut bob, "answer_box", json!({ "id": "q-ana", "allow": true })), "failed: that box question is gone");
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), Err("this machine is no box".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": "q-ana", "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
     let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
     assert_eq!(approve(&mut bob.client, &linear, json!({ "key": "lin_api_bobsguess" })), Err(format!("no confirmation {} waits", linear.as_str().unwrap())), "bob's app can't decide ana's");
@@ -6573,4 +6575,450 @@ fn an_agents_box_token_removal_forgets_only_its_own_accounts_token() {
         holds_none_of(&secrets[..3], &format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
         holds_none_of(&secrets[..3], &format!("{who}'s settings"), &connections(client).to_string());
     }
+}
+
+/// Why an agent's `answer_box` is refused: the manifest's word for it.
+const ANSWER_BOX_CLOSED: &str = "the user's yes or no to a box's question, which only they give, on the Upstash card in the app";
+const ASK_FIRST: &str = "Upstash Box: waiting for a yes on the Upstash card in Connectors before it opens a box for this; ask again once it is answered";
+
+/// The questions the Upstash card shows, as `(id, what it asks about)`.
+fn box_asks(client: &mut Client) -> Vec<(String, String)> {
+    let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let asks = settings["box_asks"].as_array().cloned().unwrap_or_default();
+    asks.iter().map(|a| (a["id"].as_str().unwrap().to_owned(), a["subject"]["issue"].as_str().unwrap_or_default().to_owned())).collect()
+}
+
+fn asked_about(client: &mut Client) -> Vec<String> {
+    box_asks(client).into_iter().map(|(_, what)| what).collect()
+}
+
+/// Sets one actor's box mode and every other actor's to off, through an app that may.
+fn box_mode(client: &mut Client, kind: &str, mode: &str) {
+    let mut access = json!({ "workflow": { "mode": "off" }, "session": { "mode": "off" }, "worker": { "mode": "off" }, "orchestrator": { "mode": "off" } });
+    access[kind] = json!({ "mode": mode });
+    client.hub(json!({ "cmd": "set_box_access", "access": access })).unwrap();
+}
+
+fn nothing_waits_on(client: &mut Client) {
+    assert_eq!(client.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "no box step became a confirmation");
+}
+
+#[test]
+fn a_workflow_box_follows_only_its_access_setting_and_its_ask_takes_one_plain_click_on_a_locked_app() {
+    let hub = TestHub::start_with_boxes("locked_box_workflow", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut owner = Client::app(&hub.url, &ana.token);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    assert_eq!(owner.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fresh" } } })), Err(LOCKED.into()), "the setting itself still needs the password");
+
+    box_mode(&mut ana.client, "workflow", "off");
+    assert_eq!(open(ana.box_run(issue("w-off"))), Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()));
+    box_mode(&mut ana.client, "workflow", "fixed");
+    assert_eq!(open(ana.box_run(issue("w-fixed-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(open(ana.box_run(issue("w-fixed-2"))), Ok(()));
+    assert_eq!(created(&hub), 1, "fixed reuses its one box, with no prompt");
+    box_mode(&mut ana.client, "workflow", "fresh");
+    assert_eq!(open(ana.box_run(issue("w-fresh"))), Ok(()));
+    assert_eq!(created(&hub), 2, "fresh opens a box of its own, with no prompt");
+    box_mode(&mut ana.client, "workflow", "ask");
+    assert_eq!(open(ana.box_run(issue("w-ask"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    assert_eq!(asked_about(&mut owner), ["w-ask"]);
+    let (id, _) = box_asks(&mut owner).remove(0);
+    assert_eq!(owner.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })), Ok(Value::Null), "the owner's yes is one click on the locked app, with no password");
+    assert_eq!(open(ana.box_run(issue("w-ask"))), Ok(()));
+    assert_eq!(created(&hub), 3);
+    nothing_waits_on(&mut owner);
+}
+
+#[test]
+fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_its_ask_with_no_password() {
+    let hub = TestHub::start_with_boxes("locked_box_session", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    let mut owner = Client::app(&url, &token);
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let mut bobs_app = Client::app(&url, &bob_token);
+    let open = |budget: f64| act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": budget }));
+    let mine = json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 1.0 });
+
+    box_mode(&mut ana.client, "session", "off");
+    let off = Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".to_owned());
+    assert_eq!(open(1.0), off);
+    assert_eq!(owner.hub(mine.clone()), off);
+
+    box_mode(&mut ana.client, "session", "ask");
+    assert_eq!(open(1.0), Err(ASK_FIRST.into()));
+    assert_eq!(asked_about(&mut owner), [format!("sessions of ana-mac {}", ana.tab)]);
+    let (id, _) = box_asks(&mut owner).remove(0);
+    assert_eq!(act(&ana.dir, &ana.tab, "answer_box", json!({ "id": id, "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
+    assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": id, "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
+    assert_eq!(bobs_app.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })), Err("that box question is gone".into()), "bob's app can't answer ana's question");
+    assert_eq!(open(1.0), Err(ASK_FIRST.into()), "no one but ana answered it");
+    assert_eq!(created(&hub), 0);
+    assert_eq!(owner.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })), Ok(Value::Null), "ana's yes is one click on the locked app");
+    assert_eq!(open(1.0).unwrap()["outcome"], "done");
+    assert_eq!(owner.hub(mine.clone()).unwrap()["phase"], "creating", "the owner's own box asks only its budget, in the app's dialog");
+
+    box_mode(&mut ana.client, "session", "fresh");
+    let fresh = open(1.0).unwrap();
+    assert_eq!(fresh["outcome"], "done", "{fresh}");
+    box_mode(&mut ana.client, "session", "fixed");
+    assert_eq!(open(1.0).unwrap()["outcome"], "done", "fixed opens with no prompt too");
+    wait_for("four boxes", || created(&hub) == 4);
+
+    let machine = fresh["result"]["machine"].as_str().unwrap().to_owned();
+    let extended = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
+    assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget an agent's extend runs at once: {extended}");
+    assert_eq!(
+        act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "past the Box budget it is refused"
+    );
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
+    assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
+    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner's extend needs no password");
+    nothing_waits_on(&mut owner);
+    nothing_waits_on(&mut bobs_app);
+}
+
+#[test]
+fn a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app() {
+    let hub = TestHub::start_with_boxes("locked_box_worker", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut owner = Client::app(&hub.url, &ana.token);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mac_dir = temp("lbw-mac");
+    let creds = pair(&hub.url, &mut ana.client, "mac", &mac_dir);
+    let mac_id = creds.machine_id.clone();
+    let mac = Node::start(&mac_dir, creds);
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&mac_dir.join("site"), SITE);
+    let site = mac.machine.open_project(mac_dir.join("site")).display().to_string();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let to_box = |title: &str| delegate_from(&mac_dir, &captain, json!({ "task": "Run the suite.", "title": title, "target": { "box": { "size": "small" } } }));
+
+    box_mode(&mut ana.client, "worker", "off");
+    assert_eq!(to_box("Off"), Err("Upstash Box is off for Workers: choose a box permission for Workers in Connectors settings".into()));
+    box_mode(&mut ana.client, "worker", "fixed");
+    assert_eq!(to_box("Fixed"), Err("Upstash Box: One box, reused is for workflows only; choose New box each time or Ask first for Workers in Connectors settings".into()));
+    box_mode(&mut ana.client, "worker", "ask");
+    assert_eq!(to_box("Asked"), Err(ASK_FIRST.into()));
+    assert_eq!(asked_about(&mut owner), [format!("workers of mac {captain}")]);
+    let (id, _) = box_asks(&mut owner).remove(0);
+    assert_eq!(owner.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })), Ok(Value::Null), "the owner's yes is one click on the locked app");
+    assert_eq!(to_box("Asked").unwrap()["workState"], "working");
+    box_mode(&mut ana.client, "worker", "fresh");
+    assert_eq!(to_box("Fresh").unwrap()["workState"], "working", "fresh opens with no prompt");
+    wait_for("a box for each worker", || created(&hub) == 2);
+    nothing_waits_on(&mut owner);
+}
+
+#[test]
+fn a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app() {
+    let hub = TestHub::start_with_boxes("locked_box_captain", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut owner = Client::app(&hub.url, &ana.token);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mini_dir = temp("lbc-mini");
+    let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
+    let mini_id = creds.machine_id.clone();
+    let mini = Node::start(&mini_dir, creds);
+    mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mini", true)]);
+    ana.client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = ana.client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    let send = |request_id: &str| session_tool(&mini_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": "Ship the form.", "request_id": request_id, "box": true }));
+
+    box_mode(&mut ana.client, "orchestrator", "off");
+    assert_eq!(send("r-off"), Err("Upstash Box is off for Captains: choose a box permission for Captains in Connectors settings".into()));
+    box_mode(&mut ana.client, "orchestrator", "fixed");
+    assert_eq!(send("r-fixed"), Err("Upstash Box: One box, reused is for workflows only; choose New box each time or Ask first for Captains in Connectors settings".into()));
+    box_mode(&mut ana.client, "orchestrator", "fresh");
+    assert_eq!(send("r-fresh").unwrap()["outcome"], "iniciado", "fresh opens with no prompt");
+    wait_for("a Captain on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Orchestrator) && t.running));
+    box_mode(&mut ana.client, "orchestrator", "ask");
+    assert_eq!(send("r-ask"), Err(ASK_FIRST.into()));
+    let asks = asked_about(&mut owner);
+    assert!(asks.len() == 1 && asks[0].starts_with("the Captain of ") && asks[0].contains("acme/site"), "{asks:?}");
+    let (id, _) = box_asks(&mut owner).remove(0);
+    assert_eq!(owner.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })), Ok(Value::Null), "the owner's yes is one click on the locked app");
+    assert_eq!(send("r-ask-again").unwrap()["outcome"], "entregue", "the project's running box takes it");
+    assert_eq!(created(&hub), 1);
+    nothing_waits_on(&mut owner);
+}
+
+#[test]
+fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer_or_budget() {
+    use pinned_core::surface::{self, Class, Parsed};
+    let hub = TestHub::start("locked_confirms");
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut app = Client::app(&hub.url, &token);
+    let machine = uuid::Uuid::new_v4().to_string();
+    let server = json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": [], "env": [] } });
+    let samples: BTreeMap<&str, Value> = [
+        ("add_account", json!({ "provider": "claude", "name": "Side" })),
+        ("set_account_key", json!({ "account": "go" })),
+        ("remove_account", json!({ "account": "side" })),
+        ("sign_in", json!({ "account": "work" })),
+        ("update_self", json!({})),
+        ("connect_linear", json!({})),
+        ("disconnect_linear", json!({})),
+        ("connect_slack", json!({})),
+        ("disconnect_slack", json!({})),
+        ("connect_github", json!({})),
+        ("disconnect_github", json!({})),
+        ("connect_vercel", json!({})),
+        ("disconnect_vercel", json!({})),
+        ("connect_upstash", json!({})),
+        ("disconnect_upstash", json!({})),
+        ("set_box_access", json!({ "access": { "worker": { "mode": "fresh" } } })),
+        ("delete_connector", json!({ "id": "c1" })),
+        ("remove_machine", json!({ "id": machine })),
+        ("pair_code", json!({})),
+        ("create_invite", json!({})),
+        ("revoke_invite", json!({ "id": "i1" })),
+        ("approve_agent", json!({ "request": "r1", "scopes": ["sessions"], "projects": [] })),
+        ("deny_agent", json!({ "request": "r1" })),
+        ("revoke_agent", json!({ "id": "g1" })),
+        ("set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })),
+        ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "box_budget_cents" })),
+        ("set_box_claude_token", json!({ "name": "bloom" })),
+        ("remove_box_claude_token", json!({ "name": "bloom" })),
+        ("mint_box_claude_token", json!({ "machine": machine, "account": "bloom" })),
+        ("delete_session", json!({ "machine": machine, "tab": "tab-1" })),
+        ("save_mcp_server", json!({ "server": server })),
+        ("remove_mcp_server", json!({ "id": "s1" })),
+        ("import_mcp_server", json!({ "machine": machine, "account": "claude", "name": "linear" })),
+    ]
+    .into_iter()
+    .collect();
+    let confirm: Vec<&surface::Action> = surface::ACTIONS.iter().filter(|a| a.class == Class::Confirm).collect();
+    assert_eq!(confirm.iter().map(|a| a.name).collect::<std::collections::BTreeSet<_>>(), samples.keys().copied().collect(), "a sample for every confirm action");
+    for action in confirm {
+        let parsed = surface::parse(action, &surface::with_blank_asks(action, &samples[action.name])).unwrap_or_else(|e| panic!("{e}"));
+        let answer = match parsed {
+            Parsed::Hub(call) => app.hub(serde_json::to_value(call).unwrap()),
+            Parsed::Node(call) => app.call(&machine, serde_json::to_value(call).unwrap()),
+        };
+        assert_eq!(answer, Err(LOCKED.into()), "{} still needs the password on a locked app", action.name);
+    }
+    assert_eq!(app.hub(json!({ "cmd": "answer_box", "id": "q-1", "allow": true })), Err("that box question is gone".into()), "a box question's answer needs no password");
+    assert_eq!(app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "nor does a box's budget");
+}
+
+const BLOOM_TOKEN: &str = "sk-ant-oat01-bloomtoken";
+
+/// The Claude token each box signs in with, from the box.env the hub wrote it, oldest box first.
+fn box_tokens(boxes: &FakeBoxes) -> Vec<String> {
+    let state = boxes.state.lock().unwrap();
+    let mut made: Vec<(u32, String)> = state
+        .boxes
+        .iter()
+        .filter_map(|(id, b)| {
+            let env = b.files.get(&format!("{BOX_DIR}/box.env"))?;
+            let token = env.lines().find_map(|l| l.strip_prefix("CLAUDE_CODE_OAUTH_TOKEN='")?.strip_suffix('\'').map(str::to_owned))?;
+            Some((id.trim_start_matches("box_").parse().ok()?, token))
+        })
+        .collect();
+    made.sort();
+    made.into_iter().map(|(_, token)| token).collect()
+}
+
+/// A machine of `client`'s account with the project `site` (github.com/acme/site) under the
+/// agent account `site_account`, which the machine adds first.
+fn machine_with_site(url: &str, owner: &mut BoxAccount, email: &str, name: &str, dir: &Path, site_account: &str) -> (Node, String, String) {
+    let (machine, machine_token) = account::register_machine(url, &owner.token, name, "macos").unwrap();
+    let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: String::new(), machine_id: machine.id.clone(), machine_token };
+    creds.save(dir).unwrap();
+    let client = &mut owner.client;
+    let id = creds.machine_id.clone();
+    let node = Node::start(dir, creds);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    client.wait("the machine online", |f| f["type"] == "machines" && f["machines"].as_array().unwrap().iter().any(|m| m["id"] == id.as_str() && m["online"] == true));
+    std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
+    origin(&dir.join("site"), SITE);
+    let site = node.machine.open_project(dir.join("site")).display().to_string();
+    if site_account != "claude" {
+        client.call(&id, json!({ "cmd": "add_account", "provider": "claude", "name": site_account })).unwrap();
+    }
+    client.call(&id, json!({ "cmd": "set_project_account", "path": site, "account": site_account })).unwrap();
+    (node, id, site)
+}
+
+#[test]
+fn every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_one_it_has_none_for() {
+    let hub = TestHub::start_with_boxes("box_account", Signup::Open, Policy { max_open: 12, ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mac_dir = temp("bacc-mac");
+    let (mac, mac_id, site) = machine_with_site(&hub.url, &mut ana, "ana@acme.dev", "mac", &mac_dir, "bloom");
+    let all_fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "fresh" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": all_fresh })).unwrap();
+    ana.client.call(&mac_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = ana.client.call(&mac_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let session = mac.machine.open_tab(Some(site.clone()), false).unwrap();
+    ana.client.wait("the session's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == session.as_str() && t["account"] == "bloom"));
+    let on_site = ana.client.hub(json!({ "cmd": "save_connector", "connector": {
+        "name": "Site", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" }, "folder": site, "model": "", "effort": "high",
+        "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+    } })).unwrap()["id"].as_str().unwrap().to_owned();
+    let triggered = |issue_id: &str| {
+        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: BoxSize::Small }), input: String::new() };
+        hub.runtime.block_on(hub.hub().open(ana.id, Work::Run(run)))
+    };
+    let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));
+    let agents_box = || act(&mac_dir, &session, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));
+    let captains_box = |request_id: &str| session_tool(&mac_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": "Ship it.", "request_id": request_id, "box": true }));
+    let workers_box = |target: Value| delegate_from(&mac_dir, &captain, json!({ "task": "Run the suite.", "title": "Suite", "target": target }));
+
+    let none = Err("No Claude token is kept for bloom, the account site runs on: add it in Settings › Integrations › Upstash Box › Claude token per account.".to_owned());
+    assert_eq!(triggered("h-1").map(drop), none, "a triggered workflow run");
+    assert_eq!(ana.client.hub(json!({ "cmd": "run_workflow", "id": on_site })).map(drop), none, "Run now");
+    assert_eq!(agents_box().map(drop), none, "an agent's open_box");
+    assert_eq!(open_box(&mut ana.client).map(drop), none, "the app's open_box");
+    assert_eq!(captains_box("r-1").map(drop), none, "a Captain's box");
+    assert_eq!(workers_box(json!({ "box": true })).map(drop), none, "a worker's box");
+    assert_eq!((created(&hub), ana.rows(&hub)), (0, 0), "no box was reserved, opened or billed");
+
+    ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": BLOOM_TOKEN })).unwrap();
+    assert_eq!(triggered("h-1"), Ok(()));
+    assert!(ana.client.hub(json!({ "cmd": "run_workflow", "id": on_site })).is_ok(), "Run now");
+    assert_eq!(agents_box().unwrap()["outcome"], "done");
+    assert_eq!(open_box(&mut ana.client).unwrap()["phase"], "creating");
+    assert_eq!(captains_box("r-2").unwrap()["outcome"], "iniciado");
+    assert_eq!(workers_box(json!({ "box": true })).unwrap()["workState"], "working");
+    wait_for("six boxes signed in", || box_tokens(&hub.boxes).len() == 6);
+    assert_eq!(box_tokens(&hub.boxes), vec![BLOOM_TOKEN; 6], "every path signs in as bloom, the account site runs on");
+
+    assert_eq!(workers_box(json!({ "box": true, "providerInstanceId": "work" })).map(drop), Err("No Claude token is kept for work: add it in Settings › Integrations › Upstash Box › Claude token per account.".into()));
+    assert_eq!(workers_box(json!({ "box": true, "providerInstanceId": "claude" })).unwrap()["workState"], "working", "a named account still wins");
+    wait_for("the named worker's box", || box_tokens(&hub.boxes).len() == 7);
+    assert_eq!(box_tokens(&hub.boxes)[6], CLAUDE_TOKEN, "claude's token is the connection's own");
+
+    ana.client.call(&mac_id, json!({ "cmd": "set_project_account", "path": site, "account": null })).unwrap();
+    assert_eq!(open_box(&mut ana.client).unwrap()["phase"], "creating");
+    wait_for("the box of a project on claude", || box_tokens(&hub.boxes).len() == 8);
+    assert_eq!(box_tokens(&hub.boxes)[7], CLAUDE_TOKEN, "a project on claude signs in with the connection's token");
+}
+
+#[test]
+fn another_accounts_project_account_never_picks_this_accounts_box_tokens() {
+    let hub = TestHub::start_with_boxes("box_account_two", Signup::Open, fast());
+    let mut ana = BoxAccount::named(&hub, "ana@acme.dev");
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let (_ana_mac, _, _) = machine_with_site(&hub.url, &mut ana, "ana@acme.dev", "ana-mac", &temp("bacc2-ana"), "claude");
+    let (_bob_mac, _, _) = machine_with_site(&hub.url, &mut bob, "bob@acme.dev", "bob-mac", &temp("bacc2-bob"), "bloom");
+    for client in [&mut ana.client, &mut bob.client] {
+        client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    }
+    ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": BLOOM_TOKEN })).unwrap();
+    let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));
+
+    assert_eq!(
+        open_box(&mut bob.client).map(drop),
+        Err("No Claude token is kept for bloom, the account site runs on: add it in Settings › Integrations › Upstash Box › Claude token per account.".into()),
+        "bob's site runs on bloom, and ana's bloom token is not bob's"
+    );
+    assert_eq!((bob.rows(&hub), created(&hub)), (0, 0));
+    assert_eq!(open_box(&mut ana.client).unwrap()["phase"], "creating", "ana's site runs on claude on her own machine, whatever bob's maps it to");
+    wait_for("ana's box", || box_tokens(&hub.boxes).len() == 1);
+    assert_eq!(box_tokens(&hub.boxes), [CLAUDE_TOKEN]);
+}
+
+const MINTED: &str = "sk-ant-oat01-MintedOnMac0123456789abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOP_qrstuv";
+
+/// A claude whose `setup-token` prints the browser's address and then a token, as the real one
+/// does once the user approves, or keeps waiting while `claude.hang` exists. It notes its pid and
+/// the account home it ran with.
+fn minting_claude() -> String {
+    format!(
+        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true,\"email\":\"felipe@bloom.dev\",\"subscriptionType\":\"team\"}}'; exit 0; }}\n\
+         if [ \"$1\" = setup-token ]; then\n  echo $$ > \"$0.pid\"\n  echo \"$CLAUDE_CONFIG_DIR\" >> \"$0.ran\"\n\
+           printf 'Opening https://claude.com/cai/oauth/authorize?code=true&scope=user%%3Ainference\\n'\n  [ -f \"$0.hang\" ] && exec sleep 60\n\
+           printf '\\033[32mLong-lived authentication token created successfully!\\033[39m\\n\\nYour OAuth token (valid for 1 year):\\n\\n{MINTED}\\n\\nStore this token securely.\\n'\n  exit 0\nfi\nexec cat\n"
+    )
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+#[test]
+fn use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_it() {
+    let hub = TestHub::start_with_boxes("box_mint", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mac_dir = temp("mint-mac");
+    let (mac, mac_id, site) = machine_with_site(&hub.url, &mut ana, "ana@acme.dev", "mac", &mac_dir, "bloom");
+    let claude = mac_dir.join("claude");
+    std::fs::write(&claude, minting_claude()).unwrap();
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    let session = mac.machine.open_tab(Some(site.clone()), false).unwrap();
+    ana.client.wait("the session's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == session.as_str()));
+    let tabs_before = mac.machine.tabs().len();
+    let mut app = Client::app(&hub.url, &ana.token);
+    let mint = json!({ "cmd": "mint_box_claude_token", "machine": mac_id, "account": "bloom" });
+    let ran = || std::fs::read_to_string(mac_dir.join("claude.ran")).unwrap_or_default();
+
+    assert_eq!(
+        app.call(&mac_id, json!({ "cmd": "setup_token", "account": "bloom" })),
+        Err("only the hub asks a machine for a Claude token: use Use for boxes on the Upstash Box card".into()),
+        "an app never gets a token from the machine"
+    );
+    assert_eq!(app.hub(mint.clone()), Err(LOCKED.into()), "keeping a credential still needs the password");
+    assert_eq!(act(&mac_dir, &session, "setup_token", json!({ "account": "bloom" })), Err("setup_token is not open to agents: the hub's way to have a machine mint a Claude token for boxes, which only the hub may receive: call mint_box_claude_token".into()));
+    assert_eq!(act(&mac_dir, &session, "mint_box_claude_token", json!({ "machine": mac_id, "account": "bloom" })).unwrap()["outcome"], "pending", "an agent only asks, and the owner approves");
+    assert_eq!(ran(), "", "nothing ran before the owner's password");
+
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(app.hub(mint.clone()), Ok(json!({ "bloom": "…stuv" })), "the app gets the hint");
+    assert!(ran().trim().ends_with("/accounts/bloom"), "setup-token ran with bloom's home: {}", ran());
+    assert_eq!(mac.machine.tabs().len(), tabs_before, "in no tab");
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 })).unwrap()["phase"], "creating");
+    wait_for("the box signed in", || box_tokens(&hub.boxes).len() == 1);
+    assert_eq!(box_tokens(&hub.boxes), [MINTED], "a box of bloom's project signs in with the minted token");
+    let audit = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap().to_string();
+    let seen = format!("{:?}{:?}{audit}", app.frames, ana.client.frames);
+    assert!(!seen.contains("MintedOnMac"), "no app frame, event or audit row carries the token");
+    let stored = hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_one("select secrets::text || store::text from accounts where email = 'ana@acme.dev'", &[]).await.unwrap().get::<_, String>(0)
+    });
+    assert!(stored.contains("sealed:") && !stored.contains("MintedOnMac"), "the hub keeps it sealed");
+
+    std::fs::write(mac_dir.join("claude.hang"), "").unwrap();
+    std::fs::remove_file(mac_dir.join("claude.pid")).unwrap();
+    let (url, login, waiting_mint) = (hub.url.clone(), ana.token.clone(), mint.clone());
+    let waiting = std::thread::spawn(move || {
+        let mut other = Client::app(&url, &login);
+        other.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        other.hub(waiting_mint)
+    });
+    wait_for("setup-token waiting on the browser", || mac_dir.join("claude.pid").exists());
+    let pid = std::fs::read_to_string(mac_dir.join("claude.pid")).unwrap().trim().to_owned();
+    assert!(alive(&pid));
+    assert_eq!(app.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Ok(json!(true)));
+    assert_eq!(waiting.join().unwrap(), Err("claude setup-token was cancelled".into()));
+    assert!(!alive(&pid), "the recorded process is gone");
+    assert_eq!(app.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Ok(json!(false)), "nothing waits any more");
+
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    let runs = ran().lines().count();
+    assert_eq!(bob.client.hub(mint.clone()), Err(format!("this account has no machine {mac_id}")), "bob can't make ana's machine mint");
+    assert_eq!(bob.client.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Err(format!("this account has no machine {mac_id}")));
+    assert_eq!(ran().lines().count(), runs, "ana's machine ran nothing for bob");
+    let bobs = bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_claude_tokens"].clone();
+    assert!(bobs.as_object().is_none_or(|kept| kept.is_empty()), "and bob keeps no token of ana's: {bobs}");
 }

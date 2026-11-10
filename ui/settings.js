@@ -271,6 +271,7 @@ function upstashCardHtml() {
     ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
     : connected && !agentAsking("connect_upstash")
       ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         ${boxLoginsHtml()}
          ${boxTokensHtml()}
          ${boxPermissionsHtml()}
          <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
@@ -291,15 +292,63 @@ function upstashCardHtml() {
     </div>`;
 }
 
-/** The Claude token each pinned account signs a worker's box in with, which `delegate_task` picks
- * by `providerInstanceId`. The token Connect took stays the default. */
+/** The Claude accounts signed in on the account's machines, one row per account, read off each
+ * online machine's `list_accounts`; `minting` is the row whose setup-token waits in a browser. */
+const boxLogins = { rows: null, minting: null };
+
+async function loadBoxLogins() {
+  if (!account || !settings.upstash) return;
+  const found = new Map();
+  // This computer first, so the browser setup-token opens is the one in front of the user.
+  const ids = onlineMachines().filter((id) => !machines.get(id)?.view.upstash_box).sort((a, b) => (b === LOCAL) - (a === LOCAL));
+  for (const id of ids) {
+    const listed = await accountsOf(id).catch(() => []);
+    for (const a of listed ?? []) {
+      if (a.provider !== "claude" || (a.auth ?? "login") !== "login" || !a.signed_in || found.has(a.id)) continue;
+      found.set(a.id, { id: a.id, email: a.email ?? "", plan: a.plan ?? "", org: a.org ?? "", machine: hubIdOf(id), on: machineName(id) });
+    }
+  }
+  boxLogins.rows = [...found.values()];
+  redrawBoxLogins();
+}
+
+function redrawBoxLogins() {
+  const box = document.getElementById("box-logins");
+  if (box) box.innerHTML = boxLoginRows();
+}
+
+function boxLoginRows() {
+  if (boxLogins.rows == null) return `<p class="hint">Looking for the Claude accounts signed in on your machines…</p>`;
+  if (!boxLogins.rows.length) return `<p class="hint">No Claude account is signed in on an online machine.</p>`;
+  const kept = settings.box_claude_tokens || {};
+  return boxLogins.rows.map((row) => {
+    const who = [row.email, row.plan, row.org].filter(Boolean).map(esc).join(" · ") || "signed in";
+    const waiting = boxLogins.minting?.account === row.id;
+    const action = waiting
+      ? `<span class="hint">Approve in the browser on ${esc(row.on)}, signed in as ${esc(row.email || row.id)}</span>
+         <button class="secondary" data-action="cancel-box-login" data-account="${esc(row.id)}" data-machine="${esc(row.machine)}">Cancel</button>`
+      : `${kept[row.id] ? `<span class="hint">Used for boxes</span>` : ""}
+         <button class="secondary" data-action="use-for-boxes" data-account="${esc(row.id)}" data-machine="${esc(row.machine)}"${boxLogins.minting ? " disabled" : ""}>${kept[row.id] ? "Renew" : "Use for boxes"}</button>`;
+    return `<div class="row box-login"><span><b>${esc(row.id)}</b> ${who} · on ${esc(row.on)}</span>${action}</div>`;
+  }).join("");
+}
+
+function boxLoginsHtml() {
+  return `<div class="box-logins">
+      <p class="hint">Claude accounts signed in on your machines. Use for boxes runs <code>claude setup-token</code> on that machine: approve it in the browser that opens there, signed in as the email shown, and boxes for that account's projects sign in with the token it makes.</p>
+      <div id="box-logins">${boxLoginRows()}</div>
+    </div>`;
+}
+
+/** The Claude token each pinned account signs a box in with: the one its project runs on, or the
+ * one `delegate_task` names. The token Connect took is the claude account's. */
 function boxTokensHtml() {
   const kept = Object.entries(settings.box_claude_tokens || {});
   const asked = agentAsking("set_box_claude_token")?.args.name;
   const rows = kept.map(([name, hint]) => `<div class="row box-token"><span><b>${esc(name)}</b> · token <b>${esc(hint)}</b></span>
       <button class="secondary" data-action="remove-box-token" data-name="${esc(name)}">Remove</button></div>`).join("");
   return `<div class="box-tokens">
-      <p class="hint">Claude token per account. A worker's box signs in with the token of the account <code>delegate_task</code> names, else the default one above.</p>
+      <p class="hint">Claude token per account. Every box signs in with the token of the account its project runs on, or of the one <code>delegate_task</code> names. The token above is the claude account's. A box whose account has no token here doesn't open.</p>
       ${rows}
       ${agentAskingHtml("set_box_claude_token")}
       <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
@@ -340,7 +389,7 @@ function boxAccess() {
 function boxAskRows() {
   return (settings.box_asks || []).map((ask) => {
     const issue = ask.subject.issue;
-    const what = ask.connector === "delegate" || ask.connector === "captain" ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
+    const what = ["delegate", "captain", "session"].includes(ask.connector) ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
     return `<p class="hint">Allow a box for ${esc(what)}?
       <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
       <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
@@ -358,7 +407,7 @@ function boxPermissionsHtml() {
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows, workers, and Captains follow this now. Sessions keep the choice and follow it in the next update.</p>
+    <p class="hint">Workflows, workers and Captains follow this. A session an agent opens follows Off and Ask first; one you open asks you its budget. A yes or no here needs no password.</p>
     ${boxAsksHtml()}`;
 }
 
@@ -1700,6 +1749,25 @@ const actions = {
       document.getElementById("upstash-error").textContent = e;
     }
   },
+  async "use-for-boxes"(button) {
+    const { account: name, machine } = button.dataset;
+    boxLogins.minting = { account: name, machine };
+    redrawBoxLogins();
+    try {
+      settings.box_claude_tokens = await connectorCall("mint_box_claude_token", { machine, account: name });
+      boxLogins.minting = null;
+      showPage("integrations");
+    } catch (e) {
+      boxLogins.minting = null;
+      redrawBoxLogins();
+      const line = document.getElementById("upstash-error");
+      if (line) line.textContent = e;
+    }
+  },
+  async "cancel-box-login"(button) {
+    const { account: name, machine } = button.dataset;
+    await connectorCall("cancel_box_claude_token", { machine, account: name }).catch(console.warn);
+  },
   async "answer-box"(button) {
     const id = button.dataset.id;
     const allow = button.dataset.allow === "yes";
@@ -2211,7 +2279,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },

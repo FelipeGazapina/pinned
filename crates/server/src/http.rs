@@ -522,6 +522,11 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
             });
         }
         Ok(ClientFrame::Call { id, machine, call }) => match call {
+            // A machine answers it with the token itself, which only the hub may keep.
+            Call::SetupToken { .. } => {
+                let refused = "only the hub asks a machine for a Claude token: use Use for boxes on the Upstash Box card".to_owned();
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Err(refused))));
+            }
             Call::WatchThreads { tabs } => {
                 account.watch_threads(client, &machine, tabs);
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));

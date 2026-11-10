@@ -1293,6 +1293,40 @@
                 ]
               },
               {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
                 "description": "The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code\naccount signed in here and resumes it there, continuing a turn a usage limit stopped.",
                 "type": "object",
                 "properties": {
@@ -5957,6 +5991,48 @@
                 ]
               },
               {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
                 "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
                 "type": "object",
                 "properties": {
@@ -10183,6 +10259,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"
@@ -14782,6 +14892,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -20015,6 +20167,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -25633,6 +25827,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -48866,6 +49102,40 @@
                 ]
               },
               {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
                 "description": "The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code\naccount signed in here and resumes it there, continuing a turn a usage limit stopped.",
                 "type": "object",
                 "properties": {
@@ -53728,6 +53998,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"

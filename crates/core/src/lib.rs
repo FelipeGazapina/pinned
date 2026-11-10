@@ -41,6 +41,7 @@ pub mod reminders;
 pub mod scaffold;
 pub mod scripts;
 pub mod sessions;
+pub mod setup_token;
 pub mod skills;
 pub mod slack;
 pub mod stats;
