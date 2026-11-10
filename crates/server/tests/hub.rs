@@ -4153,6 +4153,37 @@ fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_f
 }
 
 #[test]
+fn a_machine_archives_its_own_finished_thread_but_the_hub_keeps_a_pinned_one_and_an_orchestrator() {
+    let hub = TestHub::start("auto_archive");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
+    let worker = |id: &str, session: &str, role: &str| {
+        json!({ "id": id, "cwd": "/w/site", "bypass": false, "running": true, "status": "done", "title": "Fix login", "message": null, "resume_at": null, "opened": 1, "session": session, "role": role })
+    };
+    let tabs = json!({ "kind": "tabs", "tabs": [worker("tab-1", "conv-1", "worker"), worker("tab-2", "conv-2", "orchestrator")] });
+    let raw = RawMachine::start_with(&url, &machine_token, vec![tabs], |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mini", true)]);
+    ana.wait("the tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f.to_string().contains("conv-1"));
+
+    assert_eq!(ana.hub(json!({ "cmd": "auto_archive", "tab": "tab-1" })), Err("only a machine archives its own finished threads".into()), "the app archives with archive_session");
+
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "pin": 0 } }]))).unwrap();
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-1" })), Err("tab-1 stays open: it is pinned".into()));
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-2" })), Err("tab-2 stays open: an orchestrator is never archived on its own".into()));
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-9" })), Err(format!("this account has no tab tab-9 on machine {}", machine.id)));
+    assert_eq!(raw.calls("close_tab"), 0, "nothing was closed");
+
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "pin": null } }]))).unwrap();
+    let row = raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-1" })).unwrap();
+    assert_eq!(row["session"], "conv-1");
+    assert_eq!(row["archived"]["name"], "Fix login");
+    assert_eq!(row["archived"]["machine"], machine.id.as_str());
+    assert_eq!(raw.calls("close_tab"), 1, "its tab closed, as the app's Archive closes it");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])), "Settings › Archive lists it to bring back");
+}
+
+#[test]
 fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_for_approval() {
     let hub = TestHub::start("act_marks");
     let url = hub.url.clone();
