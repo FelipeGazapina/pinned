@@ -2,7 +2,7 @@
 //! are stored as their sha256, so the database alone can't sign anyone in. A second, optional
 //! database keeps what users chose to share to improve the app, such as rated dictations.
 
-use crate::boxes::{BoxRow, BoxWork, Phase, Remains};
+use crate::boxes::{BoxRow, BoxWork, Opener, Phase, Remains};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
@@ -99,6 +99,10 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
   decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
   target text, result jsonb, unique (account, machine, tab, action, request_id));
+-- A box an agent opened through act, until the box ends and is recorded as that session's task.
+-- `started` is unix milliseconds.
+create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, role text not null, started bigint not null);
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -722,6 +726,33 @@ impl Db {
         Ok(row.get(0))
     }
 
+    /// Keeps that the agent session `opener` opened box row `id` at unix ms `started`.
+    pub async fn hold_agent_box(&self, id: &str, account: Uuid, opener: &Opener, started: u64) -> Result<(), String> {
+        let started = i64::try_from(started).map_err(|_| format!("box {id} started at an impossible time"))?;
+        self.client()
+            .await?
+            .execute(
+                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
+                &[&id, &account, &opener.machine, &opener.tab, &opener.role.name(), &started],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The agent session that opened the account's box row `id`, and when, while it is not recorded yet.
+    pub async fn agent_box(&self, account: Uuid, id: &str) -> Result<Option<(Opener, u64)>, String> {
+        let row = self.client().await?.query_opt("select machine, tab, role, started from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err)?;
+        Ok(row.map(|r| {
+            let role = serde_json::from_value(Value::String(r.get(2))).unwrap_or(ActorRole::Session);
+            (Opener { machine: r.get(0), tab: r.get(1), role }, u64::try_from(r.get::<_, i64>(3)).unwrap_or(0))
+        }))
+    }
+
+    pub async fn forget_agent_box(&self, id: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_boxes where box = $1", &[&id]).await.map_err(err).map(drop)
+    }
+
     pub async fn delete_box(&self, id: &str) -> Result<(), String> {
         self.client().await?.execute("delete from boxes where id = $1", &[&id]).await.map_err(err).map(drop)
     }
@@ -877,6 +908,17 @@ impl Db {
             return Ok(None);
         }
         self.confirmation(account, id).await
+    }
+
+    /// Puts a decided confirmation back to waiting, as a credential action whose run failed, so the
+    /// user can type another key.
+    pub async fn reopen_confirmation(&self, id: Uuid) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("update agent_confirmations set decided_at = null, approved = null, outcome = null, result = null where id = $1", &[&id])
+            .await
+            .map_err(err)
+            .map(drop)
     }
 
     pub async fn finish_confirmation(&self, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {

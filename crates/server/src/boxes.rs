@@ -7,9 +7,11 @@
 use crate::hub::{Account, Hub, RUN_WAIT};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
+use pinned_core::accounts::{self, Provider};
 use pinned_core::agent::{session_env, Subject};
-use pinned_core::connectors::{BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
-use pinned_core::delegate::{BoxTarget, Origin, RemoteEnd, Request};
+use pinned_core::connectors::{unix_millis, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
+use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteEnd, Request, RunTarget, TaskOutcome, TaskRecord, TaskUsage};
+use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
 use serde::{Deserialize, Serialize};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
@@ -160,6 +162,14 @@ impl BoxRow {
     }
 }
 
+/// The agent session that opened a box through `act`, whose task the box counts as once it ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Opener {
+    pub machine: Uuid,
+    pub tab: String,
+    pub role: ActorRole,
+}
+
 /// What deleting a row's box and machine takes, which even a row this hub can't read gives, as
 /// one a hub with another run shape wrote.
 #[derive(Clone, Debug)]
@@ -274,6 +284,49 @@ pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked:
     let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
     let scope = repo.and_then(machine::repo_key).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo });
     tastes.resolve(&scope).limits().box_budget_usd(asked)
+}
+
+/// The task record of a box an agent opened through `act`, which ended for `why` at unix ms
+/// `ended`: the opener's task on its own machine, billed the box's life at the box rate.
+pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64, why: &End) -> TaskRecord {
+    let box_ms = ended.saturating_sub(started);
+    let (outcome, reason, limit) = match why {
+        End::Failed(why) => (TaskOutcome::Failed, Some(why.clone()), None),
+        End::Expired if over_budget(&row.spec, Duration::from_millis(box_ms)) => (TaskOutcome::Limit, None, Some("budget".to_owned())),
+        End::Expired => (TaskOutcome::Limit, None, Some("time".to_owned())),
+        End::Removed | End::Disconnected => (TaskOutcome::Cancelled, None, None),
+        End::TabClosed | End::Exited | End::Idle | End::Done | End::Offline | End::Vanished => (TaskOutcome::Done, None, None),
+    };
+    let kind = match opener.role {
+        ActorRole::GlobalOrchestrator => DelegatorKind::GlobalOrchestrator,
+        ActorRole::Captain => DelegatorKind::Captain,
+        ActorRole::Worker => DelegatorKind::Worker,
+        ActorRole::TasteChat | ActorRole::Workflow | ActorRole::Session => DelegatorKind::Session,
+    };
+    let repo = row.spec.repo.as_deref();
+    let delegator = Delegator { kind, tab: Some(opener.tab.clone()), project: repo.and_then(machine::repo_key), project_name: repo.and_then(machine::repo_name).map(str::to_owned) };
+    let usage = TaskUsage { wall_ms: box_ms, box_ms: Some(box_ms), box_usd: Some(box_ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR), ..TaskUsage::default() };
+    TaskRecord {
+        id: row.id.clone(),
+        machine: opener.machine.to_string(),
+        machine_name: String::new(),
+        title: machine_name(&row.spec),
+        delegator,
+        provider: Provider::Claude,
+        account: accounts::DEFAULT.to_owned(),
+        model: None,
+        tier: None,
+        effort: None,
+        target: RunTarget::UpstashBox,
+        started,
+        ended,
+        usage,
+        outcome,
+        reason,
+        limit,
+        review: None,
+        thread: None,
+    }
 }
 
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
@@ -485,7 +538,8 @@ impl Boxes {
     /// An interactive session on a new box cloning `repo`. The client polls `box_status` until it
     /// runs, then opens its tab. The budget dialog is the session permission's ask; a session
     /// permission of off refuses.
-    pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>) -> Result<BoxStatus, String> {
+    /// An agent's `open_box` passes its `opener`, so the box is that session's task once it ends.
+    pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         if matches!(connectors.box_access().session, BoxPermission::Off) {
@@ -520,7 +574,16 @@ impl Boxes {
         if self.drive_guard(&fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
-        hub.db.reserve_box(&fresh).await?;
+        // Kept before the row, so the box can't end before its opener is known.
+        if let Some(opener) = &opener {
+            hub.db.hold_agent_box(&fresh.id, account.id, opener, unix_millis()).await?;
+        }
+        if let Err(e) = hub.db.reserve_box(&fresh).await {
+            if opener.is_some() {
+                let _ = hub.db.forget_agent_box(&fresh.id).await;
+            }
+            return Err(e);
+        }
         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
         let row = fresh.clone();
         tokio::spawn(async move {
@@ -841,6 +904,7 @@ impl Boxes {
                 if hub.db.set_box_phase(&row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
+                    self.record_agent_box(hub, account, &row).await;
                     if let Err(e) = self.end(hub, account, &row.remains(), Some(keys)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
                     }
@@ -1004,6 +1068,7 @@ impl Boxes {
             }
             row.phase = ending;
         }
+        self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), keys).await?;
         if !failed {
             if let Ok(connectors) = hub.connectors(account).await {
@@ -1013,6 +1078,23 @@ impl Boxes {
             }
         }
         Ok(())
+    }
+
+    /// Saves the task record of an ending box an agent opened, under the opener's machine, where
+    /// `delegation_stats` counts it, then forgets the opener. Once per box: a box no agent opened, or
+    /// one already recorded, has no opener. A failure is logged and tried on the next look.
+    async fn record_agent_box(&self, hub: &Hub, account: &Account, row: &BoxRow) {
+        let Phase::Ending(why) = &row.phase else { return };
+        let recorded = async {
+            let Some((opener, started)) = hub.db.agent_box(account.id, &row.id).await? else { return Ok(()) };
+            let mut record = agent_box_record(row, &opener, started, unix_millis(), why);
+            record.machine_name = hub.db.machine_name(account.id, opener.machine).await?.unwrap_or_default();
+            hub.db.save_task_record(account.id, opener.machine, &record).await?;
+            hub.db.forget_agent_box(&row.id).await
+        };
+        if let Err(e) = recorded.await {
+            eprintln!("pinned-server: could not record box {} as its agent's task: {e}", row.id);
+        }
     }
 
     /// The session for `subject` opened its pull request, so its box ends once it stops working.
@@ -1141,7 +1223,11 @@ impl Boxes {
             };
             let finished = match ended {
                 Some(why) => self.finish(hub, account, row, why, keys.as_ref()).await,
-                None if matches!(row.phase, Phase::Ending(_)) => self.end(hub, account, &row.remains(), keys.as_ref()).await,
+                None if matches!(row.phase, Phase::Ending(_)) => {
+                    // A hub that stopped between ending the row and recording it records it now.
+                    self.record_agent_box(hub, account, &row).await;
+                    self.end(hub, account, &row.remains(), keys.as_ref()).await
+                }
                 None => Ok(()),
             };
             if let Err(e) = finished {
@@ -1198,6 +1284,48 @@ mod tests {
 
     fn spec_with(budget_usd: Option<f64>) -> RunSpec {
         RunSpec { folder: String::new(), repo: Some("https://github.com/o/r.git".into()), args: vec!["--name".into(), "r".into()], env: vec![], token: None, account: None, budget_usd }
+    }
+
+    #[test]
+    fn an_agents_box_is_its_task_billed_for_its_life_and_recorded_with_how_it_ended() {
+        let row = |budget_usd: Option<f64>| BoxRow {
+            id: "0123456789abcdef".into(),
+            account: Uuid::nil(),
+            machine: Uuid::from_u128(9),
+            upstash: None,
+            connector: INTERACTIVE_CONNECTOR.into(),
+            subject: Subject::LinearIssue { issue: "box 0123456789abcdef".into() },
+            spec: RunSpec { repo: Some("https://github.com/acme/site.git".into()), args: vec!["--name".into(), "site".into()], ..spec_with(budget_usd) },
+            size: BoxSize::Small,
+            phase: Phase::Ending(End::TabClosed),
+            age: Duration::ZERO,
+            work: BoxWork::Run,
+        };
+        let opener = Opener { machine: Uuid::from_u128(7), tab: "tab-1".into(), role: ActorRole::Captain };
+        let half_hour = 30 * 60_000;
+        let record = agent_box_record(&row(None), &opener, 1_000, 1_000 + half_hour, &End::TabClosed);
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            serde_json::json!({
+                "id": "0123456789abcdef", "machine": "00000000-0000-0000-0000-000000000007", "machine_name": "", "title": "Box · site",
+                "delegator": { "kind": "captain", "tab": "tab-1", "project": "github.com/acme/site", "project_name": "site" },
+                "provider": "claude", "account": "claude", "target": "box", "started": 1_000, "ended": 1_000 + half_hour,
+                "usage": { "tokens_in": 0, "tokens_out": 0, "wall_ms": half_hour, "box_usd": 0.5 * BOX_USD_PER_HOUR, "box_ms": half_hour },
+                "outcome": "done",
+            })
+        );
+        let ended = |budget: Option<f64>, why: End| {
+            let record = agent_box_record(&row(budget), &opener, 1_000, 1_000 + half_hour, &why);
+            (record.outcome, record.reason, record.limit)
+        };
+        assert_eq!(ended(None, End::Failed("the bootstrap failed: no disk".into())), (TaskOutcome::Failed, Some("the bootstrap failed: no disk".into()), None));
+        assert_eq!(ended(Some(0.04), End::Expired), (TaskOutcome::Limit, None, Some("budget".into())), "half an hour spent its 4 cents");
+        assert_eq!(ended(Some(1.0), End::Expired), (TaskOutcome::Limit, None, Some("time".into())));
+        assert_eq!(ended(None, End::Removed), (TaskOutcome::Cancelled, None, None));
+        assert_eq!(ended(None, End::Idle), (TaskOutcome::Done, None, None));
+        let worker = Opener { role: ActorRole::Workflow, ..opener };
+        assert_eq!(agent_box_record(&row(None), &worker, 5, 1, &End::Done).delegator.kind, DelegatorKind::Session, "a workflow session counts as a session");
+        assert_eq!(agent_box_record(&row(None), &worker, 5, 1, &End::Done).usage.box_ms, Some(0), "a clock that went back bills nothing");
     }
 
     #[test]

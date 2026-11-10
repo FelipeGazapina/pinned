@@ -410,7 +410,7 @@ impl Hub {
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
-            HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd).await?), false),
+            HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
                 let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
                 (json(self.boxes.box_status(self, account, machine).await?), false)
@@ -552,7 +552,7 @@ impl Hub {
             }
             HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
             HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
-            HubCall::DecideConfirmation { id, approve } => return crate::surface::decide(self, account, &id, approve).await,
+            HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
                 return json(self.db.audit_rows(account.id, before, limit).await?);
