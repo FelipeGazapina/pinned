@@ -175,12 +175,14 @@ async function signIn(page) {
     if (phone) await page.evaluate(() => toggleSidebar(true));
     await settle();
 
+    await page.evaluate(() => { window.__ns = []; const o = noteThreadsSeen; noteThreadsSeen = (m, c) => { if (m.startsWith("e031")) window.__ns.push([c, machines.get(m)?.view.online, tabs.length, Date.now() % 100000]); o(m, c); }; });
     // 1. One machine away.
     await stopPid(NODES[1].pid);
     await waitFor("sweep-node-2 to show offline", () => page.evaluate(() => !machineOnline("sweep-node-2")));
     await settle();
     let text = await page.evaluate(sidebarText);
     console.log(`offline:\n  ${text.join("\n  ")}`);
+    console.log(JSON.stringify(await page.evaluate(() => window.__ns.slice(-14))));
     console.log(JSON.stringify(await page.evaluate(() => ({ seen: threadsSeen, machines: [...machines.entries()].map(([id, m]) => [id.slice(0, 4), m.view.name, m.view.online, m.view.last_seen, tabs.filter((t) => t.machine === id).length]) }))));
     check(text.some((t) => /^sweep-node-2 offline · seen/.test(t)), `${size}: the offline machine is named with when it was seen`);
     check(!text.some((t) => /^sweep-node offline/.test(t)), `${size}: the online machine is not named`);
