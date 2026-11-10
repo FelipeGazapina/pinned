@@ -9964,7 +9964,7 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::Notice { tab: tab.into(), session: session.map(Into::into), text: format!("[pinned] The user approved your remove_machine request ({id}): done."), id: id.into() })
     }
 
-    fn done_event(tab: &str, session: &str) -> AgentEvent {
+    fn turn_done(tab: &str, session: &str) -> AgentEvent {
         AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.into()), session: Some(session.into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true, reply: None }
     }
 
@@ -9974,12 +9974,12 @@ Have another model review a risky change before it goes ahead.";
         let tab = m.open_tab(None, false).unwrap();
         m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)));
-        let (context, _) = m.take_notices(&done_event(&tab, "s-1"));
+        let (context, _) = m.take_notices(&turn_done(&tab, "s-1"));
         assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.");
         assert_eq!(m.view(&tab).unwrap().queued, 0, "the notice was typed");
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)), "the hub marks it notified on this answer");
         assert_eq!(m.view(&tab).unwrap().queued, 0, "a notice typed once queued again");
-        assert_eq!(m.take_notices(&done_event(&tab, "s-1")).0, "", "the session got the notice twice");
+        assert_eq!(m.take_notices(&turn_done(&tab, "s-1")).0, "", "the session got the notice twice");
         assert_eq!(notice_call(&m, &tab, None, "c-2"), Ok(json!(true)));
         assert_eq!(m.view(&tab).unwrap().queued, 1, "another id still queues");
     }
@@ -9991,7 +9991,7 @@ Have another model review a risky change before it goes ahead.";
         let tab = first.open_tab(None, false).unwrap();
         first.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&first, &tab, None, "c-1"), Ok(json!(true)));
-        assert_eq!(first.take_notices(&done_event(&tab, "s-1")).0, "[pinned] The user approved your remove_machine request (c-1): done.");
+        assert_eq!(first.take_notices(&turn_done(&tab, "s-1")).0, "[pinned] The user approved your remove_machine request (c-1): done.");
         drop(first);
 
         let second = Machine::new(launch(), Some(root.join("config")), None, |_| {});
