@@ -133,9 +133,12 @@ function agentActionTitle(action, args, machine) {
   return named ? `${agentWords(action)} ${named}` : agentWords(action);
 }
 
+/** The asking thread's title in curly quotes, trailing punctuation dropped, so any title reads cleanly. */
+const agentQuoted = (c) => `\u201c${(c.title || c.tab).replace(/[\s.!?,;:\u2026]+$/, "")}\u201d`;
+
 function agentConfirmationHtml(c) {
   const busy = agentDeciding.has(c.id) ? " disabled" : "";
-  const who = `Asked by ${c.title || c.tab} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
+  const who = `Asked by ${agentQuoted(c)} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
   return `<div class="agent-confirm" data-confirmation="${esc(c.id)}" role="group" aria-label="${esc(`Approve ${c.action}?`)}">
     <span class="dot"></span>
     <div class="texts">
@@ -176,7 +179,7 @@ function agentAskingHtml(action) {
   if (!c) return "";
   const keyless = action === "add_account" && c.args.auth !== "opencode-go";
   const how = keyless ? "Adding the account here approves it." : `Entering the ${AGENT_FORMS[action].noun} here approves it.`;
-  return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${c.title || c.tab} on ${c.machine_name || "a removed machine"}. ${how}`)}
+  return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${agentQuoted(c)} on ${c.machine_name || "a removed machine"}. ${how}`)}
     <button type="button" class="secondary" data-action="cancel-agent-approval">Cancel</button></p>`;
 }
 

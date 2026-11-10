@@ -100,9 +100,15 @@ test("a waiting confirmation reads as the action, the machine it names, its exac
     `<div class="agent-confirm" data-confirmation="c-1" role="group" aria-label="Approve remove_machine?"><span class="dot"></span><div class="texts">` +
       `<b class="title" title="Removes a machine from the account.">Remove machine iMac</b>` +
       `<pre class="args">{\n  &#34;id&#34;: &#34;imac-id&#34;\n}</pre>` +
-      `<span class="who">Asked by Clean up old machines · Worker on MacBook · 5m ago</span>` +
+      `<span class="who">Asked by “Clean up old machines” · Worker on MacBook · 5m ago</span>` +
       `<div class="actions start"><button type="button" class="primary" data-agent="approve">Approve</button><button type="button" class="outline" data-agent="deny">Deny</button></div></div></div>`,
   );
+});
+
+test("a title that ends in punctuation reads cleanly inside the quotes", () => {
+  const { context } = app();
+  context.onAgentConfirmations([{ ...removeImac, title: "Pair the new server and add my OpenCode Go account." }]);
+  assert.match(context.agentWaitingRows()[0].innerHTML, /Asked by “Pair the new server and add my OpenCode Go account” · Worker/);
 });
 
 test("an untitled session is named by its tab, and an unknown machine id adds no name", () => {
@@ -110,7 +116,7 @@ test("an untitled session is named by its tab, and an unknown machine id adds no
   context.onAgentConfirmations([{ ...removeImac, args: { id: "gone-id" }, title: "", machine_name: "" }]);
   const html = context.agentWaitingRows()[0].innerHTML;
   assert.match(html, /<b class="title" title="Removes a machine from the account\.">Remove machine<\/b>/);
-  assert.match(html, /<span class="who">Asked by tab-2b-7 · Worker on removed machine · 5m ago<\/span>/);
+  assert.match(html, /<span class="who">Asked by “tab-2b-7” · Worker on removed machine · 5m ago<\/span>/);
 });
 
 test("an action on another machine names it, by its name when the app knows the id", () => {
