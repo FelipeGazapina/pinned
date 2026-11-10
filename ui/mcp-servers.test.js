@@ -104,8 +104,8 @@ test("a server's card shows what it runs, where it loads, and that each secret i
   assert.match(remote, /Every project/);
   assert.match(remote, /If it signs in with OAuth, log in once per Claude account: run \/mcp in a session of each account\./);
   assert.doesNotMatch(remote, / checked>/);
-  const keyed = context.mcpRowHtml({ id: "mcp-3", enabled: true, server: { ...linear, transport: { ...linear.transport, headers: ["Authorization"] } } });
-  assert.doesNotMatch(keyed, /OAuth/, "a server that sends its own Authorization header signs in with it");
+  const keyed = context.mcpRowHtml({ id: "mcp-3", enabled: true, server: { ...linear, transport: { ...linear.transport, headers: ["X-Api-Key"] } } });
+  assert.doesNotMatch(keyed, /OAuth/, "a server that sends a header of its own signs in with it");
 });
 
 test("the form's fields become the server, and only the secrets typed go with it", () => {
@@ -145,7 +145,7 @@ test("Approve on an agent's add opens the form with its server locked, and the s
   assert.match(html, /<input name="name" value="ctx" placeholder="context7" autocomplete="off" spellcheck="false" readonly>/);
   assert.match(html, /<select name="type" disabled>/);
   assert.match(html, /<input type="password" data-mcp-secret="API_KEY" autocomplete="off" spellcheck="false" placeholder="Value">/);
-  assert.match(html, /<button class="primary" data-action="mcp-save">Approve<\/button>/);
+  assert.match(html, /<button class="primary">Approve<\/button>/);
   assert.deepEqual(calls.map((c) => c.cmd), ["list_mcp_servers"], "opening the form decides nothing");
 
   dom["mcp-form"] = mcpForm({ name: "changed-by-hand", type: "stdio", command: "evil" }, { API_KEY: "typed-key-1" });

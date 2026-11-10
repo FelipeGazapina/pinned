@@ -14,9 +14,9 @@ const mcpKind = (server) => (server.transport.type === "stdio" ? "env" : "header
 const mcpNames = (server) => server.transport[mcpKind(server)] ?? [];
 const mcpScope = (server) => server.project ?? "Every project";
 const mcpReach = (server) => (server.transport.type === "stdio" ? [server.transport.command, ...(server.transport.args ?? [])].join(" ") : server.transport.url);
-/** An http or sse server that sends no Authorization header may sign in with OAuth, which Claude
- * Code keeps per Claude account. */
-const mcpMaySignIn = (server) => server.transport.type !== "stdio" && !mcpNames(server).some((name) => name.toLowerCase() === "authorization");
+/** An http or sse server that sends no header of its own may sign in with OAuth, which Claude Code
+ * keeps per Claude account. */
+const mcpMaySignIn = (server) => server.transport.type !== "stdio" && !mcpNames(server).length;
 /** The projects a server can be kept to: every one, the repos the machines have, and its own. */
 const mcpScopes = (repos, server) => ["", ...new Set([...repos, ...(server.project ? [server.project] : [])])];
 const MCP_OAUTH = "If it signs in with OAuth, log in once per Claude account: run /mcp in a session of each account.";
@@ -68,7 +68,7 @@ function mcpFormHtml(form, repos) {
         ${secretInputs.length ? `<p class="hint wide">Values are kept sealed on the hub. Agents and lists only see that each is set.</p>${secretInputs.join("")}` : ""}
       </div>
       ${mcpMaySignIn(server) && (t.url ?? "") ? `<p class="hint">${esc(MCP_OAUTH)}</p>` : ""}
-      <div class="actions start"><button class="primary" data-action="mcp-save">${asking ? "Approve" : "Save"}</button>
+      <div class="actions start"><button class="primary">${asking ? "Approve" : "Save"}</button>
         <button type="button" class="secondary" data-action="mcp-cancel">Cancel</button></div>`}
       <p class="error" id="mcp-form-error">${esc(form.error ?? "")}</p>
     </form>`;
@@ -168,7 +168,7 @@ async function mcpSave() {
   const { server, typed } = mcpReadForm();
   const secrets = mcpSecretsOf(server, typed);
   const call = mcpCallOf(form, server, secrets);
-  const button = document.querySelector("#mcp-form [data-action=mcp-save]");
+  const button = document.querySelector("#mcp-form button.primary");
   if (button) button.disabled = true;
   try {
     await (agentApproval(call) ?? hub.hub(call));

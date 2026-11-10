@@ -880,11 +880,12 @@ function callPinned(name, input) {
 }
 
 // A worker pinned starts on a brief gets it as the one positional argument, and works on it at once.
+// --disallowedTools and --mcp-config take any number of values, as claude's own do.
 const VALUED = new Set(["--settings", "--plugin-dir", "--mcp-config", "--name", "--effort", "--permission-mode", "--model", "--append-system-prompt", "--resume", "--session-id"]);
 const brief = (() => {
   let list = false;
   for (const [i, arg] of args.entries()) {
-    if (arg.startsWith("--")) list = arg === "--disallowedTools";
+    if (arg.startsWith("--")) list = arg === "--disallowedTools" || arg === "--mcp-config";
     else if (!list && !VALUED.has(args[i - 1])) return arg;
   }
 })();

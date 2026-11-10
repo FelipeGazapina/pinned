@@ -314,6 +314,7 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings .mcp-server .mcp-name { min-width: 0; }
 #settings .mcp-reach { display: block; overflow-wrap: anywhere; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04); font: 12px/1.5 var(--g-mono); }
 #settings .mcp-secrets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#settings .mcp-secrets .badge { margin-left: 0; }
 #settings .mcp-server .confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid; }
 #settings .mcp-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 #settings .mcp-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--g-muted); font-size: 13px; }
