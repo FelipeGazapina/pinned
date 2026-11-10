@@ -1001,6 +1001,12 @@ pub enum HubCall {
     /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
     /// (1, 7 or 30), on every machine.
     DelegationStats { days: u32 },
+    /// `Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.
+    SessionMarks,
+    /// `Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change
+    /// landed in order. One left with only its id has no mark. The account's clients hear the same
+    /// as `ToClient::SessionMarks`.
+    MarkSessions { changes: Vec<crate::marks::MarkChange> },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1183,6 +1189,8 @@ pub enum ToClient {
     Event { machine: MachineId, event: MachineEvent },
     /// The account's connectors, after any change or check.
     Settings { settings: Settings },
+    /// Conversations whose marks changed, as they are now. One with only its id has no mark left.
+    SessionMarks { marks: Vec<crate::marks::SessionMarks> },
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.
