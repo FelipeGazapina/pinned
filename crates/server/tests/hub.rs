@@ -7403,6 +7403,25 @@ fn reply_to(sock: &mut MachineSock, id: u64) -> Value {
     }
 }
 
+/// The origin's reply to `id`, while the machine answers the hub's look at its state, which the hub
+/// takes before it refuses a delegation.
+fn reply_to_while_answering(origin: &mut MachineSock, machine: &mut MachineSock, id: u64) -> Value {
+    let start = Instant::now();
+    loop {
+        if let Some(frame) = origin.try_text() {
+            if frame["type"] == "reply" && frame["id"] == id {
+                return frame;
+            }
+        }
+        if let Some(frame) = machine.try_text() {
+            if frame["type"] == "call" && frame["call"]["cmd"] == "state" {
+                machine.send(json!({ "type": "reply", "id": frame["id"], "ok": the_minis_state() }));
+            }
+        }
+        assert!(start.elapsed() < WAIT, "timed out waiting for the reply to {id}");
+    }
+}
+
 #[test]
 fn a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capabilities() {
     let hub = TestHub::start_with("machine_load", Signup::Invite);
@@ -7457,11 +7476,11 @@ fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_
     wait_for("the hub keeps the mini's summary", || machine_rows(&mut client).iter().any(|row| row["name"] == "mac-mini" && row.get("state").is_some()));
 
     origin.send(machine_delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
-    assert_eq!(reply_to(&mut origin, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
     origin.send(machine_delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
-    assert_eq!(reply_to(&mut origin, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
     origin.send(machine_delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
-    assert_eq!(reply_to(&mut origin, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
     while let Some(frame) = mini.try_text() {
         assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
     }
