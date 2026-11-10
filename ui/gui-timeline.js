@@ -1078,6 +1078,9 @@ const resumeHtml = () => `<div class="resume-banner" role="alert">${icon("refres
   <span>This session still had work when pinned closed.</span></div>
   <button type="button" class="primary" data-resume-tab>Continue</button>
   <button type="button" class="icon" data-dismiss-resume aria-label="Dismiss">${icon("x")}</button></div>`;
+/** Where the reader left each thread drawn here, by its place: the turn at the top of the screen, or
+ * null for a thread left at its end. Coming back to a thread lands there. */
+const leftAt = new Map();
 function renderThread() {
   const tab = active;
   const crumb = document.querySelector("#chat-head .crumb");
@@ -1107,9 +1110,12 @@ function renderThread() {
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
-  const stick = threadView.dataset.tab !== place || threadAtEnd || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
-  const anchor = stick ? null : anchorOf();
-  const spacer = !stick && threadView.querySelector(".lane > .spacer");
+  const arriving = threadView.dataset.tab !== place;
+  if (arriving && threadView.dataset.tab) leftAt.set(threadView.dataset.tab, threadAtEnd ? null : anchorOf());
+  const back = arriving ? leftAt.get(place) ?? null : null;
+  const stick = !back && (arriving || threadAtEnd || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40);
+  const anchor = back ?? (stick ? null : anchorOf());
+  const spacer = !stick && !arriving && threadView.querySelector(".lane > .spacer");
   const scrolled = spacer ? threadView.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null;
   const win = finder.open ? { lo: 0, hi: shown.length, above: 0, below: 0 } : windowOf(t, shown.map((x) => x.id), anchor, scrolled);
   const key = JSON.stringify([content, win.lo, win.hi]);
@@ -1149,10 +1155,13 @@ function renderThread() {
   for (const el of threadView.querySelectorAll(".lane > .turn")) t.heights?.set(el.dataset.turnId, el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().top);
   const kept = anchor && threadView.querySelector(`.lane > .turn[data-turn-id="${CSS.escape(anchor.id)}"]`);
   renderDialog(tab);
-  if (stick) {
+  if (kept) {
+    threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
+    threadAtEnd = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+  } else if (stick || arriving) {
     threadView.scrollTop = threadView.scrollHeight;
     threadAtEnd = true;
-  } else if (kept) threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
+  }
   if (finder.open) findMatches();
   showScrollEnd();
   renderMinimap(shown, t);
