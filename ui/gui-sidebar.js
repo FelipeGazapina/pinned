@@ -994,6 +994,8 @@ let linkDownAt = null;
 function noteHubLink(on) {
   linkDownAt = on ? null : (linkDownAt ?? nowS());
 }
+/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
+const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
   const now = linkDownAt ?? nowS();
   for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";

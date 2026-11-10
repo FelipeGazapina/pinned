@@ -12,6 +12,7 @@ const accountSrc = read("account.js");
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 // Values built inside the vm carry its prototypes; a JSON round trip makes them comparable here.
 const here = (value) => JSON.parse(JSON.stringify(value));
+const line = (src, start) => src.slice(src.indexOf(start), src.indexOf("\n", src.indexOf(start)));
 const fn = (src, name, async = false) => {
   const head = `${async ? "async " : ""}function ${name}(`;
   const at = src.indexOf(`\n${head}`) + 1;
@@ -162,7 +163,7 @@ test("the sidebar's timers stop where the hub link dropped and run again when it
     document: { querySelectorAll: () => [] },
   };
   vm.createContext(context);
-  vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${fn(sidebarSrc, "tickDurations")}\nObject.assign(globalThis, { noteHubLink, tickDurations });`, context);
+  vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\n${fn(sidebarSrc, "tickDurations")}\nObject.assign(globalThis, { noteHubLink, tickDurations, clockMs });`, context);
   context.tickDurations();
   assert.equal(rows[0].textContent, "600s");
   context.noteHubLink(false);
@@ -176,6 +177,19 @@ test("the sidebar's timers stop where the hub link dropped and run again when it
   context.noteHubLink(true);
   context.tickDurations();
   assert.equal(rows[0].textContent, "1000s");
+});
+
+test("the thread's own timer reads the same held clock", () => {
+  const context = { nowS: () => 1900, Date: { now: () => 1_900_000 } };
+  vm.createContext(context);
+  vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\nObject.assign(globalThis, { noteHubLink, clockMs });`, context);
+  assert.equal(context.clockMs(), 1_900_000);
+  context.nowS = () => 1700;
+  context.noteHubLink(false);
+  assert.equal(context.clockMs(), 1_700_000, "held at the drop, in ms");
+  context.noteHubLink(true);
+  assert.equal(context.clockMs(), 1_900_000);
+  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(\) - Number\(ticker\.dataset\.since\)\)/);
 });
 
 /** hub.js on sockets the test closes itself. `draws` are the jitter draws in order; waits are what the

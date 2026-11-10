@@ -341,7 +341,7 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .machine-note { flex: none; display: flex; align-items: center; gap: 8px; margin: 0 0 4px; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: var(--g-side-muted);
   background: rgb(var(--g-warning-rgb) / 0.1); }
 .machine-note .dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--g-warning); }
-.machine-note .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-note .text { min-width: 0; overflow-wrap: anywhere; }
 .machine-note b { font-weight: 600; color: var(--g-side-fg); }
 .global-row.disabled { opacity: 0.5; cursor: default; }
 .global-row.disabled:hover { background: transparent; }
@@ -353,4 +353,5 @@ body[data-hub="offline"] #reconnect-bar { display: flex; }
 #reconnect-bar .spin { width: 10px; height: 10px; flex: none; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin 0.8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { #reconnect-bar .spin { animation: none; } }
 body[data-hub="offline"] :is(.thread-row .stamp.status.info, .project-head .state.running, .thread-row .term-run) { opacity: 0.45; }
-body[data-hub="offline"] :is(.thread-row .stamp.status.info .i, .thread-row .term-run .i) { animation-play-state: paused; }
+body[data-hub="offline"] :is(.thread-row .stamp.status.info .i, .thread-row .term-run .i, #thread .shimmer) { animation-play-state: paused; }
+body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }
