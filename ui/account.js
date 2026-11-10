@@ -36,6 +36,7 @@ function showAccount() {
       <div class="card-head"><span class="logo account">@</span>
         <div><b>${esc(account.email || "…")}</b><div class="hint">${esc(account.hub)}</div></div>
         <span class="badge" data-on="${state === "online"}">${badge}</span></div>
+      ${document.body.dataset.version ? `<p class="hint">pinned ${esc(document.body.dataset.version)}</p>` : ""}
       ${TAURI ? `<p>This ${COMPUTER} is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
@@ -323,10 +324,12 @@ const gigabytes = (mb) => (mb >= 100 * 1024 ? `${Math.round(mb / 1024)} GB` : `$
  * workers against its Workers at once, CPU, free memory and free disk, then one chip per account.
  * A stat turns amber or red where a worker sent there would struggle (the placement floors: 90% CPU,
  * 2 GB of memory, 10 GB of disk). */
-function machineStateHtml(view) {
+function machineStateHtml(view, work = null) {
   if (!view.online) return "";
   const state = view.state;
-  if (!state) return `<span class="hint">Load and accounts show once this machine runs a pinned that reports them.</span>`;
+  // What runs and waits on the machine's threads, as the sidebar counts them, then what it reports of itself.
+  const threads = work ? `<span class="stat">Threads <b>${work.running}</b> running · <b>${work.waiting}</b> waiting</span>` : "";
+  if (!state) return `${threads ? `<div class="machine-load">${threads}</div>` : ""}<span class="hint">Load and accounts show once this machine runs a pinned that reports them.</span>`;
   const load = state.load ?? {};
   const full = state.workers_at_once > 0 && state.workers >= state.workers_at_once;
   const stat = (label, value, tail = "", level = "") =>
@@ -343,14 +346,23 @@ function machineStateHtml(view) {
     return `<span class="acct" data-state="${stateName}" title="driver: ${esc(account.driver_kind)}">${esc(account.id + note)}</span>`;
   };
   const accounts = (state.accounts ?? []).map(chip).join("");
-  return `<div class="machine-load">${stats.join("")}</div>${accounts ? `<div class="machine-accounts">${accounts}</div>` : ""}`;
+  return `<div class="machine-load">${threads}${stats.join("")}</div>${accounts ? `<div class="machine-accounts">${accounts}</div>` : ""}`;
+}
+
+/** How many of a machine's threads are working and how many wait on you (a question, an approval or a failure). */
+function machineWork(id) {
+  const mine = tabs.filter((t) => t.machine === id);
+  return { running: mine.filter((t) => ["working", "delegating"].includes(phaseOf(t))).length, waiting: mine.filter((t) => waitingKindOf(t.view)).length };
+}
+function updateButtonHtml({ label, disabled, title, primary }) {
+  return `<button class="${primary ? "primary" : "secondary"}" data-action="update-machine"${disabled ? " disabled" : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</button>`;
 }
 
 function machineEntryHtml(id, view) {
   if (!view) return "";
   const local = id === LOCAL;
   const where = [view.os, local && (TAURI ? `this ${COMPUTER}` : null), !view.online && lastSeen(view.last_seen)].filter(Boolean).join(" · ");
-  const status = rowUpdate(view);
+  const standing = updateStanding(view);
   const updateId = local ? account?.machine_id : view.id;
   const name =
     machinesUi.renaming === id
@@ -374,8 +386,8 @@ function machineEntryHtml(id, view) {
     : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
-      <div class="who">${name}<span class="hint">${esc(where)}</span>${status ? `<span class="hint">${esc(status)}</span>` : ""}${machineStateHtml(view)}</div>
-      ${updateId && machinesUi.renaming !== id ? `<button class="secondary" data-action="update-machine">Update</button>` : ""}
+      <div class="who">${name}<span class="hint">${esc(where)}</span>${standing.text ? `<span class="hint" data-standing="${standing.standing}">${esc(standing.text)}</span>` : ""}${machineStateHtml(view, machineWork(id))}</div>
+      ${updateId && machinesUi.renaming !== id ? updateButtonHtml(standing.button) : ""}
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
     </div>${sync}${confirm}`;

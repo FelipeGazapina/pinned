@@ -78,3 +78,44 @@ function updateLabel(update) {
     default: return "";
   }
 }
+
+/** The newest pinned the account can install, without the "v": the hub's version in a browser, the app's own or
+ * the one the update check found in the app. "" until it is known, and then no row claims to be up to date. */
+let newestVersion = "";
+function setNewestVersion(version) {
+  const next = String(version ?? "").trim().replace(/^v/, "");
+  if (next === newestVersion) return;
+  newestVersion = next;
+  document.dispatchEvent(new CustomEvent("newest-version"));
+}
+
+const versionParts = (version) => (String(version ?? "").match(/\d+/g) ?? []).slice(0, 3).map(Number);
+/** -1, 0 or 1 as version `a` is older than, the same as, or newer than `b`, comparing major, minor, patch. */
+function versionOrder(a, b) {
+  const [x, y] = [versionParts(a), versionParts(b)];
+  for (let i = 0; i < 3; i++) {
+    const gap = (x[i] ?? 0) - (y[i] ?? 0);
+    if (gap) return gap < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The online machines that run an older pinned than `newest`. A box is replaced by the hub, so it is left out. */
+function machinesBehind(newest = newestVersion) {
+  return accountMachines().filter((view) => newest && view.online && !view.upstash_box && view.version && versionOrder(view.version, newest) < 0);
+}
+
+/** Where a machine stands against `newest`, the line its row prints and what its Update button does:
+ * `standing` is offline, updating, failed, cannot, behind, current or unknown (no version to compare). Update
+ * is offered where it can help: an offline machine can't take it, and one on the newest version has none. */
+function updateStanding(view, newest = newestVersion) {
+  const state = view.update?.state;
+  const line = (standing, text, button) => ({ standing, text, button: { label: "Update", disabled: false, title: "", primary: false, ...button } });
+  if (!view.online) return line("offline", rowUpdate(view), { disabled: true, title: "This machine is offline, so it can't update" });
+  if (state === "updating" || state === "restarting") return line("updating", updateLabel(view.update), { label: "Updating…", disabled: true });
+  if (state === "failed") return line("failed", updateLabel(view.update), { label: "Retry update" });
+  if (state === "cannot") return line("cannot", updateLabel(view.update), { disabled: true, title: view.update.reason });
+  if (!newest || !view.version) return line("unknown", rowUpdate(view), {});
+  if (versionOrder(view.version, newest) < 0) return line("behind", `v${view.version} · update to v${newest}`, { label: `Update to v${newest}`, primary: true });
+  return line("current", `up to date · v${view.version}`, { label: "Up to date", disabled: true, title: `Already on v${view.version}` });
+}

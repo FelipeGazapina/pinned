@@ -1334,6 +1334,7 @@ selectKey.onclick = () => showTermText(termText.hidden);
 async function checkUpdate() {
   try {
     const version = await invoke("check_update");
+    if (version) setNewestVersion(version);
     if (version) document.body.dataset.update = version;
     else delete document.body.dataset.update;
     for (const b of document.querySelectorAll(".update")) {
@@ -1344,6 +1345,11 @@ async function checkUpdate() {
   } catch (e) {
     console.warn("update check failed", e);
   }
+}
+/** Says why an update failed where the person looks: a notice in the app view, whose terminal is hidden, else the terminal. */
+function updateFailed(reason) {
+  if (typeof guiOn === "function" && guiOn() && typeof tell === "function") tell(`Update failed: ${esc(reason)}`, 8000);
+  else active?.term.write(`\r\n\x1b[31m[update failed: ${reason}]\x1b[0m\r\n`);
 }
 function headerUpdateResult(status) {
   if (status?.state === "restarting" || status?.state === "updating") return "wait";
@@ -1359,13 +1365,13 @@ async function installUpdate() {
     const status = await invoke("install_update");
     const outcome = headerUpdateResult(status);
     if (outcome === "error") {
-      active?.term.write(`\r\n\x1b[31m[update failed: ${status.reason}]\x1b[0m\r\n`);
+      updateFailed(status.reason);
       checkUpdate();
     } else if (outcome === "refresh") {
       checkUpdate();
     }
   } catch (e) {
-    active?.term.write(`\r\n\x1b[31m[update failed: ${e}]\x1b[0m\r\n`);
+    updateFailed(e);
     checkUpdate();
   }
 }
@@ -1376,9 +1382,17 @@ if (TAURI) {
   setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 }
 
-// A browser runs the UI its hub serves, so it shows the hub's version.
+// A browser runs the UI its hub serves, so it shows the hub's version. That is also the newest a machine can take.
 (TAURI ? TAURI.app.getVersion() : fetch("/api/version").then((r) => (r.ok ? r.text() : "")))
-  .then((version) => (document.getElementById("version").textContent = version && `v${version}`))
+  .then((version) => {
+    document.getElementById("version").textContent = version && `v${version}`;
+    // On a phone the stamp is not pinned over the page: the sidebar's brand row and Account carry it.
+    document.body.dataset.version = version && `v${version}`;
+    document.querySelector("#sidebar .brand b").dataset.version = version && `v${version}`;
+    if (version && !TAURI) setNewestVersion(version);
+    if (version && TAURI && !newestVersion) setNewestVersion(version);
+    if (typeof settingsOpen === "function" && settingsOpen() && page === "account") showAccount();
+  })
   .catch(() => {});
 
 new ResizeObserver(() => refit(active)).observe(terms);

@@ -383,3 +383,9 @@ body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }
 body[data-sidebar="closed"] #chat-sidebar-toggle:has(.count) { display: flex !important; align-items: center; gap: 6px; width: auto; padding: 0 8px 0 6px; }
 @media (pointer: coarse) { #chat-sidebar-toggle:has(.count) { min-width: 40px; } }
 body[data-hub="offline"] #chat-sidebar-toggle .running { opacity: 0.45; }
+
+/* On a phone the build's version is not pinned over the page, where it sat on the last control. The drawer's brand row and Account carry it. */
+@media (max-width: 639px) {
+  body[data-mode="gui"] #version { display: none; }
+  #sidebar .brand b[data-version]::after { content: attr(data-version); margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--g-side-muted); }
+}
