@@ -1335,7 +1335,7 @@ grok-4.7-high - Grok 4.7  High
             client_request_id: None,
             role: None,
         });
-        let captain = Delegator { kind: DelegatorKind::Captain, tab: Some("tab-1".into()), task: None, project: Some("github.com/acme/site".into()), project_name: Some("site".into()) };
+        let captain = Delegator { kind: DelegatorKind::Captain, tab: Some("tab-1".into()), project: Some("github.com/acme/site".into()), project_name: Some("site".into()) };
         delegates.describe(&task.id, captain, Some("high".into()));
         task
     }
@@ -1396,16 +1396,24 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!((review.verdict, review.auto, review.note), (Verdict::Redone, true, Some(format!("started again as {}", second.id))));
         line(&delegates, &second.id, r#"{"type":"turn.completed"}"#);
         delegates.review(&parent(), &second.id, Verdict::Accepted, Some("merged by hand".into())).unwrap();
-        let _third = start(&delegates, Provider::Codex, None, "Fix the login");
+        let third = start(&delegates, Provider::Codex, None, "Fix the login");
         let kept = delegates.get(&second.id).unwrap().review.unwrap();
         assert_eq!((kept.verdict, kept.auto, kept.note.as_deref()), (Verdict::Accepted, false, Some("merged by hand")), "a verdict the delegator gave stays");
-        delegates.accept_auto(&second.id, "its PR merged".into());
+        assert!(!delegates.accept_auto(&second.id, "its PR merged".into()));
         assert!(!delegates.get(&second.id).unwrap().review.unwrap().auto, "a signal does not overwrite the delegator");
+        assert!(!delegates.accept_auto(&third.id, "its PR merged".into()), "a task still working gets no verdict");
 
         let sent = delegates.unrecorded(10);
         assert_eq!(sent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str(), second.id.as_str()], "only finished tasks have a record");
         delegates.mark_recorded(&sent);
         assert!(delegates.unrecorded(10).is_empty());
+        line(&delegates, &third.id, r#"{"type":"turn.completed"}"#);
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(delegates.accept_auto(&third.id, "its PR #7 merged".into()));
+        assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [third.id.as_str()], "a merge is sent once");
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(!delegates.accept_auto(&third.id, "its PR #7 merged".into()), "the next poll of the merged PR changes nothing");
+        assert!(delegates.unrecorded(10).is_empty(), "and sends nothing");
         delegates.review(&parent(), &first.id, Verdict::Accepted, None).unwrap();
         assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str()], "a new verdict is sent again");
     }

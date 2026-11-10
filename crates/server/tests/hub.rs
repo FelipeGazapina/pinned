@@ -4391,3 +4391,47 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
     let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
     assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
 }
+
+#[test]
+fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive() {
+    let hub = TestHub::start("delegation_box_overlap");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let boxed = |name: &str, minutes_ago: u64| {
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        admin_on(&hub.database, &format!(
+            "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('{0}', '{ana_account}', '{0}', 'box_{0}', 'interactive', '{{\"issue\":\"{0}\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '{minutes_ago} minutes')",
+            machine.id,
+        ));
+        RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null))
+    };
+    let site = boxed("Box · site", 60);
+    let api = boxed("Box · api", 30);
+    ana.wait_machines(&[("Box · site", true), ("Box · api", true)]);
+    let now = now_ms();
+
+    // On site, task-a started first and ended last; task-b ran inside it. They arrive in start order.
+    let a = task_record("task-a", "claude-sonnet-5-5", "done", 50, Some(0.0), now);
+    let b = task_record("task-b", "claude-sonnet-5-5", "done", 20, Some(0.0), now - 20 * 60_000);
+    site.ask(json!({ "cmd": "record_tasks", "records": [a, b] })).unwrap();
+    // On api, six tasks end four minutes apart and each record is sent on its own, all at once.
+    std::thread::scope(|s| {
+        for k in 0..6u64 {
+            let api = &api;
+            s.spawn(move || {
+                let record = task_record(&format!("task-api-{k}"), "glm-5.3", "done", 1, Some(0.0), now - k * 4 * 60_000);
+                api.ask(json!({ "cmd": "record_tasks", "records": [record] })).unwrap();
+            });
+        }
+    });
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let box_minutes = |id: &str| {
+        let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+    };
+    assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
+    assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
+}

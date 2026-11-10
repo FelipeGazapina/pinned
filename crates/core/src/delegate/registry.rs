@@ -262,13 +262,16 @@ impl Delegates {
         Ok(json!({ "taskId": id, "review": record.and_then(|r| r.review) }))
     }
 
-    /// Marks a finished task accepted from a signal, unless its delegator already said otherwise.
-    pub fn accept_auto(&self, id: &str, note: String) {
-        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id && task.state.terminal() && task.review.is_none()) {
-            task.review = Some(Review { verdict: Verdict::Accepted, auto: true, note: Some(note), at: unix_millis() });
-            task.recorded = false;
-        }
+    /// Marks a finished task accepted from a signal, unless it already has a verdict. Says whether
+    /// it changed the task.
+    pub fn accept_auto(&self, id: &str, note: String) -> bool {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.iter_mut().find(|task| task.id == id && task.state.terminal() && task.review.is_none()) else { return false };
+        task.review = Some(Review { verdict: Verdict::Accepted, auto: true, note: Some(note), at: unix_millis() });
+        task.recorded = false;
+        drop(tasks);
         self.persist();
+        true
     }
 
     /// The record of every finished task.

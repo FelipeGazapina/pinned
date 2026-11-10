@@ -3152,10 +3152,6 @@ impl Machine {
     /// Who `caller` is, as a task's record names its delegator.
     fn delegator(&self, caller: &crate::delegate::Caller) -> crate::delegate::Delegator {
         use crate::delegate::{Delegator, DelegatorKind};
-        if let Some(parent) = caller.task.as_deref() {
-            let project = self.delegates.get(parent).map(|t| t.delegator).unwrap_or_default();
-            return Delegator { kind: DelegatorKind::Task, tab: None, task: Some(parent.to_owned()), project: project.project, project_name: project.project_name };
-        }
         let Some(tab) = caller.tab.as_deref() else { return Delegator::default() };
         let Ok((role, global)) = self.tab(tab, |t| (role_of(&t.env), global::is_global(&t.env))) else { return Delegator::default() };
         let kind = match (global, &role) {
@@ -3177,15 +3173,16 @@ impl Machine {
             }
             None => (None, None),
         };
-        Delegator { kind, tab: Some(tab.to_owned()), task: None, project, project_name }
+        Delegator { kind, tab: Some(tab.to_owned()), project, project_name }
     }
 
     /// The pull request a worker thread watched merged, so the task it ran was used.
     fn accept_merged(&self, tab: &str, number: Option<u64>) {
         let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return };
         let pr = number.map_or_else(|| "its pull request".to_owned(), |n| format!("its PR #{n}"));
-        self.delegates.accept_auto(&task, format!("{pr} merged"));
-        self.send_records();
+        if self.delegates.accept_auto(&task, format!("{pr} merged")) {
+            self.send_records();
+        }
     }
 
     /// Sends the hub the records of tasks that ended or changed since it last took them, in the

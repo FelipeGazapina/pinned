@@ -34,8 +34,6 @@ pub enum DelegatorKind {
     /// A thread with no role: the user's own session.
     #[default]
     Session,
-    /// A headless child that delegated in turn.
-    Task,
 }
 
 /// The session that started a task.
@@ -44,8 +42,6 @@ pub struct Delegator {
     pub kind: DelegatorKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
     /// The project's repo (`host/owner/name`), else its folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -64,14 +60,13 @@ impl Delegator {
             (DelegatorKind::Worker, None) => "Worker".into(),
             (DelegatorKind::Session, Some(name)) => format!("Session in {name}"),
             (DelegatorKind::Session, None) => "Session".into(),
-            (DelegatorKind::Task, _) => "Delegated task".into(),
         }
     }
 
     fn key(&self) -> String {
         let kind = serde_json::to_value(self.kind).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         match (self.kind, &self.project) {
-            (DelegatorKind::GlobalOrchestrator | DelegatorKind::Task, _) | (_, None) => kind,
+            (DelegatorKind::GlobalOrchestrator, _) | (_, None) => kind,
             (_, Some(project)) => format!("{kind}:{project}"),
         }
     }
@@ -83,7 +78,6 @@ impl Delegator {
 pub enum RunTarget {
     #[default]
     Local,
-    Machine,
     #[serde(rename = "box")]
     UpstashBox,
 }
@@ -431,7 +425,7 @@ mod tests {
             machine: "m1".into(),
             machine_name: "Mac mini".into(),
             title: format!("task {id}"),
-            delegator: Delegator { kind, tab: Some("tab-1".into()), task: None, project: Some(format!("github.com/acme/{project}")), project_name: Some(project.into()) },
+            delegator: Delegator { kind, tab: Some("tab-1".into()), project: Some(format!("github.com/acme/{project}")), project_name: Some(project.into()) },
             provider: Provider::Claude,
             account: "claude".into(),
             model: Some(model.into()),

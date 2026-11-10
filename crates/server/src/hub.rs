@@ -99,6 +99,9 @@ pub struct Account {
     projects: Mutex<HashMap<MachineId, Vec<ProjectView>>>,
     /// Held across a taste's read, change and write, so two changes at once both land.
     tastes: tokio::sync::Mutex<()>,
+    /// Held while task records are billed and saved, so two sends from one box never bill the
+    /// same box time twice.
+    task_records: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -192,7 +195,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -538,13 +541,16 @@ impl Hub {
     /// the account's boxes is box work: it is billed the box time since the box's previous task
     /// ended (the first task, since the box was made), at the box rate. A record sent again keeps
     /// the box time it was billed the first time.
-    pub async fn record_tasks(&self, account: &Account, machine: &str, records: Vec<TaskRecord>) -> Result<(), String> {
+    pub async fn record_tasks(&self, account: &Account, machine: &str, mut records: Vec<TaskRecord>) -> Result<(), String> {
         if records.len() > MAX_RECORDS_PER_CALL {
             return Err(format!("send at most {MAX_RECORDS_PER_CALL} task records at once"));
         }
         let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
+        let _held = account.task_records.lock().await;
         let boxed = self.db.box_created_ms(account.id, id).await?;
+        // Each task is billed the box time since the one that ended before it.
+        records.sort_by_key(|record| record.ended);
         for mut record in records {
             record.machine = machine.to_owned();
             record.machine_name = name.clone();
@@ -1089,7 +1095,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], Outbox::new().0, vec![]);
         }
@@ -1110,7 +1116,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
