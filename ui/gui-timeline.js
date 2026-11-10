@@ -1776,7 +1776,9 @@ threadView.addEventListener("click", (e) => {
   }
   const reportThread = e.target.closest("[data-report-tab]");
   if (reportThread) {
-    const { reportMachine: machine, reportTab: id, reportProject: project } = reportThread.dataset;
+    const { reportMachine, reportTab: id, reportProject: project } = reportThread.dataset;
+    // A report names its machine by hub id; the app keeps its own machine's tabs under LOCAL.
+    const machine = localIdOf(reportMachine);
     // A restart gives the Captain a new tab id; the report still names its project and machine.
     const captain = !tabByKey(keyOf(machine, id)) && tabs.find((t) => t.machine === machine && isOrchestrator(t) && projectName(t) === project);
     if (captain) return activate(captain);
