@@ -2610,7 +2610,7 @@ impl Machine {
             return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker"));
         }
         let limits = self.limits_in(&cwd, caller)?;
-        let effort = limits.admit(model.as_deref(), None)?;
+        let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
         let new = NewTask {
@@ -2630,10 +2630,7 @@ impl Machine {
         };
         let task = match self.delegates.claim(new, Some(limits.parallel)) {
             Claim::Fresh(task) => *task,
-            Claim::Full(working) => {
-                let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
-                return Err(format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
-            }
+            Claim::Full(working) => return Err(workers_full(working)),
             Claim::Existing(id) => return Err(format!("task {id} already runs for this request")),
         };
         let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
