@@ -191,6 +191,7 @@ async function scrollBack(page, away, to) {
   const pick = async (key) => {
     await page.evaluate((k) => {
       toggleSidebar(true);
+      document.activeElement?.blur();
       document.querySelector(`#thread-list .thread-row[data-tab="${k}"]`).click();
     }, key);
     await sleep(400);
@@ -340,8 +341,9 @@ async function shoot(page, name) {
     }, { node, beta });
 
     // 1. Each kind of thread, picked from the sidebar, back and forth with the loose thread.
-    const rowClick = `const row = document.querySelector('#thread-list .thread-row[data-tab="' + key + '"]'); if (!row) throw new Error('no row for ' + key); row.click();`;
-    const globalClick = `document.querySelector('#thread-list [data-global-open]').click();`;
+    // A press on a row takes the focus off the prompt, which a synthetic click does not, so each click blurs first.
+    const rowClick = `const row = document.querySelector('#thread-list .thread-row[data-tab="' + key + '"]'); if (!row) throw new Error('no row for ' + key); document.activeElement?.blur(); row.click();`;
+    const globalClick = `document.activeElement?.blur(); document.querySelector('#thread-list [data-global-open]').click();`;
     const markers = Object.fromEntries(Object.keys(named).map((n) => [n, `${n}-marker asks`]));
     const kinds = ["captain", "worker", "grandchild", "held", "loose", "asking", "far", "global"];
     for (const name of kinds) {
@@ -391,7 +393,10 @@ async function shoot(page, name) {
     // 4. Drafts stay with their thread, and the prompt has the focus after a switch.
     await page.evaluate((k) => activate(tabByKey(k)), captain);
     await page.fill("#prompt", "draft for the Captain");
-    await page.evaluate((k) => document.querySelector(`#thread-list .thread-row[data-tab="${k}"]`).click(), worker);
+    await page.evaluate((k) => {
+      document.activeElement?.blur();
+      document.querySelector(`#thread-list .thread-row[data-tab="${k}"]`).click();
+    }, worker);
     const onWorker = await shownFor(page, worker);
     check(onWorker.prompt === "", "desktop: the Captain's draft stays out of the worker's composer", JSON.stringify(onWorker.prompt));
     check(onWorker.focused === "prompt", "desktop: the prompt has the focus after a sidebar switch", onWorker.focused);
