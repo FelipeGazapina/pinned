@@ -244,7 +244,7 @@ pub const ACTIONS: &[Action] = &[
     n("delegate", Excluded, "the hub's way to start a worker here for another machine: call delegate_task with target.machine").named("node_delegate"),
     n("remote_task", Excluded, "the hub's way to read a worker running here for another machine: call task_status").named("node_remote_task"),
     n("remote_ended", Excluded, "the hub's way to tell a machine its remote worker ended").named("node_remote_ended"),
-    n("state", Excluded, "the hub's way to read a machine's load and accounts before it refuses a delegation: call orchestrator_capabilities").named("node_state"),
+    n("state", Excluded, "the hub's way to read a machine's load and accounts before it refuses a delegation: call orchestrator_capabilities"),
     n("act_for", Excluded, "the hub's way to run an agent's act on its machine"),
     n("notice", Excluded, "the hub's way to tell a session what the user decided"),
     // The account, on the hub.
