@@ -5146,9 +5146,9 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
 
     // Sessions: scratch and Captain tabs open, a session cannot prompt itself or a Captain, and a message waits for the Captain's limits.
     let scratch = ran(act(&ana.dir, &ana.tab, "open_scratch", json!({ "bypass": false })));
-    assert!(scratch.as_str().is_some_and(|tab| ana.node.machine.view(tab).is_some()));
+    assert!(scratch.as_str().is_some_and(|tab| ana.node.machine.view(tab).is_ok()));
     let captain = ran(act(&ana.dir, &ana.tab, "open_orchestrator", json!({ "path": docs })));
-    assert!(ana.node.machine.view(captain.as_str().unwrap()).is_some_and(|view| !view.running));
+    assert!(ana.node.machine.view(captain.as_str().unwrap()).is_ok_and(|view| !view.running));
     assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": ana.tab, "text": "hi" })), Err("prompt types into another session; your own session is the one reading this".into()));
     assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": captain, "text": "hi" })), Err(format!("{} is a Captain: enqueue hands it a message when it is idle", captain.as_str().unwrap())));
     assert_eq!(act(&ana.dir, &ana.tab, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
