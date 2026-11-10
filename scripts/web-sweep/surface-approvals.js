@@ -2,7 +2,10 @@
 // Drives P3b's approvals on the real page (CONTRACTS.md 13.5). An agent asks to pair a machine and to
 // add an OpenCode Go account. Approving pair_code shows the pairing command once, to the user only.
 // Approving add_account opens the Accounts form, where the user types the key the agent never sees.
-// Both run at 1440x900 and 390x844, and each size gets one side-by-side picture of the two.
+// The app's login is locked, so that first approval asks for the account's password over the form,
+// and approvals after it on the same page run without asking again.
+// Both run at 1440x900 and 390x844, and each size gets one side-by-side picture of the two, and one
+// of the password prompt.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/surface-approvals.js
@@ -99,6 +102,24 @@ const openWaiting = (page) => page.evaluate(() => {
 const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#thread-list .agent-confirm .title")].map((t) => t.textContent));
 const threadText = (page) => page.evaluate(() => document.querySelector("#thread")?.innerText ?? "");
 
+const PROMPT = "dialog[open] form";
+
+/** The password prompt the hub's LOCKED answer opens: a wrong password shows the hub's error and
+ * the prompt stays; the right one closes it, and the held call is sent again. */
+async function unlock(view, shot) {
+  await waitFor(`${shot}: the password prompt`, () => view.evaluate((p) => !!document.querySelector(`${p} [name=password]`), PROMPT));
+  const title = await view.evaluate((p) => document.querySelector(`${p} h3`).textContent, PROMPT);
+  check(title === "Enter your password", `${shot}: the approval asks for the password: ${title}`);
+  await view.screenshot({ path: path.join(SCREENS, `approvals-unlock-${shot}.png`) });
+  await view.fill(`${PROMPT} [name=password]`, "not the password");
+  await view.click(`${PROMPT} button.primary`);
+  const error = await waitFor(`${shot}: the wrong password's error`, () => view.evaluate((p) => document.querySelector(`${p} .error`)?.textContent, PROMPT));
+  check(error === "that is not this account's password", `${shot}: a wrong password is refused: ${error}`);
+  await view.fill(`${PROMPT} [name=password]`, PASSWORD);
+  await view.click(`${PROMPT} button.primary`);
+  await waitFor(`${shot}: the prompt to close`, () => view.evaluate(() => !document.querySelector("dialog[open]")));
+}
+
 /** Two screenshots side by side, as one picture. */
 async function sideBySide(browser, left, right, out, [width, height]) {
   const page = await browser.newPage({ viewport: { width: width * 2 + 48, height: height + 32 } });
@@ -126,12 +147,6 @@ async function approveBoth(view, agent, shot, name) {
   await waitFor(`${shot}: both in Waiting on you`, async () => (await asksShown(view)).length === 2);
   check((await asksShown(view)).join(" | ") === "Pair a machine | Add account", `${shot}: the items name the action in words: ${(await asksShown(view)).join(" | ")}`);
 
-  await view.click(`#thread-list .agent-confirm[data-confirmation="${pair.id}"] [data-agent=approve]`);
-  const command = await waitFor(`${shot}: the pairing command`, () => view.evaluate(() => document.querySelector("#thread-list .agent-once code")?.textContent));
-  check(/^curl -fsSL http:\/\/127\.0\.0\.1:\d+\/install\.sh \| sh -s -- \S+$/.test(command), `${shot}: the user sees the pairing command: ${command}`);
-  const code = command.split(" ").at(-1);
-  await view.screenshot({ path: path.join(SCREENS, `approvals-pair-${shot}.png`) });
-
   await view.click(`#thread-list .agent-confirm[data-confirmation="${account.id}"] [data-agent=approve]`);
   await waitFor(`${shot}: the Accounts form`, () => view.evaluate(() => document.getElementById("agent-asking")?.textContent.includes("Entering the key here approves it.")));
   const form = await view.evaluate(() => {
@@ -147,8 +162,20 @@ async function approveBoth(view, agent, shot, name) {
 
   await view.fill("form.add-account [name=key]", GO_KEY);
   await view.click("form.add-account button.primary");
+  await unlock(view, shot);
   await waitFor(`${shot}: the account the approval added`, () => view.evaluate((n) => document.getElementById("account-list")?.innerText.includes(n), name));
   check(await view.evaluate(() => !document.getElementById("agent-asking")), `${shot}: the form forgets the request once it ran`);
+  await view.evaluate(() => settingsOpen() && toggleSettings());
+  if (shot === "phone") await view.evaluate(() => toggleSidebar(true));
+  await openWaiting(view);
+  await waitFor(`${shot}: pair_code still waits`, async () => (await asksShown(view)).join(" | ") === "Pair a machine");
+  await view.click(`#thread-list .agent-confirm[data-confirmation="${pair.id}"] [data-agent=approve]`);
+  const command = await waitFor(`${shot}: the pairing command`, () => view.evaluate(() => document.querySelector("#thread-list .agent-once code")?.textContent));
+  check(/^curl -fsSL http:\/\/127\.0\.0\.1:\d+\/install\.sh \| sh -s -- \S+$/.test(command), `${shot}: the user sees the pairing command: ${command}`);
+  const code = command.split(" ").at(-1);
+  await view.screenshot({ path: path.join(SCREENS, `approvals-pair-${shot}.png`) });
+
+  check(await view.evaluate(() => !document.querySelector("dialog[open]")), `${shot}: the page asks for the password once`);
   return { pair, account, code };
 }
 

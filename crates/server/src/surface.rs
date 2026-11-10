@@ -19,6 +19,11 @@ const NOTICE_WAIT: Duration = Duration::from_secs(20);
 /// After a machine connects, when to try the notices it missed again: its tabs come back after
 /// the link, once the app restores them, and a notice finds its session only then.
 const NOTICE_TRIES: [Duration; 4] = [Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(90)];
+/// Why an approval a hub stopped in the middle of reads as failed: it may have run.
+const INTERRUPTED: &str = "the hub restarted before it could tell whether this ran; check before asking again";
+/// Longer than any decision takes to run. Younger ones without an outcome may still be running on
+/// the hub a deploy is replacing.
+pub const DECIDING_AT_MOST: Duration = Duration::from_secs(5 * 60);
 
 /// The session that acts, as its machine last reported its tab.
 struct Caller {
@@ -28,6 +33,8 @@ struct Caller {
     role: ActorRole,
     session: Option<String>,
     title: String,
+    /// Its session skips its own permission prompts.
+    bypass: bool,
 }
 
 impl Caller {
@@ -40,6 +47,7 @@ impl Caller {
             known: view.is_some(),
             role: view.as_ref().map_or(ActorRole::Session, ActorRole::of),
             session: view.as_ref().and_then(|v| v.session.clone()),
+            bypass: view.as_ref().is_some_and(|v| v.bypass),
             title: view.and_then(|v| v.title.or(v.prompt_title)).unwrap_or_default(),
         })
     }
@@ -172,10 +180,13 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         let class = serde_json::to_value(action.class).ok().and_then(|c| c.as_str().map(str::to_owned)).unwrap_or_default();
         return Err(format!("{name} is a {class} action that is not wired yet"));
     }
-    if let Some(field) = surface::secret_arg(&act.args) {
+    if let Some(field) = surface::secret_arg(&act.args, action.sends) {
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
+    if surface::skips_prompts(&call) && !caller.bypass {
+        return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
+    }
     let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
     let target = match asked {
         Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
@@ -192,14 +203,20 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
-/// machine, where the origin machine hears which session asked.
+/// machine, where the origin machine hears which session asked. Another machine hears no session
+/// for a call that checks one, which then refuses what needs the asking session's own.
 async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
         // An agent's Unarchive only reopens the tab: starting a session is `start_claude`'s, under its limits.
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
-            let call = if on_origin { Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? } } else { call };
+            let guarded = matches!(call, Call::Prompt { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+            let call = match (on_origin, guarded) {
+                (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
+                (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
+                (false, false) => call,
+            };
             hub.call_machine(account, target, call, ACT_WAIT).await.map_err(String::from)
         }
     }
@@ -266,6 +283,25 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
         }
     });
     json(Decided { decision, outcome, result })
+}
+
+/// Gives each confirmation a hub that stopped between the decision and its outcome left one: a
+/// denial is denied, an approval failed with `INTERRUPTED` and a `failed` audit row. Then tells its
+/// session, or leaves the notice to `deliver_notices` once its machine connects.
+pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
+    for (account, held) in hub.db.finish_interrupted(&format!("failed: {INTERRUPTED}"), DECIDING_AT_MOST).await? {
+        let asked = &held.confirmation;
+        if asked.decision == Some(Decision::Approved) {
+            let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+            trail.ran(AuditOutcome::Failed, INTERRUPTED).await;
+            eprintln!("pinned-server: confirmation {} was approved when a hub stopped; it reads as failed", asked.id);
+        }
+        if !matches!(notify(hub, &*hub.account(account).await?, &held).await, Ok(true)) {
+            eprintln!("pinned-server: the session that asked for confirmation {} gets its notice once its machine connects", asked.id);
+        }
+    }
+    Ok(())
 }
 
 /// The arguments an approval runs with when the user typed some in the app: the stored ones with

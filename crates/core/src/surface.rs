@@ -46,6 +46,9 @@ pub struct Action {
     pub about: &'static str,
     /// Fields of its answer an agent never gets, at any depth.
     pub hides: &'static [&'static str],
+    /// Dotted paths of arguments an agent may send though their names read as a key, such as a
+    /// project's `project.key`, which names a repository.
+    pub sends: &'static [&'static str],
     /// Refuses arguments that parse but an agent may not send. Its error is the refusal.
     pub check: Option<fn(&Parsed) -> Result<(), String>>,
     /// A `Call` that runs only on another machine of the account: on its own machine a session
@@ -73,6 +76,10 @@ impl Action {
         Action { hides, ..self }
     }
 
+    const fn sends(self, sends: &'static [&'static str]) -> Action {
+        Action { sends, ..self }
+    }
+
     const fn elsewhere(self) -> Action {
         Action { elsewhere: true, ..self }
     }
@@ -96,11 +103,11 @@ impl Action {
 }
 
 const fn n(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None, elsewhere: false, asks: &[] }
+    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[], sends: &[], check: None, elsewhere: false, asks: &[] }
 }
 
 const fn h(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None, elsewhere: false, asks: &[] }
+    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[], sends: &[], check: None, elsewhere: false, asks: &[] }
 }
 
 use Class::{Confirm, Excluded, Read, Write};
@@ -116,7 +123,7 @@ pub const ACTIONS: &[Action] = &[
     // Sessions on a machine.
     n("tabs", Read, "Every session on the machine as JSON: id, folder, agent account, title, status, role, Claude session id and who started it.").wired(),
     n("open_tab", Write, "Opens a new session tab in the folder path (null: the machine's default folder), not started, and answers its id. Start it with start_claude. bypass runs it with permissions skipped.").wired(),
-    n("open_scratch", Write, "Opens a new session tab in the folder for threads without a project, not started, and answers its id."),
+    n("open_scratch", Write, "Opens a new session tab in the folder for threads without a project, not started, and answers its id.").wired(),
     n("auto_resume", Excluded, "a thread's own switch for continuing after a usage limit, which the user sets"),
     n("start_claude", Write, "Starts the session in tab and answers its folder. It becomes your worker: it counts against its project's workers-at-once limit, is held to the time limit and budget, its first finished turn ends it as a task, and you get its notice. cols and rows size its terminal; 120 and 32 suit.").wired().starts_work(),
     n("set_bypass", Write, "Restarts a session with permissions skipped (on: true) or asked (on: false), resuming its conversation.").wired(),
@@ -131,10 +138,10 @@ pub const ACTIONS: &[Action] = &[
     n("project_history", Read, "The saved turns of the project at path, newest first, only one Claude session's when session is given.").wired(),
     n("git_remote", Excluded, GIT),
     n("browse", Excluded, "the folder picker's typeahead: list folders in your own shell"),
-    n("create_project", Write, "Makes a new git repository named after name in ~/pinned, with a first commit, and opens it as a project."),
-    n("publish_project", Write, "Pushes the project at path to a new private GitHub repository and answers its URL."),
+    n("create_project", Write, "Makes a new git repository named after name in ~/pinned, with a first commit, and opens it as a project.").wired(),
+    n("publish_project", Write, "Pushes the project at path to a new private GitHub repository and answers its URL.").wired(),
     n("clone", Excluded, "it takes a GitHub token: the hub's clone action adds the account's own").named("node_clone"),
-    n("make_folder", Write, "Makes the folder path with its parents and answers it, canonical."),
+    n("make_folder", Write, "Makes the folder path with its parents and answers it, canonical.").wired(),
     n("search_threads", Read, "The sessions on the machine whose conversations hold query, prompt matches first.").wired(),
     n("open_run", Excluded, "the hub's way to reopen an archived conversation's tab for an agent without starting it"),
     n("run", Excluded, "the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's"),
@@ -147,14 +154,14 @@ pub const ACTIONS: &[Action] = &[
     n("add_account", Confirm, "Adds an agent account on the machine. The user enters any API key in the app.").wired().asks(&["key"]),
     n("set_account_key", Confirm, "Replaces an agent account's API key. The user enters it in the app.").wired().asks(&["key"]),
     n("remove_account", Confirm, "Removes an agent account from the machine; its projects fall back to the default account.").wired(),
-    n("set_project_account", Write, "Runs the project at path under another agent account, or the default one with null."),
-    n("open_orchestrator", Write, "Opens the Captain tab of the project at path, not started, and answers its id."),
-    n("enqueue", Write, "Hands text to the Captain of the project at path: typed when it is idle, its first prompt when stopped, else queued.").starts_work(),
+    n("set_project_account", Write, "Runs the project at path under another agent account, or the default one with null.").wired(),
+    n("open_orchestrator", Write, "Opens the Captain tab of the project at path, not started, and answers its id.").wired(),
+    n("enqueue", Write, "Hands text to the Captain of the project at path: typed when it is idle, its first prompt when stopped, else queued. It is signed with your own role. Starting a stopped Captain is held to the project's tier, effort and workers-at-once limits.").wired().starts_work(),
     n("orchestrator_report", Excluded, "a Captain's report to the global orchestrator: a Captain calls tell_orchestrator"),
-    n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id."),
+    n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id. Only the global orchestrator's own session may call it.").wired(),
     n("open_taste_chat", Write, "Opens a thread that adjusts a scope's way of working by talking, not started, and answers its id."),
     n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, and its busy and report policies.").wired(),
-    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings."),
+    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
     n("read_session", Read, "A session's state and its last items (20, at most 50) of conversation, read from the end of its transcript, on the session's machine or the one machine names.").named("node_read_session").wired(),
     n("memory_search", Read, "The memories of the project at path that best match query, best first, or the latest for an empty query. Any project of the account: pass machine for one on another machine.").wired(),
     n("memory_save", Write, "Saves a memory in the project at path, any project of the account (pass machine for another machine). With id, replaces that memory. Refused when the project has one with the same title or nearly the same meaning.").wired(),
@@ -163,7 +170,7 @@ pub const ACTIONS: &[Action] = &[
     n("sign_in", Confirm, "Opens the CLI's login for an agent account in a new tab, where the user signs in.").wired(),
     n("switch_account", Write, "Moves a session's conversation to another agent account signed in on the machine and resumes it there.").wired(),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
-    n("prompt", Write, "Types text into a session as one prompt and submits it."),
+    n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
     n("workspace", Excluded, GIT),
     n("pull_request", Excluded, GIT),
     n("pr_status", Excluded, GIT),
@@ -181,7 +188,7 @@ pub const ACTIONS: &[Action] = &[
     n("read_skill", Read, "The text of file (SKILL.md when left out) in the skill folder dir that skills lists.").wired(),
     n("mcp_servers", Read, "The MCP servers Claude Code sessions on the machine load under agent account account (the project at path's account, else the default one): user and local scope from that account's .claude.json, project scope from path's .mcp.json. Each gives its name, scope, transport, and only its program or its URL's scheme and host, never its arguments, environment or headers. MCP servers that plugins bring are not listed.").wired(),
     n("mcp_importable", Excluded, "the app's import form, which reads each server's arguments and URL in full: mcp_servers lists them, and import_mcp_server asks to add one"),
-    n("save_skill", Write, "Writes a skill file to each listed copy unchanged since its read, then reloads the sessions that load it."),
+    n("save_skill", Write, "Writes a skill file to each listed copy unchanged since its read, then reloads the sessions that load it.").wired(),
     n("branches", Excluded, GIT),
     n("checkout", Excluded, GIT),
     n("pull_requests", Excluded, GIT),
@@ -190,13 +197,13 @@ pub const ACTIONS: &[Action] = &[
     n("pull_request_files", Excluded, GIT),
     n("token_usage", Read, "The tokens and cost the machine's Claude transcripts record from unix time since on, by model and day.").wired(),
     n("usage_prices", Read, "The model prices and mappings the user set on the machine.").wired(),
-    n("set_usage_prices", Write, "Sets or clears model prices and mappings on the machine."),
+    n("set_usage_prices", Write, "Sets or clears model prices and mappings on the machine.").wired(),
     n("usage_limits", Read, "The account and plan limits Claude's own usage check reports.").wired(),
     n("page_meta", Excluded, "the app's link previews"),
     n("refs", Excluded, GIT),
     n("git", Excluded, GIT),
     n("project_scripts", Read, "The scripts of a session's project, which its header runs.").wired(),
-    n("save_project_scripts", Write, "Replaces the scripts of a session's project."),
+    n("save_project_scripts", Write, "Replaces the scripts of a session's project.").wired(),
     n("checkout_pr", Excluded, GIT),
     n("set_workspace", Write, "Moves a session that is not in a turn to a new worktree of its project (worktree: \"new\"), an existing one, or back to the project's checkout (null), and restarts it there on its conversation.").wired(),
     n("read_file", Read, "The text of path in the folder of session tab on another machine of the account, or in its repository when root, as of git rev when given. Not on your own machine: there, use your own shell and files.").wired().elsewhere(),
@@ -252,16 +259,16 @@ pub const ACTIONS: &[Action] = &[
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
     h("set_box_access", Confirm, "Sets what the account's boxes may reach.").wired(),
     h("answer_box", Confirm, "Allows or refuses a box's pending permission question.").wired(),
-    h("clone", Write, "Clones repo on machine with the account's GitHub token, or finds the clone it has, and answers the folder."),
+    h("clone", Write, "Clones repo on machine with the account's GitHub token, or finds the clone it has, and answers the folder.").wired(),
     h("shared_projects", Read, "The account's synced projects, most recently shared first.").wired(),
-    h("share_project", Write, "Offers a project to the account's other machines to clone."),
+    h("share_project", Write, "Offers a project, {key, name, repo}, to the account's other machines to clone.").wired().sends(&["project.key"]),
     h("sync_list", Excluded, SYNC),
     h("sync_push", Excluded, SYNC),
     h("sync_pull", Excluded, SYNC),
     h("sync_mark_executable", Excluded, SYNC),
-    h("save_connector", Write, "Saves a workflow and answers it as stored."),
-    h("delete_connector", Confirm, "Deletes a workflow."),
-    h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model."),
+    h("save_connector", Write, "Saves a workflow (a new one with no id, else the one with that id) and answers it as stored. A workflow with a session that skips permission prompts needs a session that skips them too.").wired(),
+    h("delete_connector", Confirm, "Deletes a workflow.").wired(),
+    h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model.").wired(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
     h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine.").wired(),
@@ -286,8 +293,8 @@ pub const ACTIONS: &[Action] = &[
     h("overview", Read, "Every project of the account on every machine with its Captain's state, what waits on the user, every machine, and every session.").wired(),
     h("read_captain", Read, "The latest replies of the Captain of the project at path on machine.").wired(),
     h("get_tastes", Read, "The account's way of working: the orchestrator's, the Captains' and each project's, with the delegation limits.").wired(),
-    h("set_taste", Confirm, "Changes fields of one scope of the account's way of working."),
-    h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again."),
+    h("set_taste", Confirm, "Changes fields of one scope of the account's way of working.").wired(),
+    h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again.").wired(),
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
@@ -305,6 +312,7 @@ pub const ACTIONS: &[Action] = &[
     h("act", Excluded, "the surface itself: call act"),
     h("confirmations", Read, "The actions waiting on the user's approval, then the last 20 decided, with what each came to.").wired(),
     h("decide_confirmation", Excluded, "only the user decides, in the app"),
+    h("unlock", Excluded, "the user's own password, which only the app sends"),
     h("agent_audit", Read, "The audit trail of agents' acts on this account, newest first: limit rows (50, at most 200) from unix second before and earlier.").wired(),
     h("list_mcp_servers", Read, "The account's own MCP servers, which every session pinned starts loads while enabled (Claude Code by --mcp-config, Codex by -c), alongside the servers its agent account configures itself, which keep a name they share: id, name, project (a repository, or every project), enabled, and transport (stdio command, args and env names, or http or sse url and header names). Never a secret's value.").wired(),
     h("save_mcp_server", Confirm, "Adds an MCP server to the account's list, enabled, or with id changes that one. transport is {type: stdio, command, args, env: [names]} or {type: http or sse, url, headers: [names]}; project is a repository like github.com/owner/repo, or left out for every project. The user types each env and header value in the app; an agent never sends one, and keys never go in the command, arguments or URL.").wired().asks(&["secrets"]),
@@ -313,6 +321,19 @@ pub const ACTIONS: &[Action] = &[
     h("import_mcp_server", Confirm, "Adds the MCP server name that Claude Code account account on machine configures (as mcp_servers lists it, path for its local and project scope) to the account's list, for every project or for project. The user types each of its env and header values in the app.").wired().asks(&["secrets"]),
     h("load_mcp_servers", Excluded, "a machine's way to load the account's MCP servers, secrets and all, into the sessions it starts"),
 ];
+
+/// A signed-in client's answer to a call only the account's owner makes, until it unlocks.
+pub const LOCKED: &str = "unlock with your password in the app to do this";
+
+/// Whether a signed-in client must have unlocked with the password to run `cmd` on `side`: a
+/// decision always, and a `confirm` action on a `locked` login. The app keeps its login on disk,
+/// where any process of the same user reads it; the unlock lives in the app's memory only.
+pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
+    if side == Side::Hub && cmd == "decide_confirmation" {
+        return true;
+    }
+    locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
+}
 
 /// Hub actions that start work and that the hub holds to the limits itself: the server's `act`
 /// runs each through its own limits path, and refuses one it has no path for.
@@ -700,14 +721,41 @@ pub struct Decided {
     pub result: Value,
 }
 
+/// `HubCall::Unlock`'s answer. The app keeps `token` in memory and sends it again in
+/// `ClientFrame::Auth` after a reconnect; it works for that login until `until`, unix seconds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Unlocked {
+    pub token: String,
+    pub until: i64,
+}
+
 /// What the audit row of a call that ran says beyond its arguments: that it loosened a session's
 /// permissions.
 pub fn widening(call: &Parsed) -> Option<String> {
+    if skips_prompts(call) {
+        return Some("loosened permissions: the saved workflow runs a session that skips its permission prompts".into());
+    }
     match call {
         Parsed::Node(Call::SetBypass { tab, on: true, .. }) => Some(format!("loosened permissions: {tab} now skips its permission prompts")),
         Parsed::Node(Call::OpenTab { path, bypass: true }) => Some(format!("loosened permissions: the new tab in {} skips its permission prompts", path.as_deref().unwrap_or("the default folder"))),
         Parsed::Node(Call::DeviceAgents { allow: Some(true) }) => Some("loosened permissions: new sessions on this machine may drive its simulators and emulators".into()),
         _ => None,
+    }
+}
+
+/// Whether `call` saves a workflow with a session that skips its permission prompts. It runs later,
+/// outside the saving session, so a session that asks for its own prompts may not save one.
+pub fn skips_prompts(call: &Parsed) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && field == "bypassPermissions") || walk(field)),
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    match call {
+        Parsed::Hub(HubCall::SaveConnector { connector }) => serde_json::to_value(connector).is_ok_and(|connector| walk(&connector)),
+        _ => false,
     }
 }
 
@@ -736,15 +784,23 @@ fn secret_name(name: &str, sending: bool) -> bool {
 }
 
 /// The first field of `args`, at any depth, that holds a password, key or token, which an agent
-/// never sends: text in a field with a secret's name, or anywhere inside one, as `secrets`.
-pub fn secret_arg(args: &Value) -> Option<String> {
+/// never sends: text in a field with a secret's name, or anywhere inside one, as `secrets`. `plain`
+/// lists the dotted paths an action's arguments may carry under such a name.
+pub fn secret_arg(args: &Value, plain: &[&str]) -> Option<String> {
+    find_secret(args, plain, "")
+}
+
+fn find_secret(args: &Value, plain: &[&str], at: &str) -> Option<String> {
     match args {
-        Value::Object(fields) => fields.iter().find_map(|(name, value)| match value {
-            Value::String(text) if secret_name(name, true) && !text.trim().is_empty() => Some(name.clone()),
-            Value::Object(_) | Value::Array(_) if secret_name(name, true) && holds_text(value) => Some(name.clone()),
-            value => secret_arg(value).map(|inner| format!("{name}.{inner}")),
+        Value::Object(fields) => fields.iter().find_map(|(name, value)| {
+            let path = if at.is_empty() { name.clone() } else { format!("{at}.{name}") };
+            match value {
+                Value::String(text) if secret_name(name, true) && !text.trim().is_empty() && !plain.contains(&path.as_str()) => Some(path),
+                Value::Object(_) | Value::Array(_) if secret_name(name, true) && holds_text(value) && !plain.contains(&path.as_str()) => Some(path),
+                value => find_secret(value, plain, &path),
+            }
         }),
-        Value::Array(items) => items.iter().find_map(secret_arg),
+        Value::Array(items) => items.iter().find_map(|item| find_secret(item, plain, at)),
         _ => None,
     }
 }
@@ -884,6 +940,20 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_always_needs_the_unlock_and_a_confirm_action_needs_it_on_a_locked_login() {
+        let needs = |side, cmd, locked| owner_only(side, cmd, locked);
+        assert!(needs(Side::Hub, "decide_confirmation", false) && needs(Side::Hub, "decide_confirmation", true));
+        assert!(needs(Side::Hub, "remove_machine", true) && !needs(Side::Hub, "remove_machine", false), "an older app's login keeps its calls");
+        assert!(needs(Side::Node, "update_self", true) && needs(Side::Hub, "approve_agent", true) && needs(Side::Hub, "set_taste", true));
+        assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
+        assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
+        assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
+        let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
+        assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
+    }
+
+    #[test]
     fn names_are_unique_and_a_shared_cmd_names_the_node_call_node_cmd() {
         let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
         assert_eq!(names.len(), ACTIONS.len(), "two actions share a name");
@@ -914,16 +984,24 @@ mod tests {
         assert_eq!(
             wired,
             [
-                "open_tab", "start_claude", "set_bypass", "set_model", "restart_claude", "stop_turn", "set_folder", "add_account", "set_account_key",
-                "remove_account", "memory_save", "memory_forget", "sign_in", "switch_account", "regenerate_title", "set_workspace", "device_hub", "device_agents",
-                "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack", "disconnect_slack", "connect_github",
-                "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash", "disconnect_upstash", "set_box_access", "answer_box", "open_box",
-                "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite", "stage", "slack_reply", "linear_create",
-                "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session",
-                "unarchive_session", "delete_session",
+                "open_tab", "open_scratch", "start_claude", "set_bypass", "set_model", "restart_claude", "stop_turn", "set_folder", "create_project",
+                "publish_project", "make_folder", "add_account", "set_account_key", "remove_account", "set_project_account", "open_orchestrator",
+                "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "memory_save", "memory_forget", "sign_in",
+                "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
+                "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
+                "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
+                "disconnect_upstash", "set_box_access", "answer_box", "clone", "share_project", "save_connector", "delete_connector",
+                "generate_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
+                "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
+                "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
+                "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
             ]
         );
+        for name in ["set_taste", "reset_taste_field", "delete_connector"] {
+            assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
+        }
+        assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
     }
 
     #[test]
@@ -950,7 +1028,7 @@ mod tests {
             for field in action.asks {
                 assert!(fields.contains_key(*field), "{} has no field {field}", action.name);
                 let sent = Value::Object([(field.to_string(), json!("typed"))].into_iter().collect());
-                assert_eq!(secret_arg(&sent).as_deref(), Some(*field), "an agent could send {}'s {field}", action.name);
+                assert_eq!(secret_arg(&sent, &[]).as_deref(), Some(*field), "an agent could send {}'s {field}", action.name);
             }
         }
     }
@@ -976,7 +1054,7 @@ mod tests {
         pub(super) fn wired(name: &str, class: Class, on: &str, starts_work: bool, args: Value) {
             let action = find(name).unwrap_or_else(|| panic!("no action {name}"));
             assert_eq!((action.class, action.wired, action.on(), action.starts_work), (class, true, on, starts_work), "{name}");
-            assert_eq!(secret_arg(&args), None, "{name}: an agent sends no secret");
+            assert_eq!(secret_arg(&args, action.sends), None, "{name}: an agent sends no secret");
             let cmd = match parse(action, &with_blank_asks(action, &args)) {
                 Ok(Parsed::Node(call)) => cmd_of(&call),
                 Ok(Parsed::Hub(call)) => cmd_of(&call),
@@ -986,7 +1064,7 @@ mod tests {
             for field in action.asks {
                 let mut sent = args.as_object().cloned().unwrap_or_default();
                 sent.insert(field.to_string(), json!("typed-by-agent"));
-                assert_eq!(secret_arg(&Value::Object(sent.clone())).as_deref(), Some(*field), "{name}: an agent sending {field} is refused");
+                assert_eq!(secret_arg(&Value::Object(sent.clone()), &[]).as_deref(), Some(*field), "{name}: an agent sending {field} is refused");
                 assert!(!summary(&Value::Object(sent)).contains("typed-by-agent"), "{name}: the audit row hides {field}");
                 let blank = Value::Object([(field.to_string(), json!(""))].into_iter().collect());
                 assert_eq!(without_asked(action, &blank), json!({}), "{name}: the confirmation keeps no {field}");
@@ -1111,11 +1189,11 @@ mod tests {
         fn a_value_an_agent_puts_under_secrets_is_refused_and_never_reaches_the_trail() {
             for sent in [json!({ "env": { "REGION": "eu-west-9" } }), json!({ "headers": { "X-Org": "eu-west-9" } }), json!("eu-west-9")] {
                 let args = json!({ "server": server(), "secrets": sent });
-                assert_eq!(secret_arg(&args).as_deref(), Some("secrets"), "{args}");
+                assert_eq!(secret_arg(&args, &[]).as_deref(), Some("secrets"), "{args}");
                 assert!(!summary(&args).contains("eu-west-9"), "{}", summary(&args));
                 assert_eq!(without_asked(find("save_mcp_server").unwrap(), &args), json!({ "server": server() }));
             }
-            assert_eq!(secret_arg(&json!({ "server": server(), "secrets": { "env": {} } })), None, "no value, nothing sent");
+            assert_eq!(secret_arg(&json!({ "server": server(), "secrets": { "env": {} } }), &[]), None, "no value, nothing sent");
             assert!(!redact(json!({ "secrets": { "env": { "API_KEY": "abc" } } }), &[]).to_string().contains("abc"), "an answer never shows a secrets object");
         }
 
@@ -1171,7 +1249,7 @@ mod tests {
         let all = listing(None);
         let names: Vec<&str> = all.iter().map(|l| l.name).collect();
         assert!(names.contains(&"tabs") && names.contains(&"remove_machine") && names.contains(&"agent_audit"));
-        assert!(!names.contains(&"write_input") && !names.contains(&"prompt") && !names.contains(&"act"), "excluded or unwired: {names:?}");
+        assert!(!names.contains(&"write_input") && !names.contains(&"open_taste_chat") && !names.contains(&"act"), "excluded or unwired: {names:?}");
         let rename = all.iter().find(|l| l.name == "rename_machine").unwrap();
         assert_eq!((rename.class, rename.on), (Write, "hub"));
         assert_eq!(rename.args["required"], json!(["id", "name"]));
@@ -1213,6 +1291,24 @@ mod tests {
     }
 
     #[test]
+    fn a_workflow_that_skips_permission_prompts_is_noted_and_one_that_asks_is_not() {
+        let workflow = |mode: &str, step: &str| {
+            json!({
+                "connector": {
+                    "name": "Fix", "enabled": true, "trigger": { "kind": "called" }, "folder": "/w/site", "model": "", "effort": "high", "permissionMode": mode, "worktree": false, "instructions": "",
+                    "graph": { "nodes": [{ "id": "s", "name": "Fix", "position": [0, 0], "type": "session", "permission": step }], "edges": [] }
+                }
+            })
+        };
+        let parsed = |args: Value| parse(find("save_connector").unwrap(), &args).unwrap();
+        assert!(!skips_prompts(&parsed(workflow("acceptEdits", "plan"))));
+        assert!(skips_prompts(&parsed(workflow("bypassPermissions", ""))));
+        assert!(skips_prompts(&parsed(workflow("manual", "bypassPermissions"))), "a step's own setting counts");
+        assert_eq!(widening(&parsed(workflow("bypassPermissions", ""))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"));
+        assert_eq!(widening(&parsed(workflow("auto", ""))), None);
+    }
+
+    #[test]
     fn an_actions_check_refuses_arguments_that_parse() {
         fn no_blank_name(call: &Parsed) -> Result<(), String> {
             match call {
@@ -1227,11 +1323,16 @@ mod tests {
 
     #[test]
     fn a_key_token_or_password_in_the_arguments_is_named_and_an_empty_one_is_not() {
-        assert_eq!(secret_arg(&json!({ "key": "lin_api_123" })), Some("key".into()));
-        assert_eq!(secret_arg(&json!({ "settings": { "github_token": "x" } })), Some("settings.github_token".into()));
-        assert_eq!(secret_arg(&json!({ "items": [{ "password": "hunter2" }] })), Some("items.password".into()));
-        assert_eq!(secret_arg(&json!({ "key": "", "token": null, "name": "Mini" })), None);
-        assert_eq!(secret_arg(&json!({ "path": "/w/site", "title": "Deploys", "text": "the key is in the vault" })), None);
+        assert_eq!(secret_arg(&json!({ "key": "lin_api_123" }), &[]), Some("key".into()));
+        assert_eq!(secret_arg(&json!({ "settings": { "github_token": "x" } }), &[]), Some("settings.github_token".into()));
+        assert_eq!(secret_arg(&json!({ "items": [{ "password": "hunter2" }] }), &[]), Some("items.password".into()));
+        assert_eq!(secret_arg(&json!({ "key": "", "token": null, "name": "Mini" }), &[]), None);
+        assert_eq!(secret_arg(&json!({ "path": "/w/site", "title": "Deploys", "text": "the key is in the vault" }), &[]), None);
+        let project = json!({ "project": { "key": "github.com/acme/site", "name": "site", "repo": "github.com/acme/site" } });
+        assert_eq!(secret_arg(&project, &[]), Some("project.key".into()));
+        assert_eq!(secret_arg(&project, &["project.key"]), None, "an action may name the paths that hold no secret");
+        assert_eq!(secret_arg(&json!({ "project": { "key": "x" }, "token": "abc" }), &["project.key"]), Some("token".into()));
+        assert_eq!(find("share_project").map(|a| a.sends), Some(&["project.key"][..]));
     }
 
     #[test]

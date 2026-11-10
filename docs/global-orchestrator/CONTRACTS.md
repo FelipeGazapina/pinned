@@ -434,7 +434,8 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 5. `read` / `write`:
    - `HubCall`: `Hub::hub_call(account, call)`, the path a signed-in client's call takes.
    - `Call` on the origin machine (no `machine`, or `machine` naming the origin): `Call::ActFor { caller: act.tab, call }` to the origin machine.
-   - `Call` on another machine of the account (`machine` is its id or its name, any case): the plain `Call` to that machine, as the app sends it. A machine of another account reads as `this account has no machine <m>`.
+   - `Call` on another machine of the account (`machine` is its id or its name, any case): the plain `Call` to that machine, as the app sends it, except `prompt`, `open_global_orchestrator`, `restart_claude`, `set_model`, `set_bypass`, `rewind`, `switch_account` and `set_workspace`, which go as `Call::ActFor { caller: "", call }` so the checks `ActFor` makes of the target still apply and the ones it makes of the asking session refuse. A machine of another account reads as `this account has no machine <m>`.
+   - A saved workflow with a session that skips its permission prompts (`permissionMode` or a step's `permission` of `bypassPermissions`) is refused for a caller whose own session asks for them (`surface::skips_prompts`), and its audit row notes the widening.
 6. The answer goes through `surface::redact` and the action's `hides`, then back as `done`. An error, and a refusal, go through `surface::mask_secrets`, then back as the tool error.
 
 The audit row of something that already ran is written after it runs. When that write fails, the hub logs it and still answers, so the session does not run the action twice.
@@ -464,7 +465,7 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 | Wire | From | Answer |
 |---|---|---|
 | `HubCall::Confirmations` | a client or a machine | `Vec<Confirmation>`: every waiting one, oldest first, then the last 20 decided, newest first. |
-| `HubCall::DecideConfirmation { id, approve }` | a signed-in client only. A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
+| `HubCall::DecideConfirmation { id, approve }` | a signed-in client only, on a connection the owner unlocked with the password (13.11). A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
 | `ToClient::Confirmations { items }` | hub to client | The waiting ones, after `Hello` and after every change. An older app ignores the frame. |
 | `HubCall::AgentAudit { before?, limit? }` | a client, or an agent through `act` | `Vec<AuditEntry>` as 13.8 says. |
 
@@ -490,6 +491,9 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
   - for the global orchestrator: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`;
   - for a tab outside the caller's project (`history::project_of`), so a subfolder can't count apart: `<tab> works in <folder>, outside your project <project>: start_claude starts workers only in your own project`;
   - for a tab with wider access than the caller's (`child_access`, `tighten`): `<tab> runs with full access, wider than your session's auto`.
+- `enqueue` (a message that starts a stopped Captain): `enqueue_for` signs it as the caller (the `sender` argument is ignored: `[Worker <title>]`, `[Captain]`, `[Session <title>]`, or the orchestrator's name for the global tab) and refuses a Captain's own tab. A Captain that already runs takes the message with no new session. A Captain that does not run starts only under the limits of its project (`limits_in`, narrowed by the caller's own task): `admit` for the Captain tab's model (tier and effort), and `Delegates::working_in(project)` below workers-at-once (`workers_full`). A Captain is not a worker, so it has no `TaskRecord`.
+- `prompt` types into a running session of the account (`may_prompt`). It refuses the caller's own tab, a Captain (`enqueue` hands it a message when it is idle), the global orchestrator (`tell_orchestrator`) and a taste chat. It starts nothing: a tab with no session answers `no running session`.
+- `open_global_orchestrator` runs only for the global orchestrator's own session.
 - Any other action with `starts_work: true` is refused by `ActFor` until its unit gives it a limits path: `<name> starts work, and nothing holds it to the limits yet`.
 - `restart_claude`, `set_model`, `set_bypass`, `rewind`, `switch_account` and `set_workspace` also start a stopped tab, so `ActFor` runs them only on a tab whose session runs: `<cmd> restarts a running session, and <tab> runs none: start_claude starts it as your worker`.
 - `set_bypass` stays `write`: permission changes run directly, and loosening goes to the audit trail (13.4). With `on: true` it runs only for a caller with full access, so an agent never grants more than it has: `set_bypass on skips a session's permission prompts, and your own session asks for them`.
@@ -498,6 +502,7 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
 ### 13.7 Secrets
 
 - An argument object holding a non-empty string under a key named `key`, `token`, `password`, `secret`, `api_key`, `claude_token`, or ending in `_key`, `_token`, `_secret` or `_password`, at any depth, is refused: `an agent never sends a password, key or token: <field>. The user enters it in the app.`
+- An action may list dotted paths it takes under such a name (`Action::sends`, `.sends(&["project.key"])` for `share_project`, whose project `key` names a repository). The other fields of its arguments are still checked.
 - `surface::redact` replaces, at any depth of an answer and of an audit summary (and `surface::mask_secrets` in every error and refusal): the values of keys named `token`, `password`, `secret`, `api_key`, `claude_token` or ending in `_token`, `_secret`, `_password`; and any string that holds something shaped like a secret (`sk-`, `ghp_`, `gho_`, `github_pat_`, `lin_api_`, `xoxb-`, `xoxp-`, `AKIA` and 16 more, a JWT, a PEM private key) with that part as `[hidden]`.
 
 ### 13.8 What P1 wires
@@ -507,6 +512,18 @@ Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (a
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
 
 Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is excluded (agents archive or delete a thread through P2's actions). `update_self` (it stops the machine's sessions), `extend_box` (it raises a spending cap), `pair_code` (it adds a machine; `hides: ["code", "command"]`), `set_taste` and `reset_taste_field` (they carry the limits workers run under) are confirm.
+
+### 13.8a What `parity/surface-rest-a` wires
+
+| Area | Actions (class) |
+|---|---|
+| Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `generate_workflow` (write), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. |
+| Projects | `create_project`, `make_folder`, `publish_project`, `set_project_account`, `save_project_scripts` (write, on a machine); `clone` (write, the hub's: it adds the account's own GitHub token, the node's `node_clone` stays excluded), `share_project` (write). The reads `list_projects`, `project_history`, `shared_projects`, `project_scripts` were already wired. |
+| Sessions | `open_scratch`, `open_orchestrator`, `open_global_orchestrator` (the global orchestrator's own session only), `prompt`, `enqueue` (`starts_work`, 13.6). `search_threads` (read) was already wired. |
+| Settings | `set_global_orchestrator_settings`, `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. |
+| Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. |
+
+There is no "Run now" in the app: the `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and a workflow run starts from its trigger (Linear, Slack) alone. An agent has no `run_workflow` until a manual run has a subject and trigger input of its own.
 
 ### 13.9 Account isolation
 
@@ -528,6 +545,20 @@ Unit P2, branches `parity/session-marks` (storage) and `parity/session-actions` 
 | `delete_session` | Closes the tab and drops the conversation's marks. | `confirm`: it waits in Waiting on you, runs once on approval, and writes `approved` then `done` or `failed`. `close_tab` stays excluded. |
 
 `Call::OpenRun { run: RunSpec }` is the hub's way to open a tab like `Run` but not start it. It is excluded: only the hub sends it.
+
+### 13.11 Only the owner approves
+
+The desktop app keeps its login in `account.json`, and the web app keeps its login in `localStorage`. Any process of the same OS user can read both, so a login alone does not prove that the owner is there. The password proves it, because nothing stores it.
+
+- `ClientFrame::Auth { token, lock?, unlock? }`. An app that sends `lock: true` locks its login for good (`logins.locked`). An older app leaves it out and keeps every call it had.
+- `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`.
+- `HubCall::Unlock { password }` comes from a signed-in client only. The manifest excludes it, and a machine is refused. The hub checks the password, at most 10 tries per login and 100 per account in 15 minutes, and answers `Unlocked { token, until }`. The connection counts as the owner until `until`, 12 hours later. The app keeps `token` in memory and sends it in `Auth.unlock` after a reconnect. The token works only with the login it was taken on. A hub restart forgets it, and the app asks for the password again.
+- `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
+- `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.
+- A node keeps only its machine token. `pinned-server login` ends the login after it adds the machine. A node that finds a login an older pinned kept in `account.json` removes it from the file and ends it at the hub.
+- A hub that stopped between a decision and its outcome leaves the confirmation decided with no outcome. When a hub starts, and again 5 minutes later, it gives every such confirmation decided more than 5 minutes earlier an outcome: `denied`, or `failed: the hub restarted before it could tell whether this ran; check before asking again` with a `failed` audit row. A younger one may still be running on the hub that a deploy replaces, so the hub leaves it alone. The session gets its notice at once, or when its machine connects.
+
+A login read off a disk still runs every other client call: it reads sessions, types into tabs and starts sessions on the account's machines. After this change, the machine that runs the desktop app is the only one that keeps a login.
 
 ## 14. The account's MCP servers (0.17.22)
 
@@ -569,6 +600,8 @@ On the hub, in the connector store, as the box Claude tokens are. The list is `S
 ### 14.4 Agents
 
 `save_mcp_server` and `import_mcp_server` ask for `secrets`. The user types each value in the app's form, which sends them in `decide_confirmation`'s `entered` by path: `{"secrets.env.API_KEY": "…"}`. `surface::with_entered` places a dotted path inside its asked object. `with_blank_asks` leaves an asked object to its default.
+
+Approving needs the app unlocked (13.11), as every decision does. The user's own `save_mcp_server`, `import_mcp_server` and `remove_mcp_server` need it too on a locked login, since `surface::owner_only` reads their `confirm` class; `list_mcp_servers` and `enable_mcp_server` don't.
 
 `secrets` is a secret name (13.7). An agent that sends any text inside it is refused (`an agent never sends a password, key or token: secrets`), and summaries and answers show it as `[hidden]`.
 

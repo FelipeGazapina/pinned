@@ -32,7 +32,7 @@
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "ClientFrame",
-        "description": "Client to hub. The first frame must be `Auth` with a login token.\n\n`{\"type\":\"auth\",\"token\":\"…\"}`, `{\"type\":\"call\",\"id\":1,\"machine\":\"m1\",\"call\":{\"cmd\":\"tabs\"}}`,\n`{\"type\":\"hub\",\"id\":2,\"call\":{\"cmd\":\"get_settings\"}}`, `{\"type\":\"attach\",\"machine\":\"m1\",\"tab\":\"tab-1\"}`",
+        "description": "Client to hub. The first frame must be `Auth` with a login token.\n\n`{\"type\":\"auth\",\"token\":\"…\",\"lock\":true}`, `{\"type\":\"call\",\"id\":1,\"machine\":\"m1\",\"call\":{\"cmd\":\"tabs\"}}`,\n`{\"type\":\"hub\",\"id\":2,\"call\":{\"cmd\":\"get_settings\"}}`, `{\"type\":\"attach\",\"machine\":\"m1\",\"tab\":\"tab-1\"}`",
         "oneOf": [
           {
             "type": "object",
@@ -43,6 +43,17 @@
               },
               "token": {
                 "type": "string"
+              },
+              "lock": {
+                "description": "The app asks for the password before a call only the account's owner makes\n(`surface::owner_only`), so from now on the login alone, which the app keeps on disk,\nruns none. An older app leaves it out and keeps every call it had.",
+                "type": "boolean"
+              },
+              "unlock": {
+                "description": "The token `HubCall::Unlock` answered this app, sent again after a reconnect.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -6096,6 +6107,23 @@
                 ]
               },
               {
+                "description": "From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its\n`until`, this connection runs the calls only the owner makes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unlock"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "password"
+                ]
+              },
+              {
                 "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of\nits boundary second, which the client drops by id.",
                 "type": "object",
                 "properties": {
@@ -8870,7 +8898,7 @@
       "accept": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "ClientFrame",
-        "description": "Client to hub. The first frame must be `Auth` with a login token.\n\n`{\"type\":\"auth\",\"token\":\"…\"}`, `{\"type\":\"call\",\"id\":1,\"machine\":\"m1\",\"call\":{\"cmd\":\"tabs\"}}`,\n`{\"type\":\"hub\",\"id\":2,\"call\":{\"cmd\":\"get_settings\"}}`, `{\"type\":\"attach\",\"machine\":\"m1\",\"tab\":\"tab-1\"}`",
+        "description": "Client to hub. The first frame must be `Auth` with a login token.\n\n`{\"type\":\"auth\",\"token\":\"…\",\"lock\":true}`, `{\"type\":\"call\",\"id\":1,\"machine\":\"m1\",\"call\":{\"cmd\":\"tabs\"}}`,\n`{\"type\":\"hub\",\"id\":2,\"call\":{\"cmd\":\"get_settings\"}}`, `{\"type\":\"attach\",\"machine\":\"m1\",\"tab\":\"tab-1\"}`",
         "oneOf": [
           {
             "type": "object",
@@ -8881,6 +8909,17 @@
               },
               "token": {
                 "type": "string"
+              },
+              "lock": {
+                "description": "The app asks for the password before a call only the account's owner makes\n(`surface::owner_only`), so from now on the login alone, which the app keeps on disk,\nruns none. An older app leaves it out and keeps every call it had.",
+                "type": "boolean"
+              },
+              "unlock": {
+                "description": "The token `HubCall::Unlock` answered this app, sent again after a reconnect.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -14858,6 +14897,23 @@
                 ]
               },
               {
+                "description": "From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its\n`until`, this connection runs the calls only the owner makes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unlock"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "password"
+                ]
+              },
+              {
                 "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of\nits boundary second, which the client drops by id.",
                 "type": "object",
                 "properties": {
@@ -20054,6 +20110,23 @@
                   "cmd",
                   "id",
                   "approve"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its\n`until`, this connection runs the calls only the owner makes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unlock"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "password"
                 ]
               },
               {
@@ -25638,6 +25711,23 @@
                   "cmd",
                   "id",
                   "approve"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its\n`until`, this connection runs the calls only the owner makes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unlock"
+                  },
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "password"
                 ]
               },
               {
@@ -56836,6 +56926,46 @@
             ]
           }
         }
+      }
+    },
+    "Unlocked": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Unlocked",
+        "description": "`HubCall::Unlock`'s answer. The app keeps `token` in memory and sends it again in\n`ClientFrame::Auth` after a reconnect; it works for that login until `until`, unix seconds.",
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "until": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "token",
+          "until"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Unlocked",
+        "description": "`HubCall::Unlock`'s answer. The app keeps `token` in memory and sends it again in\n`ClientFrame::Auth` after a reconnect; it works for that login until `until`, unix seconds.",
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "until": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "token",
+          "until"
+        ]
       }
     },
     "UpstashAccount": {

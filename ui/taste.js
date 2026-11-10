@@ -219,11 +219,16 @@ function tasteRebase(saved, draft, fresh) {
   );
 }
 
-/** A model's cost tier from hints in its id: Rust's `cost_of` in delegate/catalog.rs. */
-function tasteModelTier(id) {
-  const lower = String(id).toLowerCase();
-  if (["haiku", "flash", "mini", "fast", "nano", "lite"].some((hint) => lower.includes(hint))) return "low";
-  if (["opus", "max", "pro", "ultra", "thinking"].some((hint) => lower.includes(hint))) return "high";
+/** A model's cost tier: the `cost` its machine lists for it in `list_accounts` (the one list in
+ * claude_models.rs), else, for a model it doesn't list or a node too old to send `cost`, a guess
+ * from the words of its id, as Rust's `cost_in` makes it. */
+function tasteModelTier(id, models = []) {
+  const listed = models.find((m) => m.slug === id)?.cost;
+  if (listed === "low" || listed === "mid" || listed === "high") return listed;
+  const words = String(id).toLowerCase().split(/[^a-z0-9]+/);
+  const says = (hints) => words.some((word) => hints.includes(word));
+  if (says(["opus", "max", "pro", "ultra", "thinking"])) return "high";
+  if (says(["haiku", "flash", "mini", "fast", "nano", "lite"])) return "low";
   return "mid";
 }
 

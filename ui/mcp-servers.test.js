@@ -141,7 +141,7 @@ test("Approve on an agent's add opens the form with its server locked, and the s
   assert.equal(state("page"), "mcp-servers");
   const html = dom["settings-page"].innerHTML;
   assert.match(html, /<b>Add an MCP server<\/b>/);
-  assert.match(html, /Asked by Wire up the docs on MacBook\. Entering its secrets here approves it\./);
+  assert.match(html, /Asked by “Wire up the docs” on MacBook\. Entering its secrets here approves it\./);
   assert.match(html, /<input name="name" value="ctx" placeholder="context7" autocomplete="off" spellcheck="false" readonly>/);
   assert.match(html, /<select name="type" disabled>/);
   assert.match(html, /<input type="password" data-mcp-secret="API_KEY" autocomplete="off" spellcheck="false" placeholder="Value">/);

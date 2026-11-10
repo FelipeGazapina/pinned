@@ -146,9 +146,12 @@ function agentActionTitle(action, args, machine) {
   return named ? `${agentWords(action)} ${named}` : agentWords(action);
 }
 
+/** The asking thread's title in curly quotes, trailing punctuation dropped, so any title reads cleanly. */
+const agentQuoted = (c) => `\u201c${(c.title || c.tab).replace(/[\s.!?,;:\u2026]+$/, "")}\u201d`;
+
 function agentConfirmationHtml(c) {
   const busy = agentDeciding.has(c.id) ? " disabled" : "";
-  const who = `Asked by ${c.title || c.tab} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
+  const who = `Asked by ${agentQuoted(c)} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
   return `<div class="agent-confirm" data-confirmation="${esc(c.id)}" role="group" aria-label="${esc(`Approve ${c.action}?`)}">
     <span class="dot"></span>
     <div class="texts">
@@ -190,7 +193,7 @@ function agentAskingHtml(action) {
   const keyless = action === "add_account" && c.args.auth !== "opencode-go";
   const form = AGENT_FORMS[action];
   const how = form.how ? form.how(c) : keyless ? "Adding the account here approves it." : `Entering the ${form.noun} here approves it.`;
-  return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${c.title || c.tab} on ${c.machine_name || "a removed machine"}. ${how}`)}
+  return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${agentQuoted(c)} on ${c.machine_name || "a removed machine"}. ${how}`)}
     <button type="button" class="secondary" data-action="cancel-agent-approval">Cancel</button></p>`;
 }
 
@@ -265,6 +268,20 @@ function resetAgentSurface() {
 function agentSay(text, error = false) {
   tell(esc(text), error ? 8000 : 5000);
   agentActivity.notice = { text, error };
+}
+
+/** The account's password, which the hub asks for before a call only the owner makes, such as an
+ * approval; `error` is why the last one failed. Null when the user cancels. */
+function askOwnerPassword(error) {
+  return askDialog(
+    `<h3>Enter your password</h3>
+    <p class="about">Approving an agent's request, and changes only you make, need it. It holds until you close this window, for at most 12 hours.</p>
+    <label>Password<input type="password" name="password" autocomplete="current-password"></label>
+    <p class="error" role="alert">${esc(error)}</p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="primary">Unlock</button></div>`,
+    (form) => form.password.value || undefined,
+    (form) => setTimeout(() => form.password.focus()),
+  );
 }
 
 /** Approve or Deny. `entered` is what the user typed in a credential action's form, and its failure

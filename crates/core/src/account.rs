@@ -39,6 +39,18 @@ impl Credentials {
     pub fn remove(dir: &Path) {
         let _ = std::fs::remove_file(dir.join(FILE));
     }
+
+    /// Saves these credentials without the login an older pinned kept beside the machine's token,
+    /// and answers it, so the caller ends it at the hub. A machine needs only its own token, and a
+    /// login on its disk lets anything running as this user act as the account's owner.
+    pub fn forget_login(&mut self, dir: &Path) -> Result<Option<String>, String> {
+        if self.user_token.is_empty() {
+            return Ok(None);
+        }
+        let login = std::mem::take(&mut self.user_token);
+        self.save(dir)?;
+        Ok(Some(login))
+    }
 }
 
 /// `POST /api/signup` and `/api/login` take this.
@@ -271,6 +283,26 @@ mod tests {
         assert_eq!(Credentials::load(&dir), Some(creds));
         Credentials::remove(&dir);
         assert_eq!(Credentials::load(&dir), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_machine_forgets_the_login_an_older_pinned_kept_beside_its_token() {
+        let dir = std::env::temp_dir().join(format!("pinned-forget-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut creds = Credentials {
+            hub: "https://pinned.example.com".into(),
+            email: "ana@acme.dev".into(),
+            user_token: "u-t0k".into(),
+            machine_id: "8c0f1f4e-5b8a-4c4e-9a59-0d6b4f0f2a11".into(),
+            machine_token: "m-t0k".into(),
+        };
+        creds.save(&dir).unwrap();
+        assert_eq!(creds.forget_login(&dir), Ok(Some("u-t0k".into())));
+        let saved = std::fs::read_to_string(dir.join("account.json")).unwrap();
+        assert!(!saved.contains("u-t0k") && saved.contains("m-t0k"), "{saved}");
+        assert_eq!(Credentials::load(&dir).unwrap().user_token, "");
+        assert_eq!(creds.forget_login(&dir), Ok(None), "nothing left to forget");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

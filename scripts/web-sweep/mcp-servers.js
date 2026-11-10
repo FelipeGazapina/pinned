@@ -90,6 +90,8 @@ async function signIn(page) {
     await page.click("#login .primary");
   }
   await waitFor("the hub", () => page.evaluate(() => document.body.dataset.hub === "online"));
+  // The app locks its login (CONTRACTS.md 13.11): adding a server and approving need the password.
+  await page.evaluate((password) => hub.hub({ cmd: "unlock", password }), PASSWORD);
   return waitFor("the sweep node", () => page.evaluate(() => [...machines.entries()].find(([, m]) => m.view.online && m.view.name === "sweep-node")?.[0]));
 }
 
