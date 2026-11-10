@@ -606,7 +606,14 @@ function answerEffort(key) {
   } else return;
   drawEffort();
 }
-const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.2"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+// $HOME/model-rows.json, when a sweep writes it, stands for a newer claude whose menu lists other models.
+const MODEL_ROWS = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(process.env.HOME, "model-rows.json"), "utf8"));
+  } catch {
+    return [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.2"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+  }
+})();
 let modelMenu = 0;
 function drawModels() {
   drawScreen([

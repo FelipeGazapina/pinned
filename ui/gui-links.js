@@ -70,7 +70,7 @@ function promptLinkFor(prompt, context = {}) {
 const githubOf = (repo) => /^github\.com\/([^/]+\/[^/]+)$/i.exec(repo ?? "")?.[1] ?? null;
 
 /** The composer's model a link names, by its family as the menu shows it or by its slug. */
-const linkedModel = (name) => CLAUDE_MODELS.find((m) => (!m.legacy && m.menu.toLowerCase() === name.toLowerCase()) || m.slug === name) ?? null;
+const linkedModel = (name) => claudeModels().find((m) => (!m.legacy && m.menu.toLowerCase() === name.toLowerCase()) || m.slug === name) ?? null;
 
 function promptLinkItems(tab) {
   const draft = tab && drafts[threadKey(tab)];
