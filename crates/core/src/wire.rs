@@ -634,6 +634,20 @@ pub enum Call {
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
+    /// What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this
+    /// machine, as the hub passes on that session's `act`. A call that starts a session holds it to
+    /// the caller's delegation limits (`surface::Action::starts_work`).
+    ActFor { caller: TabId, call: Value },
+    /// `true` once `text` is queued for the tab, as worker reports are: typed once its session is
+    /// idle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when
+    /// no tab has it. A repeat of `id` queues nothing.
+    Notice {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        text: String,
+        id: String,
+    },
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -653,6 +667,9 @@ impl Call {
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
+        if let Call::ActFor { call, .. } = self {
+            return serde_json::from_value::<Call>(call.clone()).is_ok_and(|call| call.may_wait());
+        }
         matches!(
             self,
             Call::Run { .. }
@@ -1001,6 +1018,23 @@ pub enum HubCall {
     /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
     /// (1, 7 or 30), on every machine.
     DelegationStats { days: u32 },
+    /// From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under
+    /// `surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.
+    Act { act: crate::surface::AgentAct },
+    /// `Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,
+    /// then the last 20 decided, newest first.
+    Confirmations,
+    /// From a signed-in client: `surface::Decided`. Approving runs the action for the session that
+    /// asked; either way the session gets a notice.
+    DecideConfirmation { id: String, approve: bool },
+    /// `Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`
+    /// rows (50, at most 200) from before unix time `before`.
+    AgentAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1183,6 +1217,8 @@ pub enum ToClient {
     Event { machine: MachineId, event: MachineEvent },
     /// The account's connectors, after any change or check.
     Settings { settings: Settings },
+    /// The agents' actions waiting on the user's approval, after `Hello` and after any change.
+    Confirmations { items: Vec<crate::surface::Confirmation> },
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.

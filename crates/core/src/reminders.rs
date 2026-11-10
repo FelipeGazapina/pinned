@@ -404,7 +404,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 14] {
+fn project_tools() -> [(Audience, serde_json::Value); 16] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -453,6 +453,28 @@ fn project_tools() -> [(Audience, serde_json::Value); 14] {
                 "type": "object",
                 "properties": { "id": { "type": "integer", "description": "The memory's id." } },
                 "required": ["id"],
+            },
+        })),
+        (Audience::Everyone, serde_json::json!({
+            "name": "actions",
+            "description": "List what you can do as the user through act: each action this session may run, with its class (read and write run at once; confirm waits for the user's approval in the app), on (machine: it runs on this session's machine or the one act names; hub: it runs on the account), what it does, and the JSON Schema of its args. search keeps those whose name or description holds each word.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "search": { "type": "string", "description": "Words to match, such as machine or memory. Empty lists every action." } },
+            },
+        })),
+        (Audience::Everyone, serde_json::json!({
+            "name": "act",
+            "description": "Do one thing the user can do in pinned, as the user's account: an action from actions, with its args. Every act goes in the account's audit trail. A read or write runs at once and answers JSON whose outcome is done, with result. A confirm action does not run: it answers outcome pending with an id, the user approves or denies it in the app, and a notice in this session says what happened. Never put a password, key or token in args; the user enters those in the app.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "The action's name from actions." },
+                    "args": { "type": "object", "description": "The action's arguments, as its args schema in actions describes them." },
+                    "request_id": { "type": "string", "description": "A new id per act, such as a UUID. Repeating it answers the first outcome instead of running again." },
+                    "machine": { "type": "string", "description": "For an action on a machine: the machine's id or name from machines, when it is not this session's own." },
+                },
+                "required": ["action"],
             },
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({
@@ -764,7 +786,8 @@ fn send(message: &Message) -> Result<String, String> {
                 | ProjectTool::TellOrchestrator { .. }
                 | ProjectTool::TasteGet { .. }
                 | ProjectTool::TasteSet { .. }
-                | ProjectTool::TasteReset { .. },
+                | ProjectTool::TasteReset { .. }
+                | ProjectTool::Act { .. },
             ..
         } => StdDuration::from_secs(70),
         _ => StdDuration::from_secs(10),
@@ -1129,7 +1152,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let names = |child| tool_definitions(true, child, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
-        let memory = ["memory_search", "memory_save", "memory_forget"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
@@ -1141,6 +1164,8 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
                 "mcp__pinned__memory_forget",
+                "mcp__pinned__actions",
+                "mcp__pinned__act",
                 "mcp__pinned__projects",
                 "mcp__pinned__send_to_captain",
                 "mcp__pinned__read_captain",
@@ -1158,8 +1183,14 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
+        assert_eq!(
+            ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
+            Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"act","action":"rename_machine","args":{"id":"m1","name":"Mini"},"request_id":"r-1"}}"#.into())
+        );
+        assert_eq!(ask("actions", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"actions"}}"#.into()));
+        assert_eq!(ask("act", serde_json::json!({}), Some("tab-2")), Err("act: missing field `action`".into()));
     }
 
     #[cfg(unix)]
@@ -1207,7 +1238,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
-        let memory = ["memory_search", "memory_save", "memory_forget"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);

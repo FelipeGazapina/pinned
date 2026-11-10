@@ -5,7 +5,7 @@ use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, Ta
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -784,6 +784,8 @@ impl Machine {
                 }
                 Ok(Value::Null)
             }
+            Call::ActFor { caller, call } => self.act_for(&caller, call),
+            Call::Notice { tab, session, text, id } => json(self.notice(&tab, session, text, &id)),
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
@@ -2245,7 +2247,29 @@ impl Machine {
 
     /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
-        Ok(self.projects_overview()?.waiting)
+        let mut waiting = self.projects_overview()?.waiting;
+        waiting.extend(self.confirmations_waiting());
+        Ok(waiting)
+    }
+
+    /// The agents' actions that wait on the user's approval, as the `waiting` tool lists them. None
+    /// without a hub, or with one too old to keep them.
+    fn confirmations_waiting(&self) -> Vec<global::Waiting> {
+        let Ok(items) = self.call_hub(HubCall::Confirmations).and_then(|value| serde_json::from_value::<Vec<surface::Confirmation>>(value).map_err(|e| e.to_string())) else { return vec![] };
+        items
+            .into_iter()
+            .filter(|confirmation| confirmation.decision.is_none())
+            .map(|confirmation| global::Waiting {
+                message: Some(surface::summary(&confirmation.args)),
+                title: Some(format!("Approve {}?", confirmation.action)),
+                since: u64::try_from(confirmation.at).ok(),
+                project: None,
+                kind: global::WaitingKind::Confirm,
+                machine: confirmation.machine,
+                machine_name: confirmation.machine_name,
+                tab: confirmation.tab,
+            })
+            .collect()
     }
 
     /// The latest replies of `project`'s Capitão, for the `read_captain` tool, as the hub's MCP
@@ -2440,7 +2464,122 @@ impl Machine {
                 })
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
+            ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
+            ProjectTool::Act { action, args, request_id, machine } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+                match self.call_hub(HubCall::Act { act }) {
+                    Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
+                    answer => text_json(answer?),
+                }
+            }
         }
+    }
+
+    /// Runs an agent's act for the session in `caller`, as the hub passes it on. A call that starts
+    /// a session holds it to the delegation limits; one with no such path yet is refused.
+    fn act_for(&self, caller: &str, call: Value) -> Result<Value, String> {
+        let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
+        if let Call::StartClaude { tab, cols, rows } = call {
+            return json(self.start_for(caller, &tab, cols, rows)?);
+        }
+        let cmd = surface::cmd_of(&call);
+        if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
+            return Err(format!("{cmd} starts work, and nothing holds it to the limits yet"));
+        }
+        self.call(call)
+    }
+
+    /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
+    /// a worker thread: a task under the project's workers-at-once limit and held to its tier, time
+    /// limit and budget, whose first finished turn ends it with a notice to the caller and a record in
+    /// the delegation metrics. A tab already running, or already some task's, just starts.
+    fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
+        let (busy, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+            let plan = t.permission_mode.as_deref() == Some("plan");
+            (t.session.is_some() || t.starting || t.task.is_some(), role_of(&t.env).is_some() || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+        })?;
+        if busy {
+            return self.start_claude(tab, cols, rows);
+        }
+        if ruled {
+            return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker"));
+        }
+        let limits = self.limits_in(&cwd, caller)?;
+        let effort = limits.admit(model.as_deref(), None)?;
+        let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
+        let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
+        let new = NewTask {
+            parent: Parent::Tab(caller.to_owned()),
+            tool: None,
+            title,
+            account: account.id.clone(),
+            provider: account.provider,
+            model,
+            cwd: cwd.clone(),
+            mode: Mode::Async,
+            access,
+            isolated: false,
+            caller_key: caller_ref.key(),
+            client_request_id: None,
+            role: None,
+        };
+        let task = match self.delegates.claim(new, Some(limits.parallel)) {
+            Claim::Fresh(task) => *task,
+            Claim::Full(working) => {
+                let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+                return Err(format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
+            }
+            Claim::Existing(id) => return Err(format!("task {id} already runs for this request")),
+        };
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        self.delegates.describe(&task.id, self.delegator(&caller_ref), effort.clone());
+        self.delegates.note_parent(&task.id, self.tab(caller, |t| t.claude_session.clone()).ok().flatten());
+        let project = history::project_of(&cwd);
+        let _ = self.tab(tab, |t| {
+            t.task = Some(task.id.clone());
+            t.spawned_by.get_or_insert_with(|| caller.to_owned());
+            t.env.extend(role_env(Role::Worker, &project));
+            if let Some(effort) = &effort {
+                t.launch.extend(["--effort".to_owned(), effort.clone()]);
+            }
+        });
+        self.delegates.link_thread(&task.id, Thread { tab: tab.to_owned(), runs: true });
+        let folder = match self.start_claude(tab, cols, rows) {
+            Ok(folder) => folder,
+            Err(error) => {
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                let _ = self.tab(tab, |t| t.task = None);
+                return Err(error);
+            }
+        };
+        if let Some(pid) = self.tab(tab, |t| t.session.as_ref().and_then(pty::Session::pid)).ok().flatten() {
+            self.delegates.remember_pid(&task.id, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+        Ok(folder)
+    }
+
+    /// Queues `text` for the session in `tab`, or in the tab that now runs Claude session
+    /// `session`, as worker reports are queued: typed once it is idle. False when no tab has it.
+    fn notice(&self, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        let found = {
+            let tabs = self.tabs.lock().unwrap();
+            match tabs.get(tab) {
+                Some(t) => Some((tab.to_owned(), t.claude_session.clone())),
+                None => session.as_deref().and_then(|session| tabs.iter().find(|(_, t)| t.claude_session.as_deref() == Some(session)).map(|(id, t)| (id.clone(), t.claude_session.clone()))),
+            }
+        };
+        let Some((tab, running)) = found else { return false };
+        if !self.delegates.holds_report(&tab, id) {
+            self.delegates.queue_report(&tab, running.or(session), text);
+            self.emit_tabs();
+        }
+        self.arm_delegate_pass();
+        true
     }
 
     /// The memories of the tab's project that bear on the prompt starting a turn, for the hook to
@@ -2489,8 +2628,15 @@ impl Machine {
     /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
     /// is a worker.
     fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
-        let (cwd, own_task) = self.tab(tab, |t| (t.cwd.clone(), t.task.clone()))?;
-        let limits = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        self.limits_in(&cwd, tab)
+    }
+
+    /// The delegation limits of work in the folder `cwd` that the session in `tab` starts: that
+    /// project's, narrowed by the limits of the task `tab` itself runs.
+    fn limits_in(&self, cwd: &Path, tab: &str) -> Result<taste::Limits, String> {
+        let own_task = self.tab(tab, |t| t.task.clone())?;
+        let limits = self.tastes().resolve(&captain_scope(&history::project_of(cwd))).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
         Ok(outer.map_or(limits, |outer| limits.narrow(outer)))
     }

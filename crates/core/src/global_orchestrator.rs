@@ -421,6 +421,9 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+    /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
+    /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
+    Confirm,
 }
 
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in

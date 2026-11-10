@@ -41,6 +41,7 @@ pub mod skills;
 pub mod slack;
 pub mod stats;
 pub mod subagents;
+pub mod surface;
 pub mod sync;
 pub mod taste;
 pub mod thread;
