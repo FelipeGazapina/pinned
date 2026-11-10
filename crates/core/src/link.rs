@@ -602,7 +602,7 @@ mod tests {
         syncer.cycle(&shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         let (_stop, stopped) = watch::channel(true);
-        syncer.run(&shared, &machine, &file, &stopped);
+        syncer.run(&shared, &machine, Some(&file), &stopped);
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         let _ = std::fs::remove_dir_all(dir);
@@ -615,7 +615,7 @@ mod tests {
         drop(stop);
         let (ended, done) = mpsc::channel();
         std::thread::spawn(move || {
-            Syncer::default().run(&shared, &machine, &file, &stopped);
+            Syncer::default().run(&shared, &machine, Some(&file), &stopped);
             let _ = ended.send(());
         });
         assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok(()));
