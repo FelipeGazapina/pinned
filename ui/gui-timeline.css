@@ -31,12 +31,12 @@ button.xs.copied { color: var(--g-success); }
   transition: opacity 0.2s; }
 #thread :is(.work, .tool, .group) > summary:hover .when, #thread .tool .row:hover .when, #thread .when.on { opacity: 1; }
 
-.turn .user .bubble .body.clamped { max-height: 176px; overflow: hidden;
+.turn .user .bubble .body.clamped, .report-row .body.clamped { max-height: 176px; overflow: hidden;
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); }
 .turn .bubble .md { color: var(--g-fg); }
-.turn .bubble .show-full { display: inline-flex; align-items: center; height: 24px; margin: 6px 0 0 -4px; padding: 0 8px; border-radius: 8px; font-size: 12px; font-weight: 500; color: var(--g-muted); }
-.turn .bubble .show-full:hover { background: var(--g-accent); color: var(--g-fg); }
-@media (pointer: coarse) { .turn .bubble .show-full { min-height: 40px; } }
+.turn .bubble .show-full, .report-row .show-full { display: inline-flex; align-items: center; height: 24px; margin: 6px 0 0 -4px; padding: 0 8px; border-radius: 8px; font-size: 12px; font-weight: 500; color: var(--g-muted); }
+.turn .bubble .show-full:hover, .report-row .show-full:hover { background: var(--g-accent); color: var(--g-fg); }
+@media (pointer: coarse) { .turn .bubble .show-full, .report-row .show-full { min-height: 40px; } }
 .turn .bubble .pictures { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 210px; margin-bottom: 8px; }
 .turn .bubble .pictures:only-child { margin-bottom: 0; }
 .turn .bubble .picture { aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; border: 1px solid rgb(var(--g-ink-rgb) / 0.05); cursor: zoom-in; }
