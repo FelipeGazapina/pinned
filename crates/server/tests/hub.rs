@@ -7220,7 +7220,7 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
     let _ana = reporting(&url, &ana_creds.machine_token, the_minis_state());
     let bruno_home = temp("machine-load-bruno");
-    let bruno = Node::start(&bruno_home, bruno_creds.clone());
+    let bruno = Node::start(&bruno_home, bruno_creds);
     bruno.machine.listen(|_| Err("unexpected".into())).unwrap();
     ana_client.wait_machines(&[("ana-mini", true)]);
     bruno_client.wait_machines(&[("bruno-mac", true)]);
@@ -7232,7 +7232,8 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     let machines = capabilities_of(&bruno_home)["machines"].clone();
     assert_eq!(machines.as_array().unwrap().iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")], "{machines}");
     assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("cursor"), "{machines}");
-    let mut origin = MachineSock::connect(&url, &bruno_creds.machine_token, "0.17.24");
+    let (raw_creds, _) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-raw");
+    let mut origin = MachineSock::connect(&url, &raw_creds.machine_token, "0.17.24");
     origin.send(delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
     assert_eq!(reply_to(&mut origin, 3)["err"], "this account has no machine ana-mini");
     bruno_client.pump();
