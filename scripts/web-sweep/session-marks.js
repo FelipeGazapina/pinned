@@ -3,7 +3,7 @@
 // and B, each its own Chrome profile: a rename, a pin and an archive made from A's row menu show in
 // B at once, with no reload, at 1440x900 and on a 390x844 phone. A third browser, C, that kept
 // marks in localStorage brings them up on its first sign-in, where the hub keeps any field it
-// already has, and then forgets them. An agent session in A renames a thread and archives another
+// already has, once, and keeps its own copy. An agent session in A renames a thread and archives another
 // through act's mark_sessions and archive_session, as Claude Code calls pinned's MCP server, and
 // both browsers show it at once. Its delete_session waits for the user's approval, and the thread
 // leaves both sidebars only once A approves.
@@ -25,7 +25,6 @@ const HOME = path.join(DIR, "home");
 const SCREENS = path.join(__dirname, "screens");
 const EMAIL = "sweep@example.test";
 const PASSWORD = "sweep password 1";
-const STORED_MARKS = ["gui-marks", "gui-seen", "gui-archived"];
 
 const check = (ok, what) => {
   if (!ok) throw new Error(what);
@@ -331,12 +330,14 @@ const errors = [];
     await signIn(C);
     await waitFor('A to show "Migrated name" on thread 2', async () => (await cardTitle(A, t2.key)) === "Migrated name");
     await waitFor('B to show "Migrated name" on thread 2', async () => (await cardTitle(B, t2.key)) === "Migrated name");
-    await waitFor("C to forget its stored marks", () => C.evaluate((keys) => keys.every((k) => localStorage.getItem(k) === null), STORED_MARKS));
+    await waitFor("C to record its move up", () => C.evaluate(() => !!localStorage.getItem("gui-marks-migrated")));
+    const keptC = await C.evaluate((k) => JSON.parse(localStorage.getItem("gui-marks")).titles[k], `session:${t2.session}`);
+    check(keptC === "Migrated name", `C's stored copy of thread 2's title: ${JSON.stringify(keptC)}`);
     const hubRow2 = (await A.evaluate(() => hub.hub({ cmd: "session_marks" }))).find((r) => r.session === t2.session);
     check(hubRow2?.title === "Migrated name" && hubRow2.pin != null, `the hub's row for thread 2: ${JSON.stringify(hubRow2)}`);
     await notReloaded(A);
     await notReloaded(B);
-    console.log(`3. C brought "Migrated name" up for thread 2; A and B show it with no reload; C's storage holds none of ${STORED_MARKS.join(", ")}; the hub's row ${JSON.stringify(hubRow2)}`);
+    console.log(`3. C brought "Migrated name" up for thread 2; A and B show it with no reload; C's storage keeps its copy; the hub's row ${JSON.stringify(hubRow2)}`);
 
     const agent = await A.evaluate(async ({ machine, dir }) => {
       const tab = await openTab(machine, dir);
