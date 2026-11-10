@@ -209,7 +209,7 @@ function tasteLimitsHtml(t) {
   return `<section class="taste-section taste-limits"><div class="taste-heading"><h2>Delegation limits</h2><p>pinned holds every worker to these. A call past them is refused, and a worker past its time or budget is stopped.</p></div>
     ${tasteParallelHtml(t)}
     <div class="taste-field">${tasteLabelHtml("tier")}<div class="taste-seg" role="group" aria-label="Model tier">${tiers}</div>
-      <span class="taste-quiet">The costliest tier a worker may run on. ${TASTE_TIER_ABOUT[t.tier]} and below.</span></div>
+      <span class="taste-quiet">The costliest tier a worker's own model may be. ${TASTE_TIER_ABOUT[t.tier]} and below. The models a worker picks for its own subagents are not held to it.</span></div>
     <div class="taste-limit-pair">
       <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.default_effort} <select data-effort="default_effort">${efforts(t.default_effort, "The model's own")}</select></label>${tasteTagHtml("default_effort")}</div>
       <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.max_effort} <select data-effort="max_effort">${efforts(t.max_effort)}</select></label>${tasteTagHtml("max_effort")}</div>
@@ -217,7 +217,7 @@ function tasteLimitsHtml(t) {
     ${tasteLadderHtml(t, "time_limit_min", tasteMinutes, "time per worker")}
     ${tasteLadderHtml(t, "budget_cents", tasteMoney, "budget per worker")}
     ${tasteLadderHtml(t, "box_budget_cents", tasteMoney, "budget per box")}
-    <p class="taste-quiet">The budget counts what a Claude Code worker's tokens cost at list prices. Cursor and Codex workers are held to time and tier only.</p>
+    <p class="taste-quiet">The budget counts what a Claude Code worker's tokens cost at list prices, its subagents' included. Cursor and Codex workers are held to time and tier only.</p>
   </section>`;
 }
 

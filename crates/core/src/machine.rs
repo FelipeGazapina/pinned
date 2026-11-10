@@ -468,8 +468,8 @@ pub struct Machine {
     delegates: crate::delegate::Delegates,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
-    /// Each working worker thread's spend so far, by task, with the session it read.
-    meters: Mutex<HashMap<String, (String, usage::Meter)>>,
+    /// Each working worker thread's spend so far, by task, across every session it ran.
+    meters: Mutex<HashMap<String, usage::Meter>>,
     /// The price list the meters price with, and when it was read.
     meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
@@ -2485,59 +2485,44 @@ impl Machine {
         }
     }
 
-    /// The delegation limits a call from `tab` is held to, and the project it works in: the
-    /// project's limits in the account's tastes over the Captains', narrowed by the limits of the
-    /// task the tab itself runs, when it is a worker.
-    fn caller_limits(&self, tab: &str) -> Result<(taste::Limits, PathBuf), String> {
+    /// The delegation limits a call from `tab` is held to: the project's limits in the account's
+    /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
+    /// is a worker.
+    fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
         let (cwd, own_task) = self.tab(tab, |t| (t.cwd.clone(), t.task.clone()))?;
-        let project = history::project_of(&cwd);
-        let limits = self.tastes().resolve(&captain_scope(&project)).limits();
+        let limits = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
-        Ok((outer.map_or(limits, |outer| limits.narrow(outer)), project))
+        Ok(outer.map_or(limits, |outer| limits.narrow(outer)))
     }
 
-    /// Refuses one more worker in `project` once `parallel` of them work there.
-    fn check_parallel(&self, limits: &taste::Limits, project: &Path) -> Result<(), String> {
-        let running = self.delegates.working_cwds().iter().filter(|cwd| history::project_of(cwd) == project).count();
-        if running >= limits.parallel as usize {
-            let running = if running == 1 { "1 worker already runs".to_owned() } else { format!("{running} workers already run") };
-            return Err(format!("{running} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
-        }
-        Ok(())
-    }
-
-    /// Prices what each working worker thread's transcript gained, records it on its task, and
-    /// stops the ones past their budget. Cursor and Codex children run headless and are not metered.
+    /// Prices what each working worker thread's transcripts gained, its subagents' included,
+    /// records it on its task, and stops the ones past their budget. The `meters` lock is held
+    /// through the record, so the 1 s pass and a turn's end never write an older total over a newer
+    /// one. Cursor and Codex children run headless and are not metered.
     fn meter_workers(&self) {
-        let threads: Vec<(String, String, Account)> = self
+        let threads: Vec<(String, String)> = self
             .tabs
             .lock()
             .unwrap()
-            .values()
-            .filter_map(|t| Some((t.task.clone()?, t.claude_session.clone()?, t.account.clone())))
-            .filter(|(task, ..)| self.delegates.get(task).is_some_and(|task| task.state == crate::delegate::WorkState::Working && task.thread.is_some_and(|thread| thread.runs)))
+            .iter()
+            .filter_map(|(id, t)| Some((t.task.clone()?, id.clone())))
+            .filter(|(task, _)| self.delegates.get(task).is_some_and(|task| task.state == crate::delegate::WorkState::Working && task.thread.is_some_and(|thread| thread.runs)))
             .collect();
-        self.meters.lock().unwrap().retain(|task, _| threads.iter().any(|(working, ..)| working == task));
-        if threads.is_empty() {
-            return;
-        }
-        let mut read = vec![];
-        for (task, session, account) in threads {
-            let Some(file) = self.find_transcript(&account, &session) else { continue };
-            let mut meters = self.meters.lock().unwrap();
-            let (of, meter) = meters.entry(task.clone()).or_insert_with(|| (session.clone(), usage::Meter::default()));
-            if *of != session {
-                (*of, *meter) = (session, usage::Meter::default());
-            }
-            if meter.advance(&file).is_ok() && !meter.is_empty() {
-                read.push((task, meter.clone()));
+        let mut meters = self.meters.lock().unwrap();
+        meters.retain(|task, _| threads.iter().any(|(working, _)| working == task));
+        let mut moved = vec![];
+        for (task, tab) in threads {
+            let Some(file) = self.transcript_of(&tab).ok().flatten() else { continue };
+            let meter = meters.entry(task.clone()).or_default();
+            if meter.advance(&file).unwrap_or(false) && !meter.is_empty() {
+                moved.push(task);
             }
         }
-        if read.is_empty() {
+        if moved.is_empty() {
             return;
         }
         let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
-        let used: Vec<_> = read.into_iter().map(|(task, meter)| (task, meter.usage(&rates, &book))).collect();
+        let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
 
@@ -3297,8 +3282,10 @@ impl Machine {
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
-        let (limits, project) = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
-        self.check_parallel(&limits, &project)?;
+        if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
+            return self.delegates.started_json(&id).map(|value| value.to_string());
+        }
+        let limits = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
         } else {
@@ -3351,8 +3338,12 @@ impl Machine {
             caller_key: caller.key(),
             client_request_id: request.client_request_id.clone(),
             role: request.role.clone(),
-        }) {
+        }, Some(limits.parallel)) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Full(working) => {
+                let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+                return Err(format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
+            }
             Claim::Fresh(task) => *task,
         };
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
@@ -8202,7 +8193,7 @@ Send hard work, such as architecture calls or a bug whose cause is unknown, stra
 Tell the user only at the end, with the result.
 Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
-        let cap = "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it.";
+        let cap = "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
@@ -8517,6 +8508,61 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(
             (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
             (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_subagents_and_its_next_session_count_toward_its_budget() {
+        let (m, dir, captain) = limited_captain("limits-subagents", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(transcripts.join("s-child/subagents")).unwrap();
+        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        std::fs::write(transcripts.join("s-child/subagents/agent-a1.jsonl"), format!("{}\n", spent("m2", 20_000))).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+
+        m.meter_workers();
+        let working = status();
+        let cents = working["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!((working["workState"].as_str(), working["usage"]["tokens_out"].as_u64(), cents), (Some("working"), Some(30_000), Some(45.0)), "the subagent's tokens count: {working}");
+
+        let next = transcripts.join("s-next.jsonl");
+        std::fs::write(&next, format!("{}\n", spent("m3", 10_000))).unwrap();
+        let cleared = json!({ "session_id": "s-next", "transcript_path": next, "prompt": null });
+        m.record_event(AgentEvent { tab: Some(child.clone()), ..hooks::event_from(Some("working"), &cleared.to_string()).unwrap() });
+        m.meter_workers();
+        let ended = status();
+        assert_eq!(
+            (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
+            (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000)),
+            "/clear starts a new session, not a new budget"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_retried_call_gets_its_task_back_at_the_workers_at_once_limit_and_the_users_threads_do_not_count() {
+        let (m, dir, captain) = limited_captain("limits-retry", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        for _ in 0..2 {
+            m.open_tab(Some(dir.join("app").display().to_string()), false).unwrap();
+        }
+        let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" }, "clientRequestId": "r1" });
+        let first = delegate_task(&m, &captain, asked.clone());
+        assert_eq!(first["workState"], "working", "the user's own threads in the project are not workers");
+        assert_eq!(delegate_task(&m, &captain, asked)["taskId"], first["taskId"], "the retry is the task already started");
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
+            "1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."
         );
         let _ = std::fs::remove_dir_all(dir);
     }

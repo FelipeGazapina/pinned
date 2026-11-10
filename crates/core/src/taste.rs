@@ -505,7 +505,7 @@ impl Limits {
         if self.box_budget_cents > 0 {
             limits.push(format!("{} per box", usd(self.box_budget_cents)));
         }
-        format!("pinned enforces these delegation limits on delegate_task: {}. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it {RAISE} rather than working around it.", limits.join(", "))
+        format!("pinned enforces these delegation limits on delegate_task: {}. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it {RAISE} rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.", limits.join(", "))
     }
 }
 
@@ -1169,12 +1169,12 @@ Deploys go through the VPS."
     fn a_session_is_told_each_limit_pinned_enforces() {
         assert_eq!(
             Limits::default().hint(),
-            "pinned enforces these delegation limits on delegate_task: at most 3 workers at once, models up to the high tier, effort up to max, 480 minutes per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it."
+            "pinned enforces these delegation limits on delegate_task: at most 3 workers at once, models up to the high tier, effort up to max, 480 minutes per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
         );
         let tight = Limits { parallel: 1, tier: Tier::Low, default_effort: Some(Effort::Low), max_effort: Effort::Medium, budget_cents: 150, time_limit_min: 45, box_budget_cents: 1000 };
         assert_eq!(
             tight.hint(),
-            "pinned enforces these delegation limits on delegate_task: one worker at a time, models up to the low tier, effort up to medium (low when a call names none), 45 minutes per worker, US$ 1.50 per worker, US$ 10.00 per box. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it."
+            "pinned enforces these delegation limits on delegate_task: one worker at a time, models up to the low tier, effort up to medium (low when a call names none), 45 minutes per worker, US$ 1.50 per worker, US$ 10.00 per box. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
         );
         assert_eq!(tight.over_budget(Some(1.49)), None);
         assert_eq!(tight.over_budget(None), None, "an unpriced worker can't be held to a budget");
