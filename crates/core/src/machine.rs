@@ -6621,6 +6621,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_turn_that_ends_with_its_transcript_in_place_sends_one_tab_list_with_the_stats_in_it() {
         let (m, dir, sent, account) = counting_machine("emits-caught-up");
         let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
@@ -6645,6 +6646,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_turn_that_ends_before_its_transcript_does_sends_the_list_again_when_the_stats_land() {
         let (m, dir, sent, account) = counting_machine("emits-behind");
         let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
@@ -6664,6 +6666,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_new_session_event_returns_before_its_transcript_is_read_and_the_list_follows() {
         let (m, dir, sent, account) = counting_machine("emits-new-session");
         let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
