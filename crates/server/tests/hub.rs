@@ -760,8 +760,10 @@ fn the_web_app_files_are_gzipped_for_a_client_that_accepts_it_and_plain_for_one_
 
     // The pages that are the app's index are compressed too, and keep their type.
     for path in ["/", "/new", "/connect-agent"] {
+        let (_, plain, plain_kind, ..) = fetch(path, None);
+        assert_eq!((plain, plain_kind.as_deref()), (None, Some("text/html")), "{path}");
         let (status, encoding, kind, _, _, body) = fetch(path, Some("gzip, br"));
-        assert_eq!((status, encoding.as_deref(), kind.as_deref()), (200, Some("gzip"), Some("text/html; charset=utf-8")), "{path}");
+        assert_eq!((status, encoding.as_deref(), kind.as_deref()), (200, Some("gzip"), Some("text/html")), "{path}");
         let mut page = String::new();
         flate2::read::GzDecoder::new(&body[..]).read_to_string(&mut page).unwrap();
         assert!(page.starts_with("<title>pinned</title>"), "{path}");
