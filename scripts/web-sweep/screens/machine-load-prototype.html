@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings › Machines prototype</title>
+<link rel="stylesheet" href="file:///Users/felipe/projetos/personal-harness/.claude/worktrees/pinned-cc03ea90/ui/style.css">
+<link rel="stylesheet" href="file:///Users/felipe/projetos/personal-harness/.claude/worktrees/pinned-cc03ea90/ui/gui.css">
+<link rel="stylesheet" href="file:///Users/felipe/projetos/personal-harness/.claude/worktrees/pinned-cc03ea90/ui/gui-theme.css">
+<link rel="stylesheet" href="file:///Users/felipe/projetos/personal-harness/.claude/worktrees/pinned-cc03ea90/ui/gui-sidebar.css">
+<link rel="stylesheet" href="file:///Users/felipe/projetos/personal-harness/.claude/worktrees/pinned-cc03ea90/ui/gui-settings.css">
+<style>html{--opacity:1}
+.machine-row .who > :is(.machine-load, .machine-accounts) { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; overflow: visible; white-space: normal; text-overflow: clip; }
+.machine-load .stat { color: var(--muted); font-size: 12px; }
+.machine-load .stat b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.machine-load .stat[data-level="warn"] b { color: #d9822b; }
+.machine-load .stat[data-level="hot"] b { color: #e5484d; }
+.machine-row .who > .machine-accounts { gap: 4px 6px; }
+.acct { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; color: var(--fg); }
+.acct[data-state="limited"] { color: #d9822b; border-color: rgb(217 130 43 / 0.4); }
+.acct[data-state="off"] { color: var(--muted); border-style: dashed; }
+@media (max-width: 600px) { .machine-row { flex-wrap: wrap; } .machine-row .who { flex-basis: calc(100% - 20px); } .machine-row > button { flex: 1 1 auto; } }
+</style></head>
+<body data-mode="gui" data-page="settings"><div id="expanded" style="position:fixed;inset:0;overflow:auto"><div id="settings"><section id="settings-page">
+<h2>Machines</h2>
+<p class="hint">Every machine signed into sweep@example.test. Sessions on the ones online show up as tabs here.</p>
+<div class="actions start"><button class="secondary">Update every machine</button></div>
+<div class="machine-list"><div class="machine-row"><span class="dot" data-online="true"></span>
+<div class="who"><b>MacBook</b><span class="hint">macos · this Mac</span><div class="machine-load"><span class="stat">Workers <b>2</b> of 5</span><span class="stat">CPU <b>41%</b></span><span class="stat">Memory <b>6.2 GB</b> free</span><span class="stat">Disk <b>118 GB</b> free</span></div><div class="machine-accounts"><span class="acct" data-state="ready" title="driver: claude">claude</span><span class="acct" data-state="ready" title="driver: claude">bloom</span><span class="acct" data-state="limited" title="driver: cursor">cursor · limited</span></div></div>
+<button class="secondary">Update</button><button class="secondary">Rename</button></div><div class="machine-row"><span class="dot" data-online="true"></span>
+<div class="who"><b>mac-mini</b><span class="hint">macos</span><div class="machine-load"><span class="stat" data-level="warn">Workers <b>3</b> of 3 · full</span><span class="stat" data-level="hot">CPU <b>92%</b></span><span class="stat" data-level="warn">Memory <b>1.4 GB</b> free</span><span class="stat" data-level="warn">Disk <b>8.6 GB</b> free</span></div><div class="machine-accounts"><span class="acct" data-state="ready" title="driver: claude">claude</span><span class="acct" data-state="ready" title="driver: cursor">cursor</span><span class="acct" data-state="off" title="driver: codex">codex · not ready</span></div></div>
+<button class="secondary">Update</button><button class="secondary">Rename</button><button class="secondary danger">Remove</button></div><div class="machine-row"><span class="dot" data-online="false"></span>
+<div class="who"><b>lypes-vps</b><span class="hint">linux · seen 3 h ago</span></div>
+<button class="secondary">Update</button><button class="secondary">Rename</button><button class="secondary danger">Remove</button></div></div>
+</section></div></div></body></html>

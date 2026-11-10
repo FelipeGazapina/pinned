@@ -121,7 +121,9 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
         .zip(&seen)
         .map(|(m, (projects, tabs, problem))| MachineSnapshot { id: &m.id, name: &m.name, online: m.online, version: &m.version, projects, tabs, problem: problem.as_deref() })
         .collect();
-    serde_json::to_value(global::overview(&snapshots)).map_err(|e| e.to_string())
+    let mut overview = global::overview(&snapshots);
+    pinned_core::load::attach(&mut overview, &machines);
+    serde_json::to_value(overview).map_err(|e| e.to_string())
 }
 
 /// What one online machine told the overview.

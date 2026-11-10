@@ -3721,7 +3721,17 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
         overview["projects"].as_array_mut().unwrap().sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
         overview
     };
-    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(by_key);
+    // The summaries move with the machine's real load, so this test compares the rest.
+    let without_load = |mut overview: Value| {
+        for machine in overview["machines"].as_array_mut().unwrap() {
+            machine.as_object_mut().unwrap().remove("state");
+        }
+        for checkout in overview["projects"].as_array_mut().unwrap().iter_mut().flat_map(|p| p["checkouts"].as_array_mut().unwrap().iter_mut()) {
+            checkout.as_object_mut().unwrap().remove("load");
+        }
+        overview
+    };
+    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(without_load).map(by_key);
     let checkout = |machine: &str, name: &str, online: bool, version: &str, path: &str| {
         json!({ "machine": machine, "machine_name": name, "online": online, "version": version, "path": path, "captain": "nenhum", "workers": 0 })
     };
@@ -3751,7 +3761,7 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
     assert_eq!((raw.calls("list_projects"), raw.calls("global_orchestrator_settings"), raw.calls("tabs")), (1, 1, 1), "the hub asked for the tabs only of the machine that never reported them");
     let mac_link = fleet.mac.link.as_ref().unwrap();
     assert_eq!(mac_link.call_hub(HubCall::Overview), Err("mac does not host the global orchestrator (mini does), so it can't list the account's projects".into()));
-    let signed_in = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let signed_in = without_load(fleet.client.hub(json!({ "cmd": "overview" })).unwrap());
     let signed_in_site = signed_in["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site");
     assert_eq!(signed_in_site, Some(&site(true)), "a signed-in client reads it too");
 
@@ -4975,6 +4985,45 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
 }
 
 #[test]
+fn a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered() {
+    let mut fleet = Fleet::start("remote_ask");
+    origin(Path::new(&fleet.site), SITE);
+    origin(&fleet.mini_dir.join("site"), SITE);
+    let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Push the footer fix.", "title": "Push footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
+    let (task, child) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+    wait_launch(&mini_dir, &child, "Push the footer fix.");
+
+    let transcripts = mini_dir.join("accounts/work/projects/site");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let call = r#"{"type":"assistant","uuid":"a1","timestamp":"2020-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#;
+    std::fs::write(transcripts.join("s-push.jsonl"), format!("{call}\n")).unwrap();
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child, "session": "s-push", "cwd": there }));
+    assert_eq!(task_status(&mac_dir, &captain, &task)["waiting"], Value::Null, "a worker that works waits on no one");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "needs-input", "tab": child, "message": "Claude needs your permission to use Bash" }));
+    wait_for("mac's task to say its worker waits", || !task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["workState"], "working", "it keeps its place");
+    assert_eq!(
+        (status["waiting"]["kind"].as_str(), status["waiting"]["tool"].as_str(), status["waiting"]["ask"].as_str(), status["waiting"]["machine"].as_str()),
+        (Some("approval"), Some("Bash"), Some("git push origin main"), Some("mini")),
+        "the command, the tool and the machine it waits on: {status}"
+    );
+    let overview = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let rows: Vec<(&str, &str, &str, &str, &str)> = overview["waiting"].as_array().unwrap().iter().map(|w| (w["machine"].as_str().unwrap(), w["machine_name"].as_str().unwrap(), w["tab"].as_str().unwrap(), w["ask"].as_str().unwrap_or(""), w["detail"].as_str().unwrap_or(""))).collect();
+    assert_eq!(rows, vec![(mini.as_str(), "mini", child.as_str(), "approval", "git push origin main")], "waiting() lists the worker under mini's name: {overview}");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child }));
+    wait_for("mac's task to hear it was answered", || task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+}
+
+#[test]
 fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends() {
     let hub = TestHub::start_with_boxes("rbox", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
@@ -5299,7 +5348,7 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     let ana_raw = RawMachine::start(&url, &ana_creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
         "delegate" => RawReply::Ok(json!({ "taskId": "task-a", "tabId": "tab-w", "workState": "working" })),
         "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
-        "remote_ended" => RawReply::Ok(json!(true)),
+        "remote_ended" | "remote_asked" => RawReply::Ok(json!(true)),
         _ => RawReply::Ok(Value::Null),
     });
     let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
@@ -5317,11 +5366,35 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a" })), none, "bob can't read ana's remote task");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a", "cancel": "mine now" })), none, "nor cancel it");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_ended", "to": ana_m, "tab": "tab-1", "task": "task-a", "end": { "state": "failed", "error": "forged" } })), none, "nor end it");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_asked", "to": ana_m, "tab": "tab-1", "task": "task-a", "ask": { "kind": "approval", "ask": "forged", "since": 1 } })), none, "nor tell it what its worker waits on");
     assert_eq!(bob.hub(delegate(json!({ "machine": bob_machine.id }))), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client delegates only through a thread");
     assert_eq!(bob.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-x" })), Err("connect Upstash Box first".into()));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
+    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended"), ana_raw.calls("remote_asked")), (0, 0, 0, 0), "ana's machine heard none of bob's");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
+}
+
+#[test]
+fn a_remote_workers_ask_reaches_the_machine_that_delegated_it_stamped_with_the_machine_that_sent_it() {
+    let hub = TestHub::start("remote_asked");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
+    let mac_raw = RawMachine::start(&url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_asked" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    let mini_raw = RawMachine::start(&url, &mini_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true), ("ana-mini", true)]);
+    let ask = json!({ "kind": "approval", "tool": "Bash", "ask": "git push origin main", "since": 1794239000 });
+
+    let taken = mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a", "ask": ask }));
+    assert_eq!(taken, Ok(json!(true)), "the machine that delegated it took it");
+    assert_eq!(mac_raw.calls.lock().unwrap().clone(), vec![json!({ "cmd": "remote_asked", "from": mini.id, "tab": "tab-1", "task": "task-a", "ask": ask })], "stamped with the machine whose socket sent it");
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Ok(json!(true)), "no ask says it waits on nothing now");
+    assert_eq!(mac_raw.calls.lock().unwrap().last().unwrap().get("ask"), None);
+    assert_eq!(ana.hub(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client can't report for a machine");
 }
 
 fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {
@@ -7470,4 +7543,200 @@ fn use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_
     assert_eq!(ran().lines().count(), runs, "ana's machine ran nothing for bob");
     let bobs = bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_claude_tokens"].clone();
     assert!(bobs.as_object().is_none_or(|kept| kept.is_empty()), "and bob keeps no token of ana's: {bobs}");
+}
+
+/// Registers a machine of the account `token` and the credentials a node for it signs in with.
+fn registered(url: &str, token: &str, email: &str, name: &str) -> (Credentials, String) {
+    let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
+    (Credentials { hub: url.to_owned(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token }, machine.id)
+}
+
+fn machine_rows(client: &mut Client) -> Vec<Value> {
+    client.hub(json!({ "cmd": "machines" })).unwrap().as_array().unwrap().clone()
+}
+
+fn state_of(client: &mut Client, id: &str) -> Option<Value> {
+    machine_rows(client).into_iter().find(|row| row["id"] == id).and_then(|row| row.get("state").cloned())
+}
+
+/// A machine socket that reports `state` and stays connected.
+fn reporting(url: &str, token: &str, state: Value) -> MachineSock {
+    let mut sock = MachineSock::connect(url, token, "0.17.24");
+    sock.send(json!({ "type": "event", "event": { "kind": "state", "state": state } }));
+    sock
+}
+
+fn the_minis_state() -> Value {
+    json!({
+        "load": { "cpus": 8, "cpu_percent": 37, "mem_total_mb": 16384, "mem_available_mb": 4096, "disk_total_mb": 471_040, "disk_free_mb": 24_576 },
+        "accounts": [
+            { "id": "claude", "driver_kind": "claude", "can_run_child_task": true, "models": ["claude-opus-5-5"] },
+            { "id": "cursor", "driver_kind": "cursor", "can_run_child_task": true, "limited": true, "models": ["grok-4.7"] }
+        ],
+        "sessions": 5, "workers": 2, "workers_at_once": 3
+    })
+}
+
+/// What `orchestrator_capabilities` answers a node's session.
+fn capabilities_of(home: &Path) -> Value {
+    let reply = ask_socket(home, &json!({ "kind": "capabilities", "search": "" }));
+    serde_json::from_str(reply["Ok"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
+}
+
+/// A delegate call as the origin machine sends it for `target`.
+fn machine_delegate_call(id: u64, target: Value) -> Value {
+    let args = json!({ "task": "Fix the parser.", "title": "Parser", "target": target });
+    let request = pinned_core::delegate::parse_request(&args).unwrap();
+    json!({ "type": "call", "id": id, "call": { "cmd": "delegate", "tab": "tab-1", "task": "t-1", "request": request, "repo": "github.com/acme/app", "access": "auto" } })
+}
+
+fn reply_to(sock: &mut MachineSock, id: u64) -> Value {
+    loop {
+        let frame = sock.read_json();
+        if frame["type"] == "reply" && frame["id"] == id {
+            return frame;
+        }
+    }
+}
+
+/// The origin's reply to `id`, while the machine answers the hub's look at its state, which the hub
+/// takes before it refuses a delegation.
+fn reply_to_while_answering(origin: &mut MachineSock, machine: &mut MachineSock, id: u64) -> Value {
+    let start = Instant::now();
+    loop {
+        if let Some(frame) = origin.try_text() {
+            if frame["type"] == "reply" && frame["id"] == id {
+                return frame;
+            }
+        }
+        if let Some(frame) = machine.try_text() {
+            if frame["type"] == "call" && frame["call"]["cmd"] == "state" {
+                machine.send(json!({ "type": "reply", "id": frame["id"], "ok": the_minis_state() }));
+            }
+        }
+        assert!(start.elapsed() < WAIT, "timed out waiting for the reply to {id}");
+    }
+}
+
+#[test]
+fn a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capabilities() {
+    let hub = TestHub::start_with("machine_load", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (book_creds, book_id) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, mini_id) = registered(&url, &token, "ana@acme.dev", "mini");
+    let book_home = temp("machine-load-book");
+    let book = Node::start(&book_home, book_creds);
+    book.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true), ("mini", false)]);
+
+    assert_eq!(state_of(&mut client, &mini_id), None, "a machine that reported nothing shows none");
+    let _mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    wait_for("the hub keeps the mini's summary", || state_of(&mut client, &mini_id).is_some());
+    let kept = state_of(&mut client, &mini_id).unwrap();
+    assert!(kept["reported_at"].as_i64().unwrap() > 1_700_000_000, "the hub stamps when it heard: {kept}");
+    let mut expected = the_minis_state();
+    expected["reported_at"] = kept["reported_at"].clone();
+    expected["accounts"][0]["limited"] = json!(false);
+    assert_eq!(kept, expected);
+
+    wait_for("the book's own node reports", || state_of(&mut client, &book_id).is_some_and(|state| state["accounts"].as_array().is_some_and(|accounts| accounts.iter().any(|a| a["id"] == "claude" && a["can_run_child_task"] == true))));
+    let own = state_of(&mut client, &book_id).unwrap();
+    assert!(own["load"]["disk_free_mb"].as_u64().is_some() && own["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "{own}");
+
+    let machines = capabilities_of(&book_home)["machines"].clone();
+    let mini = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(mini_id)).unwrap_or_else(|| panic!("{machines}")).clone();
+    assert_eq!((&mini["name"], &mini["online"], &mini["isThisMachine"], &mini["workersRunning"], &mini["workersAtOnce"]), (&json!("mini"), &json!(true), &json!(false), &json!(2), &json!(3)));
+    assert_eq!(mini["load"]["disk_free_mb"], 24_576);
+    let ids: Vec<&Value> = mini["providers"].as_array().unwrap().iter().map(|p| &p["providerInstanceId"]).collect();
+    assert_eq!(ids, [&json!("claude"), &json!("cursor")], "the mini has no bloom account, and the caller can see that");
+    assert_eq!(mini["providers"][1]["limited"], true);
+    let this = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(book_id)).unwrap();
+    assert_eq!(this["isThisMachine"], true);
+    let text = machines.to_string();
+    assert!(!text.contains("ana@acme.dev") && !text.contains("token"), "{text}");
+}
+
+#[test]
+fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_it() {
+    let hub = TestHub::start_with("machine_refuse", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (origin_creds, _) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, _) = registered(&url, &token, "ana@acme.dev", "mac-mini");
+    let mut mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    let mut origin = MachineSock::connect(&url, &origin_creds.machine_token, "0.17.24");
+    client.wait_machines(&[("book", true), ("mac-mini", true)]);
+    wait_for("the hub keeps the mini's summary", || machine_rows(&mut client).iter().any(|row| row["name"] == "mac-mini" && row.get("state").is_some()));
+
+    origin.send(machine_delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
+    origin.send(machine_delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
+    origin.send(machine_delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
+    while let Some(frame) = mini.try_text() {
+        assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
+    }
+}
+
+#[test]
+fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
+    let hub = TestHub::start_with("machine_load_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let (ana_creds, ana_id) = registered(&url, &ana_token, "ana@acme.dev", "ana-mini");
+    let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
+    let _ana = reporting(&url, &ana_creds.machine_token, the_minis_state());
+    let bruno_home = temp("machine-load-bruno");
+    let bruno = Node::start(&bruno_home, bruno_creds);
+    bruno.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana_client.wait_machines(&[("ana-mini", true)]);
+    bruno_client.wait_machines(&[("bruno-mac", true)]);
+    wait_for("Ana's summary is kept", || state_of(&mut ana_client, &ana_id).is_some());
+    wait_for("Bruno's node reports", || state_of(&mut bruno_client, &bruno_id).is_some());
+
+    let rows = machine_rows(&mut bruno_client);
+    assert_eq!(rows.iter().map(|row| row["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")]);
+    let machines = capabilities_of(&bruno_home)["machines"].clone();
+    assert_eq!(machines.as_array().unwrap().iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")], "{machines}");
+    assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("grok-4.7") && !machines.to_string().contains("ana-mini"), "{machines}");
+    let (raw_creds, _) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-raw");
+    let mut origin = MachineSock::connect(&url, &raw_creds.machine_token, "0.17.24");
+    origin.send(machine_delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
+    assert_eq!(reply_to(&mut origin, 3)["err"], "this account has no machine ana-mini");
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && f.to_string().contains(&ana_id)).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine: {leaked:?}");
+}
+
+#[test]
+fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
+    let hub = TestHub::start_with("machine_load_projects", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (creds, id) = registered(&url, &token, "ana@acme.dev", "book");
+    let home = temp("machine-load-projects");
+    let node = Node::start(&home, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true)]);
+    let folder = home.join("site");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = node.machine.open_project(folder).display().to_string();
+    wait_for("the node reports its load", || state_of(&mut client, &id).is_some());
+
+    let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
+    let checkout = overview["projects"].as_array().unwrap().iter().flat_map(|p| p["checkouts"].as_array().unwrap()).find(|c| c["path"] == json!(path)).unwrap_or_else(|| panic!("{overview}")).clone();
+    assert!(checkout["load"]["disk_free_mb"].as_u64().is_some() && checkout["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "the checkout shows its machine's load: {checkout}");
+    let machine = &overview["machines"][0];
+    assert_eq!(machine["name"], "book");
+    assert!(machine["state"]["accounts"].as_array().unwrap().iter().any(|a| a["id"] == "claude"), "{machine}");
+    assert!(machine["state"]["workers_at_once"].as_u64().is_some_and(|n| n > 0), "{machine}");
 }

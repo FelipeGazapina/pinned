@@ -171,6 +171,9 @@ struct Online {
     /// It runs in one of the account's boxes, so no other run goes to it.
     dedicated: bool,
     version: String,
+    /// What the machine last reported about its load and accounts. It goes with the connection, so
+    /// an offline machine shows none.
+    state: Option<pinned_core::load::MachineState>,
 }
 
 impl Online {
@@ -465,7 +468,7 @@ impl Hub {
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
-            HubCall::Machines => return json(self.machines(account).await?),
+            HubCall::Machines | HubCall::MachineStates => return json(self.machines(account).await?),
             HubCall::RenameMachine { id, name } => {
                 let name = name.trim();
                 if name.is_empty() {
@@ -606,7 +609,7 @@ impl Hub {
             HubCall::CancelBoxClaudeToken { machine, account: name } => {
                 return self.call_machine(account, &machine, Call::CancelSetupToken { account: name }, MACHINE_CALL_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e));
             }
-            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
+            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
@@ -894,7 +897,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -924,6 +927,19 @@ impl Account {
         let live = self.live.lock().unwrap();
         let updates = self.updates.lock().unwrap();
         apply_overlay(&live, &updates, machines);
+    }
+
+    /// What the online `machine` last reported about its load and accounts.
+    pub fn state_of(&self, machine: &str) -> Option<pinned_core::load::MachineState> {
+        self.live.lock().unwrap().machines.get(machine)?.state.clone()
+    }
+
+    /// Keeps `state`, which the online `machine` just answered, as its latest report.
+    pub fn note_state(&self, machine: &str, state: pinned_core::load::MachineState) {
+        let reported_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        if let Some(online) = self.live.lock().unwrap().machines.get_mut(machine) {
+            online.state = Some(pinned_core::load::MachineState { reported_at, ..state });
+        }
     }
 
     pub fn dedicated(&self, machine: &str) -> bool {
@@ -1096,6 +1112,11 @@ impl Account {
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
+            MachineEvent::State { state } => {
+                let reported_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+                m.state = Some(pinned_core::load::MachineState { reported_at, ..state.clone() });
+                return;
+            }
             _ => {}
         }
         let thread_tab = match &event {
@@ -1262,6 +1283,7 @@ fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machin
     for machine in machines {
         machine.online = live.machines.contains_key(&machine.id);
         machine.update = updates.get(&machine.id).cloned();
+        machine.state = live.machines.get(&machine.id).and_then(|online| online.state.clone());
         if let Some(version) = live.machines.get(&machine.id).map(|online| online.version.clone()).filter(|version| !version.is_empty()) {
             machine.version = version;
         }

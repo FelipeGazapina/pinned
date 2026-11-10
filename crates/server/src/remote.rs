@@ -4,7 +4,7 @@
 //! only among that account's own, so a machine reaches no machine, box or task of another account.
 
 use crate::hub::{Account, Hub, Unanswered, RUN_WAIT};
-use pinned_core::delegate::{Origin, RemoteEnd, Request};
+use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request};
 use pinned_core::github;
 use pinned_core::link::is_unknown_command;
 use pinned_core::wire::{Call, HubCall, TabId};
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 const LOOK_WAIT: Duration = Duration::from_secs(30);
 
-/// Answers a machine's `Delegate`, `RemoteTask` and `RemoteEnded`. `from` is the machine whose
+/// Answers a machine's `Delegate`, `RemoteTask`, `RemoteEnded` and `RemoteAsked`. `from` is the machine whose
 /// socket sent the call.
 pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, call: HubCall) -> Result<Value, String> {
     match call {
@@ -25,6 +25,7 @@ pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, call: Hub
         }
         HubCall::RemoteTask { machine, tab, task, cancel } => remote_task(hub, account, from, &machine, tab, task, cancel).await,
         HubCall::RemoteEnded { to, tab, task, end } => ended(hub, account, from, &to, tab, task, end).await,
+        HubCall::RemoteAsked { to, tab, task, ask } => asked(hub, account, from, &to, tab, task, ask).await,
         _ => Err("that is not a delegate call".into()),
     }
 }
@@ -44,6 +45,18 @@ async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Or
     }
     if !account.is_online(&machine) {
         return Err(format!("{name} is offline, so it can't take the worker; nothing ran elsewhere"));
+    }
+    // What the machine reported up to 20 s ago can miss an account it just signed in to, so a refusal
+    // is checked against what it says now.
+    if pinned_core::load::refusal(&name, &request.target, account.state_of(&machine).as_ref()).is_some() {
+        if let Ok(fresh) = hub.call_machine(account, &machine, Call::State, LOOK_WAIT).await {
+            if let Ok(state) = serde_json::from_value::<pinned_core::load::MachineState>(fresh) {
+                account.note_state(&machine, state);
+            }
+        }
+        if let Some(reason) = pinned_core::load::refusal(&name, &request.target, account.state_of(&machine).as_ref()) {
+            return Err(reason);
+        }
     }
     let token = hub.connectors(account).await?.github_token().filter(|_| repo.as_deref().is_some_and(github::hosts));
     let mut started = call(hub, account, &machine, Call::Delegate { origin, request: Box::new(request), repo, token }, RUN_WAIT).await?;
@@ -111,6 +124,18 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
         hub.boxes.end_delegate(hub, account, row).await?;
     }
     Ok(taken)
+}
+
+/// Passes what a task `from` runs waits on the user for, or that it waits on nothing, to the
+/// machine `to` whose tab delegated it. Answers whether that machine took it, as `ended` does; a
+/// machine that predates this call, or has no such task, does not, and `from` leaves it.
+async fn asked(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, ask: Option<RemoteAsk>) -> Result<Value, String> {
+    match hub.call_machine(account, to, Call::RemoteAsked { from: from.to_owned(), tab, task, ask }, LOOK_WAIT).await {
+        Ok(taken) => Ok(taken),
+        Err(Unanswered::Refused(e)) if !account.is_online(to) => Err(e),
+        Err(Unanswered::Refused(_)) => Ok(Value::Bool(false)),
+        Err(Unanswered::Lost(e)) => Err(e),
+    }
 }
 
 async fn call(hub: &Hub, account: &Account, machine: &str, call: Call, wait: Duration) -> Result<Value, String> {

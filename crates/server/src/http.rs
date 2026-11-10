@@ -612,7 +612,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
-    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None };
+    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
@@ -732,7 +732,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
 async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
-    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
+    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
@@ -789,6 +789,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::ImportTastes { .. }
                 | HubCall::GetTastes
                 | HubCall::DelegationStats { .. }
+                | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
                 | HubCall::SyncList { .. }
                 | HubCall::SyncPush { .. }

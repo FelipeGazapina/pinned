@@ -1115,6 +1115,41 @@
                 ]
               },
               {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -3127,6 +3162,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -3918,6 +3966,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -5564,6 +5658,19 @@
                 ]
               },
               {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -6242,6 +6349,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -10383,6 +10525,41 @@
                 ]
               },
               {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -12375,6 +12552,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -13148,6 +13338,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -14760,6 +14996,19 @@
                 ]
               },
               {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -15431,6 +15680,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -18861,6 +19145,23 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`\nand passes it to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "state"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/MachineState"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "state"
+                ]
               }
             ]
           },
@@ -19068,6 +19369,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -19537,6 +19845,151 @@
                   "kind"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
             ]
           },
           "HubCall": {
@@ -20104,6 +20557,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -20789,6 +21255,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -23848,6 +24349,52 @@
               "wall_ms"
             ]
           },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "TaskRecord": {
             "description": "One finished delegated task, as the hub keeps it for the account.",
             "type": "object",
@@ -24797,6 +25344,23 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`\nand passes it to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "state"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/MachineState"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "state"
+                ]
               }
             ]
           },
@@ -25004,6 +25568,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -25454,6 +26025,142 @@
                   "kind"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           },
           "HubCall": {
@@ -26020,6 +26727,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -26698,6 +27418,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -29658,6 +30413,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "TaskRecord": {
@@ -35099,6 +35900,17 @@
                 "type": "null"
               }
             ]
+          },
+          "state": {
+            "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MachineState"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -35199,6 +36011,151 @@
                 ]
               }
             ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
+            ]
           }
         }
       },
@@ -35240,6 +36197,17 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/UpdateStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MachineState"
               },
               {
                 "type": "null"
@@ -35342,6 +36310,142 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           }
         }
@@ -36231,6 +37335,17 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "load": {
+                "description": "How busy that machine is, as it last reported. Absent while it is offline or too old to report.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Load"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -36263,6 +37378,63 @@
               }
             ]
           },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
           "Waiting": {
             "description": "A tab that waits on the user.",
             "type": "object",
@@ -36278,6 +37450,31 @@
               },
               "kind": {
                 "$ref": "#/$defs/WaitingKind"
+              },
+              "ask": {
+                "description": "Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that\npredates it, and from any other kind.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AskKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tool": {
+                "description": "The tool an `approval` is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "description": "What the tool call or the question is, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "project": {
                 "description": "The project folder the tab works in, when it has one.",
@@ -36332,6 +37529,21 @@
               }
             ]
           },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "OverviewMachine": {
             "type": "object",
             "properties": {
@@ -36354,6 +37566,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "state": {
+                "description": "Its load, accounts and Workers at once, as it last reported them.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -36361,6 +37584,94 @@
               "name",
               "online",
               "version"
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
             ]
           },
           "Session": {
@@ -36642,6 +37953,17 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "load": {
+                "description": "How busy that machine is, as it last reported. Absent while it is offline or too old to report.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Load"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -36672,6 +37994,63 @@
               }
             ]
           },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
           "Waiting": {
             "description": "A tab that waits on the user.",
             "type": "object",
@@ -36687,6 +38066,31 @@
               },
               "kind": {
                 "$ref": "#/$defs/WaitingKind"
+              },
+              "ask": {
+                "description": "Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that\npredates it, and from any other kind.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AskKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tool": {
+                "description": "The tool an `approval` is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "description": "What the tool call or the question is, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "project": {
                 "description": "The project folder the tab works in, when it has one.",
@@ -36741,6 +38145,21 @@
               }
             ]
           },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "OverviewMachine": {
             "type": "object",
             "properties": {
@@ -36763,12 +38182,102 @@
                   "string",
                   "null"
                 ]
+              },
+              "state": {
+                "description": "Its load, accounts and Workers at once, as it last reported them.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "id",
               "name",
               "online"
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           },
           "Session": {
@@ -37060,6 +38569,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -37160,6 +38680,151 @@
                 ]
               }
             ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
+            ]
           }
         }
       },
@@ -37225,6 +38890,17 @@
                 "anyOf": [
                   {
                     "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
                   },
                   {
                     "type": "null"
@@ -37327,6 +39003,142 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           }
         }
@@ -37452,6 +39264,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -37552,6 +39375,151 @@
                 ]
               }
             ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
+            ]
           }
         }
       },
@@ -37608,6 +39576,17 @@
                 "anyOf": [
                   {
                     "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
                   },
                   {
                     "type": "null"
@@ -37710,6 +39689,142 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           }
         }
@@ -41872,6 +43987,13 @@
               "string",
               "null"
             ]
+          },
+          "ask_detail": {
+            "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -42248,6 +44370,13 @@
           },
           "question": {
             "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ask_detail": {
+            "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
             "type": [
               "string",
               "null"
@@ -43520,6 +45649,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -43619,6 +45759,151 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
             ]
           },
           "TabView": {
@@ -43825,6 +46110,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -44204,6 +46496,23 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`\nand passes it to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "state"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/MachineState"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "state"
                 ]
               }
             ]
@@ -46441,6 +48750,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -46538,6 +48858,142 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           },
           "TabView": {
@@ -46744,6 +49200,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -47114,6 +49577,23 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`\nand passes it to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "state"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/MachineState"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "state"
                 ]
               }
             ]
@@ -49224,6 +51704,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -49323,6 +51814,151 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "load",
+              "accounts",
+              "sessions",
+              "workers",
+              "workers_at_once",
+              "reported_at"
+            ]
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task",
+              "limited"
             ]
           },
           "Call": {
@@ -50297,6 +52933,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -52312,6 +54983,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -53103,6 +55787,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -54380,6 +57110,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "state": {
+                "description": "How busy the machine is and which accounts it has, as it last told the hub. Absent while it\nis offline, and until a machine that reports it has connected.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MachineState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -54477,6 +57218,142 @@
                   "reason"
                 ]
               }
+            ]
+          },
+          "MachineState": {
+            "description": "The summary a machine reports.",
+            "type": "object",
+            "properties": {
+              "load": {
+                "$ref": "#/$defs/Load",
+                "default": {}
+              },
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AccountState"
+                },
+                "default": []
+              },
+              "sessions": {
+                "description": "Sessions running now, of any role.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers": {
+                "description": "Workers running now: worker sessions and delegated tasks.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "workers_at_once": {
+                "description": "Workers at once that this machine allows a project, from the account's way of working.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "reported_at": {
+                "description": "Unix seconds when the hub heard it. The hub sets it; a machine's own value is ignored.",
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            }
+          },
+          "Load": {
+            "description": "How busy a machine is. A field is None where the machine can't read it.",
+            "type": "object",
+            "properties": {
+              "cpus": {
+                "description": "Logical cores.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cpu_percent": {
+                "description": "The one-minute load average per core, as a percent capped at 100.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "mem_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "mem_available_mb": {
+                "description": "Memory that a new process can take without swapping: free, inactive and cached.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_total_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "disk_free_mb": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            }
+          },
+          "AccountState": {
+            "description": "One agent account of a machine, as far as a caller needs to choose it.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "type": "string"
+              },
+              "driver_kind": {
+                "description": "`claude`, `codex` or `cursor`.",
+                "type": "string"
+              },
+              "can_run_child_task": {
+                "description": "Signed in on that machine, with its CLI installed.",
+                "type": "boolean"
+              },
+              "limited": {
+                "description": "A usage limit stopped it.",
+                "type": "boolean",
+                "default": false
+              },
+              "models": {
+                "description": "The model ids it offers a worker. Empty when it names none, as Codex does.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "driver_kind",
+              "can_run_child_task"
             ]
           },
           "Call": {
@@ -55448,6 +58325,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -57443,6 +60355,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -58216,6 +61141,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "GlobalOrchestratorSettings": {
