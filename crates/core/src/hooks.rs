@@ -76,7 +76,7 @@ pub fn guard() {
     let payload: serde_json::Value = serde_json::from_str(&hook_payload()).unwrap_or_default();
     let tool = payload["tool_name"].as_str().unwrap_or("").to_owned();
     let asked = match (std::env::var(SOCK_ENV), std::env::var(TAB_ENV)) {
-        (Ok(sock), Ok(tab)) => ask(&sock, &Message::Guard { tab, tool, input: payload["tool_input"].clone() }),
+        (Ok(sock), Ok(tab)) => ask_guard(&sock, &Message::Guard { tab, tool, input: payload["tool_input"].clone() }),
         _ => Err("pinned is not running".into()),
     };
     if let Some(output) = guard_output(asked) {
@@ -90,7 +90,7 @@ fn guard_output(asked: Reply) -> Option<String> {
     Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }).to_string())
 }
 
-fn ask(sock: &str, message: &Message) -> Reply {
+fn ask_guard(sock: &str, message: &Message) -> Reply {
     let mut stream = UnixStream::connect(sock).map_err(|e| format!("pinned is not running: {e}"))?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(guard_output(Ok(String::new())), None);
         let denied: serde_json::Value = serde_json::from_str(&guard_output(Err("/x is outside".into())).unwrap()).unwrap();
         assert_eq!(denied, serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "/x is outside" } }));
-        let unreachable = ask("/nonexistent/pinned.sock", &Message::ListReminders);
+        let unreachable = ask_guard("/nonexistent/pinned.sock", &Message::ListReminders);
         assert!(guard_output(unreachable).is_some(), "a machine that can't be reached denies");
     }
 
