@@ -364,6 +364,10 @@ pub enum Call {
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
     SetGlobalOrchestratorSettings { settings: global::Settings },
+    /// `auto_archive::Settings` of this machine: when it archives a finished session.
+    AutoArchiveSettings,
+    /// The `auto_archive::Settings` saved, answered as saved.
+    SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
     /// `reading::read` of the tab's session: its state and the last `items` items of its
     /// conversation, 20 when not given, read from the end of its transcript however long it is.
     ReadSession {
@@ -1174,6 +1178,10 @@ pub enum HubCall {
     /// closed, and Settings › Archive lists it to bring back with its name and pin. Refused while
     /// its turn runs.
     ArchiveSession { machine: MachineId, tab: TabId },
+    /// `marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`
+    /// does it. Only the machine that runs the tab sends it, from its auto-archive check, and the
+    /// hub keeps a pinned thread, an orchestrator and a working one open.
+    AutoArchive { tab: TabId },
     /// `Target`: the new tab, on the archived conversation's machine, that resumes it with its name
     /// and pin back.
     UnarchiveSession { session: String },
@@ -1854,7 +1862,7 @@ mod tests {
         round_trip(HubCall::RemoveBoxClaudeToken { name: "bloom".into() }, json!({ "cmd": "remove_box_claude_token", "name": "bloom" }));
         round_trip(HubCall::MintBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "bloom" }));
         round_trip(HubCall::CancelBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "cancel_box_claude_token", "machine": "m1", "account": "bloom" }));
-        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None, usage: None };
         round_trip(
             HubCall::RemoteEnded { to: "m1".into(), tab: "tab-1".into(), task: "task-1".into(), end: end.clone() },
             json!({ "cmd": "remote_ended", "to": "m1", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),

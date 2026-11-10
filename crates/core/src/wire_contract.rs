@@ -97,6 +97,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("AgentRequest".into(), schemas::<AgentRequest>());
     outbound.insert("AgentRedirect".into(), schemas::<AgentRedirect>());
     outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
+    outbound.insert("AutoArchiveSettings".into(), schemas::<crate::auto_archive::Settings>());
     outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
     outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());

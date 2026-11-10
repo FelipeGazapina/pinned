@@ -156,18 +156,77 @@ function sidebarSettingsHtml() {
     ${toggle("confirmArchive", sideSettings.confirmArchive, "Archive confirmation", "Ask before archiving a thread.")}
     ${toggle("confirmDelete", sideSettings.confirmDelete, "Delete confirmation", "Ask before deleting a thread.")}</section>`;
 }
+/** The last read of the machines' auto-archive settings: `{ machines, view }`. */
+let autoArchive = null;
+/** Reads `auto_archive_settings` from every online machine that is not a box. A machine that is
+ * too old to answer is marked `update`, and one that failed carries its `error`. */
+async function readAutoArchive() {
+  const list = await Promise.all(
+    [...machines.entries()]
+      .filter(([, m]) => !m.view.upstash_box)
+      .map(async ([id, m]) => {
+        const machine = { id, name: machineName(id), online: m.view.online === true, settings: null, update: false, error: null };
+        if (!machine.online) return machine;
+        try {
+          machine.settings = await callOn(id, { cmd: "auto_archive_settings" });
+        } catch (e) {
+          if (isOlderPinned(e)) machine.update = true;
+          else machine.error = String(e?.message ?? e);
+        }
+        return machine;
+      }),
+  );
+  return { machines: list, view: mergeAutoArchive(list) };
+}
+/** The Archive page's Auto-archive section: how long a finished thread idles before it archives,
+ * for worker threads and for the threads the user opened. */
+function autoArchiveHtml() {
+  const { view } = autoArchive;
+  const row = (key, title, about) => `<div class="side-setting" data-setting="${key}"><div><label for="aa-${key}">${title}</label><p class="meta">${about}</p></div>
+    <select id="aa-${key}" aria-label="${title}">${autoArchiveOptions(view[key])}</select></div>`;
+  return `<section id="auto-archive-settings"><h2 class="looks-title">Auto-archive</h2>
+    ${row("workers", "Worker threads", "Archive a thread a delegated task ran in, this long after its work ended and its report was delivered.")}
+    ${row("sessions", "Threads you open", "The same rule for threads you started yourself.")}
+    <p class="meta aa-keeps">A thread stays when it has a pending question, a running worker, uncommitted or unpushed work, or a star. Captains never archive. Archived threads come back with Unarchive.</p>
+    <p class="error" id="aa-error"></p></section>`;
+}
+function bindAutoArchive() {
+  const section = document.getElementById("auto-archive-settings");
+  if (!section) return;
+  const error = document.getElementById("aa-error");
+  const change = async () => {
+    const view = { workers: autoArchiveMinutes(document.getElementById("aa-workers").value), sessions: autoArchiveMinutes(document.getElementById("aa-sessions").value) };
+    const live = autoArchive.machines.map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
+    const writes = autoArchiveWrites(view, live);
+    const results = await Promise.allSettled(writes.map((w) => callOn(w.machine, { cmd: "set_auto_archive_settings", settings: w.settings })));
+    const failed = results.filter((r) => r.status === "rejected");
+    error.textContent = !writes.length ? "No machine is online to take this." : failed.length ? `Couldn't save on ${failed.length} of ${writes.length} machines: ${failed[0].reason?.message ?? failed[0].reason}` : "";
+    if (writes.length > failed.length) autoArchive.view = view;
+  };
+  for (const key of ["workers", "sessions"]) document.getElementById(`aa-${key}`).onchange = change;
+}
 /** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
  * with Unarchive, or from its context menu, which also deletes. */
 function showArchive() {
+  autoArchive ??= { machines: [], view: { ...AA_DEFAULT_SETTINGS } };
   const since = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
   const machinesShown = new Set(archived.map((a) => a.machine)).size > 1;
   const order = archived.map((a, i) => [a, i]).sort(([a], [b]) => b.at - a.at);
   const projects = [...new Set(order.map(([a]) => a.project))];
-  settingsPage.innerHTML = `<h2>Archive</h2><section id="archive-settings">${!archived.length
+  settingsPage.innerHTML = `<h2>Archive</h2>${autoArchiveHtml()}<section id="archive-settings">${!archived.length
     ? `<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`
     : projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${order.filter(([a]) => a.project === project).map(([a, i]) => `
       <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${machinesShown ? `${esc(machineName(a.machine))} · ` : ""}Archived ${since(a.at)}${a.created ? ` · Created ${since(a.created)}` : ""}</p></div>
         <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`).join("")}`).join("")}</section>`;
+  bindAutoArchive();
+  // The machines answer after the page is up, and what they hold replaces the defaults it showed.
+  readAutoArchive().then((read) => {
+    autoArchive = read;
+    const section = document.getElementById("auto-archive-settings");
+    if (!section || !settingsOpen() || page !== "archive") return;
+    section.outerHTML = autoArchiveHtml();
+    bindAutoArchive();
+  }, () => {});
   const root = document.getElementById("archive-settings");
   const unarchive = (i) => resumeThread(archived[i], () => {
     archived.splice(i, 1);
@@ -334,13 +393,45 @@ function snoozeLimitStops() {
   }
 }
 
+/** Per machine id, whether it had a thread while it was online. An offline machine that had one is named
+ * in the sidebar, and so is one nothing is known of; one seen online with none is not. It survives a
+ * reload, so a machine that is already down when the page opens is still named. A machine that stops
+ * cleanly closes its threads before it goes, so a later 0 never takes a "had threads" back. */
+const threadsSeen = (() => {
+  try {
+    return JSON.parse(load("machine-threads")) ?? {};
+  } catch {
+    return {};
+  }
+})();
+function noteThreadsSeen(machine, count) {
+  if (machine === LOCAL || !machines.get(machine)?.view?.online) return;
+  const had = count > 0 || (threadsSeen[machine] ?? false);
+  if (threadsSeen[machine] === had) return;
+  threadsSeen[machine] = had;
+  save("machine-threads", JSON.stringify(threadsSeen));
+}
+
+/** One line for a machine that is offline: its name and when it was last seen. */
+function machineNote(machine) {
+  const note = document.createElement("div");
+  note.className = "machine-note";
+  note.setAttribute("role", "status");
+  note.dataset.machine = machine.id;
+  note.innerHTML = `<span class="dot"></span><span class="text"><b>${esc(machine.name)}</b> offline${machine.seen ? ` · ${esc(machine.seen)}` : ""}</span>`;
+  return note;
+}
+
 /** The fixed rows above the projects: the global orchestrator's own row, with how many things
  * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
  * orchestrator as its settings do and its host machine under that, and is left out while no
  * machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
-  const host = globalHostMachine();
+  const online = globalHostMachine();
+  // With no machine online the row stays, on the machine that held it last, and says why it can't open.
+  const host = online ?? [...machines.keys()].find((id) => id !== LOCAL) ?? null;
+  const away = !!host && machines.get(host)?.view?.online !== true;
   const asks = agentWaitingRows();
   if (!host && !asks.length) return [];
   const threads = globalWaitingRows();
@@ -352,9 +443,14 @@ function globalSidebarTop() {
     row.type = "button";
     row.className = "global-row";
     row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
+    row.classList.toggle("disabled", away);
+    if (away) {
+      row.setAttribute("aria-disabled", "true");
+      row.title = `${machineName(host)} is offline, so the orchestrator can't open`;
+    }
     row.dataset.globalOpen = "true";
     const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
-    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
+    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · ${away ? "offline" : "all projects"}</span></span>${count}`;
     top.push(row);
   }
   const offers = globalOfferRows();
@@ -458,7 +554,7 @@ function globalOfferRows() {
  * tab starts when its first message is sent, as every other new tab does. */
 async function openGlobalChat() {
   const host = globalHostMachine();
-  if (!host) return tell("No machine is online to open the orchestrator on.", 4000);
+  if (!host || machines.get(host)?.view?.online !== true) return tell(host ? `${esc(machineName(host))} is offline, so the orchestrator can't open.` : "No machine is online to open the orchestrator on.", 4000);
   if (narrow(768)) toggleSidebar(false);
   try {
     const open = tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
@@ -486,8 +582,10 @@ function renderSidebar() {
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
-  threadList.replaceChildren(...globalSidebarTop(), ...list);
-  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
+  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
+  threadList.replaceChildren(...away.map(machineNote), ...globalSidebarTop(), ...list);
+  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
@@ -982,8 +1080,17 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
+/** When the app's hub link dropped, in seconds, while it is down. The timers stop there, so a "Working 7m"
+ * the app can no longer vouch for doesn't keep counting. */
+let linkDownAt = null;
+function noteHubLink(on) {
+  linkDownAt = on ? null : (linkDownAt ?? nowS());
+}
+/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
+const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
-  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, nowS() - el.dataset.since)) : "";
+  const now = linkDownAt ?? nowS();
+  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
   for (const el of document.querySelectorAll("[data-stats]")) {
     const text = statsLabel(tabByKey(el.dataset.stats));
     if (el.textContent !== text) el.textContent = text;

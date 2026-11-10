@@ -36,6 +36,7 @@
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
+    <div id="reconnect-bar" role="status"><span class="spin"></span>Reconnecting… showing the last state</div>
     <header data-tauri-drag-region data-status="idle">
       <span class="dot"></span>
       <span id="title" data-tauri-drag-region>claude</span>
@@ -166,11 +167,13 @@
     <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
     <input name="invite" placeholder="Invite code, to create an account" autocomplete="off" spellcheck="false" autocapitalize="characters" hidden>
     <p class="error"></p>
+    <button type="button" class="retry" name="retry" hidden>Retry</button>
     <div class="actions"><button type="button" class="secondary" name="signup">Create account</button><button class="primary">Sign in</button></div>
   </form>
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
 <script src="transport.js"></script>
+<script src="connection.js"></script>
 <script src="hub.js"></script>
 <script src="main.js"></script>
 <script src="update-all.js"></script>
@@ -202,6 +205,7 @@
 <script src="gui-agents.js"></script>
 <script src="composer-tags.js"></script>
 <script src="global-orchestrator.js"></script>
+<script src="auto-archive.js"></script>
 <script src="taste.js"></script>
 <script src="delegation.js"></script>
 <script src="gui-composer.js"></script>
