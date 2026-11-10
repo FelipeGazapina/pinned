@@ -51,6 +51,7 @@ impl Credentials {
     /// The app's credentials. With a store, the login comes from it, and a login `account.json`
     /// still holds moves there first: written, read back, then taken out of the file. A move that
     /// fails or stops halfway leaves the file's login in place, and the next start tries again.
+    /// When the file has no login and the store has none to give, or fails, the app is signed out.
     pub fn load_app(dir: &Path, store: Option<&dyn LoginStore>) -> Option<Credentials> {
         let mut creds = Credentials::load(dir)?;
         let Some(store) = store else { return Some(creds) };
@@ -60,8 +61,14 @@ impl Credentials {
             }
         } else {
             match store.get(&creds.login_account()) {
-                Ok(login) => creds.user_token = login.unwrap_or_default(),
-                Err(e) => eprintln!("pinned: could not read the hub login: {e}"),
+                Ok(Some(login)) => creds.user_token = login,
+                // Signed out: a link started with an empty token would never connect. The file
+                // stays, and a new sign-in overwrites it.
+                Ok(None) => return None,
+                Err(e) => {
+                    eprintln!("pinned: could not read the hub login: {e}");
+                    return None;
+                }
             }
         }
         Some(creds)
@@ -318,7 +325,7 @@ fn send(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::login_store::fake::{Memory, Writes};
+    use crate::login_store::fake::{Memory, Reads, Writes};
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
@@ -421,6 +428,21 @@ mod tests {
             assert_eq!(working.logins().len(), 1, "a later start moves it");
             assert_eq!(Credentials::load(dir.path()).unwrap().user_token, "");
         }
+    }
+
+    #[test]
+    fn a_store_that_cannot_give_the_login_means_signed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        signed_in("ana@acme.dev", "").save(dir.path()).unwrap();
+        let file = on_disk(dir.path());
+
+        assert_eq!(Credentials::load_app(dir.path(), Some(&Memory::with_reads(Reads::Refused))), None, "a failing read");
+        assert_eq!(Credentials::load_app(dir.path(), Some(&Memory::default())), None, "an item that is gone");
+        assert_eq!(on_disk(dir.path()), file, "the file stays for a new sign-in to overwrite");
+
+        let store = Memory::default();
+        store.set("https://pinned.example.com ana@acme.dev", "u-t0k").unwrap();
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")), "a login it has still loads");
     }
 
     #[test]

@@ -1,13 +1,13 @@
 # Sign and notarize the macOS app with a Developer ID
 
 The release signs pinned ad hoc (`"signingIdentity": "-"` in `tauri.conf.json`). macOS then asks
-users to approve the app by hand in Privacy & Security, and the Keychain item that holds the app's
-hub login names one exact build. Every update gets a new build hash, so the first start after an
-update asks the user for their Mac password before it can read the login.
+users to approve the app by hand in Privacy & Security. A Keychain item names the exact build that
+made it, and every ad-hoc update gets a new build hash, so the app keeps its hub login in the
+Keychain only in a signed build. Until then the login stays in `account.json`.
 
 A Developer ID signature and Apple's notarization fix both. Gatekeeper opens the app with no
 workaround. The Keychain names the app by its bundle id and team, so updates keep reading the login
-with no prompt.
+with no prompt, and signing turns the Keychain on.
 
 `.github/workflows/release.yml` already has the step that signs and notarizes. It runs only when
 the secrets in step 3 exist. Without them, the release builds ad-hoc signed, as before.
@@ -190,15 +190,20 @@ does not change it.
 
 ## 6. The Keychain after signing
 
-In 0.17.23, the app keeps its hub login in the login keychain as a generic password
+Signing turns the Keychain on. The release workflow sets `PINNED_DEVELOPER_ID_BUILD=1` at compile
+time when the Developer ID secrets exist (`scripts/apple-signing-env.sh`), and only then does the
+app keep its hub login in the Keychain. An ad-hoc build keeps it in `account.json`, because the item
+would name that build's code hash and every update would ask for the Mac password.
+
+In a signed build, the app keeps its hub login in the login keychain as a generic password
 (`crates/core/src/login_store.rs`):
 
 - service `dev.personal-harness.pinned.hub-login`
 - account `<hub URL> <account email>`
-- created by the app with the default access list, which names that ad-hoc build by its code hash
+- created by the app with the default access list, which names the build that made it
 
 Any other program reads the login only after the user types their Mac password into a system
-prompt. Each new ad-hoc build also has to ask once. Signing changes this in two stages.
+prompt. Signing changes this in two stages.
 
 **Signing alone.** An item that a signed build creates names the app by its designated requirement:
 `identifier "dev.personal-harness.pinned"` plus Apple's Developer ID anchor plus

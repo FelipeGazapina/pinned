@@ -2,6 +2,7 @@
 # Prints, in $GITHUB_ENV syntax, the signing and notarization variables tauri-action reads, for the
 # secrets that exist. Without APPLE_CERTIFICATE it prints nothing and the release stays ad-hoc
 # signed: tauri reads a variable that is set but empty as a certificate or identity, and fails.
+# With them it also prints PINNED_DEVELOPER_ID_BUILD=1, which turns the Keychain on.
 # docs/release/developer-id.md lists the secrets.
 set -euo pipefail
 
@@ -31,6 +32,10 @@ emit() {
 
 need APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
 emit APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+# A compile-time flag: login_store::system() uses the Keychain only in a build signed with a
+# Developer ID, because an ad-hoc build would ask for the Mac password after every update.
+PINNED_DEVELOPER_ID_BUILD=1
+emit PINNED_DEVELOPER_ID_BUILD
 
 if [ -n "${APPLE_API_KEY:-}" ]; then
   need APPLE_API_ISSUER APPLE_API_PRIVATE_KEY

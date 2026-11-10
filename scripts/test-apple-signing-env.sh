@@ -47,8 +47,14 @@ expect "and names what is missing" "$(cat "$tmp/stderr")" \
 
 signing=(APPLE_CERTIFICATE=Y2VydA== APPLE_CERTIFICATE_PASSWORD=p12-pass "APPLE_SIGNING_IDENTITY=Developer ID Application: Ana (TEAM123456)")
 
-expect "a certificate alone signs without notarizing" "$(run "${signing[@]}" | parse)" \
-  "$(printf '%s\n' APPLE_CERTIFICATE=Y2VydA== APPLE_CERTIFICATE_PASSWORD=p12-pass "APPLE_SIGNING_IDENTITY=Developer ID Application: Ana (TEAM123456)")"
+expect "a certificate alone signs without notarizing, and marks the build for the Keychain" "$(run "${signing[@]}" | parse)" \
+  "$(printf '%s\n' APPLE_CERTIFICATE=Y2VydA== APPLE_CERTIFICATE_PASSWORD=p12-pass "APPLE_SIGNING_IDENTITY=Developer ID Application: Ana (TEAM123456)" PINNED_DEVELOPER_ID_BUILD=1)"
+
+expect "a Developer ID build prints the flag that turns the Keychain on" \
+  "$(run "${signing[@]}" | parse | grep -c '^PINNED_DEVELOPER_ID_BUILD=1$')" "1"
+expect "an ad-hoc build prints no flag" "$(run | grep -c PINNED_DEVELOPER_ID_BUILD || true)" "0"
+expect "empty secrets print no flag" \
+  "$(run APPLE_CERTIFICATE= APPLE_CERTIFICATE_PASSWORD= APPLE_SIGNING_IDENTITY= | grep -c PINNED_DEVELOPER_ID_BUILD || true)" "0"
 
 expect "an API key notarizes through a .p8 file" \
   "$(run "${signing[@]}" APPLE_API_KEY=KEY1234567 APPLE_API_ISSUER=issuer-uuid APPLE_API_PRIVATE_KEY=p8-body APPLE_ID=ignored@acme.dev | parse | tail -3)" \
