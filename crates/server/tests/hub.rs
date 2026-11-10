@@ -4927,7 +4927,7 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(session_tool(&ana.dir, &ana.tab, json!({ "name": "memory_search", "query": "deploy" })), Ok(json!("No memory matches that.")), "the memory went to docs, not the session's own project");
 
     assert_eq!(act(&ana.dir, &ana.tab, "write_input", json!({ "tab": ana.tab, "data": "y" })), Err("write_input is not open to agents: the app's terminal plumbing".into()));
-    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": ana.tab, "text": "hi" })), Err("prompt is a write action that is not wired yet".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "device_hub", json!({ "tab": ana.tab })), Err("device_hub is a write action that is not wired yet".into()));
     assert_eq!(act(&ana.dir, &ana.tab, "rename_machine", json!({ "id": ana.machine, "name": "x", "token": "abc" })), Err("an agent never sends a password, key or token: token. The user enters it in the app.".into()));
     assert_eq!(act(&ana.dir, &ana.tab, "nope", json!({})), Err("no action nope; call actions to list them".into()));
     assert_eq!(machine_result(&url, &spare_token, json!({ "cmd": "act", "act": { "tab": "tab-zz-1", "action": "machines" } })), Err("ana-spare runs no session tab-zz-1".into()), "a machine acts only for a session it reports");
@@ -5001,7 +5001,7 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
             ("machines", "refused", "ana-spare runs no session tab-zz-1"),
             ("nope", "refused", "no action nope; call actions to list them"),
             ("rename_machine", "refused", "an agent never sends a password, key or token: token. The user enters it in the app."),
-            ("prompt", "refused", "prompt is a write action that is not wired yet"),
+            ("device_hub", "refused", "device_hub is a write action that is not wired yet"),
             ("write_input", "refused", "write_input is not open to agents: the app's terminal plumbing"),
             ("memory_search", "done", ""),
             ("memory_save", "done", ""),
