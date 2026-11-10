@@ -552,7 +552,7 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 }
 
 .add-account .row { flex-wrap: wrap; }
-@media (max-width: 639px) { #settings .add-account .row select { flex: 1 1 100%; max-width: none; } }
+@media (max-width: 639px) { #settings .add-account .row select, #settings .add-account .row input { flex: 1 1 100%; max-width: none; } }
 .add-account [name=key] { flex: 1 1 240px; }
 .replace-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .replace-key input { flex: 1 1 240px; }
