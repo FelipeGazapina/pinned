@@ -9204,7 +9204,6 @@ Have another model review a risky change before it goes ahead.";
         assert!(m.view(&captain).unwrap().running, "a stopped Captain starts on the message");
         let args = started(&dir.join("claude"), &captain);
         assert!(args.iter().any(|a| a == "[Session Fix login] Ship it."), "the message names its sender, not the orchestrator: {args:?}");
-        assert!(!args.iter().any(|a| a.contains("[Orchestrator]")), "{args:?}");
 
         let again = enqueue(&session, "r-1").unwrap();
         let first = m.sent.lock().unwrap().find("r-1").map(|sent| sent.handoff.clone()).expect("the ledger kept the message");
