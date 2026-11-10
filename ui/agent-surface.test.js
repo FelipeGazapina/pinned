@@ -61,6 +61,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     ]),
     hub: signedIn ? { hub: (call) => (calls.push(call), answer(call)) } : null,
     page: "agent-activity",
+    actions: {},
     settingsPage: { innerHTML: "" },
     settingsOpen: () => open,
     settingsSection: (section) => sections.push(section),
@@ -69,6 +70,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     tell: (html) => told.push(html),
     ago: () => "5m",
     inviteDate: () => "Nov 16",
+    clockTime: () => "14:30",
     icon: (name) => `<i data-icon="${name}"></i>`,
     document: {
       createElement: element,
@@ -192,11 +194,65 @@ test("an approved create_invite shows its code to copy until Done", async () => 
   const [asks] = context.agentWaitingRows();
   assert.equal(
     tight(asks.innerHTML),
-    `<div class="agent-invite"><b>Invite code</b><span class="hint">Send it to the person you invite. It works once and doesn't expire, and shows only until you press Done.</span>` +
+    `<div class="agent-once"><b>Invite code</b><span class="hint">Send it to the person you invite. It works once and doesn&#39;t expire, and shows only until you press Done.</span>` +
       `<div class="row"><code>K7Q2-9XPL</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
   );
   click(context, "dismiss-code");
   assert.equal(context.agentWaitingRows().length, 0);
+});
+
+test("an approved pair_code shows its command once, to copy and run on the new machine, and signing out forgets it", async () => {
+  const pair = { code: "PAIR-7Q2K", expires_at: 1794250324, command: "curl -fsSL https://hub.example/install.sh | sh -s -- PAIR-7Q2K" };
+  const logged = [];
+  const { context, calls, told } = app({ answer: async () => ({ decision: "approved", outcome: "done", result: pair }) });
+  context.console = { log: (...a) => logged.push(a), warn: (...a) => logged.push(a), error: (...a) => logged.push(a) };
+  context.onAgentConfirmations([{ ...createInvite, id: "c-6", action: "pair_code" }]);
+  click(context, "approve", "c-6");
+  await flush();
+  assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-6", approve: true }]);
+  assert.deepEqual(told, ["Approved pair_code: done"]);
+  assert.deepEqual(logged, []);
+  assert.equal(
+    tight(context.agentWaitingRows()[0].innerHTML),
+    `<div class="agent-once"><b>Pairing command</b><span class="hint">Run it yourself on the new machine. Its code works once, until 14:30, and shows only until you press Done.</span>` +
+      `<div class="row"><code>curl -fsSL https://hub.example/install.sh | sh -s -- PAIR-7Q2K</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
+  );
+  context.resetAgentSurface();
+  assert.equal(context.agentWaitingRows().length, 0);
+});
+
+test("a plain confirm such as update_self approves at once, with no entered, and reads as words with the machine it runs on", async () => {
+  const { context, calls, told } = app({ answer: async () => ({ decision: "approved", outcome: "done", result: null }) });
+  context.onAgentConfirmations([{ ...removeImac, id: "c-7", action: "update_self", about: "Updates pinned on the machine.", args: {}, target: "imac-id" }]);
+  const html = context.agentWaitingRows()[0].innerHTML;
+  assert.match(html, /<b class="title" title="Updates pinned on the machine\.">Update pinned on iMac<\/b>\s*<span class="who">/);
+  click(context, "approve", "c-7");
+  await flush();
+  assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-7", approve: true }]);
+  assert.deepEqual(told, ["Approved update_self: done"]);
+});
+
+test("each confirm action an agent asks for reads as words in the item", () => {
+  const { context } = app();
+  const actions = ["remove_account", "sign_in", "disconnect_linear", "disconnect_github", "disconnect_upstash", "set_box_access", "remove_box_claude_token", "answer_box", "revoke_invite", "approve_agent", "revoke_agent", "connect_vercel", "set_box_claude_token", "pair_code"];
+  context.onAgentConfirmations(actions.map((action, i) => ({ ...removeImac, id: `c-${i}`, action, args: { id: "x" } })));
+  const titles = [...context.agentWaitingRows()[0].innerHTML.matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
+  assert.deepEqual(titles, [
+    "Remove account",
+    "Sign in",
+    "Disconnect Linear",
+    "Disconnect GitHub",
+    "Disconnect Upstash",
+    "Set box access",
+    "Forget box Claude token",
+    "Answer box",
+    "Revoke invite",
+    "Approve agent",
+    "Revoke agent",
+    "Connect Vercel",
+    "Keep box Claude token",
+    "Pair a machine",
+  ]);
 });
 
 test("signing out forgets the confirmations and the invite code", () => {

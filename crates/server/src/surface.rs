@@ -2,11 +2,13 @@
 //! against the manifest, run as the account that owns the session's machine, written to the audit
 //! trail, and a `confirm` action waits for the user's approval in the app.
 
+use crate::boxes::Opener;
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::wire::{Call, HubCall, ToClient};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -110,7 +112,10 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             role: caller.role,
             action: admitted.action.name.to_owned(),
             about: String::new(),
-            args: if act.args.is_null() { Value::Object(Default::default()) } else { act.args.clone() },
+            args: match surface::without_asked(admitted.action, &act.args) {
+                Value::Null => Value::Object(Default::default()),
+                args => args,
+            },
             target: (!admitted.on_origin).then(|| admitted.target.clone()),
             request_id: request_id.map(str::to_owned),
             decision: None,
@@ -131,7 +136,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
     }
     let widened = surface::widening(&admitted.call).unwrap_or_default();
-    match run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await {
+    let ran = if surface::HUB_LIMITS.contains(&admitted.action.name) {
+        limited(hub, account, &caller, admitted.action, admitted.call).await
+    } else {
+        run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await
+    };
+    match ran {
         Ok(result) => {
             trail.ran(AuditOutcome::Done, &widened).await;
             json(ActAnswer::Done { result: surface::redact(result, admitted.action.hides) })
@@ -170,13 +180,16 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if let Some(field) = surface::secret_arg(&act.args) {
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
-    let call = surface::parse(action, &act.args)?;
+    let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
     let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
     let target = match asked {
         Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
         None => origin.to_owned(),
     };
     let on_origin = target == origin;
+    if action.elsewhere && on_origin {
+        return Err(format!("{name} reads files on another machine of the account: on your own machine use your own shell and files"));
+    }
     if action.starts_work && !on_origin {
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
@@ -197,10 +210,26 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Par
     }
 }
 
-/// The user's decision on confirmation `id`, from a signed-in client of `account`.
-pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool) -> Result<Value, String> {
+/// Runs a hub action that starts work (`surface::HUB_LIMITS`) through the limits the hub holds it
+/// to, for the session that asked. One with no path here is refused, never run unheld.
+async fn limited(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, action: &Action, call: Parsed) -> Result<Value, String> {
+    match call {
+        Parsed::Hub(HubCall::OpenBox { repo, size, budget_usd }) => {
+            let opener = Opener { machine: caller.machine, tab: caller.tab.clone(), role: caller.role };
+            json(hub.boxes.open_session(hub, account, repo, size, budget_usd, Some(opener)).await?)
+        }
+        _ => Err(format!("{} starts work on the hub, and nothing holds it to the limits there", action.name)),
+    }
+}
+
+/// The user's decision on confirmation `id`, from a signed-in client of `account`. `entered` is
+/// what they typed in the app for a credential action. It never reaches the trail, the stored
+/// confirmation, the notice or an error, and a credential action whose run fails waits again.
+pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>) -> Result<Value, String> {
     let unknown = || format!("no confirmation {id} waits");
+    let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
+    let typed = if approve { typed_args(hub, account, key, &entered).await.map_err(|e| hide(&e))? } else { None };
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
     let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
@@ -210,9 +239,17 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let (decision, outcome, result) = match (approve, action) {
         (false, _) => (Decision::Denied, "denied".to_owned(), Value::Null),
         (true, None) => (Decision::Approved, format!("failed: no action {} any more", asked.action), Value::Null),
-        (true, Some(action)) => match rerun(hub, account, action, asked).await {
+        (true, Some(action)) => match rerun(hub, account, action, asked, typed.as_ref().unwrap_or(&asked.args)).await {
             Ok(result) => (Decision::Approved, "done".to_owned(), result),
-            Err(e) => (Decision::Approved, format!("failed: {}", surface::mask_secrets(&e)), Value::Null),
+            // A key the service refused: the user types another, so it waits again, with no notice.
+            Err(e) if !action.asks.is_empty() => {
+                let error = hide(&e);
+                trail.ran(AuditOutcome::Failed, &error).await;
+                hub.db.reopen_confirmation(account.id, key).await?;
+                push_confirmations(hub, account).await;
+                return Err(error);
+            }
+            Err(e) => (Decision::Approved, format!("failed: {}", hide(&e)), Value::Null),
         },
     };
     if decision == Decision::Approved {
@@ -221,7 +258,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             None => trail.ran(AuditOutcome::Done, "").await,
         }
     }
-    let shown = surface::redact(result.clone(), action.map_or(&[][..], |a| a.hides));
+    let shown = surface::hide_entered_in(surface::redact(result.clone(), action.map_or(&[][..], |a| a.hides)), &entered);
     hub.db.finish_confirmation(key, &outcome, &shown).await?;
     push_confirmations(hub, account).await;
     let decided = Held { confirmation: Confirmation { decision: Some(decision), outcome: Some(outcome.clone()), ..asked.clone() }, session: held.session.clone(), result: shown };
@@ -255,9 +292,24 @@ pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs an approved confirmation for the session that asked, on the machine it named.
-async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, asked: &Confirmation) -> Result<Value, String> {
-    let call = surface::parse(action, &asked.args)?;
+/// The arguments an approval runs with when the user typed some in the app: the stored ones with
+/// `entered`, checked before the confirmation is taken, so one that lacks a field still waits.
+/// None runs the stored ones, for an action that asks nothing.
+async fn typed_args(hub: &Hub, account: &Account, key: Uuid, entered: &BTreeMap<String, String>) -> Result<Option<Value>, String> {
+    let waiting = hub.db.confirmation(account.id, key).await?.filter(|held| held.confirmation.decision.is_none());
+    let Some(asked) = waiting.map(|held| held.confirmation) else { return Ok(None) };
+    let Some(action) = surface::find(&asked.action) else { return Ok(None) };
+    if action.asks.is_empty() && entered.is_empty() {
+        return Ok(None);
+    }
+    let args = surface::with_entered(action, &asked.args, entered)?;
+    surface::parse(action, &args)?;
+    Ok(Some(args))
+}
+
+/// Runs an approved confirmation with `args` for the session that asked, on the machine it named.
+async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, asked: &Confirmation, args: &Value) -> Result<Value, String> {
+    let call = surface::parse(action, args)?;
     let target = match asked.target.as_deref() {
         Some(named) => crate::remote::resolve(hub, account, named).await?.0,
         None => asked.machine.clone(),
