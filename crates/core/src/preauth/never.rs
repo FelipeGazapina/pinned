@@ -1435,7 +1435,7 @@ impl<'c, 'a> Scan<'c, 'a> {
                     let t = self.tgt(&dir, d);
                     dir = if t.top_var || t.top_glob { None } else { t.path };
                 }
-                if !dir.as_deref().is_some_and(|d| !self.outside(d)) {
+                if dir.as_deref().is_none_or(|d| self.outside(d)) {
                     self.hit(NeverItem::DeleteOutside, "git clean outside the worktree");
                 }
                 let pos = rest.positionals();
@@ -1456,7 +1456,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             "clone" | "worktree" => {
                 let pos = rest.positionals();
-                let dest = if sub == "clone" { pos.get(1) } else if pos.first().is_some_and(|w| w.text == "add") { pos.get(1) } else { None };
+                let dest = if sub == "clone" || pos.first().is_some_and(|w| w.text == "add") { pos.get(1) } else { None };
                 if let Some(d) = dest {
                     self.write_words(cwd, vec![(*d).clone()]);
                 }
