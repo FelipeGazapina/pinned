@@ -11412,7 +11412,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[cfg(unix)]
-    fn turn_done(tab: &str) -> AgentEvent {
+    fn worker_done(tab: &str) -> AgentEvent {
         AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: Some("Done.".into()) }
     }
 
@@ -11466,7 +11466,7 @@ Have another model review a risky change before it goes ahead.";
         let status = m.delegates.status(&caller, &id).unwrap();
         assert_eq!((status["providerInstanceId"].as_str(), status["model"].as_str(), status["movedFrom"]["providerInstanceId"].as_str()), (Some("spare"), Some("claude-opus-5-5"), Some("work")), "task_status says which one ran: {status}");
 
-        m.record_event(turn_done(&tab));
+        m.record_event(worker_done(&tab));
         let record = m.delegates.records().into_iter().find(|r| r.id == id).unwrap();
         assert_eq!((record.account.as_str(), record.model.as_deref(), record.asked_account.as_deref(), record.asked_model.as_deref()), ("spare", Some("claude-opus-5-5"), Some("work"), Some("claude-sonnet-5-5")));
         assert!(record.moved_because.unwrap().contains(GO_429));
