@@ -226,9 +226,12 @@ const hubUp = () => {
 
     // 3. The hub away.
     check(!(await page.evaluate(barShows)), `${size}: no bar while the link is up`);
+    await page.evaluate(() => hub.ws.addEventListener("close", (e) => { window.__closeCode = e.code; }));
     await stopPid("hub.pid");
     await waitFor("the app to see the hub gone", () => page.evaluate(() => document.body.dataset.hub === "offline"));
     await settle();
+    const code = await page.evaluate(() => window.__closeCode);
+    check(code === 1001, `${size}: the stopping hub closed the app's socket with 1001 (saw ${code})`);
     check(await page.evaluate(barShows), `${size}: the Reconnecting bar shows`);
     check(await page.evaluate(() => document.getElementById("reconnect-bar").textContent.includes("Reconnecting")), `${size}: the bar says Reconnecting`);
     const dimmed = await page.evaluate(() => [...document.querySelectorAll(".thread-row .stamp.status.info, .project-head .state.running")].map((el) => getComputedStyle(el).opacity));
@@ -239,7 +242,9 @@ const hubUp = () => {
     check(held !== "" && held === (await since()), `${size}: the working timer holds at ${held}`);
     await shot("reconnecting");
     startHub();
+    const restarted = Date.now();
     await waitFor("the app to reconnect", () => page.evaluate(() => document.body.dataset.hub === "online"), 90000);
+    console.log(`reconnected ${((Date.now() - restarted) / 1000).toFixed(1)} s after the hub started`);
     await waitFor("both nodes back after the hub", () => page.evaluate(() => machineOnline("sweep-node") && machineOnline("sweep-node-2")), 90000);
     await settle();
     check(!(await page.evaluate(barShows)), `${size}: the bar clears when the hub is back`);
