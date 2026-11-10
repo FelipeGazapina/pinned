@@ -4394,7 +4394,7 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
         let remote = fleet.mini.machine.view(second["tabId"].as_str().unwrap()).unwrap();
         assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
     }
-    let stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let mut stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
     wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 3);
     std::thread::sleep(Duration::from_millis(1500));
     let stats = stats();

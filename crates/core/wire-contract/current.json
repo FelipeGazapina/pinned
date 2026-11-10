@@ -109,7 +109,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target2",
+            "$ref": "#/$defs/Target3",
             "required": [
               "type"
             ]
@@ -122,7 +122,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target2",
+            "$ref": "#/$defs/Target3",
             "required": [
               "type"
             ]
@@ -936,6 +936,99 @@
                 ]
               },
               {
+                "description": "The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker\nthread here for a tab on another machine of the account. `origin.machine` is the hub's\nstamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names\nthe checkout it works in, cloned with `token` when this machine has none. A repeat of\n`origin.task` answers the task it started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "origin": {
+                    "$ref": "#/$defs/Origin"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin",
+                  "request"
+                ]
+              },
+              {
+                "description": "The task's status JSON, as `task_status` answers it, or its state once cancelled when\n`cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and\n`task` of `origin_machine`, the hub's stamp of the machine that asks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "origin_machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin_machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`\nended there. `from` is the hub's stamp of the machine that reports it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -1518,7 +1611,7 @@
                   "copies": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/$defs/Target"
+                      "$ref": "#/$defs/Target2"
                     }
                   }
                 },
@@ -3074,6 +3167,425 @@
               }
             ]
           },
+          "Origin": {
+            "description": "The tab on another machine that delegated a task here. The hub stamps `machine` from the\nsocket the request came on.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "task": {
+                "description": "The caller's own id for the task, which the end notice names.",
+                "type": "string"
+              },
+              "access": {
+                "description": "The widest access the caller may hand a child.",
+                "$ref": "#/$defs/Access"
+              },
+              "delegator": {
+                "description": "Who asked, for the record this machine keeps of the task it runs.",
+                "$ref": "#/$defs/Delegator",
+                "default": {
+                  "kind": "session"
+                }
+              },
+              "limits": {
+                "description": "The delegation limits the caller runs under, which the worker here is held to.",
+                "$ref": "#/$defs/Limits",
+                "default": {
+                  "parallel": 3,
+                  "tier": "high",
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "tab",
+              "task",
+              "access",
+              "delegator",
+              "limits"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms",
+              "budget_ms",
+              "limit_ms",
+              "interaction"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "account",
+              "model",
+              "effort"
+            ]
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "size"
+            ]
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -3187,7 +3699,7 @@
               }
             ]
           },
-          "Target": {
+          "Target2": {
             "description": "One copy a save should write, with the tree the client read it at.",
             "type": "object",
             "properties": {
@@ -5090,6 +5602,158 @@
                 ]
               },
               {
+                "description": "From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box\nits target names, for the asking machine's tab `tab`, whose own id for the task is `task`.\n`repo` is the caller's git origin, which the worker's checkout is found or cloned by;\n`access` is the widest the caller may hand a child; `delegator` and `limits` are who asked\nand the limits it runs under, which the worker is held to and recorded with.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "access": {
+                    "$ref": "#/$defs/Access"
+                  },
+                  "delegator": {
+                    "$ref": "#/$defs/Delegator",
+                    "default": {
+                      "kind": "session"
+                    }
+                  },
+                  "limits": {
+                    "$ref": "#/$defs/Limits",
+                    "default": {
+                      "parallel": 3,
+                      "tier": "high",
+                      "max_effort": "max",
+                      "budget_cents": 0,
+                      "time_limit_min": 480,
+                      "box_budget_cents": 0
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task",
+                  "request",
+                  "access",
+                  "delegator",
+                  "limits"
+                ]
+              },
+              {
+                "description": "From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,\nor its state once cancelled when `cancel` gives a reason.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated\nhere as `task`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for\nboxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name",
+                  "token"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, without the token kept for `name`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name"
+                ]
+              },
+              {
                 "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
                 "type": "object",
                 "properties": {
@@ -5334,7 +5998,7 @@
                 "type": "string"
               },
               "effort": {
-                "$ref": "#/$defs/Effort"
+                "$ref": "#/$defs/Effort2"
               },
               "permissionMode": {
                 "$ref": "#/$defs/PermissionMode"
@@ -5610,7 +6274,7 @@
               "mention"
             ]
           },
-          "Effort": {
+          "Effort2": {
             "type": "string",
             "enum": [
               "low",
@@ -5820,15 +6484,6 @@
             "type": "string",
             "enum": [
               "upstash-box"
-            ]
-          },
-          "BoxSize": {
-            "description": "Serialized names match Upstash's `size`.",
-            "type": "string",
-            "enum": [
-              "small",
-              "medium",
-              "large"
             ]
           },
           "Graph": {
@@ -6602,6 +7257,47 @@
                   "kind",
                   "report"
                 ]
+              },
+              {
+                "description": "`text` for the Capitão of `repo` in an Upstash Box the hub opens with the account's own\nconnection, or the box that already runs it. Taken only from the global orchestrator's host.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo",
+                  "size",
+                  "text",
+                  "sender"
+                ]
               }
             ]
           },
@@ -6699,7 +7395,7 @@
               "default_effort": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -6709,7 +7405,7 @@
               "max_effort": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -6802,37 +7498,6 @@
             "required": [
               "name",
               "enabled"
-            ]
-          },
-          "Cost": {
-            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
-            "oneOf": [
-              {
-                "description": "Haiku and flash models: sweeps, translations, first drafts.",
-                "type": "string",
-                "const": "low"
-              },
-              {
-                "description": "The middle default when nothing is known.",
-                "type": "string",
-                "const": "mid"
-              },
-              {
-                "description": "Opus and max efforts: architecture and hairy bugs.",
-                "type": "string",
-                "const": "high"
-              }
-            ]
-          },
-          "Effort2": {
-            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
-            "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
             ]
           },
           "TasteField": {
@@ -7021,7 +7686,7 @@
                 "description": "The effort a worker gets when the call names none. None leaves it to the model.",
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -7031,7 +7696,7 @@
               },
               "max_effort": {
                 "description": "The most effort a call may ask for.",
-                "$ref": "#/$defs/Effort2",
+                "$ref": "#/$defs/Effort",
                 "default": "max"
               },
               "budget_cents": {
@@ -7189,60 +7854,21 @@
               "outcome"
             ]
           },
-          "Delegator": {
-            "description": "The session that started a task.",
-            "type": "object",
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/DelegatorKind"
-              },
-              "tab": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project": {
-                "description": "The project's repo (`host/owner/name`), else its folder.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project_name": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "DelegatorKind": {
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
             "oneOf": [
               {
                 "type": "string",
                 "enum": [
-                  "global_orchestrator",
-                  "captain",
-                  "worker"
+                  "local",
+                  "box"
                 ]
               },
               {
-                "description": "A thread with no role: the user's own session.",
+                "description": "On another machine of the account than its delegator's, which `machine` names.",
                 "type": "string",
-                "const": "session"
+                "const": "machine"
               }
-            ]
-          },
-          "RunTarget": {
-            "description": "Where the task ran, from its delegator's side.",
-            "type": "string",
-            "enum": [
-              "local",
-              "box"
             ]
           },
           "TaskUsage": {
@@ -7351,7 +7977,7 @@
               "redone"
             ]
           },
-          "Target2": {
+          "Target3": {
             "type": "object",
             "properties": {
               "machine": {
@@ -7448,7 +8074,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target2",
+            "$ref": "#/$defs/Target3",
             "required": [
               "type"
             ]
@@ -7461,7 +8087,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target2",
+            "$ref": "#/$defs/Target3",
             "required": [
               "type"
             ]
@@ -8272,6 +8898,99 @@
                 ]
               },
               {
+                "description": "The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker\nthread here for a tab on another machine of the account. `origin.machine` is the hub's\nstamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names\nthe checkout it works in, cloned with `token` when this machine has none. A repeat of\n`origin.task` answers the task it started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "origin": {
+                    "$ref": "#/$defs/Origin"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin",
+                  "request"
+                ]
+              },
+              {
+                "description": "The task's status JSON, as `task_status` answers it, or its state once cancelled when\n`cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and\n`task` of `origin_machine`, the hub's stamp of the machine that asks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "origin_machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin_machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`\nended there. `from` is the hub's stamp of the machine that reports it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -8852,7 +9571,7 @@
                   "copies": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/$defs/Target"
+                      "$ref": "#/$defs/Target2"
                     }
                   }
                 },
@@ -10386,6 +11105,411 @@
               }
             ]
           },
+          "Origin": {
+            "description": "The tab on another machine that delegated a task here. The hub stamps `machine` from the\nsocket the request came on.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "task": {
+                "description": "The caller's own id for the task, which the end notice names.",
+                "type": "string"
+              },
+              "access": {
+                "description": "The widest access the caller may hand a child.",
+                "$ref": "#/$defs/Access"
+              },
+              "delegator": {
+                "description": "Who asked, for the record this machine keeps of the task it runs.",
+                "$ref": "#/$defs/Delegator",
+                "default": {
+                  "kind": "session"
+                }
+              },
+              "limits": {
+                "description": "The delegation limits the caller runs under, which the worker here is held to.",
+                "$ref": "#/$defs/Limits",
+                "default": {
+                  "parallel": 3,
+                  "tier": "high",
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "tab",
+              "task",
+              "access"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -10491,7 +11615,7 @@
               }
             ]
           },
-          "Target": {
+          "Target2": {
             "description": "One copy a save should write, with the tree the client read it at.",
             "type": "object",
             "properties": {
@@ -12369,6 +13493,156 @@
                 ]
               },
               {
+                "description": "From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box\nits target names, for the asking machine's tab `tab`, whose own id for the task is `task`.\n`repo` is the caller's git origin, which the worker's checkout is found or cloned by;\n`access` is the widest the caller may hand a child; `delegator` and `limits` are who asked\nand the limits it runs under, which the worker is held to and recorded with.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "access": {
+                    "$ref": "#/$defs/Access"
+                  },
+                  "delegator": {
+                    "$ref": "#/$defs/Delegator",
+                    "default": {
+                      "kind": "session"
+                    }
+                  },
+                  "limits": {
+                    "$ref": "#/$defs/Limits",
+                    "default": {
+                      "parallel": 3,
+                      "tier": "high",
+                      "max_effort": "max",
+                      "budget_cents": 0,
+                      "time_limit_min": 480,
+                      "box_budget_cents": 0
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task",
+                  "request",
+                  "access"
+                ]
+              },
+              {
+                "description": "From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,\nor its state once cancelled when `cancel` gives a reason.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated\nhere as `task`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for\nboxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name",
+                  "token"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, without the token kept for `name`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name"
+                ]
+              },
+              {
                 "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
                 "type": "object",
                 "properties": {
@@ -12606,7 +13880,7 @@
                 "type": "string"
               },
               "effort": {
-                "$ref": "#/$defs/Effort"
+                "$ref": "#/$defs/Effort2"
               },
               "permissionMode": {
                 "$ref": "#/$defs/PermissionMode"
@@ -12865,7 +14139,7 @@
               "description"
             ]
           },
-          "Effort": {
+          "Effort2": {
             "type": "string",
             "enum": [
               "low",
@@ -13071,15 +14345,6 @@
             "type": "string",
             "enum": [
               "upstash-box"
-            ]
-          },
-          "BoxSize": {
-            "description": "Serialized names match Upstash's `size`.",
-            "type": "string",
-            "enum": [
-              "small",
-              "medium",
-              "large"
             ]
           },
           "Graph": {
@@ -13826,6 +15091,45 @@
                   "kind",
                   "report"
                 ]
+              },
+              {
+                "description": "`text` for the Capitão of `repo` in an Upstash Box the hub opens with the account's own\nconnection, or the box that already runs it. Taken only from the global orchestrator's host.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo",
+                  "text"
+                ]
               }
             ]
           },
@@ -13923,7 +15227,7 @@
               "default_effort": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -13933,7 +15237,7 @@
               "max_effort": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -14026,37 +15330,6 @@
             "required": [
               "name",
               "enabled"
-            ]
-          },
-          "Cost": {
-            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
-            "oneOf": [
-              {
-                "description": "Haiku and flash models: sweeps, translations, first drafts.",
-                "type": "string",
-                "const": "low"
-              },
-              {
-                "description": "The middle default when nothing is known.",
-                "type": "string",
-                "const": "mid"
-              },
-              {
-                "description": "Opus and max efforts: architecture and hairy bugs.",
-                "type": "string",
-                "const": "high"
-              }
-            ]
-          },
-          "Effort2": {
-            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
-            "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
             ]
           },
           "TasteField": {
@@ -14240,7 +15513,7 @@
                 "description": "The effort a worker gets when the call names none. None leaves it to the model.",
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/Effort2"
+                    "$ref": "#/$defs/Effort"
                   },
                   {
                     "type": "null"
@@ -14250,7 +15523,7 @@
               },
               "max_effort": {
                 "description": "The most effort a call may ask for.",
-                "$ref": "#/$defs/Effort2",
+                "$ref": "#/$defs/Effort",
                 "default": "max"
               },
               "budget_cents": {
@@ -14388,60 +15661,21 @@
               "outcome"
             ]
           },
-          "Delegator": {
-            "description": "The session that started a task.",
-            "type": "object",
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/DelegatorKind"
-              },
-              "tab": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project": {
-                "description": "The project's repo (`host/owner/name`), else its folder.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project_name": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "DelegatorKind": {
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
             "oneOf": [
               {
                 "type": "string",
                 "enum": [
-                  "global_orchestrator",
-                  "captain",
-                  "worker"
+                  "local",
+                  "box"
                 ]
               },
               {
-                "description": "A thread with no role: the user's own session.",
+                "description": "On another machine of the account than its delegator's, which `machine` names.",
                 "type": "string",
-                "const": "session"
+                "const": "machine"
               }
-            ]
-          },
-          "RunTarget": {
-            "description": "Where the task ran, from its delegator's side.",
-            "type": "string",
-            "enum": [
-              "local",
-              "box"
             ]
           },
           "TaskUsage": {
@@ -14549,7 +15783,7 @@
               "redone"
             ]
           },
-          "Target2": {
+          "Target3": {
             "type": "object",
             "properties": {
               "machine": {
@@ -15189,6 +16423,13 @@
               },
               "spawned_by": {
                 "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "spawned_on": {
+                "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
                 "type": [
                   "string",
                   "null"
@@ -16731,6 +17972,158 @@
                 ]
               },
               {
+                "description": "From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box\nits target names, for the asking machine's tab `tab`, whose own id for the task is `task`.\n`repo` is the caller's git origin, which the worker's checkout is found or cloned by;\n`access` is the widest the caller may hand a child; `delegator` and `limits` are who asked\nand the limits it runs under, which the worker is held to and recorded with.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "access": {
+                    "$ref": "#/$defs/Access"
+                  },
+                  "delegator": {
+                    "$ref": "#/$defs/Delegator",
+                    "default": {
+                      "kind": "session"
+                    }
+                  },
+                  "limits": {
+                    "$ref": "#/$defs/Limits",
+                    "default": {
+                      "parallel": 3,
+                      "tier": "high",
+                      "max_effort": "max",
+                      "budget_cents": 0,
+                      "time_limit_min": 480,
+                      "box_budget_cents": 0
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task",
+                  "request",
+                  "access",
+                  "delegator",
+                  "limits"
+                ]
+              },
+              {
+                "description": "From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,\nor its state once cancelled when `cancel` gives a reason.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated\nhere as `task`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for\nboxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name",
+                  "token"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, without the token kept for `name`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name"
+                ]
+              },
+              {
                 "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
                 "type": "object",
                 "properties": {
@@ -18243,6 +19636,47 @@
                   "kind",
                   "report"
                 ]
+              },
+              {
+                "description": "`text` for the Capitão of `repo` in an Upstash Box the hub opens with the account's own\nconnection, or the box that already runs it. Taken only from the global orchestrator's host.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo",
+                  "size",
+                  "text",
+                  "sender"
+                ]
               }
             ]
           },
@@ -18822,6 +20256,333 @@
               "box_budget_cents"
             ]
           },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms",
+              "budget_ms",
+              "limit_ms",
+              "interaction"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "account",
+              "model",
+              "effort"
+            ]
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "size"
+            ]
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort2"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "TaskRecord": {
             "description": "One finished delegated task, as the hub keeps it for the account.",
             "type": "object",
@@ -18937,54 +20698,6 @@
               "outcome"
             ]
           },
-          "Delegator": {
-            "description": "The session that started a task.",
-            "type": "object",
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/DelegatorKind"
-              },
-              "tab": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project": {
-                "description": "The project's repo (`host/owner/name`), else its folder.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project_name": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "DelegatorKind": {
-            "oneOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "global_orchestrator",
-                  "captain",
-                  "worker"
-                ]
-              },
-              {
-                "description": "A thread with no role: the user's own session.",
-                "type": "string",
-                "const": "session"
-              }
-            ]
-          },
           "Provider": {
             "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
             "type": "string",
@@ -18996,10 +20709,19 @@
           },
           "RunTarget": {
             "description": "Where the task ran, from its delegator's side.",
-            "type": "string",
-            "enum": [
-              "local",
-              "box"
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "local",
+                  "box"
+                ]
+              },
+              {
+                "description": "On another machine of the account than its delegator's, which `machine` names.",
+                "type": "string",
+                "const": "machine"
+              }
             ]
           },
           "TaskUsage": {
@@ -19593,6 +21315,13 @@
               },
               "spawned_by": {
                 "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "spawned_on": {
+                "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
                 "type": [
                   "string",
                   "null"
@@ -21110,6 +22839,156 @@
                 ]
               },
               {
+                "description": "From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box\nits target names, for the asking machine's tab `tab`, whose own id for the task is `task`.\n`repo` is the caller's git origin, which the worker's checkout is found or cloned by;\n`access` is the widest the caller may hand a child; `delegator` and `limits` are who asked\nand the limits it runs under, which the worker is held to and recorded with.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "access": {
+                    "$ref": "#/$defs/Access"
+                  },
+                  "delegator": {
+                    "$ref": "#/$defs/Delegator",
+                    "default": {
+                      "kind": "session"
+                    }
+                  },
+                  "limits": {
+                    "$ref": "#/$defs/Limits",
+                    "default": {
+                      "parallel": 3,
+                      "tier": "high",
+                      "max_effort": "max",
+                      "budget_cents": 0,
+                      "time_limit_min": 480,
+                      "box_budget_cents": 0
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task",
+                  "request",
+                  "access"
+                ]
+              },
+              {
+                "description": "From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,\nor its state once cancelled when `cancel` gives a reason.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated\nhere as `task`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for\nboxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name",
+                  "token"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, without the token kept for `name`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_box_claude_token"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "name"
+                ]
+              },
+              {
                 "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
                 "type": "object",
                 "properties": {
@@ -22567,6 +24446,45 @@
                   "kind",
                   "report"
                 ]
+              },
+              {
+                "description": "`text` for the Capitão of `repo` in an Upstash Box the hub opens with the account's own\nconnection, or the box that already runs it. Taken only from the global orchestrator's host.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain_box"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/BoxSize",
+                    "default": "medium"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "busy": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BusyPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo",
+                  "text"
+                ]
               }
             ]
           },
@@ -23122,6 +25040,322 @@
               }
             }
           },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort2"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "TaskRecord": {
             "description": "One finished delegated task, as the hub keeps it for the account.",
             "type": "object",
@@ -23234,54 +25468,6 @@
               "outcome"
             ]
           },
-          "Delegator": {
-            "description": "The session that started a task.",
-            "type": "object",
-            "properties": {
-              "kind": {
-                "$ref": "#/$defs/DelegatorKind"
-              },
-              "tab": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project": {
-                "description": "The project's repo (`host/owner/name`), else its folder.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "project_name": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "DelegatorKind": {
-            "oneOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "global_orchestrator",
-                  "captain",
-                  "worker"
-                ]
-              },
-              {
-                "description": "A thread with no role: the user's own session.",
-                "type": "string",
-                "const": "session"
-              }
-            ]
-          },
           "Provider": {
             "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
             "type": "string",
@@ -23293,10 +25479,19 @@
           },
           "RunTarget": {
             "description": "Where the task ran, from its delegator's side.",
-            "type": "string",
-            "enum": [
-              "local",
-              "box"
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "local",
+                  "box"
+                ]
+              },
+              {
+                "description": "On another machine of the account than its delegator's, which `machine` names.",
+                "type": "string",
+                "const": "machine"
+              }
             ]
           },
           "TaskUsage": {
@@ -29674,6 +31869,13 @@
             ],
             "default": null
           },
+          "box_claude_tokens": {
+            "description": "The last characters of each Claude token kept for a pinned account name, which a worker box\nsigns in with when `delegate_task` names that account.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "connectors": {
             "type": "array",
             "items": {
@@ -31215,6 +33417,13 @@
               }
             ],
             "default": null
+          },
+          "box_claude_tokens": {
+            "description": "The last characters of each Claude token kept for a pinned account name, which a worker box\nsigns in with when `delegate_task` names that account.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "connectors": {
             "type": "array",
@@ -33219,6 +35428,13 @@
               "null"
             ]
           },
+          "spawned_on": {
+            "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "orchestrator_global": {
             "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
             "type": "boolean"
@@ -33548,6 +35764,13 @@
           },
           "spawned_by": {
             "description": "The tab that started this one: the thread that delegated a worker, or the thread whose\ndelegated task this tab reopened. The sidebar nests the tab under it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spawned_on": {
+            "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
             "type": [
               "string",
               "null"
@@ -35044,6 +37267,13 @@
                   "null"
                 ]
               },
+              "spawned_on": {
+                "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
                 "type": "boolean"
@@ -35682,6 +37912,13 @@
                   }
                 ],
                 "default": null
+              },
+              "box_claude_tokens": {
+                "description": "The last characters of each Claude token kept for a pinned account name, which a worker box\nsigns in with when `delegate_task` names that account.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
               },
               "connectors": {
                 "type": "array",
@@ -37576,6 +39813,13 @@
                   "null"
                 ]
               },
+              "spawned_on": {
+                "description": "The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a\nthread there delegated here.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "orchestrator_global": {
                 "description": "The tab is the account's global orchestrator, the chat above every project's Capitão. Its\n`role` is empty, so an older app shows it as a plain thread.",
                 "type": "boolean"
@@ -38195,6 +40439,13 @@
                   }
                 ],
                 "default": null
+              },
+              "box_claude_tokens": {
+                "description": "The last characters of each Claude token kept for a pinned account name, which a worker box\nsigns in with when `delegate_task` names that account.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
               },
               "connectors": {
                 "type": "array",
@@ -40661,6 +42912,99 @@
                 ]
               },
               {
+                "description": "The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker\nthread here for a tab on another machine of the account. `origin.machine` is the hub's\nstamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names\nthe checkout it works in, cloned with `token` when this machine has none. A repeat of\n`origin.task` answers the task it started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "origin": {
+                    "$ref": "#/$defs/Origin"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin",
+                  "request"
+                ]
+              },
+              {
+                "description": "The task's status JSON, as `task_status` answers it, or its state once cancelled when\n`cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and\n`task` of `origin_machine`, the hub's stamp of the machine that asks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "origin_machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin_machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`\nended there. `from` is the hub's stamp of the machine that reports it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -41243,7 +43587,7 @@
                   "copies": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/$defs/Target"
+                      "$ref": "#/$defs/Target2"
                     }
                   }
                 },
@@ -42799,6 +45143,425 @@
               }
             ]
           },
+          "Origin": {
+            "description": "The tab on another machine that delegated a task here. The hub stamps `machine` from the\nsocket the request came on.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "task": {
+                "description": "The caller's own id for the task, which the end notice names.",
+                "type": "string"
+              },
+              "access": {
+                "description": "The widest access the caller may hand a child.",
+                "$ref": "#/$defs/Access"
+              },
+              "delegator": {
+                "description": "Who asked, for the record this machine keeps of the task it runs.",
+                "$ref": "#/$defs/Delegator",
+                "default": {
+                  "kind": "session"
+                }
+              },
+              "limits": {
+                "description": "The delegation limits the caller runs under, which the worker here is held to.",
+                "$ref": "#/$defs/Limits",
+                "default": {
+                  "parallel": 3,
+                  "tier": "high",
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "machine_name",
+              "tab",
+              "task",
+              "access",
+              "delegator",
+              "limits"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms",
+              "budget_ms",
+              "limit_ms",
+              "interaction"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "account",
+              "model",
+              "effort"
+            ]
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "size"
+            ]
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -42912,7 +45675,7 @@
               }
             ]
           },
-          "Target": {
+          "Target2": {
             "description": "One copy a save should write, with the tree the client read it at.",
             "type": "object",
             "properties": {
@@ -44847,6 +47610,99 @@
                 ]
               },
               {
+                "description": "The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker\nthread here for a tab on another machine of the account. `origin.machine` is the hub's\nstamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names\nthe checkout it works in, cloned with `token` when this machine has none. A repeat of\n`origin.task` answers the task it started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegate"
+                  },
+                  "origin": {
+                    "$ref": "#/$defs/Origin"
+                  },
+                  "request": {
+                    "$ref": "#/$defs/Request"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin",
+                  "request"
+                ]
+              },
+              {
+                "description": "The task's status JSON, as `task_status` answers it, or its state once cancelled when\n`cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and\n`task` of `origin_machine`, the hub's stamp of the machine that asks.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_task"
+                  },
+                  "origin_machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "cancel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "origin_machine",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`\nended there. `from` is the hub's stamp of the machine that reports it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_ended"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "$ref": "#/$defs/RemoteEnd"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task",
+                  "end"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -45427,7 +48283,7 @@
                   "copies": {
                     "type": "array",
                     "items": {
-                      "$ref": "#/$defs/Target"
+                      "$ref": "#/$defs/Target2"
                     }
                   }
                 },
@@ -46961,6 +49817,411 @@
               }
             ]
           },
+          "Origin": {
+            "description": "The tab on another machine that delegated a task here. The hub stamps `machine` from the\nsocket the request came on.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "task": {
+                "description": "The caller's own id for the task, which the end notice names.",
+                "type": "string"
+              },
+              "access": {
+                "description": "The widest access the caller may hand a child.",
+                "$ref": "#/$defs/Access"
+              },
+              "delegator": {
+                "description": "Who asked, for the record this machine keeps of the task it runs.",
+                "$ref": "#/$defs/Delegator",
+                "default": {
+                  "kind": "session"
+                }
+              },
+              "limits": {
+                "description": "The delegation limits the caller runs under, which the worker here is held to.",
+                "$ref": "#/$defs/Limits",
+                "default": {
+                  "parallel": 3,
+                  "tier": "high",
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
+                }
+              }
+            },
+            "required": [
+              "machine",
+              "tab",
+              "task",
+              "access"
+            ]
+          },
+          "Access": {
+            "description": "What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed\nparent to read-only, and a parent that asks before acting does not hand the child a bypass.",
+            "type": "string",
+            "enum": [
+              "full",
+              "auto",
+              "read_only"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Limits": {
+            "description": "A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.",
+            "type": "object",
+            "properties": {
+              "parallel": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tier": {
+                "$ref": "#/$defs/Cost"
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "$ref": "#/$defs/Effort"
+              },
+              "budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "parallel",
+              "tier",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "Request": {
+            "description": "The delegation request, after the MCP arguments have been read once.",
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "isolation": {
+                "$ref": "#/$defs/Isolation"
+              },
+              "mode": {
+                "$ref": "#/$defs/Mode"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "budget_ms": {
+                "description": "As asked; `run_limits` settles both under the caller's time limit.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "limit_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "interaction": {
+                "$ref": "#/$defs/Interaction",
+                "default": "inherit"
+              },
+              "runtime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RuntimeMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tools": {
+                "description": "Tools the child may use. The child sees them as its grant; empty grants what the task\nneeds. A child that needs more says NEEDS followed by the tools, and the parent answers\nwith a wider grant.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "client_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "task",
+              "title",
+              "target",
+              "isolation",
+              "mode",
+              "timeout_ms"
+            ]
+          },
+          "Target": {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "driver_kind": {
+                "description": "Set when the request named `driverKind`, so a custom account can be checked against it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "Another machine of the account, by id or name, that runs the child.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "box": {
+                "description": "A new Upstash Box, opened with the account's connection on the hub, that runs the child.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "BoxTarget": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "$ref": "#/$defs/BoxSize",
+                "default": "medium"
+              },
+              "repo": {
+                "description": "The repository the box clones. None clones the caller's.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
+            ]
+          },
+          "Isolation": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "worktree"
+            ]
+          },
+          "Mode": {
+            "type": "string",
+            "enum": [
+              "async",
+              "wait"
+            ]
+          },
+          "Interaction": {
+            "description": "`plan` is read-only. `inherit` and `default` leave the parent's mode alone.",
+            "type": "string",
+            "enum": [
+              "inherit",
+              "default",
+              "plan"
+            ]
+          },
+          "RuntimeMode": {
+            "description": "How wide a child may act. Omitted means the parent's own mode.",
+            "type": "string",
+            "enum": [
+              "full-access",
+              "auto"
+            ]
+          },
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -47066,7 +50327,7 @@
               }
             ]
           },
-          "Target": {
+          "Target2": {
             "description": "One copy a save should write, with the tree the client read it at.",
             "type": "object",
             "properties": {
