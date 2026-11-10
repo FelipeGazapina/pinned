@@ -1,9 +1,14 @@
 /** The General page: app-wide switches. */
 async function showGeneral() {
+  const features = await featuresSettingsHtml();
+  const orchestration = await orchestrationSettingsHtml();
+  const globalOrchestrator = await globalOrchestratorSettingsHtml();
+  // Asking every machine takes a while, and the user may have moved to another page meanwhile.
+  if (page !== "general") return;
   settingsPage.innerHTML = `<h2>General</h2>
-    ${await featuresSettingsHtml()}
-    ${await orchestrationSettingsHtml()}
-    ${await globalOrchestratorSettingsHtml()}
+    ${features}
+    ${orchestration}
+    ${globalOrchestrator}
     ${sidebarSettingsHtml()}
     ${sendShortcutHtml()}
     ${browserSettingsHtml()}`;

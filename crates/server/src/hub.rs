@@ -4,23 +4,32 @@ use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
+use pinned_core::delegate::{RunTarget, TaskRecord};
+use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::Tastes;
+use pinned_core::wire::BOX_USD_PER_HOUR;
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
+    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, RunSpec, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
+use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+/// How long importing an MCP server waits for the machine to read its account's config.
+const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
+const MAX_RECORDS_PER_CALL: usize = 500;
+/// How long the password the app took counts as the owner being there.
+const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
 pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
 
@@ -82,6 +91,15 @@ pub struct Hub {
     sockets: AtomicU64,
     /// Serializes external agents' work on one project's orchestrator.
     agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The unlocks apps hold in memory, by the sha256 of the token. A hub restart forgets them, and
+    /// the app asks for the password again.
+    unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
+}
+
+struct Unlock {
+    /// The sha256 of the login it was taken on, the only one it works for.
+    login: Vec<u8>,
+    until: Instant,
 }
 
 pub struct Account {
@@ -96,6 +114,12 @@ pub struct Account {
     projects: Mutex<HashMap<MachineId, Vec<ProjectView>>>,
     /// Held across a taste's read, change and write, so two changes at once both land.
     tastes: tokio::sync::Mutex<()>,
+    /// Held across a marks write and its push, so every client hears the changes in the order they
+    /// were kept.
+    marks: tokio::sync::Mutex<()>,
+    /// Held while task records are billed and saved, so two sends from one box never bill the
+    /// same box time twice.
+    task_records: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -132,6 +156,10 @@ impl Online {
 struct Client {
     out: Outbox,
     login: Vec<u8>,
+    /// Its app asks for the password before a call only the owner makes.
+    locked: bool,
+    /// Until when the password the app took counts for this connection.
+    unlocked: Option<Instant>,
     attached: HashSet<Target>,
     threads: HashMap<MachineId, HashSet<TabId>>,
 }
@@ -156,7 +184,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default() })
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
@@ -170,6 +198,26 @@ impl Hub {
             locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
         };
         lock.lock_owned().await
+    }
+
+    /// Unlocks client `client` of `account` for `UNLOCK_FOR`, once it gave the account's password,
+    /// and answers the token its app sends again after a reconnect.
+    pub fn unlock(&self, account: &Account, client: u64) -> Option<Unlocked> {
+        let token = db::Token::new();
+        let now = Instant::now();
+        let until = now + UNLOCK_FOR;
+        let login = account.unlocked(client, until)?;
+        let mut unlocks = self.unlocks.lock().unwrap();
+        unlocks.retain(|_, unlock| unlock.until > now);
+        unlocks.insert(token.hash, Unlock { login, until });
+        let ends = SystemTime::now() + UNLOCK_FOR;
+        Some(Unlocked { token: token.text, until: ends.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) })
+    }
+
+    /// When the unlock `token` ends, if it was taken on login `login` and has not ended yet.
+    pub fn unlocked_until(&self, token: &str, login: &[u8]) -> Option<Instant> {
+        let unlocks = self.unlocks.lock().unwrap();
+        unlocks.get(&db::hash(token)).filter(|unlock| unlock.login == login && unlock.until > Instant::now()).map(|unlock| unlock.until)
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -189,7 +237,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -400,7 +448,7 @@ impl Hub {
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
-            HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd).await?), false),
+            HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
                 let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
                 (json(self.boxes.box_status(self, account, machine).await?), false)
@@ -470,6 +518,11 @@ impl Hub {
                 self.boxes.end_all(self, account).await?;
                 (json(c().await?.disconnect_upstash()?), true)
             }
+            HubCall::SetBoxClaudeToken { name, token } => (json(c().await?.set_box_claude_token(&name, &token)?), true),
+            HubCall::RemoveBoxClaudeToken { name } => (json(c().await?.remove_box_claude_token(&name)?), true),
+            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
+                return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
+            }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
             HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
@@ -515,12 +568,180 @@ impl Hub {
                 let _held = account.tastes.lock().await;
                 return json(self.db.import_tastes(account.id, &tastes).await?);
             }
+            HubCall::RecordTasks { .. } => return Err("only a machine records the tasks it ran".into()),
+            HubCall::DelegationStats { days } => {
+                let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
+                let now = pinned_core::connectors::unix_millis();
+                let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
+                let records = self.db.task_records(account.id, since).await?;
+                return json(pinned_core::delegate::aggregate(&records, now, days));
+            }
+            HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
+            HubCall::MarkSessions { changes } => {
+                marks::check(&changes)?;
+                let _held = account.marks.lock().await;
+                return json(self.write_marks(account, changes).await?);
+            }
+            HubCall::ArchiveSession { machine, tab } => return json(self.archive_session(account, &machine, &tab).await?),
+            HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session, true).await?),
+            HubCall::DeleteSession { machine, tab } => {
+                self.delete_session(account, &machine, &tab).await?;
+                return Ok(Value::Null);
+            }
+            HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
+            HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
+            HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
+            HubCall::Unlock { .. } => return Err("only the app unlocks, on its own connection".into()),
+            HubCall::AgentAudit { before, limit } => {
+                let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
+                return json(self.db.audit_rows(account.id, before, limit).await?);
+            }
+            HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
+            HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
+            HubCall::EnableMcpServer { id, enabled } => return json(c().await?.enable_mcp_server(&id, enabled)?),
+            HubCall::RemoveMcpServer { id } => {
+                c().await?.remove_mcp_server(&id)?;
+                return Ok(Value::Null);
+            }
+            HubCall::ImportMcpServer { machine, account: agent_account, name, path, project, secrets } => {
+                let (target, machine_name) = crate::remote::resolve(self, account, &machine).await?;
+                let read = Call::McpImportable { account: Some(agent_account.clone()), path };
+                let found = self.call_machine(account, &target, read, MCP_IMPORT_WAIT).await.map_err(String::from)?;
+                let found: Vec<pinned_core::mcp::Found> = serde_json::from_value(found).map_err(|e| format!("{machine_name} answered servers that did not read: {e}"))?;
+                let found = found.into_iter().find(|f| f.server.name == name).ok_or_else(|| format!("Claude Code account {agent_account} on {machine_name} has no MCP server {name}"))?;
+                let server = pinned_core::mcp::Spec { project, ..found.server };
+                return json(c().await?.save_mcp_server(None, server, &secrets)?);
+            }
+            HubCall::LoadMcpServers => return Err("only a machine loads the account's MCP servers into the sessions it starts".into()),
         };
         if changed {
             self.watch(account).await?;
             self.push_settings(account).await;
         }
         answer
+    }
+
+    /// Keeps what `machine` sent about the tasks it ran. A record from a machine that runs in one of
+    /// the account's boxes is box work: it is billed the box time since the box's previous task
+    /// ended (the first task, since the box was made), at the box rate. A record sent again keeps
+    /// the box time it was billed the first time.
+    pub async fn record_tasks(&self, account: &Account, machine: &str, mut records: Vec<TaskRecord>) -> Result<(), String> {
+        if records.len() > MAX_RECORDS_PER_CALL {
+            return Err(format!("send at most {MAX_RECORDS_PER_CALL} task records at once"));
+        }
+        let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+        let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
+        let _held = account.task_records.lock().await;
+        let boxed = self.db.box_created_ms(account.id, id).await?;
+        // Each task is billed the box time since the one that ended before it.
+        records.sort_by_key(|record| record.ended);
+        for mut record in records {
+            record.machine = machine.to_owned();
+            record.machine_name = name.clone();
+            let billed = self.db.task_record(account.id, id, &record.id).await?.filter(|old| old.usage.box_ms.is_some());
+            let box_ms = match (billed, boxed) {
+                (Some(old), _) => old.usage.box_ms,
+                (None, Some(created)) => {
+                    let before = self.db.billed_box_ms(account.id, id, &record.id).await?;
+                    Some(record.ended.saturating_sub(created).saturating_sub(before))
+                }
+                (None, None) => None,
+            };
+            if let Some(ms) = box_ms {
+                record.target = RunTarget::UpstashBox;
+                record.usage.box_ms = Some(ms);
+                record.usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+            }
+            self.db.save_task_record(account.id, id, &record).await?;
+        }
+        Ok(())
+    }
+
+    /// Keeps `changes` and tells the account's clients. The caller holds `account.marks`.
+    async fn write_marks(&self, account: &Account, changes: Vec<MarkChange>) -> Result<Vec<SessionMarks>, String> {
+        let touched = self.db.mark_sessions(account.id, changes).await?;
+        if !touched.is_empty() {
+            account.broadcast(&ToClient::SessionMarks { marks: touched.clone() });
+        }
+        Ok(touched)
+    }
+
+    fn open_tab(account: &Account, machine: &str, tab: &str) -> Result<(TabView, String), String> {
+        let view = account.tab(machine, tab).ok_or_else(|| format!("this account has no tab {tab} on machine {machine}"))?;
+        let session = view.session.clone().ok_or_else(|| format!("tab {tab} has no conversation yet"))?;
+        Ok((view, session))
+    }
+
+    /// Archives as the app does: the thread goes to the archive with its name and pin, then its tab
+    /// closes. A tab that does not close gets its marks back.
+    async fn archive_session(&self, account: &Account, machine: &str, tab: &str) -> Result<SessionMarks, String> {
+        let (view, session) = Self::open_tab(account, machine, tab)?;
+        if view.status == Some(AgentStatus::Working) {
+            return Err("the thread is working; stop its turn first".into());
+        }
+        let (was, row) = {
+            let _held = account.marks.lock().await;
+            let was = self.db.session_marks_of(account.id, &session).await?;
+            let archived = Archived {
+                machine: machine.into(),
+                name: was.title.clone().or(view.title).or(view.prompt_title).unwrap_or_else(|| "New thread".into()),
+                project: project_name(&account.last_listed(machine), &view.cwd),
+                cwd: view.cwd,
+                at: pinned_core::connectors::unix_millis() as f64 / 1000.0,
+                created: None,
+                title: was.title.clone(),
+                pinned: was.pin.is_some(),
+            };
+            let mark = |mark| MarkChange { session: session.clone(), mark };
+            let row = self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Archived(Some(archived)))]).await?.remove(0);
+            (was, row)
+        };
+        if let Err(e) = self.call_machine(account, machine, Call::CloseTab { tab: tab.into() }, MACHINE_CALL_WAIT).await {
+            let _held = account.marks.lock().await;
+            self.write_marks(account, was.rebuild()).await?;
+            return Err(format!("the thread's tab did not close: {}", String::from(e)));
+        }
+        Ok(row)
+    }
+
+    /// Reopens an archived conversation in a new tab with its name and pin back. The user's Unarchive
+    /// resumes it at once; with `start` false, as for an agent, the tab stays unstarted: starting it
+    /// is `start_claude`'s, which holds it to the agent's limits.
+    pub(crate) async fn unarchive_session(&self, account: &Account, session: &str, start: bool) -> Result<Target, String> {
+        let mark = |mark| MarkChange { session: session.into(), mark };
+        let (was, archived) = {
+            let _held = account.marks.lock().await;
+            let was = self.db.session_marks_of(account.id, session).await?;
+            let archived = was.archived.clone().ok_or_else(|| format!("this account has no archived conversation {session}"))?;
+            if !account.is_online(&archived.machine) {
+                return Err("the conversation's machine is offline".into());
+            }
+            // Off the Archive page before the resume starts, so a second Unarchive can't open it twice.
+            self.write_marks(account, vec![mark(Mark::Archived(None))]).await?;
+            (was, archived)
+        };
+        let run = RunSpec { folder: archived.cwd, repo: None, args: vec!["--resume".into(), session.into()], env: vec![], token: None, account: None, budget_usd: None };
+        let call = if start { Call::Run { run } } else { Call::OpenRun { run } };
+        let started = self.call_machine(account, &archived.machine, call, RUN_WAIT).await.map_err(String::from);
+        let _held = account.marks.lock().await;
+        let tab: TabId = match started.and_then(|tab| serde_json::from_value(tab).map_err(|e| e.to_string())) {
+            Ok(tab) => tab,
+            Err(e) => {
+                self.write_marks(account, was.rebuild()).await?;
+                return Err(e);
+            }
+        };
+        let pin = if archived.pinned { Some(self.db.session_marks(account.id).await?.iter().filter_map(|row| row.pin).max().map_or(0, |last| last + 1)) } else { None };
+        self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Title(archived.title)), mark(Mark::Pin(pin))]).await?;
+        Ok(Target { machine: archived.machine, tab })
+    }
+
+    async fn delete_session(&self, account: &Account, machine: &str, tab: &str) -> Result<(), String> {
+        let (_, session) = Self::open_tab(account, machine, tab)?;
+        self.call_machine(account, machine, Call::CloseTab { tab: tab.into() }, MACHINE_CALL_WAIT).await?;
+        let _held = account.marks.lock().await;
+        self.write_marks(account, vec![MarkChange { session, mark: Mark::Clear }]).await?;
+        Ok(())
     }
 
     async fn change_tastes(&self, account: &Account, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Value, String> {
@@ -558,6 +779,7 @@ impl Hub {
                 account.client_gone(client);
             }
         }
+        self.unlocks.lock().unwrap().retain(|_, unlock| unlock.login != hash);
     }
 }
 
@@ -718,6 +940,16 @@ impl Account {
         }
     }
 
+    /// What a worker's or a Captain's box shows: any of its tabs, working or not.
+    pub fn seen_any(&self, machine: &str) -> Seen {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        match m.tabs() {
+            [] => Seen::NoTab,
+            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(|t| t.status == Some(AgentStatus::Working)) },
+        }
+    }
+
     /// Sends the call at once, so calls reach the machine in the order they came, and answers
     /// the machine's name and where its answer arrives, or None while it is offline.
     pub fn send_call(&self, machine: &str, call: Call) -> Option<Sent> {
@@ -792,7 +1024,7 @@ impl Account {
 
     /// Registers a client, sending it `hello` first: built under the same lock that events take,
     /// so no event falls between the snapshot and the stream.
-    pub fn client_connected(&self, id: u64, login: Vec<u8>, out: Outbox, mut machines: Vec<MachineView>) {
+    pub fn client_connected(&self, id: u64, login: Vec<u8>, locked: bool, unlocked: Option<Instant>, out: Outbox, mut machines: Vec<MachineView>) {
         let mut live = self.live.lock().unwrap();
         {
             let updates = self.updates.lock().unwrap();
@@ -807,7 +1039,30 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, attached: HashSet::new(), threads: HashMap::new() });
+        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new() });
+    }
+
+    /// Whether client `id` must unlock before `call` on `side`: only the account's owner makes it,
+    /// and the password the app took for this connection is missing or past its time.
+    pub fn needs_unlock(&self, id: u64, side: Side, call: &impl Serialize) -> bool {
+        let (locked, unlocked) = match self.live.lock().unwrap().clients.get(&id) {
+            Some(client) => (client.locked, client.unlocked.is_some_and(|until| until > Instant::now())),
+            None => return true,
+        };
+        !unlocked && surface::owner_only(side, &surface::cmd_of(call), locked)
+    }
+
+    /// The sha256 of the login client `id` signed in with.
+    pub fn login_of(&self, id: u64) -> Option<Vec<u8>> {
+        self.live.lock().unwrap().clients.get(&id).map(|client| client.login.clone())
+    }
+
+    /// Counts client `id` as its owner until `until`, and answers its login.
+    fn unlocked(&self, id: u64, until: Instant) -> Option<Vec<u8>> {
+        let mut live = self.live.lock().unwrap();
+        let client = live.clients.get_mut(&id)?;
+        client.unlocked = Some(until);
+        Some(client.login.clone())
     }
 
     pub fn client_gone(&self, id: u64) {
@@ -886,6 +1141,15 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+}
+
+/// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
+fn project_name(projects: &[ProjectView], cwd: &str) -> String {
+    let holds = |p: &&ProjectView| cwd == p.path || cwd.strip_prefix(&p.path).is_some_and(|rest| rest.starts_with('/'));
+    match projects.iter().filter(holds).max_by_key(|p| p.path.len()) {
+        Some(project) => project.name.clone(),
+        None => cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd).to_owned(),
+    }
 }
 
 fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machines: &mut [MachineView]) {
@@ -1045,9 +1309,9 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
         for client in [1, 2] {
-            account.client_connected(client, vec![], Outbox::new().0, vec![]);
+            account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
         let (old, _, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.16.1".into(), old);
@@ -1066,7 +1330,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();

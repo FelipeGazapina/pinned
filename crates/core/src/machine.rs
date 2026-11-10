@@ -5,7 +5,7 @@ use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, Ta
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,9 +17,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+const MODEL_MENU_FILE: &str = "claude-model-menu.json";
+
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
+/// Task records sent to the hub in one call.
+const RECORDS_PER_SEND: usize = 100;
+const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
@@ -34,6 +39,15 @@ const NOT_LINKED: &str = "this machine is not linked to a hub";
 const TASTE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TASTE_WAIT: Duration = Duration::from_millis(500);
+/// How long a session's start waits for the account's MCP servers before it loads the ones the
+/// hub last handed this machine.
+#[cfg(not(test))]
+const MCP_WAIT: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const MCP_WAIT: Duration = Duration::from_millis(500);
+/// How often a remote task's status asks the machine running it, and an end that did not get
+/// through is sent again.
+const REMOTE_LOOK: Duration = Duration::from_secs(3);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -108,7 +122,8 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf]) -> CommandBuilder {
+    #[allow(clippy::too_many_arguments)]
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
@@ -123,10 +138,11 @@ impl Launch {
         match program {
             Program::Agent => {
                 if spec.harness {
-                    if let Some(mcp_config) = &self.mcp_config {
+                    let configs: Vec<&Path> = self.mcp_config.iter().map(PathBuf::as_path).chain(mcp.map(|files| files.file.as_path())).collect();
+                    if !configs.is_empty() {
                         // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
                         cmd.arg("--mcp-config");
-                        cmd.arg(mcp_config);
+                        cmd.args(configs);
                     }
                     cmd.arg("--settings");
                     cmd.arg(&self.settings);
@@ -139,6 +155,9 @@ impl Launch {
                 } else if provider == Provider::Codex {
                     if self.mcp_config.is_some() {
                         cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
+                    }
+                    if let Some(files) = mcp {
+                        cmd.args(files.codex_flags(&self.exe));
                     }
                     let home = env
                         .iter()
@@ -239,8 +258,37 @@ impl Screen {
 }
 
 /// A child `delegate_task` starts from the tab `from`, as the worker thread that shows it.
+/// Who a new child is for: a tab or a task here, or a tab on another machine (`origin`), with
+/// what it inherits.
+struct ChildParent {
+    parent: crate::delegate::Parent,
+    caller_key: String,
+    client_request_id: Option<String>,
+    /// The tab here that asked, which must stay open.
+    tab: Option<TabId>,
+    origin: Option<crate::delegate::Origin>,
+    account: Option<accounts::AccountId>,
+    inherited_model: Option<String>,
+    provider: Provider,
+    auth: Auth,
+    cwd: PathBuf,
+    ceiling: crate::delegate::Access,
+    limits: taste::Limits,
+    /// Workers at once in the project, when this machine counts them.
+    parallel: Option<u32>,
+    delegator: crate::delegate::Delegator,
+}
+
+/// `delegate_task`'s answer when the project already runs as many workers as it allows.
+fn workers_full(working: usize) -> String {
+    let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+    format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.")
+}
+
 struct ThreadChild<'a> {
     from: &'a str,
+    /// The tab on another machine the thread is for. `from` then names no tab here.
+    origin: Option<crate::delegate::Origin>,
     task: &'a str,
     title: &'a str,
     cwd: &'a Path,
@@ -260,6 +308,8 @@ struct Tab {
     account: Account,
     program: Program,
     session: Option<pty::Session>,
+    /// The running session's own MCP config, removed when the session ends or is replaced.
+    mcp: Option<mcp::SessionFiles>,
     starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -288,6 +338,9 @@ struct Tab {
     /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
     /// once this tab is closed.
     spawned_by: Option<TabId>,
+    /// The tab on another machine that delegated this worker here. Its end goes back through the
+    /// hub, and its tab id is never looked up among this machine's tabs.
+    origin: Option<crate::delegate::Origin>,
     /// The `delegate_task` task this worker thread shows. Its first finished turn ends the task
     /// when the tab runs it; a headless child's thread follows the task instead.
     task: Option<String>,
@@ -379,7 +432,8 @@ impl Tab {
             prompt_title: self.tally.prompt_title.clone(),
             orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
             role: role.map(|(role, _)| role),
-            spawned_by: self.spawned_by.clone(),
+            spawned_by: self.origin.as_ref().map(|o| o.tab.clone()).or_else(|| self.spawned_by.clone()),
+            spawned_on: self.origin.as_ref().map(|o| o.machine.clone()),
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
@@ -442,6 +496,9 @@ pub struct Machine {
     uploads: Option<PathBuf>,
     /// LiteLLM's price list, downloaded at most daily for the usage page.
     rates_file: Option<PathBuf>,
+    /// The model rows claude's /model menu showed last on this machine, kept in `model_menu_file`.
+    model_menu: Mutex<Vec<crate::claude_models::MenuRow>>,
+    model_menu_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
     shells: Shells,
@@ -453,6 +510,9 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
+    sending_records: AtomicBool,
+    /// After the hub refused records, when to offer them again.
+    records_retry: Mutex<Option<Instant>>,
     threads_watched: AtomicBool,
     thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
@@ -460,12 +520,22 @@ pub struct Machine {
     usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
+    /// Ends of tasks run here for another machine's tabs that the hub could not pass on yet.
+    remote_ends: Mutex<Vec<(Instant, HubCall)>>,
     memories: Arc<memory::Memories>,
-    orchestration: Mutex<crate::orchestration::Orchestration>,
     orchestration_dir: Option<PathBuf>,
+    /// Each working worker thread's spend so far, by task, across every session it ran.
+    meters: Mutex<HashMap<String, usage::Meter>>,
+    /// The price list the meters price with, and when it was read.
+    meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
     tastes_shared: Arc<AtomicBool>,
+    /// The account's enabled MCP servers as the hub last handed them, secrets and all, kept in
+    /// memory only, for a session that starts while the hub is slow to answer.
+    mcp_loaded: Mutex<Option<Vec<mcp::Load>>>,
+    /// A session start already waited for the link to load the MCP servers.
+    mcp_waited: AtomicBool,
     global: Mutex<global::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
@@ -582,9 +652,8 @@ impl Machine {
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let sent = global::Ledger::load(dir.as_deref());
-        // Seeds taste.json from the old cost style now, before a change to the worker cap rewrites
-        // orchestration.json without it.
-        taste::load(dir.as_deref());
+        // Seeds taste.json from the old cost style, then moves the old worker cap into it.
+        taste::migrate_worker_cap(dir.as_deref());
         let home = home();
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
@@ -606,6 +675,8 @@ impl Machine {
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
+            model_menu: Mutex::new(dir.as_ref().and_then(|d| std::fs::read(d.join(MODEL_MENU_FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
+            model_menu_file: dir.as_ref().map(|d| d.join(MODEL_MENU_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
             device_hub: DeviceHub::default(),
@@ -615,16 +686,22 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
+            sending_records: AtomicBool::new(false),
+            records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
             thread_watchers: Mutex::default(),
             usage: Mutex::default(),
             usage_refreshed: Mutex::default(),
             agents: Mutex::default(),
             delegates,
+            remote_ends: Mutex::default(),
             memories,
-            orchestration: Mutex::new(crate::orchestration::Orchestration::load(dir.as_deref())),
             orchestration_dir: dir.clone(),
+            meters: Mutex::default(),
+            meter_rates: Mutex::default(),
             tastes_shared: Arc::default(),
+            mcp_loaded: Mutex::default(),
+            mcp_waited: AtomicBool::new(false),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
@@ -764,6 +841,7 @@ impl Machine {
                 self.close_tab(&tab);
                 Ok(Value::Null)
             }
+            Call::StopTurn { tab } => json(self.stop_turn(&tab)?),
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
@@ -772,6 +850,24 @@ impl Machine {
                     sync::set_aside_unreadable(file)?;
                 }
                 Ok(Value::Null)
+            }
+            Call::ActFor { caller, call } => self.act_for(&caller, call),
+            Call::Notice { tab, session, text, id } => json(self.notice(&tab, session, text, &id)),
+            Call::McpServers { account, path } => {
+                let path = path.map(PathBuf::from);
+                let account = self.account_for(account.as_deref(), path.as_deref().unwrap_or(Path::new("")))?;
+                if account.provider != Provider::Claude {
+                    return Err(format!("{} runs {}, and mcp_servers reads Claude Code's MCP servers", account.id, account.provider.spec().name));
+                }
+                json(mcp::servers(&self.accounts.home(&account), path.as_deref()))
+            }
+            Call::McpImportable { account, path } => {
+                let path = path.map(PathBuf::from);
+                let account = self.account_for(account.as_deref(), path.as_deref().unwrap_or(Path::new("")))?;
+                if account.provider != Provider::Claude {
+                    return Err(format!("{} runs {}, and import reads Claude Code's MCP servers", account.id, account.provider.spec().name));
+                }
+                json(mcp::importable(&self.accounts.home(&account), path.as_deref()))
             }
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
@@ -797,6 +893,7 @@ impl Machine {
             }
             Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
+            Call::OpenRun { run } => json(self.open_run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
             Call::Upload { name, data } => {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
@@ -808,6 +905,7 @@ impl Machine {
             }
             Call::ReadImage { path } => json(uploads::named(&path, &home())?),
             Call::ListAccounts => json(self.list_accounts()),
+            Call::LearnModelMenu { lines } => json(self.learn_model_menu(&lines)?),
             Call::AddAccount { provider, name, auth, key } => {
                 let auth = auth.unwrap_or(Auth::Login);
                 if auth == Auth::OpenCodeGo {
@@ -861,6 +959,9 @@ impl Machine {
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
             Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
+            Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
+            Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
+            Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
@@ -883,6 +984,7 @@ impl Machine {
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
             }
             Call::RegenerateTitle { tab, previous, thread } => {
+                let thread = if thread.is_empty() { titles::thread_text(&self.thread(&tab, 0)?.items) } else { thread };
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 let env = self.headless_env(&tab)?;
                 let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
@@ -1208,6 +1310,10 @@ impl Machine {
     }
 
     fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
+        self.nudge_thread_watchers_at(seen, Instant::now());
+    }
+
+    fn nudge_thread_watchers_at(&self, seen: &mut HashMap<String, TranscriptLook>, now: Instant) {
         let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
         if watched.is_empty() {
             return;
@@ -1217,7 +1323,6 @@ impl Machine {
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
-        let now = Instant::now();
         for (id, session, status, account) in open {
             if !watched.contains(&id) {
                 continue;
@@ -1299,7 +1404,31 @@ impl Machine {
 
     fn view_account(&self, account: Account) -> accounts::View {
         let status = self.status(&account);
-        accounts::View::new(account, status)
+        let mut view = accounts::View::new(account, status);
+        if view.account.provider == Provider::Claude && view.account.auth != Auth::OpenCodeGo {
+            view.models = self.claude_models();
+        }
+        view
+    }
+
+    /// Claude's models on this machine: pinned's table as this machine's claude last showed its
+    /// /model menu.
+    pub fn claude_models(&self) -> Vec<crate::claude_models::ClaudeModel> {
+        crate::claude_models::merged(crate::claude_models::known(), &self.model_menu.lock().unwrap())
+    }
+
+    /// Keeps the model rows of claude's /model menu when `lines`, a screen, shows it, and answers
+    /// Claude's models as they are now.
+    fn learn_model_menu(&self, lines: &[String]) -> Result<Vec<crate::claude_models::ClaudeModel>, String> {
+        let rows = crate::claude_models::menu_rows(lines).ok_or("claude's /model menu is not on that screen")?;
+        if !rows.is_empty() && *self.model_menu.lock().unwrap() != rows {
+            if let Some(file) = &self.model_menu_file {
+                let body = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;
+                crate::fsx::replace(file, &body, None, None)?;
+            }
+            *self.model_menu.lock().unwrap() = rows;
+        }
+        Ok(self.claude_models())
     }
 
     fn status(&self, account: &Account) -> accounts::Status {
@@ -1547,8 +1676,9 @@ impl Machine {
             }
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
-                prompt.extend(tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)).brief()));
-                prompt.push(self.orchestration.lock().unwrap().hint());
+                let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
+                prompt.extend(scoped.as_ref().map(taste::Taste::brief));
+                prompt.extend(scoped.map(|t| t.limits().hint()));
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
@@ -1558,8 +1688,9 @@ impl Machine {
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs);
-        if let Err(error) = self.spawn(tab, cmd, pty::size(cols, rows)) {
+        let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
+        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
             let _ = self.tab(tab, |t| t.starting = false);
             return Err(error);
         }
@@ -1724,7 +1855,13 @@ impl Machine {
         self.relaunch(tab, cols, rows)
     }
 
+    #[cfg(test)]
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
+        self.spawn_with(tab, cmd, size, None)
+    }
+
+    /// `spawn`, keeping the session's own MCP config `mcp` until the session ends.
+    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, mcp: Option<mcp::SessionFiles>) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| {
             t.held.clear();
             (t.session.take(), t.screen.clone())
@@ -1747,6 +1884,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.mcp = mcp;
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
@@ -1810,6 +1948,19 @@ impl Machine {
         if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
             screen.lock().unwrap().detach(viewer);
         }
+    }
+
+    /// What the app's Stop types. Esc alone ends the turn but leaves background agents and workflows
+    /// running, so claude's ctrl+x ctrl+k stops them first; their "stopped by the user" notices then
+    /// wake claude for a turn of its own, which the last Esc ends.
+    pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
+        const KILL_AGENTS: &[u8] = b"\x18\x0b";
+        for keys in [KILL_AGENTS, KILL_AGENTS, b"\x1b"] {
+            self.write_input(tab, keys)?;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        self.write_input(tab, b"\x1b")
     }
 
     pub fn write_input(&self, tab: &str, data: &[u8]) -> Result<(), String> {
@@ -2141,6 +2292,32 @@ impl Machine {
         }
     }
 
+    /// `send_to_captain` with `box`: the hub opens the Capitão of `project`'s repository in an
+    /// Upstash Box, with the account's connection, or hands the message to the box that runs it.
+    fn send_to_captain_box(&self, project: &str, machine: Option<&str>, boxed: crate::delegate::BoxTarget, message: &str, request_id: &str) -> Result<Value, String> {
+        let repo = match boxed.repo {
+            Some(repo) => repo,
+            None => self.project_origin(project, machine)?,
+        };
+        let settings = self.global_settings();
+        let to = global::RelayTo::CaptainBox { repo, size: boxed.size, text: message.to_owned(), sender: settings.name, busy: Some(settings.busy) };
+        self.call_hub(HubCall::Relay { request_id: request_id.to_owned(), to }).map_err(needs_update)
+    }
+
+    /// The git origin of `project`: its checkout here, else the repo the hub's overview lists for it.
+    fn project_origin(&self, project: &str, machine: Option<&str>) -> Result<String, String> {
+        if let Some(remote) = self.local_project(project, machine).as_deref().and_then(git_remote) {
+            return Ok(remote);
+        }
+        let overview = self.projects_overview()?;
+        let listed = overview.projects.iter().find(|p| p.key == project || p.repo.as_deref() == Some(project) || p.checkouts.iter().any(|c| c.path == project));
+        match listed {
+            Some(p) => p.repo.clone().ok_or_else(|| format!("{project} has no git origin, so no box can clone it")),
+            None if project.contains('/') && !is_absolute_anywhere(project) => Ok(project.to_owned()),
+            None => Err(format!("{project} is not a project of this account")),
+        }
+    }
+
     /// The folder on this machine that `project` names, as a key `projects` lists (`repo`, or
     /// `<machine>:<path>`) or as a folder, unless `machine` names another machine.
     fn local_project(&self, project: &str, machine: Option<&str>) -> Option<PathBuf> {
@@ -2233,7 +2410,29 @@ impl Machine {
 
     /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
-        Ok(self.projects_overview()?.waiting)
+        let mut waiting = self.projects_overview()?.waiting;
+        waiting.extend(self.confirmations_waiting());
+        Ok(waiting)
+    }
+
+    /// The agents' actions that wait on the user's approval, as the `waiting` tool lists them. None
+    /// without a hub, or with one too old to keep them.
+    fn confirmations_waiting(&self) -> Vec<global::Waiting> {
+        let Ok(items) = self.call_hub(HubCall::Confirmations).and_then(|value| serde_json::from_value::<Vec<surface::Confirmation>>(value).map_err(|e| e.to_string())) else { return vec![] };
+        items
+            .into_iter()
+            .filter(|confirmation| confirmation.decision.is_none())
+            .map(|confirmation| global::Waiting {
+                message: Some(surface::summary(&confirmation.args)),
+                title: Some(format!("Approve {}?", confirmation.action)),
+                since: u64::try_from(confirmation.at).ok(),
+                project: None,
+                kind: global::WaitingKind::Confirm,
+                machine: confirmation.machine,
+                machine_name: confirmation.machine_name,
+                tab: confirmation.tab,
+            })
+            .collect()
     }
 
     /// The latest replies of `project`'s Capitão, for the `read_captain` tool, as the hub's MCP
@@ -2375,7 +2574,11 @@ impl Machine {
                 only_global()?;
                 self.read_session(&id, machine.as_deref(), items)
             }
-            ProjectTool::SendToCaptain { project, message, request_id, machine } => {
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
+                only_global()?;
+                text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
+            }
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
                 text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
             }
@@ -2428,7 +2631,204 @@ impl Machine {
                 })
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
+            ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
+            ProjectTool::Act { action, args, request_id, machine } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+                match self.call_hub(HubCall::Act { act }) {
+                    Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
+                    answer => text_json(answer?),
+                }
+            }
         }
+    }
+
+    /// Runs an agent's act for the session in `caller`, as the hub passes it on. A call that starts
+    /// a session holds it to the delegation limits; one with no such path yet is refused. `caller`
+    /// names no tab here when the act runs on another machine than the session's.
+    fn act_for(&self, caller: &str, call: Value) -> Result<Value, String> {
+        let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
+        if let Call::StartClaude { tab, cols, rows } = call {
+            return json(self.start_for(caller, &tab, cols, rows)?);
+        }
+        if let Call::SetModel { model, .. } = &call {
+            // An agent moves a session only to a model its own project allows, as it starts a worker.
+            self.caller_limits(caller)?.admit(Some(model), None, &self.claude_models())?;
+        }
+        if let Call::Enqueue { path, text, request_id, busy, .. } = call {
+            return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
+        }
+        if let Call::Prompt { tab, text } = &call {
+            self.may_prompt(caller, tab)?;
+            return json(self.type_prompt(tab, text)?);
+        }
+        if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
+            return Err("open_global_orchestrator is for the global orchestrator's own session".into());
+        }
+        let cmd = surface::cmd_of(&call);
+        if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
+            return Err(format!("{cmd} starts work, and nothing holds it to the limits yet"));
+        }
+        // These start a stopped tab as well as restart a running one, outside the limits.
+        if let Call::RestartClaude { tab, .. } | Call::SetModel { tab, .. } | Call::SetBypass { tab, .. } | Call::Rewind { tab, .. } | Call::SwitchAccount { tab, .. } | Call::SetWorkspace { tab, .. } = &call {
+            if !self.tab(tab, |t| t.session.is_some())? {
+                return Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker"));
+            }
+        }
+        if matches!(call, Call::SetBypass { on: true, .. }) && self.tab(caller, |t| t.child_access())? != crate::delegate::Access::Full {
+            return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
+        }
+        self.call(call)
+    }
+
+    /// Whether the session in `caller` may type a prompt into `tab`: a session of another kind than
+    /// itself, a Captain or the global orchestrator. Those take a message through their queue, so
+    /// it never lands in the middle of their turn: `enqueue`, or `tell_orchestrator`.
+    fn may_prompt(&self, caller: &str, tab: &str) -> Result<(), String> {
+        if caller == tab {
+            return Err("prompt types into another session; your own session is the one reading this".into());
+        }
+        let (captain, global, chat) = self.tab(tab, |t| (matches!(role_of(&t.env), Some((Role::Orchestrator, _))), global::is_global(&t.env), taste::is_chat(&t.env)))?;
+        match (global, captain, chat) {
+            (true, _, _) => Err(format!("{tab} is the global orchestrator: a Captain reports to it with tell_orchestrator")),
+            (_, true, _) => Err(format!("{tab} is a Captain: enqueue hands it a message when it is idle")),
+            (_, _, true) => Err(format!("{tab} is a taste chat, which only the user talks to")),
+            _ => Ok(()),
+        }
+    }
+
+    /// Hands `text` to the Captain of `path` for the agent in `caller`, labelled with the caller's
+    /// own role, never the orchestrator's name; the `sender` it sent is ignored. A Captain that is not running starts on it, which is
+    /// a session start: it must pass the project's tier and effort limits, and the project must run
+    /// fewer than its workers-at-once. A Captain that runs takes the message with no new session.
+    fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+        let project = canonical(path);
+        let tab = self.open_orchestrator(path)?;
+        if tab == caller {
+            return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
+        }
+        let (running, model) = self.tab(&tab, |t| (t.session.is_some() || t.starting, t.model.clone()))?;
+        if !running {
+            let limits = self.limits_in(caller, &project);
+            limits.admit(model.as_deref(), None, &self.claude_models())?;
+            let working = self.delegates.working_in(&project);
+            if working >= limits.parallel as usize {
+                return Err(workers_full(working));
+            }
+        }
+        let sender = self.tab(caller, |t| (global::is_global(&t.env), role_of(&t.env).map(|(role, _)| role), t.title.clone())).map_or_else(
+            |_| "Session".to_owned(),
+            |(global, role, title)| {
+                let kind = match (global, role) {
+                    (true, _) => return self.global_settings().name,
+                    (_, Some(Role::Orchestrator)) => "Captain",
+                    (_, Some(Role::Worker)) => "Worker",
+                    _ => "Session",
+                };
+                title.map_or_else(|| kind.to_owned(), |title| format!("{kind} {title}"))
+            },
+        );
+        self.enqueue_to_captain(path, text, request_id, &sender, busy)
+    }
+
+    /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
+    /// a worker thread: in the caller's project, no wider than the caller's access, a task under the
+    /// project's workers-at-once limit and held to its tier, time limit and budget, whose first
+    /// finished turn ends it with a notice to the caller and a record in the delegation metrics. A
+    /// tab already running, or the thread of a task still working, just starts.
+    fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
+        let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
+        let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+            let plan = t.permission_mode.as_deref() == Some("plan");
+            (t.session.is_some() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+        })?;
+        if running || self.thread_task(tab, false).is_some() {
+            return self.start_claude(tab, cols, rows);
+        }
+        if ruled {
+            return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker"));
+        }
+        if global {
+            return Err(NO_PROJECT_WORK.into());
+        }
+        if history::project_of(&cwd) != home {
+            return Err(format!("{tab} works in {}, outside your project {}: start_claude starts workers only in your own project", cwd.display(), home.display()));
+        }
+        if crate::delegate::tighten(ceiling, access) != access {
+            return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
+        }
+        let limits = self.caller_limits(caller)?;
+        let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
+        let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
+        let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
+        let new = NewTask {
+            parent: Parent::Tab(caller.to_owned()),
+            tool: None,
+            title,
+            account: account.id.clone(),
+            provider: account.provider,
+            model,
+            cwd: cwd.clone(),
+            mode: Mode::Async,
+            access,
+            isolated: false,
+            caller_key: caller_ref.key(),
+            client_request_id: None,
+            role: None,
+        };
+        let task = match self.delegates.claim(new, Some(limits.parallel)) {
+            Claim::Fresh(task) => *task,
+            Claim::Full(working) => return Err(workers_full(working)),
+            Claim::Existing(id) => return Err(format!("task {id} already runs for this request")),
+        };
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        self.delegates.describe(&task.id, self.delegator(&caller_ref), effort.clone());
+        self.delegates.note_parent(&task.id, self.tab(caller, |t| t.claude_session.clone()).ok().flatten());
+        let project = history::project_of(&cwd);
+        let _ = self.tab(tab, |t| {
+            t.task = Some(task.id.clone());
+            t.spawned_by.get_or_insert_with(|| caller.to_owned());
+            t.env.extend(role_env(Role::Worker, &project));
+            if let Some(effort) = &effort {
+                t.launch.extend(["--effort".to_owned(), effort.clone()]);
+            }
+        });
+        self.delegates.link_thread(&task.id, Thread { tab: tab.to_owned(), runs: true });
+        let folder = match self.start_claude(tab, cols, rows) {
+            Ok(folder) => folder,
+            Err(error) => {
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                let _ = self.tab(tab, |t| t.task = None);
+                return Err(error);
+            }
+        };
+        if let Some(pid) = self.tab(tab, |t| t.session.as_ref().and_then(pty::Session::pid)).ok().flatten() {
+            self.delegates.remember_pid(&task.id, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+        Ok(folder)
+    }
+
+    /// Queues `text` for the session in `tab`, or in the tab that now runs Claude session
+    /// `session`, as worker reports are queued: typed once it is idle. False when no tab has it.
+    fn notice(&self, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        let found = {
+            let tabs = self.tabs.lock().unwrap();
+            match tabs.get(tab) {
+                Some(t) => Some((tab.to_owned(), t.claude_session.clone())),
+                None => session.as_deref().and_then(|session| tabs.iter().find(|(_, t)| t.claude_session.as_deref() == Some(session)).map(|(id, t)| (id.clone(), t.claude_session.clone()))),
+            }
+        };
+        let Some((tab, running)) = found else { return false };
+        if !self.delegates.holds_report(&tab, id) {
+            self.delegates.queue_report(&tab, running.or(session), text);
+            self.emit_tabs();
+        }
+        self.arm_delegate_pass();
+        true
     }
 
     /// The memories of the tab's project that bear on the prompt starting a turn, for the hook to
@@ -2473,14 +2873,65 @@ impl Machine {
         }
     }
 
-    /// Refuses new workers past the global cap, naming where to raise it.
-    fn check_worker_cap(&self) -> Result<(), String> {
-        let max = self.orchestration.lock().unwrap().max_workers as usize;
-        let running = self.worker_count();
-        if running >= max {
-            return Err(format!("{running} workers are already running, the most this machine starts at once. Raise it under Settings, or wait for one to finish."));
+    /// The delegation limits a call from `tab` is held to: the project's limits in the account's
+    /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
+    /// is a worker.
+    fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        Ok(self.limits_in(tab, &history::project_of(&cwd)))
+    }
+
+    /// The limits for starting a session in `project` on behalf of `tab`: the project's, narrowed by
+    /// the limits of the task `tab` itself runs, when it is a worker here.
+    fn limits_in(&self, tab: &str, project: &Path) -> taste::Limits {
+        let own_task = self.tab(tab, |t| t.task.clone()).ok().flatten();
+        let limits = self.tastes().resolve(&captain_scope(project)).limits();
+        let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
+        outer.map_or(limits, |outer| limits.narrow(outer))
+    }
+
+    /// Prices what each working worker thread's transcripts gained, its subagents' included,
+    /// records it on its task, and stops the ones past their budget. The `meters` lock is held
+    /// through the record, so the 1 s pass and a turn's end never write an older total over a newer
+    /// one. Cursor and Codex children run headless and are not metered.
+    fn meter_workers(&self) {
+        let threads: Vec<(String, String)> = self
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, t)| Some((t.task.clone()?, id.clone())))
+            .filter(|(task, _)| self.delegates.get(task).is_some_and(|task| task.state == crate::delegate::WorkState::Working && task.thread.is_some_and(|thread| thread.runs)))
+            .collect();
+        let mut meters = self.meters.lock().unwrap();
+        meters.retain(|task, _| threads.iter().any(|(working, _)| working == task));
+        let mut moved = vec![];
+        for (task, tab) in threads {
+            let Some(file) = self.transcript_of(&tab).ok().flatten() else { continue };
+            let meter = meters.entry(task.clone()).or_default();
+            if meter.advance(&file).unwrap_or(false) && !meter.is_empty() {
+                moved.push(task);
+            }
         }
-        Ok(())
+        if moved.is_empty() {
+            return;
+        }
+        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
+        let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
+        self.delegates.meter(&used, self.launch.path_env.as_deref());
+    }
+
+    /// The price list, read again each hour.
+    fn meter_rates(&self) -> Arc<usage::RateTable> {
+        let mut held = self.meter_rates.lock().unwrap();
+        match &*held {
+            Some((read, rates)) if read.elapsed() < Duration::from_secs(3600) => rates.clone(),
+            _ => {
+                let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
+                *held = Some((Instant::now(), rates.clone()));
+                rates
+            }
+        }
     }
 
     /// The workers `from` sees, one per line, each indented under the worker that started it:
@@ -2527,6 +2978,10 @@ impl Machine {
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+        // A worker for another machine's tab reports only its task's end, through the hub.
+        if self.tab(worker, |t| t.origin.is_some()).unwrap_or(false) {
+            return;
+        }
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
             AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
@@ -2695,6 +3150,58 @@ impl Machine {
 
     pub(crate) fn set_hub(&self, hub: Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>) {
         *self.hub.lock().unwrap() = Some(hub);
+        *self.mcp_loaded.lock().unwrap() = None;
+        self.mcp_waited.store(false, Ordering::SeqCst);
+    }
+
+    /// The account's enabled MCP servers: the hub's answer within `MCP_WAIT`, else the ones it
+    /// last handed this machine. The first session that finds none kept waits that long for the
+    /// link to come up, as sessions restored at launch start before it does; later ones don't, so
+    /// an offline machine starts its sessions at once. None while this machine is not linked.
+    fn mcp_loads(&self) -> Option<Vec<mcp::Load>> {
+        let hub = self.hub.lock().unwrap().clone()?;
+        let deadline = Instant::now() + MCP_WAIT;
+        let first = !self.mcp_waited.swap(true, Ordering::SeqCst);
+        loop {
+            let (answer, answered) = std::sync::mpsc::channel();
+            let asking = hub.clone();
+            std::thread::spawn(move || {
+                let read = asking(HubCall::LoadMcpServers).and_then(|value| serde_json::from_value::<Vec<mcp::Load>>(value).map_err(|e| e.to_string()));
+                let _ = answer.send(read);
+            });
+            let kept = || self.mcp_loaded.lock().unwrap().clone();
+            match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(loads)) => {
+                    *self.mcp_loaded.lock().unwrap() = Some(loads.clone());
+                    return Some(loads);
+                }
+                Ok(Err(e)) if first && e == crate::link::OFFLINE && kept().is_none() && Instant::now() + Duration::from_millis(100) < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => return kept(),
+            }
+        }
+    }
+
+    /// The account's MCP servers a session of `account` in `cwd` loads, in a config only its user
+    /// reads, or None when there are none. Cursor reads MCP servers only from its own files.
+    fn session_mcp(&self, account: &Account, cwd: &Path) -> Option<mcp::SessionFiles> {
+        if account.provider == Provider::Cursor {
+            return None;
+        }
+        let loads = self.mcp_loads().filter(|loads| !loads.is_empty())?;
+        let repo = git_remote(&history::project_of(cwd)).and_then(|remote| repo_key(&remote));
+        let taken: Vec<String> = match account.provider {
+            Provider::Claude => mcp::servers(&self.accounts.home(account), Some(cwd)).into_iter().map(|s| s.name).collect(),
+            _ => mcp::codex_servers(&std::fs::read_to_string(self.accounts.home(account).join("config.toml")).unwrap_or_default()),
+        };
+        match mcp::SessionFiles::write(&mcp::for_session(&loads, repo.as_deref(), &taken)) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("pinned: a session in {} starts without the account's MCP servers: {e}", cwd.display());
+                None
+            }
+        }
     }
 
     /// Remembers this machine's id and name from the hub's hello, so a project named by it is
@@ -2784,7 +3291,10 @@ impl Machine {
             let Ok(cwd) = self.tab(&tab, |t| t.cwd.clone()) else { continue };
             for url in self.pr_watches.of(&tab) {
                 let view = workspace::run(&cwd, self.launch.path_env.as_deref(), "gh", &["pr", "view", "--json", crate::prwatch::FIELDS, "--", &url]);
-                if let Some(view) = view.ok().and_then(|v| serde_json::from_str(&v).ok()) {
+                if let Some(view) = view.ok().and_then(|v| serde_json::from_str::<Value>(&v).ok()) {
+                    if view["state"] == "MERGED" {
+                        self.accept_merged(&tab, view["number"].as_u64());
+                    }
                     self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
                 }
             }
@@ -2878,22 +3388,6 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
-    /// How this machine's orchestrator routes and how many workers it may run.
-    pub fn orchestration(&self) -> crate::orchestration::Orchestration {
-        self.orchestration.lock().unwrap().clone()
-    }
-
-    /// Saves a new worker cap, clamped into range.
-    pub fn set_orchestration(&self, max_workers: u32) -> Result<crate::orchestration::Orchestration, String> {
-        let mut current = self.orchestration.lock().unwrap();
-        *current = crate::orchestration::Orchestration { max_workers };
-        current.clamp();
-        let saved = current.clone();
-        drop(current);
-        saved.save(self.orchestration_dir.as_deref())?;
-        *self.orchestration.lock().unwrap() = saved.clone();
-        Ok(saved)
-    }
 
     /// The account's tastes: the hub's while this machine is linked, which `taste.json` keeps for
     /// when the hub can't answer, or else this machine's own. Waits at most `TASTE_WAIT` for the
@@ -2956,12 +3450,6 @@ impl Machine {
             tastes.reset(scope, field);
             Ok(())
         })
-    }
-
-    /// Workers running right now: live worker threads plus active delegate tasks.
-    fn worker_count(&self) -> usize {
-        let threads = self.tabs.lock().unwrap().values().filter(|t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker)).count();
-        threads + self.delegates.active_count()
     }
 
     fn record_usage(&self, account: accounts::AccountId, report: Usage) {
@@ -3031,6 +3519,8 @@ impl Machine {
                 Message::TaskStatus { tab, task, id } => machine.task_status(tab, task, &id),
                 Message::TaskCancel { tab, task, id, reason } => machine.task_cancel(tab, task, &id, &reason),
                 Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
+                Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
+                Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 message => other(message),
             }
@@ -3088,11 +3578,120 @@ impl Machine {
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let mut status = self.delegates.status(&caller, id)?;
+        if let Some(remote) = self.delegates.get(id).and_then(|t| t.remote) {
+            let steps = match (caller.tab.as_deref(), self.delegates.remote_due(id, Instant::now(), REMOTE_LOOK)) {
+                (Some(tab), Some(due)) => self.look_remote(tab, id, &due),
+                _ => None,
+            };
+            status = self.delegates.status(&caller, id)?;
+            if let Some(steps) = steps {
+                status["recentSteps"] = steps;
+            }
+            return Ok(with_remote(status, &remote).to_string());
+        }
         // A thread's own session runs the child, so its steps are in the thread's transcript.
         if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
         }
         Ok(status.to_string())
+    }
+
+    /// Who `caller` is, as a task's record names its delegator.
+    fn delegator(&self, caller: &crate::delegate::Caller) -> crate::delegate::Delegator {
+        use crate::delegate::{Delegator, DelegatorKind};
+        let Some(tab) = caller.tab.as_deref() else { return Delegator::default() };
+        let Ok((role, global)) = self.tab(tab, |t| (role_of(&t.env), global::is_global(&t.env))) else { return Delegator::default() };
+        let kind = match (global, &role) {
+            (true, _) => DelegatorKind::GlobalOrchestrator,
+            (false, Some((Role::Orchestrator, _))) => DelegatorKind::Captain,
+            (false, Some((Role::Worker, _))) => DelegatorKind::Worker,
+            (false, _) => DelegatorKind::Session,
+        };
+        let folder = match (global, role) {
+            (true, _) => None,
+            (false, Some((_, project))) => Some(project),
+            (false, None) => self.project_of_tab(tab).ok(),
+        };
+        let (project, project_name) = match folder {
+            Some(folder) => {
+                let repo = git_remote(&folder).and_then(|remote| repo_key(&remote));
+                let name = repo.as_deref().and_then(repo_name).map(str::to_owned).or_else(|| folder.file_name().map(|n| n.to_string_lossy().into_owned()));
+                (Some(repo.unwrap_or_else(|| folder.display().to_string())), name)
+            }
+            None => (None, None),
+        };
+        Delegator { kind, tab: Some(tab.to_owned()), project, project_name }
+    }
+
+    /// The pull request a worker thread watched merged, so the task it ran was used.
+    fn accept_merged(&self, tab: &str, number: Option<u64>) {
+        let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return };
+        let pr = number.map_or_else(|| "its pull request".to_owned(), |n| format!("its PR #{n}"));
+        if self.delegates.accept_auto(&task, format!("{pr} merged")) {
+            self.send_records();
+        }
+    }
+
+    /// Sends the hub the records of tasks that ended or changed since it last took them, in the
+    /// background, one send at a time. A machine with no hub keeps them for its own totals.
+    pub(crate) fn send_records(&self) {
+        if self.hub.lock().unwrap().is_none() || self.records_retry.lock().unwrap().is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self.sending_records.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            machine.record_now();
+            machine.sending_records.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Sends the hub the records it lacks, on this thread, until it holds them all or refuses.
+    fn record_now(&self) {
+        loop {
+            let records = self.delegates.unrecorded(RECORDS_PER_SEND);
+            if records.is_empty() {
+                return;
+            }
+            match self.call_hub(HubCall::RecordTasks { records: records.clone() }) {
+                Ok(_) => self.delegates.mark_recorded(&records),
+                Err(e) => {
+                    eprintln!("pinned: the hub did not take {} task records: {e}", records.len());
+                    *self.records_retry.lock().unwrap() = Some(Instant::now() + RECORDS_RETRY);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn task_review(&self, tab: Option<String>, task: Option<String>, id: &str, verdict: &str, note: Option<String>) -> Result<String, String> {
+        let caller = Self::require_caller(tab, task)?;
+        let verdict = crate::delegate::Verdict::parse(verdict)?;
+        let answer = self.delegates.review(&caller, id, verdict, note)?;
+        self.send_records();
+        Ok(answer.to_string())
+    }
+
+    /// The account's delegation totals when the hub keeps them, else this machine's own.
+    fn delegation_stats(&self, days: Option<u64>) -> Result<String, String> {
+        let days = crate::delegate::stats_days(days)?;
+        let from_hub = self.call_hub(HubCall::DelegationStats { days }).ok().and_then(|value| serde_json::from_value::<crate::delegate::DelegationStats>(value).ok());
+        let (stats, scope) = match from_hub {
+            Some(stats) => (stats, "every machine of the account"),
+            None => (self.local_delegation_stats(days), "this machine"),
+        };
+        let mut brief = stats.brief();
+        brief["scope"] = json!(scope);
+        Ok(brief.to_string())
+    }
+
+    /// The totals of the tasks this machine ran, for a signed-out app and a machine with no hub.
+    pub fn local_delegation_stats(&self, days: u32) -> crate::delegate::DelegationStats {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        crate::delegate::aggregate(&self.delegates.records(), now, days)
     }
 
     /// The task the tab's thread shows, while that task is still working. `runs` asks only for
@@ -3105,7 +3704,160 @@ impl Machine {
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
+        let remote = self.delegates.get(id).filter(|t| !t.state.terminal()).and_then(|t| t.remote);
+        if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
+            self.delegates.status(&caller, id)?;
+            if !remote.machine.is_empty() {
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                let answer = self.call_hub(cancel).map_err(|e| format!("{} did not take the cancel: {}", remote.name, needs_update(e)))?;
+                self.settle_from(tab, id, &remote, &answer);
+            }
+        }
         self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+    }
+
+    /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
+    /// machine keeps the task, under its own id, for the caller's `task_status` and notice.
+    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+        use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
+        let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
+        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
+        let access = resolve_access(ceiling, &request)?;
+        let repo = request.target.boxed.as_ref().and_then(|b| b.repo.clone()).or_else(|| git_remote(&cwd));
+        if repo.is_none() {
+            return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
+        }
+        let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
+        let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
+        let place = request.target.machine.clone().unwrap_or_else(|| "an Upstash Box".into());
+        // Held here to the caller's limits, and sent with them, so the worker there is held too.
+        let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
+        (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
+        let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
+        let delegator = self.delegator(caller);
+        let task = match self.delegates.claim(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool,
+            title: request.title.clone(),
+            account,
+            provider,
+            model: request.target.model.clone(),
+            cwd,
+            mode: request.mode,
+            access,
+            isolated: false,
+            caller_key: caller.key(),
+            client_request_id: request.client_request_id.clone(),
+            role: request.role.clone(),
+        }, Some(limits.parallel)) {
+            Claim::Existing(id) => return self.remote_started(&id),
+            Claim::Full(working) => return Err(workers_full(working)),
+            Claim::Fresh(task) => *task,
+        };
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, held);
+        self.delegates.describe(&task.id, delegator.clone(), effort);
+        self.delegates.note_parent(&task.id, session);
+        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
+        let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
+        match self.call_hub(asked) {
+            Ok(answer) => {
+                let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
+                let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
+                let tab = answer["tabId"].as_str().map(str::to_owned);
+                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+                self.arm_delegate_pass();
+                self.remote_started(&task.id)
+            }
+            Err(error) => {
+                let error = needs_update(error);
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                Err(error)
+            }
+        }
+    }
+
+    fn remote_started(&self, id: &str) -> Result<String, String> {
+        let body = self.delegates.started_json(id)?;
+        Ok(match self.delegates.get(id).and_then(|t| t.remote) {
+            Some(remote) => with_remote(body, &remote),
+            None => body,
+        }
+        .to_string())
+    }
+
+    /// Asks the machine that runs a remote task how it goes. A finished task ends here too; a
+    /// working one gives its latest steps. None while that machine can't answer, as while its box boots.
+    fn look_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget) -> Option<Value> {
+        if remote.machine.is_empty() {
+            return None;
+        }
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let answer = self.call_hub(asked).ok()?;
+        self.settle_from(tab, id, remote, &answer);
+        Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
+    }
+
+    /// Ends the remote task when `answer`, the status its machine gave, says it ended.
+    fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
+        let state = answer["workState"].as_str().unwrap_or_default();
+        if !matches!(state, "result_available" | "failed" | "cancelled") {
+            return;
+        }
+        let end = crate::delegate::RemoteEnd {
+            state: state.to_owned(),
+            summary: answer["summary"].as_str().map(str::to_owned),
+            error: answer["error"].as_str().map(str::to_owned),
+        };
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+            self.emit_tabs();
+        }
+    }
+
+    /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
+    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
+        if !self.delegates.settle_remote(task, tab, from, end) {
+            return false;
+        }
+        self.maybe_deliver(tab);
+        self.emit_tabs();
+        true
+    }
+
+    /// `Call::RemoteTask`: the status of the task started here for `task` of `tab` on `origin`, or
+    /// its state once cancelled.
+    fn remote_task(&self, origin: &str, tab: &str, task: &str, cancel: Option<&str>) -> Result<Value, String> {
+        let key = crate::delegate::Origin::key(origin, tab);
+        let id = self.delegates.for_origin(&key, task).ok_or_else(|| format!("no task {task} of that thread runs here"))?;
+        let caller = crate::delegate::Caller { tab: Some(key), task: None };
+        if let Some(reason) = cancel {
+            return self.delegates.cancel(&caller, &id, reason, self.launch.path_env.as_deref());
+        }
+        let mut status = self.delegates.status(&caller, &id)?;
+        if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
+            status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+        }
+        Ok(status)
+    }
+
+    /// Sends the end of each task that a tab on another machine delegated here back through the
+    /// hub. An end the hub could not pass on waits for the next pass, at most every `REMOTE_LOOK`.
+    fn send_remote_ends(&self, now: Instant) {
+        let fresh: Vec<_> = self.delegates.claim_remote_ends().into_iter().map(|(_, machine, tab, task, end)| HubCall::RemoteEnded { to: machine, tab, task, end }).collect();
+        // A worker box goes once its end got through, so the tasks' records go first.
+        if !fresh.is_empty() && self.hub.lock().unwrap().is_some() {
+            self.record_now();
+        }
+        let held = std::mem::take(&mut *self.remote_ends.lock().unwrap());
+        let (again, mut waiting): (Vec<_>, Vec<_>) = held.into_iter().partition(|(at, _)| now.saturating_duration_since(*at) >= REMOTE_LOOK);
+        for call in fresh.into_iter().chain(again.into_iter().map(|(_, call)| call)) {
+            if let Err(e) = self.call_hub(call.clone()) {
+                eprintln!("pinned: could not send a delegated task's end back: {e}");
+                waiting.push((now, call));
+            }
+        }
+        self.remote_ends.lock().unwrap().extend(waiting);
     }
 
     /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
@@ -3140,30 +3892,75 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        use crate::delegate::Parent;
         let caller = Self::require_caller(tab, parent_task)?;
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
                 return Err(NO_PROJECT_WORK.into());
             }
         }
-        self.check_worker_cap()?;
         if let Some(error) = crate::delegate::delegate_block(caller.task.is_some()) {
             return Err(error.to_owned());
         }
-        let parent = if let Some(tab) = caller.tab.clone() {
-            Parent::Tab(tab)
+        if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
+            return self.remote_started(&id);
+        }
+        let limits = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
+        if request.target.machine.is_some() || request.target.boxed.is_some() {
+            return self.delegate_elsewhere(&caller, tool, request, limits);
+        }
+        let delegator = self.delegator(&caller);
+        let parallel = Some(limits.parallel);
+        let side = if let Some(tab) = caller.tab.clone() {
+            let (account, model, provider, auth, cwd, ceiling) = self.tab(&tab, |t| (t.account.id.clone(), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?;
+            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator }
         } else {
-            Parent::Task(caller.task.clone().unwrap_or_default())
+            let id = caller.task.clone().unwrap_or_default();
+            let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
+            let auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
+            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator }
         };
-        let (account_id, inherited_model, parent_provider, parent_auth, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?
-        } else {
-            let id = caller.task.as_deref().unwrap_or_default();
-            let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
-            let parent_auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
-            (Some(task.account), task.model, task.provider, parent_auth, task.cwd, task.access)
+        self.launch_child(side, tool, request)
+    }
+
+    /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
+    /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
+    /// the project's account unless the request names one.
+    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+        let key = origin.parent_key();
+        if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
+            return self.delegates.started_json(&id).map(|value| value.to_string());
+        }
+        let repo = repo.ok_or("the thread that asked works in a folder with no git origin, so this machine can't find its project")?;
+        let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
+        let account = self.account_for(None, &cwd)?;
+        // The caller's limits, held no looser than this machine's own for the project.
+        let limits = origin.limits.narrow(self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits());
+        (request.target.machine, request.target.boxed) = (None, None);
+        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let side = ChildParent {
+            parent: crate::delegate::Parent::Tab(key),
+            caller_key,
+            client_request_id: Some(origin.task.clone()),
+            tab: None,
+            account: Some(account.id),
+            inherited_model: None,
+            provider: account.provider,
+            auth: account.auth,
+            cwd,
+            ceiling: origin.access,
+            limits,
+            // The caller's machine counted it against Workers at once.
+            parallel: None,
+            delegator: origin.delegator.clone(),
+            origin: Some(origin),
         };
+        self.launch_child(side, None, request)
+    }
+
+    fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
+        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator } = side;
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
         } else if let Some(id) = account_id {
@@ -3185,8 +3982,9 @@ impl Machine {
         // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
-        let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
-        self.ensure_parent(caller.tab.as_deref(), None)?;
+        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
+        self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
             parent,
@@ -3199,19 +3997,22 @@ impl Machine {
             mode: request.mode,
             access,
             isolated: false,
-            caller_key: caller.key(),
-            client_request_id: request.client_request_id.clone(),
+            caller_key,
+            client_request_id,
             role: request.role.clone(),
-        }) {
+        }, parallel) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
-        self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
-        if let Some(tab) = caller.tab.as_deref() {
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        self.delegates.describe(&task.id, delegator, effort.clone());
+        if let Some(tab) = parent_tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         if account.provider == Provider::Cursor {
             if let Some(name) = model.clone() {
                 let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
@@ -3220,11 +4021,11 @@ impl Machine {
             }
             effort = None;
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         // A child called from a tab is a worker thread under it. Claude Code runs in that thread's
         // own session; Cursor and Codex report no turns to pinned, so they run headless and the
-        // thread shows their steps.
-        let from = caller.tab.clone();
+        // thread shows their steps. A child for a tab on another machine is a thread here.
+        let from = parent_tab.clone().or_else(|| origin.as_ref().map(crate::delegate::Origin::parent_key));
         let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
@@ -3246,12 +4047,13 @@ impl Machine {
         }
         let brief = crate::delegate::granted_brief(&request.task, &request.tools);
         if let Some(from) = from.as_deref() {
-            let child = ThreadChild { from, task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
+            let child = ThreadChild { from, origin: origin.clone(), task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
             if runs_in_thread {
                 return self.run_in_thread(child, account, effort.as_deref(), access, &brief);
             }
             self.watch_thread(child, account.clone());
         }
+        let mcp = self.session_mcp(&account, &cwd);
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
@@ -3260,6 +4062,7 @@ impl Machine {
                 effort: effort.as_deref(),
                 access,
                 mcp_config: self.launch.mcp_config.as_deref(),
+                session_mcp: mcp.as_ref(),
                 exe: &self.launch.exe,
                 sock: &self.launch.sock,
                 task_id: &task.id,
@@ -3279,6 +4082,8 @@ impl Machine {
         let pid = match spawn(
             ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &strip },
             move |event| {
+                // The child's MCP config lives as long as its output does, which ends with it.
+                let _ = &mcp;
                 let Some(machine) = me.upgrade() else { return };
                 if let Some(tab) = machine.delegates.apply(&id, event, path_env.as_deref()) {
                     machine.maybe_deliver(&tab);
@@ -3354,10 +4159,14 @@ impl Machine {
     }
 
     fn add_child_tab(&self, child: &ThreadChild, account: Account, launch: Vec<String>, bypass: bool) -> TabId {
-        let project = self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd));
+        let project = match child.origin {
+            Some(_) => history::project_of(child.cwd),
+            None => self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd)),
+        };
         let id = self.add_tab(child.cwd.to_owned(), account, launch, role_env(Role::Worker, &project), bypass, None);
         let _ = self.tab(&id, |t| {
-            t.spawned_by = Some(child.from.to_owned());
+            t.spawned_by = child.origin.is_none().then(|| child.from.to_owned());
+            t.origin = child.origin.clone();
             t.task = Some(child.task.to_owned());
             t.title = Some(child.title.to_owned());
             t.model = child.model.clone();
@@ -3381,7 +4190,14 @@ impl Machine {
         if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
             self.delegates.set_conversation(&task, session);
         }
+        // The meter reads a working task only; this reads the turn that just ended before it settles.
+        self.meter_workers();
         let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // A thread for another machine's tab sends its end back through the hub on the next pass.
+        if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
+            self.arm_delegate_pass();
+            return true;
+        }
         // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
         match parent {
             Some(parent) if self.tabs.lock().unwrap().contains_key(&parent) => {
@@ -3537,6 +4353,11 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.send_remote_ends(Instant::now());
+                machine.meter_workers();
+                if !machine.delegates.unrecorded(1).is_empty() {
+                    machine.send_records();
+                }
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
@@ -3550,7 +4371,7 @@ impl Machine {
     }
 
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
+        use crate::delegate::{capabilities, codex_constraints, cursor_models, Access, Inherited, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -3572,7 +4393,7 @@ impl Machine {
                     Provider::Claude if account.auth == Auth::OpenCodeGo => {
                         (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()])
                     }
-                    Provider::Claude => (provider_models(Provider::Claude), vec![]),
+                    Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
                     Provider::Codex => (vec![], codex_constraints()),
                     Provider::Cursor => {
                         let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
@@ -3680,6 +4501,7 @@ impl Machine {
             account,
             program: Program::Agent,
             session: None,
+            mcp: None,
             starting: false,
             started: None,
             launch,
@@ -3694,6 +4516,7 @@ impl Machine {
             model: None,
             made: None,
             spawned_by: None,
+            origin: None,
             task: None,
             turn: None,
             status: None,
@@ -3732,7 +4555,7 @@ impl Machine {
             return;
         }
         self.end_session(tab);
-        let _ = self.tab(tab, |t| (t.session, t.background_wait) = (None, None));
+        let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
         if let Some(task) = self.thread_task(tab, true) {
             self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
         }
@@ -4065,6 +4888,13 @@ fn is_absolute_anywhere(path: &str) -> bool {
 }
 
 /// The hub's error, or which side needs an update when it is an older hub's or machine's refusal.
+/// A remote task's status or start, naming the machine that runs it and its thread there.
+fn with_remote(mut body: Value, remote: &crate::delegate::RemoteTarget) -> Value {
+    body["machine"] = json!(remote.name);
+    body["tabId"] = json!(remote.tab);
+    body
+}
+
 fn needs_update(e: String) -> String {
     if crate::link::is_unknown_command(&e) {
         "o hub ou a máquina precisa atualizar o pinned".to_owned()
@@ -4232,7 +5062,8 @@ fn captain_scope(folder: &Path) -> TasteScope {
     git_remote(folder).and_then(|remote| repo_key(&remote)).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo })
 }
 
-fn repo_key(url: &str) -> Option<String> {
+/// A repository's key in the tastes, as in `github.com/acme/site`, from any of its URLs.
+pub fn repo_key(url: &str) -> Option<String> {
     https_url(url).map(|https| https.trim_start_matches("https://").trim_end_matches(".git").to_lowercase())
 }
 
@@ -4738,6 +5569,20 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stopping_a_turn_types_what_the_apps_stop_button_does() {
+        let m = machine();
+        let typed = temp("stop-turn").join("typed");
+        let tab = running(&m, vec![], &format!("stty raw -echo; dd bs=1 count=6 2>/dev/null | od -An -tx1 > {}; sleep 30", typed.display()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(m.call(Call::StopTurn { tab: tab.clone() }), Ok(Value::Null));
+        wait_for("the keys", || std::fs::read_to_string(&typed).is_ok_and(|t| !t.trim().is_empty()));
+        assert_eq!(std::fs::read_to_string(&typed).unwrap().split_whitespace().collect::<Vec<_>>(), ["18", "0b", "18", "0b", "1b", "1b"]);
+        assert_eq!(m.call(Call::StopTurn { tab: "tab-none".into() }), Err("no tab tab-none".into()));
+        m.close_tab(&tab);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_late_viewer_gets_the_screen_then_live_output_across_a_restart() {
         let m = machine();
         let tab = running(&m, vec![], "printf 'first\\n'; read line; printf 'got %s\\n' \"$line\"; sleep 30");
@@ -4850,6 +5695,159 @@ pub(crate) mod tests {
 
     fn ticked_by_hand(m: &Machine) {
         m.threads_watched.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn mcp_servers_reads_the_named_accounts_own_config_and_refuses_an_account_claude_does_not_run() {
+        let root = temp("mcp-servers");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let config = r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer lin_api_x"}}}}"#;
+        std::fs::write(root.join("config/accounts/work/.claude.json"), config).unwrap();
+        assert_eq!(m.call(Call::McpServers { account: Some("work".into()), path: None }), Ok(json!([{ "name": "linear", "scope": "user", "transport": "http", "origin": "https://mcp.linear.app" }])));
+        assert_eq!(m.call(Call::McpServers { account: Some("codex".into()), path: None }), Err("codex runs Codex, and mcp_servers reads Claude Code's MCP servers".into()));
+        assert_eq!(m.call(Call::McpServers { account: Some("nope".into()), path: None }), Err("no account nope on this machine".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A hub that hands out `loads` as the account's MCP servers until `down` is set, and fails
+    /// every other call.
+    fn mcp_hub(loads: Value, down: Arc<AtomicBool>) -> Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync> {
+        Arc::new(move |call| match call {
+            HubCall::LoadMcpServers if !down.load(Ordering::SeqCst) => Ok(loads.clone()),
+            _ => Err("the hub is away".into()),
+        })
+    }
+
+    fn mcp_loads() -> Value {
+        json!([
+            { "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } }, "secrets": { "env": { "API_KEY": "ctx-secret-1" } } },
+            { "server": { "name": "linear", "transport": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": ["Authorization"] } }, "secrets": { "headers": { "Authorization": "Bearer pinned-linear-2" } } },
+            { "server": { "name": "docs", "project": "github.com/acme/other", "transport": { "type": "http", "url": "https://docs.example.com/mcp" } } },
+        ])
+    }
+
+    /// The arguments a fake CLI printed as `a|b|c|`, split.
+    fn printed_args(seen: &Mutex<Vec<u8>>) -> Vec<String> {
+        text(seen).trim_end().trim_end_matches('|').split('|').map(str::to_owned).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_session_loads_the_accounts_mcp_servers_from_a_config_of_its_own_that_goes_with_it() {
+        let root = temp("mcp-session");
+        let claude = root.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let launch = Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), mcp_config: Some(root.join("pinned-mcp.json")), ..launch() };
+        let m = Machine::new(launch, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp"}}}"#).unwrap();
+        let down = Arc::new(AtomicBool::new(false));
+        m.set_hub(mcp_hub(mcp_loads(), down.clone()));
+        let site = root.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let tab = m.add_tab(site.clone(), m.accounts.get("work").unwrap(), vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        let args = printed_args(&seen);
+        assert_eq!(args[..2], ["--mcp-config".to_owned(), root.join("pinned-mcp.json").display().to_string()]);
+        assert_eq!(args[3..], ["--settings", "s", "--plugin-dir", "p"].map(str::to_owned), "{args:?}");
+        let file = PathBuf::from(&args[2]);
+        assert_eq!(
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+            json!({ "mcpServers": { "ctx": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": { "API_KEY": "ctx-secret-1" } } } }),
+            "the account's own linear keeps its name and another project's docs stays out"
+        );
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
+        assert!(!text(&seen).contains("ctx-secret-1"), "no secret in claude's arguments");
+
+        down.store(true, Ordering::SeqCst);
+        seen.lock().unwrap().clear();
+        m.restart_claude(&tab, 80, 24).unwrap();
+        wait_for("the restart's arguments", || text(&seen).ends_with("\r\n"));
+        let again = PathBuf::from(&printed_args(&seen)[2]);
+        assert!(again != file && again.exists(), "a hub that doesn't answer leaves the servers it last handed out: {again:?}");
+        assert!(!file.parent().unwrap().exists(), "the replaced session's config is gone");
+        assert_eq!(m.call(Call::CloseTab { tab }), Ok(Value::Null));
+        wait_for("the closed session's config to go", || !again.parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_session_reads_its_servers_through_pinned_with_no_secret_in_its_arguments() {
+        let root = temp("mcp-codex");
+        let codex = root.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: [(Provider::Codex, codex)].into_iter().collect(), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
+        let account = m.accounts.get("side").unwrap();
+        std::fs::write(m.accounts.home(&account).join("config.toml"), "[mcp_servers.ctx]\ncommand = \"own-ctx\"\n").unwrap();
+        m.set_hub(mcp_hub(mcp_loads(), Arc::default()));
+        let tab = m.add_tab(root.clone(), account, vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("codex's arguments", || text(&seen).ends_with("\r\n"));
+        let args = printed_args(&seen);
+        let at = args.iter().position(|a| a.starts_with("mcp_servers.linear.url=")).unwrap_or_else(|| panic!("no linear in {args:?}"));
+        let helper = args[at + 2].strip_prefix("mcp_servers.linear.http_headers_helper=").unwrap_or_else(|| panic!("{args:?}"));
+        let file = helper.split('\'').nth(5).unwrap().to_owned();
+        assert_eq!(&args[at - 1..at + 3], ["-c", "mcp_servers.linear.url=\"https://mcp.linear.app/mcp\"", "-c", &format!("mcp_servers.linear.http_headers_helper=\"'/opt/pinned/bin/pinned' 'mcp-headers' '{file}' 'linear'\"")]);
+        assert!(!args.iter().any(|a| a.starts_with("mcp_servers.ctx.")), "the account's own ctx stays its own: {args:?}");
+        assert!(!text(&seen).contains("ctx-secret-1") && !text(&seen).contains("pinned-linear-2"), "no secret in codex's arguments");
+        assert_eq!(mcp::headers(&[file.clone(), "linear".into()]), Ok(r#"{"Authorization":"Bearer pinned-linear-2"}"#.into()));
+        assert_eq!(m.call(Call::CloseTab { tab }), Ok(Value::Null));
+        wait_for("the closed session's config to go", || !Path::new(&file).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_machine_without_a_hub_starts_sessions_with_pinneds_server_alone() {
+        let m = machine();
+        assert!(m.session_mcp(&Account::builtin(Provider::Claude), Path::new("/repo")).is_none());
+        m.set_hub(mcp_hub(json!([]), Arc::default()));
+        assert!(m.session_mcp(&Account::builtin(Provider::Claude), Path::new("/repo")).is_none(), "an account with no servers writes no config");
+        m.set_hub(mcp_hub(mcp_loads(), Arc::default()));
+        assert!(m.session_mcp(&Account::builtin(Provider::Cursor), Path::new("/repo")).is_none(), "cursor-agent reads only its own files");
+    }
+
+    #[test]
+    fn the_first_session_waits_for_a_link_still_coming_up_and_later_ones_start_at_once() {
+        let root = temp("mcp-link-up");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        let up = Instant::now() + Duration::from_millis(200);
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::LoadMcpServers if Instant::now() >= up => Ok(mcp_loads()),
+            _ => Err(crate::link::OFFLINE.into()),
+        }));
+        assert!(m.session_mcp(&work, &root).is_some(), "a session restored at launch gets the servers once the link is up");
+        m.set_hub(Arc::new(|_| Err(crate::link::OFFLINE.into())));
+        let started = Instant::now();
+        assert!(m.session_mcp(&work, &root).is_none());
+        assert!(started.elapsed() >= MCP_WAIT - Duration::from_millis(150), "the first start without a list waits for the link: {:?}", started.elapsed());
+        let started = Instant::now();
+        assert!(m.session_mcp(&work, &root).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100), "an offline machine starts the next session at once: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_machine_reads_a_claude_accounts_servers_in_full_for_the_apps_import() {
+        let root = temp("mcp-importable");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"ctx":{"command":"npx","args":["@acme/ctx"],"env":{"API_KEY":"ctx-secret-1"}}}}"#).unwrap();
+        let found = m.call(Call::McpImportable { account: Some("work".into()), path: None }).unwrap();
+        assert_eq!(found, json!([{ "scope": "user", "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } } }]));
+        assert_eq!(m.call(Call::McpImportable { account: Some("codex".into()), path: None }), Err("codex runs Codex, and import reads Claude Code's MCP servers".into()));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
@@ -5085,16 +6083,17 @@ pub(crate) mod tests {
         let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
         let before = scans();
         let mut looks = HashMap::new();
+        let mut now = Instant::now();
         for _ in 0..10 {
-            m.nudge_thread_watchers(&mut looks);
+            m.nudge_thread_watchers_at(&mut looks, now);
         }
         assert_eq!(scans(), before + 1, "ten ticks at the prompt search once");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
-        m.nudge_thread_watchers(&mut looks);
+        m.nudge_thread_watchers_at(&mut looks, now);
         assert_eq!(scans(), before + 2, "a turn that starts searches at once");
         std::fs::write(projects.join("p007/s1.jsonl"), assistant_line("first")).unwrap();
-        std::thread::sleep(THREAD_LOOK_EVERY * 2);
-        m.nudge_thread_watchers(&mut looks);
+        now += THREAD_LOOK_EVERY * 2;
+        m.nudge_thread_watchers_at(&mut looks, now);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started nudges");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5785,7 +6784,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[]);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -5797,7 +6796,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin));
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -6002,10 +7001,23 @@ pub(crate) mod tests {
             "id": "work", "provider": "claude", "name": "Work", "auth": "login", "provider_name": "Claude Code", "builtin": false,
             "signed_in": false, "email": null, "org": null, "plan": null,
         });
-        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }), Ok(work.clone()));
+        // Claude Code logins carry the picker's models; the rest of each account reads as before.
+        let without_models = |mut value: Value| {
+            let first = |account: &mut Value| account.as_object_mut().unwrap().remove("models").map(|models| models[0]["slug"].clone());
+            let firsts = match value.as_array_mut() {
+                Some(list) => list.iter_mut().map(first).collect(),
+                None => vec![first(&mut value)],
+            };
+            (value, firsts)
+        };
+        let (added, firsts) = without_models(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap());
+        assert_eq!((added, firsts), (work.clone(), vec![Some(json!("claude-fable-5-2"))]));
         assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into(), auth: None, key: None }), Err("an account work already exists".into()));
+        let (listed, firsts) = without_models(m.call(Call::ListAccounts).unwrap());
+        let fable = Some(json!("claude-fable-5-2"));
+        assert_eq!(firsts, [fable.clone(), None, None, fable]);
         assert_eq!(
-            m.call(Call::ListAccounts),
+            Ok::<_, String>(listed),
             Ok(json!([
                 {
                     "id": "claude", "provider": "claude", "name": "Claude Code", "auth": "login", "provider_name": "Claude Code", "builtin": true,
@@ -6384,27 +7396,6 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
-    fn workers_stop_at_the_global_cap() {
-        let dir = temp("worker-cap");
-        let config = dir.join("config");
-        std::fs::create_dir_all(&config).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::new(), ..launch() }, Some(config.clone()), None, |_| {});
-        assert_eq!(m.orchestration().max_workers, 100);
-        m.set_orchestration(1).unwrap();
-        assert_eq!(m.orchestration().max_workers, 1);
-        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(config.join("orchestration.json")).unwrap()).is_ok());
-        m.check_worker_cap().unwrap();
-        let worker = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &dir), false, None);
-        assert_eq!(m.worker_count(), 1);
-        let err = m.check_worker_cap().unwrap_err();
-        assert!(err.contains("1 workers are already running"), "{err}");
-        assert!(err.contains("Settings"), "{err}");
-        m.close_tab(&worker);
-        m.check_worker_cap().unwrap();
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
     #[cfg(unix)]
     fn a_delegated_task_keeps_the_budget_it_asked_for() {
         let root = temp("budget");
@@ -6780,6 +7771,38 @@ exec sleep 30
             assert!(err.contains("PINNED_TAB") && err.contains("PINNED_TASK"), "{err}");
         }
         assert!(m.capabilities(None, None, "").is_ok());
+    }
+
+    #[test]
+    fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
+        let picker = |m: &Machine| -> Vec<String> {
+            let accounts = m.call(Call::ListAccounts).unwrap();
+            let claude = accounts.as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap().clone();
+            claude["models"].as_array().unwrap().iter().take(5).map(|model| format!("{} {}", model["name"].as_str().unwrap(), model["legacy"])).collect()
+        };
+        let catalog = |m: &Machine| -> Vec<String> {
+            let value: Value = serde_json::from_str(&m.capabilities(None, None, "fable").unwrap()).unwrap();
+            value["providers"][0]["models"].as_array().unwrap().iter().map(|model| model["id"].as_str().unwrap().to_owned()).collect()
+        };
+
+        let m = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&m)[0], "Claude Fable 5.2 false");
+        assert_eq!(m.call(Call::LearnModelMenu { lines: vec!["$ ls".into()] }).unwrap_err(), "claude's /model menu is not on that screen");
+        let learned = m.call(Call::LearnModelMenu { lines }).unwrap();
+        assert_eq!(learned[0]["slug"], "claude-fable-5-3");
+        let expected = ["Claude Fable 5.3 false", "Claude Opus 5.5 false", "Claude Sonnet 5.5 false", "Claude Haiku 5.5 false", "Claude Fable 5.2 true"];
+        assert_eq!(picker(&m), expected);
+        assert_eq!(catalog(&m), ["claude-fable-5-3", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]);
+        drop(m);
+
+        let again = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&again), expected, "a restarted machine keeps what its claude showed");
+        assert_eq!(catalog(&again)[0], "claude-fable-5-3");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7484,7 +8507,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let path = project.display().to_string();
-        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
@@ -8024,7 +9047,7 @@ while True:
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
@@ -8045,7 +9068,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
-            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."] } },
+            "projects": { "github.com/acme/site": { "parallel": 4, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
         });
         let asked = Arc::new(AtomicU32::new(0));
         let (answer, count) = (account.clone(), asked.clone());
@@ -8059,13 +9082,13 @@ while True:
         let path = site.display().to_string();
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
-        let site_brief = "Run up to 5 workers at once.
+        let site_brief = "Run up to 4 workers at once.
 Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
 Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
-        let cap = "At most 100 workers run at once on this machine; if that blocks you, tell the user to raise it under Settings rather than working around it.";
+        let cap = "pinned enforces these delegation limits on delegate_task: at most 4 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
@@ -8078,7 +9101,7 @@ Deploys go through the VPS.";
 
         let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&global_tab, 80, 24).unwrap();
-        let orchestrator_brief = "Run up to 6 workers at once.
+        let orchestrator_brief = "Run up to 8 workers at once.
 Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
@@ -8149,14 +9172,13 @@ Have another model review a risky change before it goes ahead.";
         std::fs::write(config.join("orchestration.json"), r#"{"style":"economical","max_workers":4}"#).unwrap();
         let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
         assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the old cost style seeded the Capitães");
-        m.set_orchestration(7).unwrap();
         let site = TasteScope::Project { repo: "github.com/acme/site".into() };
         let set = m.set_local_taste(&site, TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
         assert_eq!(serde_json::to_value(&set.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": false } }));
         let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
         assert_eq!(serde_json::to_value(&reset.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
         assert_eq!(m.local_tastes(), reset);
-        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the worker cap's save kept the seeded taste");
+        assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "moving the worker cap kept the seeded taste");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8196,13 +9218,13 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(got, set);
 
         let reset: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"parallel""#).unwrap()).unwrap();
-        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
-        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":9}"#), Err("parallel workers go from 1 to 8".into()));
+        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(5)));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":101}"#), Err("parallel workers go from 1 to 100".into()));
         assert_eq!(tool(&chat, r#""name":"taste_get","scope":"site""#), Err("unknown scope \"site\": use orchestrator, captains or project:<repo>, as in project:github.com/acme/site".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, r#""name":"taste_set","scope":"captains","patch":{"parallel":1}"#), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
-        assert_eq!(m.local_tastes().captains.parallel, 3, "a plain thread changed the taste");
+        assert_eq!(m.local_tastes().captains.parallel, 5, "a plain thread changed the taste");
 
         let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
         assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");
@@ -8249,7 +9271,7 @@ Have another model review a risky change before it goes ahead.";
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), crate::orchestration::Orchestration::default().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
@@ -8270,6 +9292,552 @@ Have another model review a risky change before it goes ahead.";
     fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
         let request = crate::delegate::parse_request(&args).unwrap();
         serde_json::from_str(&m.start_delegate(Some(from.to_owned()), None, None, request).unwrap()).unwrap()
+    }
+
+    /// A Captain of the project `app` on a machine whose Captains have `limits`, with the `work`
+    /// account. Returns the machine, its folder and the Captain's tab.
+    #[cfg(unix)]
+    fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
+        let dir = temp(name);
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.set_local_taste(&TasteScope::Captains, limits).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        (m, dir, captain)
+    }
+
+    /// `thread_claude` that also answers the headless title call.
+    #[cfg(unix)]
+    fn titling_claude(claude: &Path) {
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nif [ \"$1\" = \"-p\" ]; then echo '{\"title\":\"Fix login\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(claude, script).unwrap();
+        std::fs::set_permissions(claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_runs_each_session_action_through_act_on_a_started_tab() {
+        let (m, dir, captain) = limited_captain("act-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        titling_claude(&claude);
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        // The tab runs under an added account, whose home is in the test's folder: the built-in one is the real ~/.claude.
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Spare".into(), auth: None, key: None }).unwrap();
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| (t.account, t.model) = (work, Some("claude-haiku-5-5".into()))).unwrap();
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        let first = started(&claude, &tab);
+        assert!(!first.iter().any(|a| a == "--dangerously-skip-permissions"), "{first:?}");
+        let has = |args: &[String], pair: &[&str]| args.windows(pair.len()).any(|w| w == pair);
+
+        assert_eq!(act(json!({ "cmd": "stop_turn", "tab": tab })), Ok(Value::Null));
+
+        assert_eq!(act(json!({ "cmd": "restart_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--model", "claude-haiku-5-5"]));
+
+        let set = |model: &str| act(json!({ "cmd": "set_model", "tab": tab, "model": model, "cols": 80, "rows": 24 }));
+        assert_eq!(set("claude-opus-5-5"), Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(set("claude-sonnet-5-5"), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--model", "claude-sonnet-5-5"]), "the session restarts on the model");
+        assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-sonnet-5-5"));
+
+        let bypass = |on: bool| act(json!({ "cmd": "set_bypass", "tab": tab, "on": on, "cols": 80, "rows": 24 }));
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        assert_eq!(bypass(true), Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into()));
+        assert!(!m.view(&tab).unwrap().bypass, "a refused loosening changes nothing");
+        m.tab(&captain, |t| t.bypass = true).unwrap();
+        assert_eq!(bypass(true), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--dangerously-skip-permissions"]));
+        assert_eq!(bypass(false), Ok(json!(path)));
+        assert!(!started(&claude, &tab).iter().any(|a| a == "--dangerously-skip-permissions"), "asking again is always allowed");
+
+        assert_eq!(act(json!({ "cmd": "set_workspace", "tab": tab, "worktree": null, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        started(&claude, &tab);
+
+        assert_eq!(act(json!({ "cmd": "regenerate_title", "tab": tab, "previous": "", "thread": "USER: the login page fails" })), Ok(json!("Fix login")));
+
+        let account = m.tab(&tab, |t| t.account.clone()).unwrap();
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = |kind: &str, uuid: &str, minute: u8| json!({ "type": kind, "uuid": uuid, "sessionId": "sess-1", "timestamp": format!("2026-11-09T10:0{minute}:00Z"), "message": { "role": kind, "content": "hi" } }).to_string();
+        std::fs::write(projects.join("sess-1.jsonl"), [line("user", "u1", 0), line("assistant", "a1", 1), line("user", "u2", 2), line("assistant", "a2", 3)].join("\n") + "\n").unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("sess-1".into())).unwrap();
+        let transcripts = || std::fs::read_dir(&projects).unwrap().count();
+
+        let forked = act(json!({ "cmd": "fork", "tab": tab, "through": "a1" })).unwrap();
+        let copy = forked.as_str().expect("the new tab's id").to_owned();
+        assert_eq!(transcripts(), 2, "the conversation was copied");
+        assert!(!m.view(&copy).unwrap().running, "a fork opens a tab and starts nothing");
+
+        let web = Path::new(&path).join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        act(json!({ "cmd": "set_folder", "tab": copy, "path": web.display().to_string() })).unwrap();
+        assert_eq!(m.view(&copy).unwrap().cwd, web.display().to_string());
+
+        assert_eq!(act(json!({ "cmd": "rewind", "tab": tab, "before": "u2", "files": false, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--resume"]), "the session resumes the rewound copy");
+        assert_eq!(transcripts(), 3);
+        assert_ne!(m.tab(&tab, |t| t.claude_session.clone()).unwrap().as_deref(), Some("sess-1"));
+
+        assert_eq!(act(json!({ "cmd": "switch_account", "tab": tab, "account": "spare", "cols": 80, "rows": 24 })), Ok(json!(path)));
+        let moved = started(&claude, &tab);
+        assert_eq!(m.tab(&tab, |t| t.account.id.clone()).unwrap(), "spare");
+        assert!(moved[3].ends_with("accounts/spare"), "it runs under the other account now: {moved:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_restarts_nothing_on_a_stopped_tab_but_the_session_it_runs() {
+        let (m, dir, captain) = limited_captain("act-stopped", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let stopped = m.open_tab(Some(path), false).unwrap();
+        let tab = stopped.as_str();
+        let asks = [
+            ("restart_claude", json!({ "tab": tab, "cols": 80, "rows": 24 })),
+            ("set_model", json!({ "tab": tab, "model": "claude-sonnet-5-5", "cols": 80, "rows": 24 })),
+            ("set_bypass", json!({ "tab": tab, "on": false, "cols": 80, "rows": 24 })),
+            ("rewind", json!({ "tab": tab, "before": "u1", "files": false, "cols": 80, "rows": 24 })),
+            ("switch_account", json!({ "tab": tab, "account": "work", "cols": 80, "rows": 24 })),
+            ("set_workspace", json!({ "tab": tab, "worktree": null, "cols": 80, "rows": 24 })),
+        ];
+        for (cmd, mut args) in asks {
+            args["cmd"] = json!(cmd);
+            assert_eq!(m.call(Call::ActFor { caller: captain.clone(), call: args }), Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker")), "{cmd}");
+        }
+        assert!(!m.view(tab).unwrap().running, "a refused restart starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_open_run_reopens_a_conversation_in_a_tab_that_is_not_started() {
+        let (m, dir, _) = limited_captain("open-run", TastePatch::default());
+        let folder = dir.join("app").display().to_string();
+        let run = RunSpec { folder: folder.clone(), repo: None, args: vec!["--resume".into(), "conv-1".into()], env: vec![], token: None, account: None, budget_usd: None };
+        let tab: String = serde_json::from_value(m.call(Call::OpenRun { run }).unwrap()).unwrap();
+        assert!(!m.view(&tab).unwrap().running, "nothing runs until start_claude");
+        assert_eq!(m.tab(&tab, |t| (t.cwd.display().to_string(), t.launch.clone(), t.claude_session.clone())).unwrap(), (folder, vec!["--resume".to_owned(), "conv-1".to_owned()], Some("conv-1".to_owned())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn refused(m: &Machine, from: &str, args: Value) -> String {
+        m.start_delegate(Some(from.to_owned()), None, None, crate::delegate::parse_request(&args).unwrap()).unwrap_err()
+    }
+
+    #[cfg(unix)]
+    fn work(model: Option<&str>, effort: Option<&str>) -> Value {
+        json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": model, "options": { "effort": effort } } })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_call_above_the_tier_or_the_most_effort_is_refused_and_one_without_effort_gets_the_default() {
+        let limits = TastePatch { tier: Some(taste::Tier::Mid), default_effort: Some(taste::Effort::Low), max_effort: Some(taste::Effort::High), ..TastePatch::default() };
+        let (m, dir, captain) = limited_captain("limits-tier", limits);
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-opus-5-5"), None)),
+            "claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working"
+        );
+        assert_eq!(
+            refused(&m, &captain, work(None, None)),
+            "name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working"
+        );
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), Some("max"))),
+            "effort max is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working"
+        );
+        assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "a refused call starts nothing");
+
+        let child = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "low"]), "the default effort: {args:?}");
+        let child = delegate_task(&m, &captain, work(Some("claude-haiku-5-5"), Some("high")))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]), "the effort asked for, at the most: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
+        let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
+        m.call(Call::LearnModelMenu { lines }).unwrap();
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-fable-5-3"), None)),
+            "claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working"
+        );
+        let child = delegate_task(&m, &captain, work(Some("claude-haiku-6"), None))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "claude-haiku-6"]), "a learned Haiku runs under a low cap: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_worker_past_workers_at_once_is_refused_until_one_ends() {
+        let (m, dir, captain) = limited_captain("limits-parallel", TastePatch { parallel: Some(2), ..TastePatch::default() });
+        let first = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
+            "2 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."
+        );
+        m.task_cancel(Some(captain.clone()), None, first["taskId"].as_str().unwrap(), "not needed").unwrap();
+        assert_eq!(delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["workState"], "working", "an ended worker frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_start_claude_makes_the_tab_its_worker_under_the_projects_limits() {
+        let (m, dir, captain) = limited_captain("act-start", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let start = |tab: &str| act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 }));
+        let first = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&first), Ok(json!(path)));
+        let view = m.view(&first).unwrap();
+        assert_eq!((view.role, view.spawned_by.as_deref(), view.running), (Some(Role::Worker), Some(captain.as_str()), true));
+        let task = m.tab(&first, |t| t.task.clone()).unwrap().expect("the started tab runs a task");
+
+        let second = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&second), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()));
+        assert!(!m.view(&second).unwrap().running, "a refused start starts nothing");
+
+        m.task_cancel(Some(captain.clone()), None, &task, "not needed").unwrap();
+        let records = m.delegates.records();
+        let record = records.iter().find(|r| r.id == task).expect("the ended task's record for the metrics");
+        assert_eq!((record.delegator.kind, record.delegator.tab.as_deref(), record.outcome), (crate::delegate::DelegatorKind::Captain, Some(captain.as_str()), crate::delegate::TaskOutcome::Cancelled));
+        assert_eq!(start(&second), Ok(json!(path)), "an ended worker frees its place");
+        drop(m.tab(&first, |t| t.session.take()).unwrap());
+        assert_eq!(start(&first), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()), "a tab whose task ended claims a new one");
+
+        assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue hands a message to a Captain; your own session is the one reading this".into()));
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": captain, "cols": 80, "rows": 24 })), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker")));
+        let listed = act(json!({ "cmd": "tabs" })).unwrap();
+        assert_eq!(listed.as_array().map(Vec::len), Some(3), "a read runs as Machine::call runs it: {listed}");
+
+        let docs = Path::new(&path).join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let outside = m.open_tab(Some(docs.display().to_string()), false).unwrap();
+        assert_eq!(start(&outside), Err(format!("{outside} works in {}, outside your project {path}: start_claude starts workers only in your own project", docs.display())));
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        let wide = m.open_tab(Some(path.clone()), true).unwrap();
+        assert_eq!(start(&wide), Err(format!("{wide} runs with full access, wider than your session's auto")));
+        assert_eq!(act(json!({ "cmd": "restart_claude", "tab": wide, "cols": 80, "rows": 24 })), Err(format!("restart_claude restarts a running session, and {wide} runs none: start_claude starts it as your worker")));
+        assert_eq!(act(json!({ "cmd": "set_bypass", "tab": second, "on": true, "cols": 80, "rows": 24 })), Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into()));
+        let global = m.open_global_orchestrator().unwrap();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(m.call(Call::ActFor { caller: global, call: json!({ "cmd": "start_claude", "tab": plain, "cols": 80, "rows": 24 }) }), Err(NO_PROJECT_WORK.into()));
+        assert!(!m.view(&outside).unwrap().running && !m.view(&wide).unwrap().running && !m.view(&plain).unwrap().running, "a refused start starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent's act as the hub runs it on a machine: the manifest's wiring, the arguments parsed
+    /// into the call, and `act_for` for the session in `caller`.
+    fn act_as(m: &Machine, caller: &str, action: &str, args: Value) -> Result<Value, String> {
+        let action = surface::find(action).unwrap_or_else(|| panic!("no action {action}"));
+        assert!(action.wired && action.class != surface::Class::Excluded, "{} is not open to agents", action.name);
+        let surface::Parsed::Node(call) = surface::parse(action, &args)? else { panic!("{} is a hub call", action.name) };
+        m.call(Call::ActFor { caller: caller.into(), call: serde_json::to_value(&call).unwrap() })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_enqueue_starts_a_stopped_captain_only_under_the_projects_limits_and_signs_as_the_caller() {
+        let (m, dir, captain) = limited_captain("act-enqueue", TastePatch { tier: Some(taste::Tier::Mid), parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        m.tab(&session, |t| t.title = Some("Fix login".into())).unwrap();
+        let enqueue = |from: &str, request: &str| act_as(&m, from, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": request, "sender": "Orchestrator" }));
+
+        assert_eq!(
+            enqueue(&session, "r-1"),
+            Err("name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working".into())
+        );
+        m.tab(&captain, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        assert_eq!(enqueue(&session, "r-1"), Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        m.tab(&captain, |t| t.model = Some("claude-sonnet-5-5".into())).unwrap();
+        assert!(!m.view(&captain).unwrap().running, "a refused message starts nothing");
+
+        let worker = m.open_tab(Some(path.clone()), false).unwrap();
+        m.tab(&worker, |t| t.model = Some("claude-sonnet-5-5".into())).unwrap();
+        act_as(&m, &captain, "start_claude", json!({ "tab": worker, "cols": 80, "rows": 24 })).unwrap();
+        let task = m.tab(&worker, |t| t.task.clone()).unwrap().expect("the worker runs a task");
+        assert_eq!(
+            enqueue(&session, "r-1"),
+            Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into())
+        );
+        assert!(!m.view(&captain).unwrap().running, "a project at its workers-at-once starts no Captain");
+        m.task_cancel(Some(captain.clone()), None, &task, "not needed").unwrap();
+
+        assert!(enqueue(&session, "r-1").is_ok());
+        assert!(m.view(&captain).unwrap().running, "a stopped Captain starts on the message");
+        let args = started(&dir.join("claude"), &captain);
+        assert!(args.iter().any(|a| a == "[Session Fix login] Ship it."), "the message names its sender, not the orchestrator: {args:?}");
+
+        let again = enqueue(&session, "r-1").unwrap();
+        let first = m.sent.lock().unwrap().find("r-1").map(|sent| sent.handoff.clone()).expect("the ledger kept the message");
+        assert_eq!(again, serde_json::to_value(first).unwrap(), "a repeat of its request_id answers the first outcome");
+        assert_eq!(enqueue(&captain, "r-2"), Err("enqueue hands a message to a Captain; your own session is the one reading this".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
+        let (m, dir, captain) = limited_captain("act-prompt", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let (me, other) = (m.open_tab(Some(path.clone()), false).unwrap(), m.open_tab(Some(path.clone()), false).unwrap());
+        let prompt = |tab: &str| act_as(&m, &me, "prompt", json!({ "tab": tab, "text": "Rebase on main." }));
+        assert_eq!(prompt(&other), Err(format!("tab {other} has no running session")));
+        m.start_claude(&other, 80, 24).unwrap();
+        assert_eq!(prompt(&other), Ok(Value::Null));
+        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), ["Rebase on main."], "the prompt reached the session, held until its screen draws");
+        assert_eq!(prompt(&me), Err("prompt types into another session; your own session is the one reading this".into()));
+        assert_eq!(prompt(&captain), Err(format!("{captain} is a Captain: enqueue hands it a message when it is idle")));
+        let global = m.open_global_orchestrator().unwrap();
+        assert_eq!(prompt(&global), Err(format!("{global} is the global orchestrator: a Captain reports to it with tell_orchestrator")));
+        assert_eq!(prompt("tab-gone-9"), Err("no tab tab-gone-9".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_opens_scratch_and_captain_tabs_and_only_the_global_orchestrator_opens_its_own() {
+        let (m, dir, captain) = limited_captain("act-open", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let scratch = act_as(&m, &session, "open_scratch", json!({ "bypass": false })).unwrap();
+        let scratch = scratch.as_str().unwrap().to_owned();
+        let view = m.view(&scratch).unwrap();
+        assert!(!view.running && !view.bypass && !view.cwd.starts_with(&path), "a scratch tab opens unstarted, outside every project: {view:?}");
+        assert_eq!(act_as(&m, &session, "open_orchestrator", json!({ "path": path })), Ok(json!(captain)), "the project's Captain tab is the one that is open");
+        assert_eq!(act_as(&m, &session, "open_orchestrator", json!({ "path": "/no/such/folder" })), Err("/no/such/folder is not a folder on this machine".into()));
+        assert_eq!(act_as(&m, &session, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+        assert_eq!(act_as(&m, &captain, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+        let global = m.open_global_orchestrator().unwrap();
+        assert_eq!(act_as(&m, &global, "open_global_orchestrator", json!({})), Ok(json!(global)));
+        assert!(!m.view(&session).unwrap().running && !m.view(&captain).unwrap().running, "opening a tab starts no session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_makes_and_lists_projects_sets_their_account_and_keeps_their_scripts() {
+        let (m, dir, captain) = limited_captain("act-projects", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let act = |action: &str, args: Value| act_as(&m, &session, action, args);
+
+        let made = dir.join("made/deeper");
+        assert_eq!(act("make_folder", json!({ "path": made })), Ok(json!(made)));
+        assert!(made.is_dir());
+        assert_eq!(act("create_project", json!({ "name": "  " })), Err("Name the project.".into()), "it reaches the same scaffold the app's New project does");
+        assert!(act("publish_project", json!({ "path": made })).is_err(), "a folder with no git history is not published");
+
+        assert_eq!(act("set_project_account", json!({ "path": path, "account": "work" })), Ok(json!({ "path": path, "name": "app", "account": "work" })));
+        assert_eq!(act("set_project_account", json!({ "path": path, "account": "home" })), Err("no account home on this machine".into()));
+        let listed = act("list_projects", json!({})).unwrap();
+        assert_eq!(listed[0], json!({ "path": path, "name": "app", "account": "work" }), "{listed}");
+
+        let script = json!({ "id": "dev", "name": "Dev", "command": "npm run dev" });
+        assert_eq!(act("save_project_scripts", json!({ "tab": session, "scripts": [script] })), Ok(Value::Null));
+        assert_eq!(act("project_scripts", json!({ "tab": session })).unwrap()["scripts"][0]["command"], "npm run dev");
+        assert_eq!(act("search_threads", json!({ "query": "no conversation says this" })), Ok(json!([])));
+        assert_eq!(act("project_history", json!({ "path": path })).unwrap().as_array().map(Vec::len), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_changes_the_machines_orchestrator_settings_prices_and_skills_through_the_surface() {
+        let (m, dir, captain) = limited_captain("act-settings", TastePatch::default());
+        let act = |action: &str, args: Value| act_as(&m, &captain, action, args);
+
+        let saved = act("set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true, "busy": "queue" } })).unwrap();
+        assert_eq!((saved["name"].as_str(), saved["host"].as_bool()), (Some("Almirante"), Some(true)), "{saved}");
+        assert_eq!(act("global_orchestrator_settings", json!({})).unwrap(), saved, "the read sees what the write saved");
+
+        let book = act("set_usage_prices", json!({ "prices": { "claude-sonnet-5-5": { "input": 3.0, "output": 15.0 } }, "aliases": { "claude-sonnet-5-5-x": "claude-sonnet-5-5" } })).unwrap();
+        assert_eq!(book["aliases"]["claude-sonnet-5-5-x"], "claude-sonnet-5-5", "{book}");
+        assert_eq!(act("usage_prices", json!({})).unwrap(), book);
+        let cleared = act("set_usage_prices", json!({ "prices": { "claude-sonnet-5-5": null }, "aliases": {} })).unwrap();
+        assert_eq!(cleared["prices"], json!({}), "{cleared}");
+
+        let skills = act("skills", json!({})).unwrap();
+        assert!(skills["copies"].is_array(), "{skills}");
+        let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
+        assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
+        assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_is_queued_once_for_the_tab_or_the_tab_that_took_its_session() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
+        let notice = |tab: &str, session: Option<&str>, id: &str| m.call(Call::Notice { tab: tab.into(), session: session.map(Into::into), text: format!("[pinned] The user approved your remove_machine request ({id}): done."), id: id.into() });
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(m.view(&tab).unwrap().queued, 1, "a repeat queues nothing");
+        assert_eq!(notice("tab-gone-9", Some("s-1"), "c-2"), Ok(json!(true)), "a restart's new tab id is found by the session");
+        assert_eq!(m.view(&tab).unwrap().queued, 2);
+        assert_eq!(notice("tab-gone-9", Some("s-other"), "c-3"), Ok(json!(false)));
+        let done = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: Some("s-1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true };
+        let (context, _) = m.take_notices(&done);
+        assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.\n[pinned] The user approved your remove_machine request (c-2): done.");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_past_the_time_limit_is_stopped_and_task_status_says_why() {
+        let (m, dir, captain) = limited_captain("limits-time", TastePatch { time_limit_min: Some(30), ..TastePatch::default() });
+        let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" }, "limitMs": 7_200_000 });
+        let task = delegate_task(&m, &captain, asked)["taskId"].as_str().unwrap().to_owned();
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        assert_eq!((status()["limitSecs"].as_u64(), status()["budgetSecs"].as_u64()), (Some(1800), Some(900)), "a longer limitMs is cut to the time limit");
+        m.delegates.enforce_limits(Instant::now() + Duration::from_secs(1801), None);
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after 30 min, its limit")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_past_its_budget_is_stopped_and_task_status_shows_what_it_spent() {
+        let (m, dir, captain) = limited_captain("limits-budget", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
+        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+
+        m.meter_workers();
+        let working = status();
+        let cents = working["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!((working["workState"].as_str(), working["usage"]["tokens_out"].as_u64(), cents), (Some("working"), Some(10_000), Some(15.0)), "{working}");
+        append(&transcript, &[spent("m2", 30_000)]);
+        m.meter_workers();
+        let ended = status();
+        assert_eq!(
+            (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
+            (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_subagents_and_its_next_session_count_toward_its_budget() {
+        let (m, dir, captain) = limited_captain("limits-subagents", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(transcripts.join("s-child/subagents")).unwrap();
+        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        std::fs::write(transcripts.join("s-child/subagents/agent-a1.jsonl"), format!("{}\n", spent("m2", 20_000))).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+
+        m.meter_workers();
+        let working = status();
+        let cents = working["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!((working["workState"].as_str(), working["usage"]["tokens_out"].as_u64(), cents), (Some("working"), Some(30_000), Some(45.0)), "the subagent's tokens count: {working}");
+
+        let next = transcripts.join("s-next.jsonl");
+        std::fs::write(&next, format!("{}\n", spent("m3", 10_000))).unwrap();
+        let cleared = json!({ "session_id": "s-next", "transcript_path": next, "prompt": null });
+        m.record_event(AgentEvent { tab: Some(child.clone()), ..hooks::event_from(Some("working"), &cleared.to_string()).unwrap() });
+        m.meter_workers();
+        let ended = status();
+        assert_eq!(
+            (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
+            (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000)),
+            "/clear starts a new session, not a new budget"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_retried_call_gets_its_task_back_at_the_workers_at_once_limit_and_the_users_threads_do_not_count() {
+        let (m, dir, captain) = limited_captain("limits-retry", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        for _ in 0..2 {
+            m.open_tab(Some(dir.join("app").display().to_string()), false).unwrap();
+        }
+        let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" }, "clientRequestId": "r1" });
+        let first = delegate_task(&m, &captain, asked.clone());
+        assert_eq!(first["workState"], "working", "the user's own threads in the project are not workers");
+        assert_eq!(delegate_task(&m, &captain, asked)["taskId"], first["taskId"], "the retry is the task already started");
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
+            "1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_last_turn_is_metered_before_its_task_ends() {
+        let (m, dir, captain) = limited_captain("limits-last-turn", TastePatch::default());
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        append(&transcript, &[json!({ "type": "assistant", "requestId": "r1", "message": { "id": "m1", "model": "claude-sonnet-5-5", "content": [{ "type": "text", "text": "Fixed." }], "usage": { "input_tokens": 1000, "output_tokens": 2000 } } })]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        let status: Value = serde_json::from_str(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        let cents = status["usage"]["cost_usd"].as_f64().map(|usd| (usd * 100.0).round());
+        assert_eq!(
+            (status["workState"].as_str(), status["usage"]["tokens_in"].as_u64(), status["usage"]["tokens_out"].as_u64(), cents),
+            (Some("result_available"), Some(1000), Some(2000), Some(3.0)),
+            "the turn that ended the task counts: {status}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_own_worker_is_held_to_the_limits_it_started_under() {
+        let (m, dir, captain) = limited_captain("limits-narrow", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let worker = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["tabId"].as_str().unwrap().to_owned();
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::High), ..TastePatch::default() }).unwrap();
+        assert_eq!(delegate_task(&m, &captain, work(Some("claude-opus-5-5"), None))["workState"], "working", "the Captain has the raised tier");
+        assert_eq!(
+            refused(&m, &worker, work(Some("claude-opus-5-5"), None)),
+            "claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working",
+            "the worker keeps the tier it started under"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -8329,7 +9897,7 @@ Have another model review a risky change before it goes ahead.";
             ]
         );
 
-        assert_eq!(m.worker_count(), 1, "the thread and its task are one worker");
+        assert_eq!(m.delegates.working_cwds(), [tree.clone()], "the thread and its task are one worker");
         let checkout = &m.local_overview().projects[0].checkouts[0];
         assert_eq!((checkout.path.as_str(), checkout.workers), (path.as_str(), 1), "projects() counts the child");
         let agents = m.project_tool(&captain, ProjectTool::Agents).unwrap();
@@ -8353,7 +9921,7 @@ Have another model review a risky change before it goes ahead.";
         let read = reading::read(&m.view(&child).unwrap(), m.thread(&child, 0).and_then(json), reading::DEFAULT_ITEMS);
         assert_eq!(read["conversation"]["items"][0]["text"], "Added --json; cargo test passes.", "{read}");
         assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
-        assert_eq!(m.worker_count(), 1);
+        assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "an ended task no longer counts toward workers at once");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8376,6 +9944,82 @@ Have another model review a risky change before it goes ahead.";
         let transcript = transcripts.join("s-child.jsonl");
         std::fs::write(&transcript, json!({ "type": "custom-title", "customTitle": "Board check", "sessionId": "s-child" }).to_string() + "\n").unwrap();
         (m, dir, captain, task, child, transcript)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captains_finished_thread_task_reaches_the_hub_with_its_usage_and_the_stats_answer_from_there() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-record");
+        let usage = |id: &str| json!({ "type": "assistant", "message": { "id": id, "model": "claude-sonnet-5-5", "content": [{ "type": "text", "text": "Matches the boards." }], "usage": { "input_tokens": 12, "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 400, "output_tokens": 250 } } });
+        append(&transcript, &[usage("m1"), usage("m1"), usage("m2")]);
+        // An Agent-tool subagent of the worker writes its own transcript beside the worker's.
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), format!("{}\n", usage("m-sub"))).unwrap();
+        let rates = json!({ "claude-sonnet-5-5": { "input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6, "cache_read_input_token_cost": 0.3e-6, "cache_creation_input_token_cost": 3.75e-6 } });
+        std::fs::write(dir.join("config/usage-model-rates.json"), rates.to_string()).unwrap();
+        let kept: Arc<Mutex<Vec<crate::delegate::TaskRecord>>> = Arc::default();
+        let hub_records = kept.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RecordTasks { records } => {
+                hub_records.lock().unwrap().extend(records);
+                Ok(Value::Null)
+            }
+            HubCall::DelegationStats { days } => Ok(json!(crate::delegate::aggregate(&hub_records.lock().unwrap(), SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64, days))),
+            _ => Err("not this test's".into()),
+        }));
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        m.send_records();
+        let start = Instant::now();
+        while kept.lock().unwrap().is_empty() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let record = kept.lock().unwrap().first().cloned().expect("the finished task reached the hub");
+        assert_eq!(
+            json!([record.id, record.title, record.delegator.kind, record.delegator.tab, record.delegator.project_name, record.account, record.outcome, record.thread, record.usage.tokens_in, record.usage.tokens_out]),
+            json!([task, "Board check", "captain", captain, "app", "work", "done", child, 3 * 3412, 750]),
+            "the turn that ended is metered before the task settles with its subagent's, and m1's two lines count once"
+        );
+        let cost = record.usage.cost_usd.expect("priced from the rates file");
+        assert!((cost - (36.0 * 3e-6 + 9000.0 * 0.3e-6 + 1200.0 * 3.75e-6 + 750.0 * 15e-6)).abs() < 1e-9, "{cost}");
+        assert!(m.delegates.unrecorded(10).is_empty(), "the hub took it");
+
+        let answer: Value = serde_json::from_str(&m.delegation_stats(None).unwrap()).unwrap();
+        assert_eq!((answer["scope"].as_str(), answer["all"]["runs"].as_u64(), answer["byModel"]["work's default"]["runs"].as_u64()), (Some("every machine of the account"), Some(1), Some(1)), "{answer}");
+        m.set_hub(Arc::new(|_| Err("this hub runs pinned 0.17.20, which can't answer that".into())));
+        let local: Value = serde_json::from_str(&m.delegation_stats(Some(30)).unwrap()).unwrap();
+        assert_eq!((local["scope"].as_str(), local["days"].as_u64(), local["all"]["runs"].as_u64()), (Some("this machine"), Some(30), Some(1)), "{local}");
+        assert_eq!(m.delegation_stats(Some(2)).unwrap_err(), "days must be 1, 7 or 30, not 2");
+
+        let review = m.task_review(Some(captain.clone()), None, &task, "accepted", Some("merged".into())).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&review).unwrap()["review"]["verdict"], "accepted");
+        assert_eq!(m.task_review(Some(captain), None, &task, "kept", None).unwrap_err(), "verdict must be accepted or redone, not \"kept\"");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_global_orchestrator_a_captain_and_a_plain_thread_each_name_themselves_as_delegator() {
+        use crate::delegate::{Caller, DelegatorKind};
+        let dir = temp("delegator");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let global = m.open_global_orchestrator().unwrap();
+        let plain = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let of = |tab: &str| {
+            let d = m.delegator(&Caller { tab: Some(tab.to_owned()), task: None });
+            (d.kind, d.project, d.project_name)
+        };
+        let site = (Some("github.com/acme/site".to_owned()), Some("site".to_owned()));
+        assert_eq!(of(&captain), (DelegatorKind::Captain, site.0.clone(), site.1.clone()));
+        assert_eq!(of(&global), (DelegatorKind::GlobalOrchestrator, None, None));
+        assert_eq!(of(&plain), (DelegatorKind::Session, site.0, site.1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// What the hook reports for `payload`, as Claude Code's hook process would send it from `tab`.

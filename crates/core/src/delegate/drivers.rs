@@ -62,8 +62,10 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
         Access::ReadOnly => args.extend(["--permission-mode".into(), "plan".into()]),
     }
-    if let Some(config) = spec.mcp_config {
-        args.extend(["--mcp-config".into(), config.display().to_string()]);
+    let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();
+    if !configs.is_empty() {
+        args.push("--mcp-config".into());
+        args.extend(configs);
     }
     args
 }
@@ -92,6 +94,9 @@ fn codex_args(spec: &SpawnSpec) -> Vec<String> {
         Some(spec.task_id),
         spec.reminders,
     ));
+    if let Some(files) = spec.session_mcp {
+        args.extend(files.codex_flags(spec.exe));
+    }
     args.push(prompt_arg(spec.task));
     args
 }
@@ -169,7 +174,7 @@ pub fn codex_mcp_flags(
     args
 }
 
-fn toml_str(value: &str) -> String {
+pub fn toml_str(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {
@@ -429,10 +434,11 @@ fn parse_codex(line: &str) -> Vec<StreamEvent> {
             .unwrap_or_default(),
         Some("item.started") => codex_item(&value["item"], false),
         Some("item.completed") => codex_item(&value["item"], true),
-        Some("turn.completed") => vec![StreamEvent::TurnEnd {
-            text: String::new(),
-            error: None,
-        }],
+        Some("turn.completed") => usage_of(&value["usage"])
+            .map(StreamEvent::Usage)
+            .into_iter()
+            .chain([StreamEvent::TurnEnd { text: String::new(), error: None }])
+            .collect(),
         Some("turn.failed") => {
             let message = value["error"]["message"]
                 .as_str()
@@ -534,7 +540,8 @@ fn turn_edges(value: &Value) -> Vec<StreamEvent> {
                 text.clone()
             }
         });
-        return vec![StreamEvent::TurnEnd { text, error }];
+        let usage = usage_of(&value["usage"]).map(|report| UsageReport { cost_usd: value["total_cost_usd"].as_f64(), ..report });
+        return usage.map(StreamEvent::Usage).into_iter().chain([StreamEvent::TurnEnd { text, error }]).collect();
     }
     if value["type"] == "system" && value["subtype"] == "init" {
         let conversation = value["session_id"].as_str().map(|id| StreamEvent::Conversation(id.to_owned()));
@@ -550,6 +557,7 @@ pub(crate) struct Outcome {
     pub(crate) text: Option<String>,
     pub(crate) done: bool,
     pub(crate) error: Option<String>,
+    pub(crate) usage: UsageReport,
 }
 
 #[cfg(test)]
@@ -560,6 +568,7 @@ pub(crate) fn replay(provider: Provider, lines: &str) -> Outcome {
         text: None,
         done: false,
         error: None,
+        usage: UsageReport::default(),
     };
     for line in lines.lines() {
         for event in (driver(provider).parse)(line) {
@@ -579,6 +588,11 @@ pub(crate) fn replay(provider: Provider, lines: &str) -> Outcome {
                     }
                     outcome.error = error;
                     outcome.done = true;
+                }
+                StreamEvent::Usage(report) => {
+                    outcome.usage.tokens_in += report.tokens_in;
+                    outcome.usage.tokens_out += report.tokens_out;
+                    outcome.usage.cost_usd = report.cost_usd.or(outcome.usage.cost_usd);
                 }
                 StreamEvent::TurnStart | StreamEvent::Background(_) => {}
             }
@@ -1032,4 +1046,19 @@ mod tests {
         assert!(text.contains("say\\thi"), "{text}");
         assert!(!text.contains('\t'), "{text}");
     }
+}
+
+/// A turn's token counts, in Claude's and Codex's `snake_case` or Cursor's `camelCase`. Input
+/// counts what the model read from the cache too. Codex's `input_tokens` already includes its
+/// cached input, so only the other two add cache counts.
+fn usage_of(usage: &Value) -> Option<UsageReport> {
+    if !usage.is_object() {
+        return None;
+    }
+    let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+    Some(UsageReport {
+        tokens_in: n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("inputTokens") + n("cacheReadTokens") + n("cacheWriteTokens"),
+        tokens_out: n("output_tokens") + n("outputTokens"),
+        cost_usd: None,
+    })
 }

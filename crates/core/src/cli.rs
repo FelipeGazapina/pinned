@@ -1,7 +1,7 @@
 //! The subcommands Claude Code and connector sessions run on the binary that started them.
 //! Every pinned binary answers them the same way, so a session can't tell which one hosts it.
 
-use crate::{evidence, hooks, reminders};
+use crate::{evidence, hooks, mcp, reminders};
 
 /// Runs the subcommand `args` names (the arguments after the program) and returns the exit
 /// code, or None when `args` is not one, so the caller goes on to start normally.
@@ -25,6 +25,8 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         hooks::SLACK_SUBCOMMAND => hooks::slack(rest),
         hooks::LINEAR_SUBCOMMAND => hooks::linear(rest),
         evidence::SUBCOMMAND => evidence::run(rest),
+        mcp::RUN_SUBCOMMAND => mcp::run(rest),
+        mcp::HEADERS_SUBCOMMAND => mcp::headers(rest),
         _ => return None,
     };
     Some(match answer {
@@ -53,5 +55,7 @@ mod tests {
         assert_eq!(dispatch(&args(&["/Users/ana/acme"])), None);
         assert_eq!(dispatch(&args(&["stage", "shipping"])), Some(1));
         assert_eq!(dispatch(&args(&["linear", "file"])), Some(1));
+        assert_eq!(dispatch(&args(&["mcp-headers", "/nowhere/servers.json", "x"])), Some(1));
+        assert_eq!(dispatch(&args(&["mcp-run"])), Some(1));
     }
 }

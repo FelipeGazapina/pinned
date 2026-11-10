@@ -131,6 +131,10 @@ pub struct TabView {
     /// delegated task this tab reopened. The sidebar nests the tab under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<TabId>,
+    /// The machine whose tab `spawned_by` names, when that tab is on another machine: a worker a
+    /// thread there delegated here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_on: Option<MachineId>,
     /// The tab is the account's global orchestrator, the chat above every project's Capitão. Its
     /// `role` is empty, so an older app shows it as a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -206,6 +210,9 @@ pub enum Call {
     ResizePty { tab: TabId, cols: u16, rows: u16 },
     /// `null`.
     CloseTab { tab: TabId },
+    /// `null`, once the tab's turn is stopped as the app's Stop button stops it: claude's background
+    /// agents and workflows first, then the turn, then the turn their "stopped" notices wake.
+    StopTurn { tab: TabId },
     /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
     /// the client then sends `StartClaude`.
     SetFolder { tab: TabId, path: String },
@@ -242,6 +249,9 @@ pub enum Call {
     SearchThreads { query: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
+    /// The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation
+    /// for an agent this way, which then starts it with `start_claude`, under the limits.
+    OpenRun { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
     /// The absolute path the file was saved under, in a private folder of the machine, for a
@@ -256,6 +266,9 @@ pub enum Call {
     ReadImage { path: String },
     /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
     ListAccounts,
+    /// `Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's
+    /// /model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.
+    LearnModelMenu { lines: Vec<String> },
     /// The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`
     /// when `key` is an OpenCode Go API key.
     AddAccount {
@@ -303,6 +316,32 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// The started task's JSON, as `delegate_task` answers it. From the hub: starts a worker
+    /// thread here for a tab on another machine of the account. `origin.machine` is the hub's
+    /// stamp of the machine that asked; the thread nests under `origin.tab` there. `repo` names
+    /// the checkout it works in, cloned with `token` when this machine has none. A repeat of
+    /// `origin.task` answers the task it started.
+    Delegate {
+        origin: crate::delegate::Origin,
+        request: Box<crate::delegate::Request>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
+    /// The task's status JSON, as `task_status` answers it, or its state once cancelled when
+    /// `cancel` gives a reason. From the hub: only for the task `Delegate` started for `tab` and
+    /// `task` of `origin_machine`, the hub's stamp of the machine that asks.
+    RemoteTask {
+        origin_machine: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancel: Option<String>,
+    },
+    /// `null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`
+    /// ended there. `from` is the hub's stamp of the machine that reports it.
+    RemoteEnded { from: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
@@ -355,7 +394,7 @@ pub enum Call {
     /// `Option<String>`: the icon of the tab's project, where T3 Code looks for one, as a data URL.
     Favicon { tab: TabId },
     /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
-    /// messages, and the `previous` title.
+    /// messages, and the `previous` title. An empty `thread` reads the tab's own conversation.
     RegenerateTitle { tab: TabId, previous: String, thread: String },
     /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
     PrList { tab: TabId },
@@ -634,6 +673,38 @@ pub enum Call {
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
+    /// What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this
+    /// machine, as the hub passes on that session's `act`. A call that starts a session holds it to
+    /// the caller's delegation limits (`surface::Action::starts_work`).
+    ActFor { caller: TabId, call: Value },
+    /// `true` once `text` is queued for the tab, as worker reports are: typed once its session is
+    /// idle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when
+    /// no tab has it. A repeat of `id` queues nothing.
+    Notice {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        text: String,
+        id: String,
+    },
+    /// `Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the
+    /// account of the project at `path`, else the default one. User and local scope come from that
+    /// account's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or
+    /// its URL's origin only, never its arguments, environment or headers.
+    McpServers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// `Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and
+    /// the names of their environment and headers, never their values, for the app to import.
+    McpImportable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -653,6 +724,9 @@ impl Call {
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
+        if let Call::ActFor { call, .. } = self {
+            return serde_json::from_value::<Call>(call.clone()).is_ok_and(|call| call.may_wait());
+        }
         matches!(
             self,
             Call::Run { .. }
@@ -660,6 +734,7 @@ impl Call {
                 | Call::PrStatus { .. }
                 | Call::Favicon { .. }
                 | Call::RegenerateTitle { .. }
+                | Call::StopTurn { .. }
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
@@ -725,6 +800,8 @@ impl Call {
                 | Call::MemoryForget { .. }
                 | Call::MemoryStatus { .. }
                 | Call::UpdateSelf
+                | Call::McpServers { .. }
+                | Call::McpImportable { .. }
         )
     }
 }
@@ -995,6 +1072,124 @@ pub enum HubCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box
+    /// its target names, for the asking machine's tab `tab`, whose own id for the task is `task`.
+    /// `repo` is the caller's git origin, which the worker's checkout is found or cloned by;
+    /// `access` is the widest the caller may hand a child; `delegator` and `limits` are who asked
+    /// and the limits it runs under, which the worker is held to and recorded with.
+    Delegate {
+        tab: TabId,
+        task: String,
+        request: Box<crate::delegate::Request>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        access: crate::delegate::Access,
+        #[serde(default)]
+        delegator: crate::delegate::Delegator,
+        #[serde(default)]
+        limits: crate::taste::Limits,
+    },
+    /// From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,
+    /// or its state once cancelled when `cancel` gives a reason.
+    RemoteTask {
+        machine: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancel: Option<String>,
+    },
+    /// From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated
+    /// here as `task`.
+    RemoteEnded { to: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// `connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for
+    /// boxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.
+    SetBoxClaudeToken { name: String, token: String },
+    /// `connectors::Settings::box_claude_tokens`, without the token kept for `name`.
+    RemoveBoxClaudeToken { name: String },
+    /// From a machine: `null`, once the hub keeps these records of its delegated tasks, as they
+    /// are now. The hub stamps the machine, and box time for a machine that is a box.
+    RecordTasks { records: Vec<crate::delegate::TaskRecord> },
+    /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
+    /// (1, 7 or 30), on every machine.
+    DelegationStats { days: u32 },
+    /// `Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.
+    SessionMarks,
+    /// `Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change
+    /// landed in order. One left with only its id has no mark. The account's clients hear the same
+    /// as `ToClient::SessionMarks`.
+    MarkSessions { changes: Vec<crate::marks::MarkChange> },
+    /// `marks::SessionMarks` of the conversation in `tab` on `machine`, once it is archived: its tab
+    /// closed, and Settings › Archive lists it to bring back with its name and pin. Refused while
+    /// its turn runs.
+    ArchiveSession { machine: MachineId, tab: TabId },
+    /// `Target`: the new tab, on the archived conversation's machine, that resumes it with its name
+    /// and pin back.
+    UnarchiveSession { session: String },
+    /// `null`, once the conversation's tab closed and its marks are gone, so pinned forgets it.
+    /// Claude Code keeps its transcript.
+    DeleteSession { machine: MachineId, tab: TabId },
+    /// From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under
+    /// `surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.
+    Act { act: crate::surface::AgentAct },
+    /// `Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,
+    /// then the last 20 decided, newest first.
+    Confirmations,
+    /// From a signed-in client: `surface::Decided`. Approving runs the action for the session that
+    /// asked; either way the session gets a notice. `entered` holds what the user typed in the app
+    /// for a credential action's asked fields (`surface::Action::asks`); a credential action whose
+    /// run fails waits again, so the user can type another.
+    DecideConfirmation {
+        id: String,
+        approve: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        entered: BTreeMap<String, String>,
+    },
+    /// From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its
+    /// `until`, this connection runs the calls only the owner makes.
+    Unlock { password: String },
+    /// `Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`
+    /// rows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of
+    /// its boundary second, which the client drops by id.
+    AgentAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// `Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads
+    /// while enabled, each with the names of its secrets and never their values.
+    ListMcpServers,
+    /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
+    /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
+    /// value the server has, and a new name needs one.
+    SaveMcpServer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        server: crate::mcp::Spec,
+        #[serde(default, skip_serializing_if = "crate::mcp::Secrets::is_empty")]
+        secrets: crate::mcp::Secrets,
+    },
+    /// `mcp::Entry`: turns a server of the account's list on or off for the sessions started next.
+    EnableMcpServer { id: String, enabled: bool },
+    /// Removes a server and its secrets from the account's list.
+    RemoveMcpServer { id: String },
+    /// `mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`
+    /// configures (`Call::McpImportable`), for every project or for `project` (a repository),
+    /// with `secrets` typed in the app for each of its names.
+    ImportMcpServer {
+        machine: MachineId,
+        account: AccountId,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "crate::mcp::Secrets::is_empty")]
+        secrets: crate::mcp::Secrets,
+    },
+    /// From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to
+    /// load into the sessions it starts.
+    LoadMcpServers,
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1086,7 +1281,8 @@ pub struct PairCode {
 pub struct NewInvite {
     pub id: String,
     pub code: String,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
 
@@ -1097,9 +1293,15 @@ pub struct InviteView {
     pub hint: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
+
+/// The `expires_at` of a code that never expires: the last second of the year 9999. Apps older than
+/// 0.17.22 still read `expires_at` and show it as a date, so the hub keeps sending this instead of
+/// nothing.
+pub const NEVER_EXPIRES: i64 = 253402300799;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Invites {
@@ -1143,12 +1345,22 @@ impl Reply {
 
 /// Client to hub. The first frame must be `Auth` with a login token.
 ///
-/// `{"type":"auth","token":"…"}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
+/// `{"type":"auth","token":"…","lock":true}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
 /// `{"type":"hub","id":2,"call":{"cmd":"get_settings"}}`, `{"type":"attach","machine":"m1","tab":"tab-1"}`
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
-    Auth { token: String },
+    Auth {
+        token: String,
+        /// The app asks for the password before a call only the account's owner makes
+        /// (`surface::owner_only`), so from now on the login alone, which the app keeps on disk,
+        /// runs none. An older app leaves it out and keeps every call it had.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lock: bool,
+        /// The token `HubCall::Unlock` answered this app, sent again after a reconnect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unlock: Option<String>,
+    },
     /// Forwarded to the machine; the reply comes back as `ToClient::Reply` with this id.
     Call { id: u64, machine: MachineId, call: Call },
     /// Answered by the hub itself.
@@ -1177,6 +1389,10 @@ pub enum ToClient {
     Event { machine: MachineId, event: MachineEvent },
     /// The account's connectors, after any change or check.
     Settings { settings: Settings },
+    /// Conversations whose marks changed, as they are now. One with only its id has no mark left.
+    SessionMarks { marks: Vec<crate::marks::SessionMarks> },
+    /// The agents' actions waiting on the user's approval, after `Hello` and after any change.
+    Confirmations { items: Vec<crate::surface::Confirmation> },
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.
@@ -1269,6 +1485,7 @@ mod tests {
             prompt_title: Some("Fix the build".into()),
             role: None,
             spawned_by: None,
+            spawned_on: None,
             orchestrator_global: false,
             taste_chat: false,
             orchestrator_turn: false,
@@ -1580,7 +1797,27 @@ mod tests {
             HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
             _ => panic!("not an import"),
         }
+        round_trip(HubCall::SetBoxClaudeToken { name: "bloom".into(), token: "sk-ant-oat01-1".into() }, json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-1" }));
+        round_trip(HubCall::RemoveBoxClaudeToken { name: "bloom".into() }, json!({ "cmd": "remove_box_claude_token", "name": "bloom" }));
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        round_trip(
+            HubCall::RemoteEnded { to: "m1".into(), tab: "tab-1".into(), task: "task-1".into(), end: end.clone() },
+            json!({ "cmd": "remote_ended", "to": "m1", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        );
+        round_trip(
+            HubCall::RemoteTask { machine: "m2".into(), tab: "tab-1".into(), task: "task-1".into(), cancel: Some("not now".into()) },
+            json!({ "cmd": "remote_task", "machine": "m2", "tab": "tab-1", "task": "task-1", "cancel": "not now" }),
+        );
+        round_trip(
+            Call::RemoteEnded { from: "m2".into(), tab: "tab-1".into(), task: "task-1".into(), end },
+            json!({ "cmd": "remote_ended", "from": "m2", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        );
+        let request = crate::delegate::parse_request(&json!({ "task": "Fix it.", "target": { "box": { "size": "large" } } })).unwrap();
+        let delegate = serde_json::to_value(HubCall::Delegate { tab: "tab-1".into(), task: "task-1".into(), request: Box::new(request), repo: Some("git@github.com:o/r.git".into()), access: crate::delegate::Access::ReadOnly, delegator: Default::default(), limits: Default::default() }).unwrap();
+        assert_eq!((delegate["cmd"].as_str(), delegate["access"].as_str()), (Some("delegate"), Some("read_only")));
+        assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
             json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),
@@ -1597,7 +1834,8 @@ mod tests {
 
     #[test]
     fn client_frames_are_tagged_by_type() {
-        round_trip(ClientFrame::Auth { token: "t0k".into() }, json!({ "type": "auth", "token": "t0k" }));
+        round_trip(ClientFrame::Auth { token: "t0k".into(), lock: false, unlock: None }, json!({ "type": "auth", "token": "t0k" }));
+        round_trip(ClientFrame::Auth { token: "t0k".into(), lock: true, unlock: Some("u-1".into()) }, json!({ "type": "auth", "token": "t0k", "lock": true, "unlock": "u-1" }));
         round_trip(
             ClientFrame::Call { id: 1, machine: "m1".into(), call: Call::CloseTab { tab: "tab-2".into() } },
             json!({ "type": "call", "id": 1, "machine": "m1", "call": { "cmd": "close_tab", "tab": "tab-2" } }),
@@ -1638,7 +1876,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -1691,6 +1929,32 @@ mod tests {
             json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
         );
         round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
+    }
+
+    #[test]
+    fn a_decision_without_typed_fields_keeps_its_old_shape_and_mcp_servers_takes_both_fields_as_optional() {
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: BTreeMap::new() }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true }));
+        let typed = BTreeMap::from([("key".to_owned(), "lin_api_x".to_owned())]);
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: typed }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true, "entered": { "key": "lin_api_x" } }));
+        round_trip(Call::McpServers { account: None, path: None }, json!({ "cmd": "mcp_servers" }));
+        round_trip(Call::McpServers { account: Some("work".into()), path: Some("/w/site".into()) }, json!({ "cmd": "mcp_servers", "account": "work", "path": "/w/site" }));
+        assert!(Call::McpServers { account: None, path: None }.may_wait());
+        round_trip(Call::McpImportable { account: Some("work".into()), path: None }, json!({ "cmd": "mcp_importable", "account": "work" }));
+        assert!(Call::McpImportable { account: None, path: None }.may_wait());
+        use crate::mcp::{Reach, Secrets, Spec};
+        let server = Spec { name: "ctx".into(), project: None, transport: Reach::Stdio { command: "npx".into(), args: vec![], env: vec!["API_KEY".into()] } };
+        let wire_server = json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "env": ["API_KEY"] } });
+        round_trip(HubCall::ListMcpServers, json!({ "cmd": "list_mcp_servers" }));
+        round_trip(HubCall::SaveMcpServer { id: None, server: server.clone(), secrets: Secrets::default() }, json!({ "cmd": "save_mcp_server", "server": wire_server }));
+        let typed = Secrets { env: [("API_KEY".to_owned(), "k".to_owned())].into(), headers: BTreeMap::new() };
+        round_trip(HubCall::SaveMcpServer { id: Some("s1".into()), server, secrets: typed.clone() }, json!({ "cmd": "save_mcp_server", "id": "s1", "server": wire_server, "secrets": { "env": { "API_KEY": "k" } } }));
+        round_trip(HubCall::EnableMcpServer { id: "s1".into(), enabled: false }, json!({ "cmd": "enable_mcp_server", "id": "s1", "enabled": false }));
+        round_trip(HubCall::RemoveMcpServer { id: "s1".into() }, json!({ "cmd": "remove_mcp_server", "id": "s1" }));
+        round_trip(
+            HubCall::ImportMcpServer { machine: "m1".into(), account: "claude".into(), name: "linear".into(), path: None, project: Some("github.com/a/b".into()), secrets: Secrets::default() },
+            json!({ "cmd": "import_mcp_server", "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/a/b" }),
+        );
+        round_trip(HubCall::LoadMcpServers, json!({ "cmd": "load_mcp_servers" }));
     }
 
     #[test]

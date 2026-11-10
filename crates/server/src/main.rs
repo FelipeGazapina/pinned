@@ -133,8 +133,12 @@ fn login(args: &[String]) -> Result<(), String> {
     };
     let (user_token, account) = account::login(hub, email, &password)?;
     let (machine, machine_token) = account::register_machine(hub, &user_token, &args.name(), &account::os())?;
-    let creds = Credentials { hub: hub.trim_end_matches('/').to_owned(), email: account.email, user_token, machine_id: machine.id, machine_token };
+    // The machine links with its own token; the login only added it.
+    let creds = Credentials { hub: hub.trim_end_matches('/').to_owned(), email: account.email, user_token: String::new(), machine_id: machine.id, machine_token };
     creds.save(&args.config_dir())?;
+    if let Err(e) = account::logout(hub, &user_token) {
+        eprintln!("pinned-server: could not end the login that added this machine: {e}");
+    }
     println!("{}", machine.name);
     Ok(())
 }
@@ -150,7 +154,14 @@ fn node(args: &[String]) -> Result<(), String> {
     pinned_server::self_update::prove_or_restore();
     let args = Args::parse(args, &["config-dir"], 0)?;
     let dir = args.config_dir();
-    let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
+    let mut creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
+    if let Some(login) = creds.forget_login(&dir)? {
+        let hub = creds.hub.clone();
+        std::thread::spawn(move || match account::logout(&hub, &login) {
+            Ok(()) => eprintln!("pinned-server: ended the login an older pinned kept in account.json"),
+            Err(e) => eprintln!("pinned-server: could not end the login an older pinned kept in account.json: {e}"),
+        });
+    }
     let exe = std::env::current_exe().map_err(|e| format!("could not find pinned-server's own binary: {e}"))?;
     let mut launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
     // Reminders notify on a desktop, which a node doesn't have, so its sessions get delegation and the project tools.

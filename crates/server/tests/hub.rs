@@ -1,7 +1,7 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating, Signup};
 use pinned_core::accounts::Provider;
-use pinned_core::agent::{self, Stage, Subject};
+use pinned_core::agent::{self, Role, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
@@ -10,12 +10,13 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall};
+use pinned_core::wire::{Call, HubCall, MachineView, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,6 +149,13 @@ fn admin_on(database: &str, sql: &str) {
     });
 }
 
+/// A fresh folder for one node of one test. Parallel tests reuse machine names, so a counter
+/// keeps two nodes named alike from sharing a config folder.
+fn node_dir(name: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    temp(&format!("{name}-{}", NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pinned-server-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -171,13 +179,37 @@ struct Client {
 }
 
 impl Client {
+    /// An app older than the unlock: its login keeps every call it had.
     fn connect(hub: &str, token: &str) -> Client {
+        Client::auth(hub, json!({ "type": "auth", "token": token }))
+    }
+
+    /// The app as it signs in now: it locks its login, so the login alone runs no confirm-class call.
+    fn app(hub: &str, token: &str) -> Client {
+        let mut client = Client::auth(hub, json!({ "type": "auth", "token": token, "lock": true }));
+        client.wait("hello", |f| f["type"] == "hello");
+        client
+    }
+
+    fn auth(hub: &str, auth: Value) -> Client {
         let (mut ws, _) = tungstenite::connect(format!("{}/ws/client", hub.replace("http://", "ws://"))).unwrap();
         if let MaybeTlsStream::Plain(s) = ws.get_mut() {
             s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         }
-        ws.send(Message::text(json!({ "type": "auth", "token": token }).to_string())).unwrap();
+        ws.send(Message::text(auth.to_string())).unwrap();
         Client { ws, frames: vec![], next: 1, closed: None }
+    }
+
+    /// Signed in, or None once the hub closes the socket.
+    fn signed_in(mut self) -> Option<Client> {
+        let start = Instant::now();
+        while !self.frames.iter().any(|f| f["type"] == "hello") {
+            if !self.pump() {
+                return None;
+            }
+            assert!(start.elapsed() < WAIT, "timed out waiting for hello or a close");
+        }
+        Some(self)
     }
 
     fn pump(&mut self) -> bool {
@@ -843,17 +875,18 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
     let opus = json!({ "model": "claude-opus-5-5" });
     let aggressive = json!({
-        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
     });
-    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
-    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 101 } })), Err("parallel workers go from 1 to 100".into()));
     let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
     assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
     client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();
@@ -921,12 +954,12 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
     assert_eq!(bob_node.link.as_ref().unwrap().call_hub(bobs_set), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "ana's open chat lets no machine of bob's change a taste");
     let bob_chat = open_chat(&bob_node, &mut bob);
     let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
-    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
+    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(5)), "bob's session reads none of ana's taste");
     session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
     assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
     assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()), "bob's set changed ana's taste");
     let reset = session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "parallel" })).unwrap();
-    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(5)));
     assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
@@ -1815,8 +1848,7 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     let invite = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let code = invite["code"].as_str().unwrap().to_owned();
     assert_eq!((code.len(), code.matches('-').count()), (19, 3), "four groups of four: {code}");
-    let week = invite["expires_at"].as_i64().unwrap() - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    assert!((7 * 86400 - 60..=7 * 86400 + 60).contains(&week), "a code lasts 7 days, not {week} s");
+    assert_eq!(invite["expires_at"], json!(NEVER_EXPIRES), "a code never expires; an older app that shows a date reads one far away");
     let pending = ana_client.hub(json!({ "cmd": "invites" })).unwrap();
     assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
     assert_eq!(pending["pending"][0]["id"], invite["id"]);
@@ -1838,10 +1870,17 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": code })), refused_signup(), "a code works once");
     assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used code is no longer pending");
 
-    let expired = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
-    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '1 second' where id = '{}'", expired["id"].as_str().unwrap()));
-    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": expired["code"] })), refused_signup(), "an expired code fails");
-    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"], json!([]));
+    // A row as it was before codes stopped expiring: a past `expires_at`, which nothing reads anymore.
+    let old = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '8 days' where id = '{}'", old["id"].as_str().unwrap()));
+    assert_eq!(
+        ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        [old["id"].as_str().unwrap()],
+        "an old code stays in the list",
+    );
+    let (status, dani) = signup_from(&url, "10.0.0.4", json!({ "email": "dani@acme.dev", "password": "correct horse", "invite": old["code"] }));
+    assert_eq!(status, 200, "a code made before codes stopped expiring still works: {dani}");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used old code is no longer pending");
 
     let revoked = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let kept = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
@@ -2004,6 +2043,9 @@ struct FakeState {
     failing: Option<Exec>,
     /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
+    /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
+    /// the repo a worker or a Captain needs without cloning from the network.
+    checkout: Option<(String, String)>,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2043,7 +2085,7 @@ impl FakeBoxes {
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
-        let (dir, creds) = {
+        let (dir, creds, checkout) = {
             let mut state = self.state.lock().unwrap();
             if let Some(failing) = state.failing.take() {
                 return Ok(failing);
@@ -2051,13 +2093,17 @@ impl FakeBoxes {
             let fake = state.boxes.get(&id.0).ok_or("no such box")?;
             let creds: Credentials = serde_json::from_str(&fake.files[&format!("{BOX_DIR}/account.json")]).unwrap();
             assert!(fake.files[&format!("{BOX_DIR}/start.sh")].contains("pinned-server\" node --config-dir"));
-            (self.root.join(&id.0), creds)
+            (self.root.join(&id.0), creds, state.checkout.clone())
         };
         std::fs::create_dir_all(&dir).unwrap();
         let node = tokio::task::spawn_blocking(move || {
             let node = Node::start(&dir, creds);
             // A delivery is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
-            std::fs::write(dir.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
+            std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo; exec cat\n").unwrap();
+            if let Some((name, remote)) = checkout {
+                origin(&dir.join(&name), &remote);
+                node.machine.open_project(dir.join(&name));
+            }
             node
         })
         .await
@@ -2159,7 +2205,11 @@ struct BoxAccount {
 
 impl BoxAccount {
     fn new(hub: &TestHub) -> BoxAccount {
-        let (token, account) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        BoxAccount::named(hub, "ana@acme.dev")
+    }
+
+    fn named(hub: &TestHub, email: &str) -> BoxAccount {
+        let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
         let mut client = Client::connect(&hub.url, &token);
         client.wait("hello", |f| f["type"] == "hello");
         assert_eq!(
@@ -3879,6 +3929,287 @@ fn synced_files_skills_and_shared_projects_stay_in_their_account() {
     assert_eq!(bob.hub(json!({ "cmd": "sync_list", "project": project })).unwrap()[0]["sha"], sha256_hex(b"bob's plans"));
 }
 
+fn mark(changes: Value) -> Value {
+    json!({ "cmd": "mark_sessions", "changes": changes })
+}
+
+/// Every `session_marks` push the client got, after it read all that came.
+fn marks_pushed(client: &mut Client) -> Vec<Value> {
+    settle(client);
+    client.frames.iter().filter(|f| f["type"] == "session_marks").cloned().collect()
+}
+
+#[test]
+fn a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it() {
+    let hub = TestHub::start("marks_live");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let archived = json!({ "machine": "m-1", "cwd": "/w/site", "name": "Fix login", "project": "site", "at": 1700000100.5, "title": "Fix login", "pinned": true });
+    let filed = laptop.hub(mark(json!([
+        { "session": "s1", "mark": { "title": "Fix login" } },
+        { "session": "s1", "mark": { "pin": 0 } },
+        { "session": "s1", "mark": { "archived": archived } },
+    ])));
+    let row = json!({ "session": "s1", "title": "Fix login", "pin": 0, "archived": archived });
+    assert_eq!(filed, Ok(json!([row])));
+    let filed_push = json!({ "type": "session_marks", "marks": [row] });
+    assert_eq!(phone.wait("the phone hears the laptop's marks", |f| f["type"] == "session_marks"), filed_push, "the push carries the row as the hub keeps it");
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+
+    assert_eq!(laptop.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    let cleared_push = json!({ "type": "session_marks", "marks": [{ "session": "s1" }] });
+    for client in [&mut laptop, &mut phone] {
+        client.wait("the clear's push", |f| *f == cleared_push);
+        assert_eq!(marks_pushed(client), [filed_push.clone(), cleared_push.clone()], "each device hears each change once, in order");
+    }
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a session with no mark left has no row");
+}
+
+#[test]
+fn every_device_ends_on_the_marks_the_hub_kept_after_a_burst_of_changes() {
+    let hub = TestHub::start("marks_burst");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    // Sent without waiting, so the hub runs them at once and they race for the session's row.
+    for seen in 0..20 {
+        laptop.send(json!({ "type": "hub", "id": 100 + seen, "call": mark(json!([{ "session": "s1", "mark": { "seen": seen as f64 } }])) }));
+    }
+    for id in 100..120 {
+        let reply = laptop.wait(&format!("reply {id}"), |f| f["type"] == "reply" && f["id"] == id);
+        assert!(reply.get("err").is_none(), "{reply}");
+    }
+    let kept = laptop.hub(json!({ "cmd": "session_marks" })).unwrap();
+    for client in [&mut laptop, &mut phone] {
+        let pushed = marks_pushed(client);
+        assert_eq!(pushed.len(), 20, "one push per change");
+        assert_eq!(pushed.last().unwrap()["marks"], kept, "the last push a device heard is the row the hub kept");
+    }
+}
+
+#[test]
+fn another_accounts_marks_stay_its_own_even_on_the_same_session_id() {
+    let hub = TestHub::start("iso_marks");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let anas = json!({ "session": "s1", "title": "Ana's plan", "pin": 2 });
+    assert_eq!(ana.hub(mark(json!([{ "session": "s1", "mark": { "title": "Ana's plan" } }, { "session": "s1", "mark": { "pin": 2 } }]))), Ok(json!([anas])));
+
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob reads none of ana's marks");
+    let bobs = json!({ "session": "s1", "title": "Bob's notes" });
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": { "title": "Bob's notes" } }]))), Ok(json!([bobs])), "bob's change on ana's session id starts from no marks");
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([bobs])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's change left ana's row alone");
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's clear left ana's row alone");
+
+    assert_eq!(marks_pushed(&mut ana), [json!({ "type": "session_marks", "marks": [anas] })], "ana heard only her own change");
+    assert_eq!(mentioning(&mut bob, "Ana's plan"), Vec::<Value>::new(), "bob's socket carried none of ana's marks");
+}
+
+#[test]
+fn a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark() {
+    let hub = TestHub::start("marks_refused");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let unnamed = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }, { "session": "", "mark": { "pin": 0 } }])));
+    assert_eq!(unnamed, Err("a mark needs a session id".into()));
+    let long = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "x".repeat(pinned_core::marks::MAX_TEXT + 1) } }])));
+    assert_eq!(long, Err("a mark's text may be at most 2000 bytes".into()));
+
+    let (_, machine_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let refused = Err("a machine may only forward a workflow session's callbacks".to_owned());
+    assert_eq!(machine_result(&url, &machine_token, mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }]))), refused);
+    assert_eq!(machine_result(&url, &machine_token, json!({ "cmd": "session_marks" })), refused);
+
+    assert_eq!(laptop.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "not even a refused call's good change was kept");
+    assert_eq!(marks_pushed(&mut laptop), Vec::<Value>::new());
+    assert_eq!(marks_pushed(&mut phone), Vec::<Value>::new());
+}
+
+#[test]
+fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_forgets_it() {
+    let hub = TestHub::start("marks_archive");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let dir = temp("marks-archive-node");
+    let creds = pair(&url, &mut ana, "box", &dir);
+    let machine = creds.machine_id.clone();
+    std::fs::write(dir.join("sessions.json"), format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display())).unwrap();
+    let _node = Node::resume(&dir, creds);
+    // A resume answers once Claude has drawn for 2s, and the stand-in's `cat` draws nothing.
+    let drawing = dir.join("claude-drawing");
+    std::fs::write(&drawing, "#!/bin/sh\necho resumed\nexec cat\n").unwrap();
+    std::fs::set_permissions(&drawing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&drawing, dir.join("claude")).unwrap();
+    ana.wait_machines(&[("box", true)]);
+    let tabs_of = |f: &Value| (f["type"] == "event" && f["machine"] == machine.as_str() && f["event"]["kind"] == "tabs").then(|| f["event"]["tabs"].as_array().cloned().unwrap_or_default());
+    let listed = ana.wait("the restored tab", |f| tabs_of(f).is_some_and(|tabs| tabs.iter().any(|t| t["session"] == "conv-1")));
+    let restored = tabs_of(&listed).unwrap().into_iter().find(|t| t["session"] == "conv-1").unwrap();
+    let (tab, cwd) = (restored["id"].as_str().unwrap().to_owned(), restored["cwd"].as_str().unwrap().to_owned());
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 4 } }]))).unwrap();
+
+    let not_bobs = Err(format!("this account has no tab {tab} on machine {machine}"));
+    assert_eq!(bob.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })), not_bobs);
+    assert_eq!(bob.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": tab })), not_bobs);
+
+    let from = ana.frames.len();
+    let row = ana.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })).unwrap();
+    let at = row["archived"]["at"].as_f64().unwrap();
+    assert!(at > 1.7e9, "archived at {at}");
+    let project = cwd.rsplit('/').next().unwrap();
+    assert_eq!(
+        row,
+        json!({ "session": "conv-1", "archived": { "machine": machine, "cwd": cwd, "name": "Fix login", "project": project, "at": at, "title": "Fix login", "pinned": true } })
+    );
+    wait_frame(&mut ana, from, "the archived tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == tab.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+    assert_eq!(bob.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })), Err("this account has no archived conversation conv-1".into()));
+
+    let back = ana.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })).unwrap();
+    let reopened = back["tab"].as_str().unwrap().to_owned();
+    assert_eq!(back, json!({ "machine": machine, "tab": reopened }));
+    assert_ne!(reopened, tab);
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])), "its name and pin are back");
+
+    let from = ana.frames.len();
+    assert_eq!(ana.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": reopened })), Ok(Value::Null));
+    wait_frame(&mut ana, from, "the deleted tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == reopened.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
+    assert_eq!(mentioning(&mut bob, "Fix login"), Vec::<Value>::new(), "bob heard nothing of ana's thread");
+}
+
+#[test]
+fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_for_approval() {
+    let hub = TestHub::start("act_marks");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let tab = |id: &str, status: &str, session: &str| json!({ "id": id, "cwd": "/a/app", "bypass": false, "running": true, "status": status, "title": null, "message": null, "resume_at": null, "opened": 1, "session": session });
+    let answer = |call: &Value| match call["cmd"].as_str().unwrap() {
+        "act_for" => RawReply::Ok(json!({ "ran": call["call"]["cmd"] })),
+        "run" | "open_run" => RawReply::Ok(json!("tab-back")),
+        "notice" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    };
+    let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab("tab-agent", "working", "agent-conv"), tab("tab-t", "done", "conv-1")] })], answer);
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![json!({ "kind": "tabs", "tabs": [tab("tab-bob", "working", "bob-conv")] })], answer);
+    ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    bob.wait("bob-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    let machine = machine.id;
+    let act = |raw: &RawMachine, agent: &str, action: &str, args: Value| raw.ask(json!({ "cmd": "act", "act": { "tab": agent, "action": action, "args": args } }));
+    let calls = |raw: &RawMachine, cmd: &str| raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).cloned().collect::<Vec<Value>>();
+
+    let from = ana.frames.len();
+    let renamed = act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 0 } }] }));
+    assert_eq!(renamed, Ok(json!({ "outcome": "done", "result": [{ "session": "conv-1", "title": "Fix login", "pin": 0 }] })));
+    wait_frame(&mut ana, from, "the agent's rename and pin", |f| f["type"] == "session_marks" && f["marks"] == json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }]));
+    assert_eq!(
+        act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": "clear" }] })),
+        Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".into())
+    );
+
+    let restarts = [
+        ("stop_turn", json!({ "tab": "tab-t" })),
+        ("set_bypass", json!({ "tab": "tab-t", "on": true, "cols": 120, "rows": 32 })),
+        ("set_model", json!({ "tab": "tab-t", "model": "claude-sonnet-5-5", "cols": 120, "rows": 32 })),
+        ("restart_claude", json!({ "tab": "tab-t", "cols": 120, "rows": 32 })),
+        ("set_folder", json!({ "tab": "tab-t", "path": "/a/app/web" })),
+        ("regenerate_title", json!({ "tab": "tab-t", "previous": "", "thread": "" })),
+        ("rewind", json!({ "tab": "tab-t", "before": "m-3", "files": false, "cols": 120, "rows": 32 })),
+        ("fork", json!({ "tab": "tab-t", "through": "m-3" })),
+    ];
+    for (action, args) in &restarts {
+        assert_eq!(act(&raw, "tab-agent", action, args.clone()), Ok(json!({ "outcome": "done", "result": { "ran": action } })), "{action}");
+    }
+    let ran: Vec<Value> = calls(&raw, "act_for").into_iter().map(|c| json!([c["caller"], c["call"]])).collect();
+    let asked: Vec<Value> = restarts
+        .iter()
+        .map(|(action, args)| {
+            let mut call = args.clone();
+            call["cmd"] = json!(action);
+            json!(["tab-agent", call])
+        })
+        .collect();
+    assert_eq!(ran, asked, "each ran on the agent's machine for the agent's session, as the app sends it");
+    let audit = ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let bypass: Vec<(Value, Value)> = audit.as_array().unwrap().iter().filter(|e| e["action"] == "set_bypass").map(|e| (serde_json::from_str(e["args"].as_str().unwrap()).unwrap(), e["outcome"].clone())).collect();
+    assert_eq!(bypass, [(restarts[1].1.clone(), json!("done"))], "loosening to bypass is on the audit trail");
+
+    let archived = act(&raw, "tab-agent", "archive_session", json!({ "machine": machine, "tab": "tab-t" })).unwrap();
+    assert_eq!(archived["result"]["archived"]["name"], "Fix login");
+    assert_eq!(archived["result"]["archived"]["pinned"], true);
+    assert_eq!(calls(&raw, "close_tab"), [json!({ "cmd": "close_tab", "tab": "tab-t" })]);
+    assert_eq!(act(&raw, "tab-agent", "unarchive_session", json!({ "session": "conv-1" })), Ok(json!({ "outcome": "done", "result": { "machine": machine, "tab": "tab-back" } })));
+    let reopened = calls(&raw, "open_run");
+    assert_eq!((reopened.len(), &reopened[0]["run"]["folder"], &reopened[0]["run"]["args"]), (1, &json!("/a/app"), &json!(["--resume", "conv-1"])));
+    assert_eq!(calls(&raw, "run"), Vec::<Value>::new(), "an agent's unarchive reopens the tab and starts nothing: start_claude does, under its limits");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])));
+
+    let from = ana.frames.len();
+    let delete = |request_id: &str| raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-agent", "action": "delete_session", "args": { "machine": machine, "tab": "tab-t" }, "request_id": request_id } }));
+    let held = delete("r-del").unwrap();
+    assert_eq!(held["outcome"], "pending");
+    let id = held["id"].as_str().unwrap().to_owned();
+    wait_frame(&mut ana, from, "the delete to approve", |f| f["type"] == "confirmations" && f["items"][0]["id"] == id.as_str() && f["items"][0]["action"] == "delete_session");
+    assert_eq!(calls(&raw, "close_tab").len(), 1, "nothing closed before the user approved");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])), "nor were its marks dropped");
+    assert_eq!(delete("r-del").unwrap()["id"], id.as_str(), "the same ask while it waits is the same wait");
+    assert_eq!(ana.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().filter(|c| c["action"] == "delete_session").count(), 1, "one confirmation, not two");
+    ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!((&decided["decision"], &decided["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
+    assert_eq!(ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })), Err(format!("no confirmation {id} waits")), "a second click decides nothing");
+    assert_eq!(calls(&raw, "close_tab").len(), 2, "the delete ran once");
+    let trail: Vec<(String, String)> = ana.hub(json!({ "cmd": "agent_audit" })).unwrap().as_array().unwrap().iter().filter(|e| e["action"] == "delete_session").map(|e| (e["outcome"].as_str().unwrap().to_owned(), e["detail"].as_str().unwrap().to_owned())).collect();
+    assert_eq!(trail.iter().map(|(outcome, _)| outcome.as_str()).collect::<Vec<_>>(), ["done", "approved", "pending"], "the trail: asked, approved, then ran: {trail:?}");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
+
+    let not_bobs = Err(format!("this account has no tab tab-agent on machine {machine}"));
+    assert_eq!(act(&bob_raw, "tab-bob", "archive_session", json!({ "machine": machine, "tab": "tab-agent" })), not_bobs);
+    assert_eq!(bob_raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-bob", "action": "stop_turn", "args": { "tab": "tab-agent" }, "machine": machine } })), Err(format!("this account has no machine {machine}")));
+    assert_eq!(act(&bob_raw, "tab-bob", "unarchive_session", json!({ "session": "agent-conv" })), Err("this account has no archived conversation agent-conv".into()));
+    let from = ana.frames.len();
+    act(&bob_raw, "tab-bob", "mark_sessions", json!({ "changes": [{ "session": "agent-conv", "mark": { "title": "Bob was here" } }] })).unwrap();
+    assert_eq!(act(&bob_raw, "tab-bob", "session_marks", json!({})), Ok(json!({ "outcome": "done", "result": [{ "session": "agent-conv", "title": "Bob was here" }] })));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob's agent changed only bob's marks");
+    assert_eq!(ana.frames[from..].iter().filter(|f| f.to_string().contains("Bob was here")).count(), 0);
+    assert_eq!(calls(&raw, "act_for").len(), restarts.len(), "bob's agent reached nothing on ana's machine");
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
+
+    let bobs_delete = act(&bob_raw, "tab-bob", "delete_session", json!({ "machine": machine, "tab": "tab-t" })).unwrap();
+    assert_eq!(bobs_delete["outcome"], "pending", "bob's own delete waits for bob");
+    assert_eq!(ana.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })), Err(format!("no confirmation {} waits", bobs_delete["id"].as_str().unwrap())), "ana can't decide bob's");
+    bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let refused = bob.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })).unwrap();
+    assert!(refused["outcome"].as_str().unwrap().starts_with("failed: this account has no tab tab-t on machine"), "{refused}");
+    assert_eq!(calls(&raw, "close_tab").len(), 2, "approved by bob, it still closed nothing of ana's");
+
+    let ana_marks = ana.hub(json!({ "cmd": "session_marks" })).unwrap();
+    for call in [
+        json!({ "cmd": "archive_session", "machine": machine, "tab": "tab-agent" }),
+        json!({ "cmd": "delete_session", "machine": machine, "tab": "tab-agent" }),
+    ] {
+        assert_eq!(bob.hub(call.clone()), Err(format!("this account has no tab tab-agent on machine {machine}")), "{call}");
+    }
+    for call in [json!({ "cmd": "stop_turn", "tab": "tab-agent" }), json!({ "cmd": "set_model", "tab": "tab-agent", "model": "claude-sonnet-5-5", "cols": 80, "rows": 24 }), json!({ "cmd": "restart_claude", "tab": "tab-agent", "cols": 80, "rows": 24 })] {
+        assert!(bob.call(&machine, call.clone()).is_err(), "bob's app reaches none of ana's sessions: {call}");
+    }
+    assert_eq!(bob_raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-bob", "action": "rename_machine", "args": { "id": machine, "name": "bob's" } } })), Err(format!("this account has no machine {machine}")));
+    bob.hub(json!({ "cmd": "mark_sessions", "changes": [{ "session": "conv-1", "mark": { "title": "Bob's name for it" } }] })).unwrap();
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })).unwrap(), ana_marks, "bob's app marked a session id of his own account only");
+    assert_eq!((calls(&raw, "stop_turn"), calls(&raw, "set_model"), calls(&raw, "restart_claude")), (vec![], vec![], vec![]), "bob's app and agent sent ana's machine none of it");
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
+}
+
 #[test]
 fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
     let hub = TestHub::start("iso_pair");
@@ -4004,8 +4335,8 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     let defaults = bob.hub(json!({ "cmd": "get_tastes" })).unwrap();
     let site = |parallel: u32| json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": parallel } });
 
-    let anas = ana.hub(site(5)).unwrap();
-    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 5);
+    let anas = ana.hub(site(6)).unwrap();
+    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 6);
     assert_eq!(bob.hub(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "bob's client reads none of ana's tastes");
     assert_eq!(bob_raw.ask(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "nor does bob's machine");
 
@@ -4026,6 +4357,40 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     for (who, client) in [("ana", &mut ana), ("bob", &mut bob)] {
         assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
     }
+}
+
+#[test]
+fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
+    let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    for client in [&mut ana.client, &mut bob.client] {
+        client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    }
+    let limits = json!({ "box_budget_cents": 100, "tier": "mid", "time_limit_min": 60 });
+    let anas = ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": limits })).unwrap();
+    assert_eq!((anas["captains"]["box_budget_cents"].as_u64(), anas["captains"]["tier"].as_str()), (Some(100), Some("mid")));
+    let bobs = bob.client.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(
+        (bobs["captains"]["box_budget_cents"].as_u64(), bobs["captains"]["tier"].as_str(), bobs["captains"]["time_limit_min"].as_u64()),
+        (Some(0), Some("high"), Some(480)),
+        "ana's limits never show in bob's tastes"
+    );
+
+    let open = |client: &mut Client, budget: Option<f64>| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": budget }));
+    assert_eq!(open(&mut ana.client, Some(5.0)), Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()));
+    let anas_box = open(&mut ana.client, None).unwrap();
+    assert_eq!(anas_box["budget_usd"].as_f64(), Some(1.0), "a box with no budget named gets the account's box budget");
+    let bobs_box = open(&mut bob.client, Some(5.0)).unwrap();
+    assert_eq!(bobs_box["budget_usd"].as_f64(), Some(5.0), "ana's box budget never bounds bob's box");
+    let machine = anas_box["machine"].as_str().unwrap();
+    assert_eq!(
+        ana.client.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "adding funds stops at the box budget too"
+    );
+    let bobs_machine = bobs_box["machine"].as_str().unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "extend_box", "machine": bobs_machine, "extra_usd": 1.0 })).unwrap()["budget_usd"].as_f64(), Some(6.0));
 }
 
 /// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.
@@ -4253,4 +4618,1840 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
     assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
     let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
     assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
+}
+
+// delegate_task on another machine or in an Upstash Box.
+
+const SITE: &str = "https://github.com/acme/site.git";
+
+/// One line on a node's session socket, answered as the text it returns read as JSON.
+fn on_sock(dir: &Path, line: Value) -> Result<Value, String> {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{line}").unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    let reply: Result<String, String> = serde_json::from_str(&reply).unwrap();
+    reply.map(|text| serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+fn request(args: Value) -> Value {
+    serde_json::to_value(pinned_core::delegate::parse_request(&args).unwrap()).unwrap()
+}
+
+/// What `delegate_task` answers the session in `tab`.
+fn delegate_from(dir: &Path, tab: &str, args: Value) -> Result<Value, String> {
+    on_sock(dir, json!({ "kind": "delegate", "tab": tab, "request": request(args) }))
+}
+
+fn task_status(dir: &Path, tab: &str, task: &str) -> Value {
+    on_sock(dir, json!({ "kind": "task-status", "tab": tab, "id": task })).unwrap()
+}
+
+/// How many workers `projects()` counts on `machine`.
+fn workers_on(client: &mut Client, machine: &str) -> u64 {
+    let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
+    let checkouts = overview["projects"].as_array().unwrap().iter().flat_map(|p| p["checkouts"].as_array().cloned().unwrap_or_default());
+    checkouts.filter(|c| c["machine"] == machine).map(|c| c["workers"].as_u64().unwrap_or(0)).sum()
+}
+
+/// The tabs of the node a box runs, none while no box has booted.
+fn box_tabs(boxes: &FakeBoxes) -> Vec<pinned_core::wire::TabView> {
+    let node = boxes.state.lock().unwrap().boxes.values().find_map(|b| b.node.clone());
+    node.map(|node| node.machine.tabs()).unwrap_or_default()
+}
+
+#[test]
+fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
+    let mut fleet = Fleet::start("remote_machine");
+    origin(Path::new(&fleet.site), SITE);
+    origin(&fleet.mini_dir.join("site"), SITE);
+    let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
+
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Fix the footer.", "title": "Footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
+    let (task, child) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+    assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("mini")));
+    let view = fleet.mini.machine.view(&child).unwrap();
+    assert_eq!(
+        (view.role, view.spawned_by.as_deref(), view.spawned_on.as_deref(), view.account.as_str(), view.title.as_deref(), view.cwd.as_str(), view.running),
+        (Some(Role::Worker), Some(captain.as_str()), Some(mac.as_str()), "work", Some("Footer"), there.as_str(), true),
+        "a running worker thread on mini, under mac's Captain, on mini's account and checkout"
+    );
+    wait_launch(&mini_dir, &child, "Fix the footer.");
+    assert_eq!(fleet.mac.machine.tabs().len(), 1, "mac opened no thread of its own for it");
+    wait_for("projects() to count the worker on mini", || workers_on(&mut fleet.client, &mini) == 1);
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+    let more: Vec<Value> = ["Deps", "Docs", "Bins", "Tags"]
+        .iter()
+        .map(|title| delegate_from(&mac_dir, &captain, json!({ "task": format!("Update the {title}."), "title": title, "target": { "machine": mini, "providerInstanceId": "work" } })).unwrap())
+        .collect();
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, json!({ "task": "One too many.", "target": { "machine": "mini" } })),
+        Err("5 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()),
+        "workers on another machine count against the caller's Workers at once"
+    );
+
+    let transcripts = mini_dir.join("accounts/work/projects/site");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(transcripts.join("s-footer.jsonl"), assistant_line("Footer fixed; tests pass.")).unwrap();
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child, "session": "s-footer", "cwd": there }));
+    hook(&mini_dir, json!({ "kind": "agent", "status": "done", "tab": child, "session": "s-footer" }));
+    wait_for("mac to hear how the worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["summary"].as_str(), status["error"].as_str(), status["machine"].as_str(), status["tabId"].as_str()),
+        (Some("Footer fixed; tests pass."), None, Some("mini"), Some(child.as_str())),
+        "task_status on mac reports the end and the child's last reply"
+    );
+
+    for second in &more {
+        let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": second["taskId"], "reason": "not now" })).unwrap();
+        assert_eq!((cancel["workState"].as_str(), cancel["error"].as_str()), (Some("cancelled"), Some("not now")));
+        let remote = fleet.mini.machine.view(second["tabId"].as_str().unwrap()).unwrap();
+        assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
+    }
+    let mut stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 5);
+    std::thread::sleep(Duration::from_millis(1500));
+    let stats = stats();
+    let ran: Vec<(&str, &str)> = stats["slowest"].as_array().unwrap().iter().map(|t| (t["machine"].as_str().unwrap(), t["delegator"].as_str().unwrap())).collect();
+    assert_eq!((stats["totals"]["runs"].as_u64(), ran), (Some(5), vec![(mini.as_str(), "Captain site"); 5]), "one record per worker, from mini that ran it, under mac's Captain: {stats}");
+
+    let refused = |target: Value| delegate_from(&mac_dir, &captain, json!({ "task": "Anything.", "target": target }));
+    assert_eq!(refused(json!({ "machine": "nowhere" })), Err("this account has no machine nowhere".into()));
+    assert_eq!(refused(json!({ "machine": "@mac" })), Err("mac is this machine: leave target.machine out to run the worker here".into()));
+    pair(&fleet.hub.url, &mut fleet.client, "laptop", &temp("remote_machine-laptop"));
+    assert_eq!(refused(json!({ "machine": "laptop" })), Err("laptop is offline, so it can't take the worker; nothing ran elsewhere".into()));
+    assert_eq!(refused(json!({ "box": true })), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 5, "no refusal started a worker anywhere");
+}
+
+#[test]
+fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends() {
+    let hub = TestHub::start_with_boxes("rbox", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let mac_dir = temp("rbox-mac");
+    let creds = pair(&hub.url, &mut ana.client, "mac", &mac_dir);
+    let mac_id = creds.machine_id.clone();
+    let mac = Node::start(&mac_dir, creds);
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&mac_dir.join("site"), SITE);
+    let site = mac.machine.open_project(mac_dir.join("site")).display().to_string();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let to_box = json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": { "size": "small" }, "providerInstanceId": "bloom" } });
+
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, to_box.clone()),
+        Err("Upstash Box is off for Workers: choose a box permission for Workers in Connectors settings".into())
+    );
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, to_box.clone()),
+        Err("no Claude token is kept for bloom: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token".into())
+    );
+    assert_eq!(ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": " sk-ant-oat01-bloomtoken " })), Ok(json!({ "bloom": "…oken" })));
+    let settings = ana.client.wait("settings with bloom's token", |f| f["type"] == "settings" && f["settings"]["box_claude_tokens"]["bloom"] == "…oken");
+    assert!(!settings.to_string().contains("bloomtoken"), "clients see only the hint");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no refusal opened a box");
+
+    let started = delegate_from(&mac_dir, &captain, to_box).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("Box · Slow suite")), "{started}");
+    assert_eq!(started["tabId"], Value::Null, "the box has not booted yet");
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\n".into()), "bloom's token, and no GitHub token without GitHub");
+    assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+    assert_eq!(
+        (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
+        (Some(captain.as_str()), Some(mac_id.as_str()), Some("Slow suite"), true),
+        "the box's worker thread nests under mac's Captain"
+    );
+    assert!(child.cwd.ends_with("/site"), "it works in the box's checkout of the repo: {}", child.cwd);
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let machine = ana.box_machine();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id }));
+    wait_for("the box to go once its task ended", || hub.boxes.live().is_empty());
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "result_available");
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    ana.client.wait_machines(&[("mac", true)]);
+    let stats = ana.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ran = &stats["slowest"][0];
+    assert_eq!(
+        (stats["totals"]["runs"].as_u64(), ran["machine"].as_str(), ran["delegator"].as_str(), ran["title"].as_str()),
+        (Some(1), Some(machine.as_str()), Some("Captain site"), Some("Slow suite")),
+        "the box recorded its worker before it went: {stats}"
+    );
+    assert!(stats["totals"]["box_ms"].as_u64().unwrap() > 0, "and was billed its box time: {stats}");
+
+    let again = delegate_from(&mac_dir, &captain, json!({ "task": "Run it again.", "title": "Again", "target": { "box": true } })).unwrap();
+    let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": again["taskId"], "reason": "not now" })).unwrap();
+    assert_eq!(cancel["workState"], "cancelled");
+    wait_for("a cancelled task's box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+
+    for needle in [machine.as_str(), "Slow suite", "Box · "] {
+        assert_eq!(mentioning(&mut bob, needle), Vec::<Value>::new(), "bob's lists never show ana's box worker: {needle}");
+    }
+}
+
+#[test]
+fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection() {
+    let hub = TestHub::start_with_boxes("box_captain", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mini_dir = temp("rcap-mini");
+    let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
+    let mini_id = creds.machine_id.clone();
+    let mini = Node::start(&mini_dir, creds);
+    mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mini", true)]);
+    ana.client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = ana.client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    let send = |request_id: &str, text: &str| session_tool(&mini_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": text, "request_id": request_id, "box": true }));
+
+    assert_eq!(send("r-0", "Ship the form."), Err("Upstash Box is off for Captains: choose a box permission for Captains in Connectors settings".into()));
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "off" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    let sent = send("r-1", "Ship the form.").unwrap();
+    assert_eq!((sent["outcome"].as_str(), sent["machineName"].as_str()), (Some("iniciado"), Some("Box · Captain site")), "{sent}");
+    wait_for("a Captain on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Orchestrator) && t.running));
+    let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
+    assert!(captain.cwd.ends_with("/site"), "{}", captain.cwd);
+    ana.client.wait_machines(&[("mini", true), ("Box · Captain site", true)]);
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")));
+
+    let again = send("r-2", "Also the footer.").unwrap();
+    assert_eq!((again["box"].as_str(), again["tab"].as_str()), (sent["box"].as_str(), Some(captain.id.as_str())), "the box that runs the Captain takes the next message: {again}");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1, "one box for the project");
+}
+
+#[test]
+fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
+    let hub = TestHub::start_with_boxes("iso_delegate", Signup::Open, fast());
+    let url = hub.url.clone();
+    let mut ana = BoxAccount::new(&hub);
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let ana_creds = account::pair(&url, code["code"].as_str().unwrap(), "ana-mini", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-a", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
+        "remote_ended" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("ana-mini", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let ana_m = ana_creds.machine_id.clone();
+    let none = Err(format!("this account has no machine {ana_m}"));
+    let delegate = |target: Value| json!({ "cmd": "delegate", "tab": "tab-1", "task": "task-b", "request": request(json!({ "task": "Read the secrets.", "target": target })), "repo": SITE, "access": "full" });
+
+    assert_eq!(bob_raw.ask(delegate(json!({ "machine": ana_m }))), none, "bob can't target ana's machine by id");
+    assert_eq!(bob_raw.ask(delegate(json!({ "machine": "ana-mini" }))), Err("this account has no machine ana-mini".into()), "nor by name");
+    assert_eq!(bob_raw.ask(delegate(json!({ "box": true }))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()), "bob's box can't use ana's connection");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a" })), none, "bob can't read ana's remote task");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a", "cancel": "mine now" })), none, "nor cancel it");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_ended", "to": ana_m, "tab": "tab-1", "task": "task-a", "end": { "state": "failed", "error": "forged" } })), none, "nor end it");
+    assert_eq!(bob.hub(delegate(json!({ "machine": bob_machine.id }))), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client delegates only through a thread");
+    assert_eq!(bob.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-x" })), Err("connect Upstash Box first".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
+}
+
+fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {
+    let mut record = json!({
+        "id": id, "machine": "spoofed", "title": format!("task {id}"),
+        "delegator": { "kind": "captain", "tab": "tab-1", "project": "github.com/acme/site", "project_name": "site" },
+        "provider": "claude", "account": "claude", "model": model, "started": ended - minutes * 60_000, "ended": ended,
+        "usage": { "tokens_in": 1000, "tokens_out": 100, "wall_ms": minutes * 60_000 },
+        "outcome": outcome,
+    });
+    if let Some(cost) = cost {
+        record["usage"]["cost_usd"] = json!(cost);
+    }
+    if outcome == "limit" {
+        record["limit"] = json!("time");
+    }
+    record
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+#[test]
+fn an_accounts_delegated_task_records_and_totals_reach_only_that_account() {
+    let hub = TestHub::start("iso_delegation");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, |_| RawReply::Ok(Value::Null));
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let now = now_ms();
+    let stats = |days: u32| json!({ "cmd": "delegation_stats", "days": days });
+
+    let anas = json!([task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now), task_record("task-2", "claude-opus-5-5", "limit", 120, Some(6.0), now)]);
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": anas })), Ok(Value::Null));
+    let bobs = json!([task_record("task-1", "glm-5.3", "failed", 3, None, now)]);
+    assert_eq!(bob_raw.ask(json!({ "cmd": "record_tasks", "records": bobs })), Ok(Value::Null), "the same task id on bob's machine is bob's own");
+    assert_eq!(ana.hub(json!({ "cmd": "record_tasks", "records": [] })), Err("only a machine records the tasks it ran".into()));
+
+    let ana_stats = ana.hub(stats(7)).unwrap();
+    assert_eq!(
+        json!([ana_stats["totals"]["runs"], ana_stats["totals"]["limited"], ana_stats["totals"]["cost_usd"], ana_stats["by_model"][0]["key"], ana_stats["by_model"][0]["limits"]]),
+        json!([2, 1, 7.5, "claude-opus-5-5", { "time": 1 }])
+    );
+    assert_eq!(
+        json!([ana_stats["slowest"][0]["id"], ana_stats["slowest"][0]["machine"], ana_stats["slowest"][0]["machine_name"]]),
+        json!(["task-2", ana_machine.id, "ana-mac"]),
+        "the hub names the machine that sent it"
+    );
+    assert!(!ana_stats.to_string().contains("glm-5.3"), "bob's task is in ana's totals: {ana_stats}");
+    let bob_stats = bob.hub(stats(30)).unwrap();
+    assert_eq!((bob_stats["totals"]["runs"].as_u64(), bob_stats["totals"]["failed"].as_u64()), (Some(1), Some(1)));
+    assert!(!bob_stats.to_string().contains("opus"), "ana's tasks are in bob's totals: {bob_stats}");
+    assert_eq!(bob_raw.ask(stats(7)).unwrap()["totals"], bob.hub(stats(7)).unwrap()["totals"], "bob's machine reads bob's totals");
+    assert_eq!(ana.hub(stats(2)), Err("days must be 1, 7 or 30, not 2".into()));
+
+    let mut accepted = task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now);
+    accepted["review"] = json!({ "verdict": "accepted", "at": now });
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": [accepted] })), Ok(Value::Null));
+    let again = ana.hub(stats(7)).unwrap();
+    assert_eq!((again["totals"]["runs"].as_u64(), again["totals"]["accepted"].as_u64()), (Some(2), Some(1)), "a record sent again replaces the first");
+    assert_eq!(bob.hub(stats(7)).unwrap()["totals"]["accepted"], 0);
+    let old = task_record("task-3", "claude-opus-5-5", "done", 10, None, now - 8 * 24 * 60 * 60 * 1000);
+    ana_raw.ask(json!({ "cmd": "record_tasks", "records": [old] })).unwrap();
+    assert_eq!((ana.hub(stats(7)).unwrap()["totals"]["runs"].as_u64(), ana.hub(stats(30)).unwrap()["totals"]["runs"].as_u64()), (Some(2), Some(3)));
+}
+
+#[test]
+fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() {
+    let hub = TestHub::start("delegation_box");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let first = task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 20 * 60_000);
+    let second = task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first.clone(), second] })).unwrap();
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first] })).unwrap();
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
+    let usd = stats["totals"]["box_usd"].as_f64().unwrap();
+    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}
+
+#[test]
+fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive() {
+    let hub = TestHub::start("delegation_box_overlap");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let boxed = |name: &str, minutes_ago: u64| {
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        admin_on(&hub.database, &format!(
+            "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('{0}', '{ana_account}', '{0}', 'box_{0}', 'interactive', '{{\"issue\":\"{0}\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '{minutes_ago} minutes')",
+            machine.id,
+        ));
+        RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null))
+    };
+    let site = boxed("Box · site", 60);
+    let api = boxed("Box · api", 30);
+    ana.wait_machines(&[("Box · site", true), ("Box · api", true)]);
+    let now = now_ms();
+
+    // On site, task-a started first and ended last; task-b ran inside it. They arrive in start order.
+    let a = task_record("task-a", "claude-sonnet-5-5", "done", 50, Some(0.0), now);
+    let b = task_record("task-b", "claude-sonnet-5-5", "done", 20, Some(0.0), now - 20 * 60_000);
+    site.ask(json!({ "cmd": "record_tasks", "records": [a, b] })).unwrap();
+    // On api, six tasks end four minutes apart and each record is sent on its own, all at once.
+    std::thread::scope(|s| {
+        for k in 0..6u64 {
+            let api = &api;
+            s.spawn(move || {
+                let record = task_record(&format!("task-api-{k}"), "glm-5.3", "done", 1, Some(0.0), now - k * 4 * 60_000);
+                api.ask(json!({ "cmd": "record_tasks", "records": [record] })).unwrap();
+            });
+        }
+    });
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let box_minutes = |id: &str| {
+        let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+    };
+    assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
+    assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
+}
+
+/// What a session's `act` tool answers: the hub's `ActAnswer`, or the refusal.
+fn act(dir: &Path, tab: &str, action: &str, args: Value) -> Result<Value, String> {
+    session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args }))
+}
+
+/// The context a session's Stop hook gets, which carries the notices queued for it.
+fn turn_end_context(dir: &Path, tab: &str) -> String {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", json!({ "kind": "agent", "status": "done", "tab": tab, "hook_feedback": true })).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    serde_json::from_str::<Result<String, String>>(&reply).unwrap().unwrap()
+}
+
+struct Agent {
+    client: Client,
+    node: Node,
+    dir: PathBuf,
+    machine: String,
+    tab: String,
+}
+
+/// An account's app, its machine `name` with a project `site` and a project `docs`, and an agent
+/// session in `site`.
+fn agent_of(url: &str, token: &str, email: &str, name: &str) -> Agent {
+    let mut client = Client::connect(url, token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = node_dir(&format!("surface-{name}"));
+    let (machine, machine_token) = account::register_machine(url, token, name, "macos").unwrap();
+    let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[(name, true)]);
+    for project in ["site", "docs"] {
+        std::fs::create_dir_all(dir.join(project)).unwrap();
+    }
+    node.machine.open_tab(Some(dir.join("docs").display().to_string()), false).unwrap();
+    let tab = node.machine.open_tab(Some(dir.join("site").display().to_string()), false).unwrap();
+    client.wait("the agent's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab));
+    Agent { client, node, dir, machine: machine.id, tab }
+}
+
+fn names(list: &Value) -> Vec<String> {
+    let mut names: Vec<String> = list.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves() {
+    let hub = TestHub::start_with("agent_surface", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let (spare, spare_token) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let docs = ana.dir.join("docs").canonicalize().unwrap().display().to_string();
+
+    let found = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions", "search": "machine" })).unwrap();
+    let listed: Vec<(&str, &str)> = found["actions"].as_array().unwrap().iter().map(|a| (a["name"].as_str().unwrap(), a["class"].as_str().unwrap())).collect();
+    assert!(listed.contains(&("machines", "read")) && listed.contains(&("rename_machine", "write")) && listed.contains(&("remove_machine", "confirm")), "{listed:?}");
+
+    let machines = act(&ana.dir, &ana.tab, "machines", json!({})).unwrap();
+    assert_eq!(machines["outcome"], "done");
+    assert_eq!(names(&machines["result"]), ["ana-mac", "ana-spare"]);
+    assert_eq!(act(&ana.dir, &ana.tab, "rename_machine", json!({ "id": ana.machine, "name": "Ana Mini" })).unwrap(), json!({ "outcome": "done", "result": null }));
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini", "ana-spare"], "the app sees the agent's rename");
+
+    let saved = act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })).unwrap();
+    assert_eq!((&saved["outcome"], &saved["result"]["title"]), (&json!("done"), &json!("Deploys")), "{saved}");
+    let read = act(&ana.dir, &ana.tab, "memory_search", json!({ "path": docs, "query": "deploy" })).unwrap();
+    assert_eq!(read["result"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Docs deploy from tags."]);
+    assert_eq!(session_tool(&ana.dir, &ana.tab, json!({ "name": "memory_search", "query": "deploy" })), Ok(json!("No memory matches that.")), "the memory went to docs, not the session's own project");
+
+    assert_eq!(act(&ana.dir, &ana.tab, "write_input", json!({ "tab": ana.tab, "data": "y" })), Err("write_input is not open to agents: the app's terminal plumbing".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "open_taste_chat", json!({ "tab": ana.tab })), Err("open_taste_chat is a write action that is not wired yet".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "rename_machine", json!({ "id": ana.machine, "name": "x", "token": "abc" })), Err("an agent never sends a password, key or token: token. The user enters it in the app.".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "nope", json!({})), Err("no action nope; call actions to list them".into()));
+    assert_eq!(machine_result(&url, &spare_token, json!({ "cmd": "act", "act": { "tab": "tab-zz-1", "action": "machines" } })), Err("ana-spare runs no session tab-zz-1".into()), "a machine acts only for a session it reports");
+
+    let remove = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "remove_machine", "args": { "id": spare.id }, "request_id": "r-remove" })).unwrap();
+    assert_eq!(remove["outcome"], "pending", "{remove}");
+    let remove_id = remove["id"].as_str().unwrap().to_owned();
+    let pushed = ana.client.wait("the confirmation in the app", |f| f["type"] == "confirmations" && f["items"].as_array().unwrap().iter().any(|c| c["id"] == remove_id.as_str()));
+    let item = pushed["items"].as_array().unwrap().iter().find(|c| c["id"] == remove_id.as_str()).unwrap().clone();
+    assert_eq!((&item["action"], &item["args"], &item["tab"], &item["role"], &item["machine_name"]), (&json!("remove_machine"), &json!({ "id": spare.id }), &json!(ana.tab), &json!("session"), &json!("Ana Mini")));
+    let again = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "remove_machine", "args": { "id": spare.id }, "request_id": "r-remove" })).unwrap();
+    assert_eq!(again["id"], remove_id.as_str(), "the same request_id holds one confirmation");
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini", "ana-spare"], "nothing runs before the owner approves");
+
+    let invite = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap();
+    let invite_id = invite["id"].as_str().unwrap().to_owned();
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": invite_id, "approve": true })).unwrap();
+    assert_eq!((&decided["decision"], &decided["outcome"]), (&json!("approved"), &json!("done")));
+    let code = decided["result"]["code"].as_str().unwrap().to_owned();
+    wait_for("the invite's notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
+    let told = turn_end_context(&ana.dir, &ana.tab);
+    assert!(told.starts_with(&format!("[pinned] The user approved your create_invite request ({invite_id}): done. Result: ")), "{told}");
+    assert!(told.contains(r#""code":"[hidden]""#) && !told.contains(&code), "the agent never gets the code: {told}");
+
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let (_, bob_spare_token) = account::register_machine(&url, &bob_token, "bob-spare", "linux").unwrap();
+    assert_eq!(names(&act(&bob.dir, &bob.tab, "machines", json!({})).unwrap()["result"]), ["bob-mac", "bob-spare"]);
+    assert_eq!(act(&bob.dir, &bob.tab, "rename_machine", json!({ "id": ana.machine, "name": "mine" })), Err(format!("this account has no machine {}", ana.machine)));
+    assert_eq!(session_tool(&bob.dir, &bob.tab, json!({ "name": "act", "action": "memory_search", "args": { "path": docs, "query": "deploy" }, "machine": "ana-mac" })), Err("this account has no machine ana-mac".into()));
+    let bobs_remove = act(&bob.dir, &bob.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err(format!("no confirmation {remove_id} waits")), "bob's app can't decide ana's");
+    assert_eq!(machine_result(&url, &bob_spare_token, json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err("only the account's owner decides, in the app".into()));
+    let bobs_list = machine_result(&url, &bob_spare_token, json!({ "cmd": "confirmations" })).unwrap();
+    assert_eq!(bobs_list.as_array().unwrap().iter().map(|c| c["action"].as_str().unwrap()).collect::<Vec<_>>(), ["remove_machine"], "bob sees only his own: {bobs_list}");
+    assert_eq!(bobs_list[0]["id"], bobs_remove["id"]);
+    let denied = bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_remove["id"], "approve": false })).unwrap();
+    assert_eq!((&denied["decision"], &denied["outcome"]), (&json!("denied"), &json!("denied")));
+    let bobs_audit = act(&bob.dir, &bob.tab, "agent_audit", json!({})).unwrap()["result"].clone();
+    let rows: Vec<(&str, &str)> = bobs_audit.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap())).collect();
+    assert_eq!(rows, [("remove_machine", "denied"), ("remove_machine", "pending"), ("memory_search", "refused"), ("rename_machine", "failed"), ("machines", "done")], "bob's trail holds his acts only");
+    assert!(bobs_audit.as_array().unwrap().iter().all(|r| r["machine"] == bob.machine.as_str()));
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [remove_id.clone(), invite_id.clone()], "ana's waiting one, then her decided one; none of bob's");
+    ana.node.machine.call(Call::SetGlobalOrchestratorSettings { settings: pinned_core::global_orchestrator::Settings { host: true, ..Default::default() } }).unwrap();
+    let global = ana.node.machine.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+    ana.client.wait("the global tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == global.as_str()));
+    let waiting = session_tool(&ana.dir, &global, json!({ "name": "waiting" })).unwrap();
+    let confirm = waiting.as_array().unwrap().iter().find(|w| w["kind"] == "confirm").unwrap_or_else(|| panic!("{waiting}"));
+    assert_eq!((&confirm["title"], &confirm["tab"]), (&json!("Approve remove_machine?"), &json!(ana.tab)));
+
+    let approved = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })).unwrap();
+    assert_eq!((&approved["decision"], &approved["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err(format!("no confirmation {remove_id} waits")), "a second click decides nothing");
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini"]);
+    ana.client.wait("the emptied list in the app", |f| f["type"] == "confirmations" && f["items"] == json!([]));
+    wait_for("the removal's notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
+    assert_eq!(turn_end_context(&ana.dir, &ana.tab), format!("[pinned] The user approved your remove_machine request ({remove_id}): done."));
+
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("remove_machine", "done", ""),
+            ("remove_machine", "approved", ""),
+            ("create_invite", "done", ""),
+            ("create_invite", "approved", ""),
+            ("create_invite", "pending", ""),
+            ("remove_machine", "pending", ""),
+            ("machines", "refused", "ana-spare runs no session tab-zz-1"),
+            ("nope", "refused", "no action nope; call actions to list them"),
+            ("rename_machine", "refused", "an agent never sends a password, key or token: token. The user enters it in the app."),
+            ("open_taste_chat", "refused", "open_taste_chat is a write action that is not wired yet"),
+            ("write_input", "refused", "write_input is not open to agents: the app's terminal plumbing"),
+            ("memory_search", "done", ""),
+            ("memory_save", "done", ""),
+            ("rename_machine", "done", ""),
+            ("machines", "done", ""),
+        ],
+        "ana's trail, newest first, with none of bob's"
+    );
+    let secret = trail.as_array().unwrap().iter().find(|r| r["detail"].as_str().unwrap().starts_with("an agent never")).unwrap();
+    assert_eq!(secret["args"], format!(r#"{{"id":"{}","name":"x","token":"[hidden]"}}"#, ana.machine));
+    assert_eq!((&trail[0]["role"], &trail[0]["tab"], &trail[0]["machine_name"]), (&json!("session"), &json!(ana.tab), &json!("Ana Mini")));
+    assert_eq!(trail[6]["machine_name"], "", "a removed machine's rows stay, without its name");
+    assert_eq!(act(&bob.dir, &bob.tab, "agent_audit", json!({ "limit": 200 })).unwrap()["result"].as_array().unwrap().len(), 6, "bob's trail never shows ana's");
+    let ids = |page: &Value| page.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(&ana.client.hub(json!({ "cmd": "agent_audit", "limit": 2 })).unwrap()), ids(&trail)[..2]);
+    let oldest = &trail[14];
+    let page = ana.client.hub(json!({ "cmd": "agent_audit", "before": oldest["at"] })).unwrap();
+    assert!(ids(&page).contains(&oldest["id"].as_str().unwrap().to_owned()), "before keeps the rows of its own second: {page}");
+
+    let keyed = |tab: &str, action: &str| session_tool(&ana.dir, tab, json!({ "name": "act", "action": action, "request_id": "r-same" })).unwrap()["outcome"].clone();
+    assert_eq!(keyed(&ana.tab, "machines"), "done");
+    assert_eq!(keyed(&ana.tab, "machines"), "repeat");
+    assert_eq!(keyed(&global, "machines"), "done", "another session's request_id is its own");
+    assert_eq!(keyed(&ana.tab, "confirmations"), "done", "and so is another action's");
+
+    assert_eq!(act(&ana.dir, &ana.tab, "open_tab", json!({ "path": docs, "bypass": true })).unwrap()["outcome"], "done");
+    let latest = &ana.client.hub(json!({ "cmd": "agent_audit", "limit": 1 })).unwrap()[0];
+    assert_eq!((&latest["action"], &latest["detail"]), (&json!("open_tab"), &json!(format!("loosened permissions: the new tab in {docs} skips its permission prompts"))));
+    assert_eq!(act(&ana.dir, &ana.tab, "session_marks", json!({})).unwrap(), json!({ "outcome": "done", "result": [] }), "a hub read runs as the app's call");
+    drop(bob);
+}
+
+const LOCKED: &str = "unlock with your password in the app to do this";
+
+/// Every string an agent on a machine reads without its owner: each JSON value under the machine's
+/// config dir, where `account.json` lives, and its environment.
+fn readable_on(dir: &Path) -> Vec<String> {
+    fn strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) if !s.is_empty() => out.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            Value::Object(fields) => fields.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut found: Vec<String> = std::env::vars().map(|(_, value)| value).collect();
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(at) = dirs.pop() {
+        for path in std::fs::read_dir(&at).unwrap().flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Ok(value) = serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap_or_default()) {
+                strings(&value, &mut found);
+            }
+        }
+    }
+    found.retain(|s| !s.is_empty());
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_confirm_action() {
+    let hub = TestHub::start_with("owner_only", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-laptop");
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let asked = act(&ana.dir, &ana.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
+    let id = asked["id"].as_str().unwrap().to_owned();
+    let decide = json!({ "cmd": "decide_confirmation", "id": id, "approve": true });
+
+    let found = readable_on(&ana.dir);
+    assert!(found.contains(&ana_token), "the desktop app keeps its login in account.json, which the agent reads");
+    let mut logins = 0;
+    for secret in &found {
+        let Some(mut agent) = Client::connect(&url, secret).signed_in() else { continue };
+        logins += 1;
+        assert_eq!(agent.hub(decide.clone()), Err(LOCKED.into()), "the agent approves nothing");
+        assert_eq!(agent.hub(json!({ "cmd": "remove_machine", "id": spare.id })), Err(LOCKED.into()), "nor runs the confirm action itself");
+        assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()));
+        assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
+    }
+    assert_eq!(logins, 1, "the app's login is the one login on the machine");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-laptop", "ana-spare"], "nothing ran");
+
+    let status = |r: Result<(MachineView, String), String>| r.map(|(m, _)| m.name);
+    assert_eq!(status(account::register_machine(&url, &ana_token, "rogue", "linux")), Err("this login adds no machine: pair it with a code from the app".into()));
+    assert_eq!(app.hub(json!({ "cmd": "unlock", "password": "correct hors" })), Err("that is not this account's password".into()));
+
+    assert_eq!(app.hub(decide.clone()), Err(LOCKED.into()), "the app asks for the password before it decides");
+    let unlocked = app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let unlock = unlocked["token"].as_str().unwrap().to_owned();
+    let until = unlocked["until"].as_i64().unwrap() - now_ms() as i64 / 1000;
+    assert!((12 * 3600 - 60..=12 * 3600).contains(&until), "it holds for 12 hours: {until}s");
+    let found = readable_on(&ana.dir);
+    assert!(!found.contains(&unlock), "the unlock lives in the app's memory only");
+    for secret in &found {
+        let mut agent = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "unlock": secret })).signed_in().unwrap();
+        assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()), "nothing on the disk unlocks");
+    }
+    let approved = app.hub(decide.clone()).unwrap();
+    assert_eq!((&approved["decision"], &approved["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-laptop"]);
+    let mut reconnected = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "lock": true, "unlock": unlock })).signed_in().unwrap();
+    assert!(reconnected.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].is_string(), "the app's own unlock holds across its reconnect");
+
+    let (older, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut older_app = Client::connect(&url, &older).signed_in().unwrap();
+    assert!(older_app.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].is_string(), "an app older than the lock keeps its calls");
+    let waiting = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(older_app.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(LOCKED.into()), "but decides only once unlocked");
+
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&older_app.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned())).unwrap();
+    let mut bob = Client::app(&url, &bob_token);
+    let bobs_unlock = bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap()["token"].as_str().unwrap().to_owned();
+    let mut agent = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "unlock": bobs_unlock })).signed_in().unwrap();
+    assert_eq!(agent.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(LOCKED.into()), "another login's unlock counts for nothing here");
+    let mut bob_with_anas = Client::auth(&url, json!({ "type": "auth", "token": bob_token, "unlock": unlock })).signed_in().unwrap();
+    assert_eq!(bob_with_anas.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()), "nor ana's unlock on bob's login");
+    assert_eq!(bob.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(format!("no confirmation {waiting} waits")), "bob, unlocked, still decides none of ana's");
+
+    let mut guessing = Client::connect(&url, &ana_token).signed_in().unwrap();
+    for _ in 0..10 {
+        let _ = guessing.hub(json!({ "cmd": "unlock", "password": "guess" }));
+    }
+    assert_eq!(guessing.hub(json!({ "cmd": "unlock", "password": "correct horse" })), Err("too many wrong passwords; try again in 15 minutes".into()), "guessing with the login off the disk locks out that login");
+    let (phone, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let unlocked = Client::app(&url, &phone).hub(json!({ "cmd": "unlock", "password": "correct horse" }));
+    assert!(unlocked.is_ok(), "the owner's phone still unlocks: {unlocked:?}");
+}
+
+const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
+
+#[test]
+fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
+    let hub = TestHub::start("node_login");
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let dir = temp("node-login");
+    let config = dir.to_str().unwrap();
+    let login = std::process::Command::new(BIN).args(["login", &url, "ana@acme.dev", "--name", "ana-mini", "--config-dir", config]).env("PINNED_PASSWORD", "correct horse").output().unwrap();
+    assert!(login.status.success(), "{}", String::from_utf8_lossy(&login.stderr));
+    let creds = Credentials::load(&dir).unwrap();
+    let machine_token = creds.machine_token.clone();
+    assert_eq!(creds.user_token, "", "the machine keeps its own token only");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mini"]);
+    assert!(readable_on(&dir).iter().all(|secret| Client::connect(&url, secret).signed_in().is_none()), "no login is left on the machine");
+
+    let (older, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    Credentials { user_token: older.clone(), ..creds }.save(&dir).unwrap();
+    let shell = dir.join("shell");
+    std::fs::write(&shell, "#!/bin/sh\nprintf '\\n__PINNED_PATH__/usr/bin:/bin__PINNED_PATH__\\n'\n").unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let node = std::process::Command::new(BIN)
+        .args(["node", "--config-dir", config])
+        .env("HOME", &dir)
+        .env("SHELL", &shell)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(dir.join("stderr")).unwrap())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = node.id();
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for("the node to forget the login", || Credentials::load(&dir).unwrap().user_token.is_empty());
+        wait_for("the hub to end it", || Client::connect(&url, &older).signed_in().is_none());
+        app.wait_machines(&[("ana-mini", true)]);
+    }));
+    let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+    let mut node = node;
+    let _ = node.wait();
+    if let Err(panic) = ended {
+        eprintln!("{}", std::fs::read_to_string(dir.join("stderr")).unwrap_or_default());
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(Credentials::load(&dir).unwrap().machine_token, machine_token, "the machine token stays");
+}
+
+fn wait_long(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !done() {
+        assert!(start.elapsed() < limit, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_hub_restarted_between_a_decision_and_its_outcome_finishes_it_and_tells_the_session() {
+    let mut hub = TestHub::start_with("interrupted", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-studio");
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let removal = act(&ana.dir, &ana.tab, "remove_machine", json!({ "id": spare.id })).unwrap()["id"].as_str().unwrap().to_owned();
+    let invite = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    let running = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    // Where a hub that stopped mid-decision leaves them: decided, with no outcome and no notice. The
+    // third was decided a moment ago, so the hub a deploy replaces may still be running it.
+    admin_on(
+        &hub.database,
+        &format!(
+            "update agent_confirmations set decided_at = now() - interval '6 minutes', approved = true where id = '{removal}';
+             update agent_confirmations set decided_at = now() - interval '6 minutes', approved = false where id = '{invite}';
+             update agent_confirmations set decided_at = now(), approved = true where id = '{running}'"
+        ),
+    );
+    hub.restart();
+
+    wait_long("both notices in the agent's queue", Duration::from_secs(30), || ana.node.machine.view(&ana.tab).unwrap().queued >= 2);
+    let told = turn_end_context(&ana.dir, &ana.tab);
+    assert!(told.contains(&format!("[pinned] The user approved your remove_machine request ({removal}): failed: the hub restarted before it could tell whether this ran; check before asking again.")), "{told}");
+    assert!(told.contains(&format!("[pinned] The user denied your create_invite request ({invite}). It did not run.")), "{told}");
+    let mut app = Client::app(&url, &ana_token);
+    let confirmations = app.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let outcomes: Vec<(String, String)> = confirmations.as_array().unwrap().iter().filter_map(|c| Some((c["id"].as_str()?.to_owned(), c["outcome"].as_str()?.to_owned()))).collect();
+    assert!(outcomes.contains(&(removal.clone(), "failed: the hub restarted before it could tell whether this ran; check before asking again".into())), "{outcomes:?}");
+    assert!(outcomes.contains(&(invite.clone(), "denied".into())), "{outcomes:?}");
+    let young = confirmations.as_array().unwrap().iter().find(|c| c["id"] == running.as_str()).unwrap();
+    assert_eq!(young.get("outcome"), None, "one decided a moment ago is left to the hub that may be running it: {young}");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-spare", "ana-studio"], "the restarted hub runs nothing it can't tell ran");
+    let latest = &app.hub(json!({ "cmd": "agent_audit", "limit": 1 })).unwrap()[0];
+    assert_eq!((&latest["action"], &latest["outcome"], &latest["detail"]), (&json!("remove_machine"), &json!("failed"), &json!("the hub restarted before it could tell whether this ran; check before asking again")));
+}
+
+#[test]
+fn a_notice_missed_while_its_machine_was_offline_is_tried_again_after_it_reconnects_until_its_tab_is_back() {
+    let hub = TestHub::start("notice_retry");
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, raw_token) = account::register_machine(&url, &ana_token, "raw", "linux").unwrap();
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let tab = json!({ "id": "tab-1", "cwd": "/repo", "bypass": false, "running": true, "status": "done", "title": null, "message": null, "resume_at": null, "opened": 1, "session": "s-1" });
+    let first = Instant::now();
+    let machine = RawMachine::start_with(&url, &raw_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+    let act = json!({ "cmd": "act", "act": { "tab": "tab-1", "action": "remove_machine", "args": { "id": spare.id } } });
+    let mut asked = machine.ask(act.clone());
+    while asked == Err("raw runs no session tab-1".into()) {
+        asked = machine.ask(act.clone());
+    }
+    let id = asked.unwrap()["id"].as_str().unwrap().to_owned();
+    // Each connection's retries run on: this one's look, 3 s in, must find nothing waiting, so only
+    // the reconnect's retries remain.
+    std::thread::sleep(Duration::from_millis(3500).saturating_sub(first.elapsed()));
+    drop(machine);
+    wait_for("raw offline", || app.machines().contains(&("raw".to_owned(), false)));
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = app.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "it ran while its machine was offline; only the notice waits");
+
+    // The machine is back, and its tab comes back only after the hub's first try.
+    let notices: Arc<Mutex<Vec<(Instant, Value)>>> = Arc::default();
+    let seen = notices.clone();
+    let back = Instant::now();
+    let machine = RawMachine::start(&url, &raw_token, move |call| {
+        if call["cmd"] != "notice" {
+            return RawReply::Ok(Value::Null);
+        }
+        let mut seen = seen.lock().unwrap();
+        seen.push((Instant::now(), call.clone()));
+        RawReply::Ok(json!(seen.len() > 1))
+    });
+    wait_long("the second try", Duration::from_secs(25), || notices.lock().unwrap().len() >= 2);
+    std::thread::sleep(Duration::from_secs(1));
+    let notices = notices.lock().unwrap().clone();
+    let at: Vec<f64> = notices.iter().map(|(at, _)| at.duration_since(back).as_secs_f64()).collect();
+    assert!((3.0..6.0).contains(&at[0]) && (10.0..13.0).contains(&(at[1] - at[0])), "tried 3 s after it connected, then 10 s later: {at:?}");
+    assert_eq!(notices[1].1, json!({ "cmd": "notice", "tab": "tab-1", "session": "s-1", "text": format!("[pinned] The user approved your remove_machine request ({id}): done."), "id": id }));
+    assert_eq!(notices.len(), 2, "taken, so tried no more");
+    drop(machine);
+
+    wait_for("raw offline again", || app.machines().contains(&("raw".to_owned(), false)));
+    let again = RawMachine::start(&url, &raw_token, |_| RawReply::Ok(json!(true)));
+    wait_for("raw back", || app.machines().contains(&("raw".to_owned(), true)));
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(again.calls("notice"), 0, "a reconnect after the notice was taken sends it no more");
+}
+
+/// `act` on `machine` (a name or id) instead of the session's own.
+fn act_on(dir: &Path, tab: &str, machine: &str, action: &str, args: Value) -> Result<Value, String> {
+    session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }))
+}
+
+/// What `act` ran and answered, which must have run.
+fn ran(answer: Result<Value, String>) -> Value {
+    let answer = answer.unwrap();
+    assert_eq!(answer["outcome"], "done", "{answer}");
+    answer["result"].clone()
+}
+
+/// A git repository at `dir` with one commit, which a clone of it can copy.
+fn source_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    let git = |args: &[&str]| assert!(pinned_core::process::command("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success(), "git {args:?}");
+    git(&["init", "-q"]);
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "first"]);
+}
+
+#[test]
+fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it() {
+    let hub = TestHub::start_with("agent_surface_rest", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "rest-ana");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let code = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "rest-bob");
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let docs = ana.dir.join("docs").canonicalize().unwrap().display().to_string();
+    let site = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let bobs_docs = bob.dir.join("docs").canonicalize().unwrap().display().to_string();
+    let no_machine = "this account has no machine rest-ana".to_owned();
+
+    let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
+    let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
+    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
+        assert_eq!(class(name).as_deref(), Some(expected), "{name}");
+    }
+    assert!(class("run_workflow").is_none() && class("run").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
+
+    // Workflows: save, edit, list, and a refusal for one that skips permission prompts.
+    let workflow = |name: &str, mode: &str, id: Option<&str>| {
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": site, "model": "", "effort": "high", "permissionMode": mode, "worktree": false, "instructions": "",
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let saved = ran(act(&ana.dir, &ana.tab, "save_connector", workflow("Bugs", "acceptEdits", None)));
+    let workflow_id = saved["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved["name"], "Bugs");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "save_connector", workflow("Bugs v2", "acceptEdits", Some(&workflow_id))))["id"], workflow_id.as_str(), "an id edits the workflow");
+    let settings = ran(act(&ana.dir, &ana.tab, "get_settings", json!({})));
+    let workflows: Vec<(&str, &str)> = settings["connectors"].as_array().unwrap().iter().map(|c| (c["id"].as_str().unwrap(), c["name"].as_str().unwrap())).collect();
+    assert_eq!(workflows, [(workflow_id.as_str(), "Bugs v2")]);
+    assert_eq!(
+        act(&ana.dir, &ana.tab, "save_connector", workflow("Wide", "bypassPermissions", None)),
+        Err("save_connector would run a session that skips its permission prompts, and your own session asks for them".into()),
+        "a workflow outlives the session that saved it, so it never runs wider than that session"
+    );
+    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": "Triage bugs" })), Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": " " })), Err("describe the workflow first".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "run", json!({})), Err("run is not open to agents: the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's".into()));
+
+    // Bob's account holds none of Ana's workflows, and cannot reach, edit or delete one.
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "get_settings", json!({})))["connectors"], json!([]));
+    let bobs = ran(act(&bob.dir, &bob.tab, "save_connector", workflow("Bugs v3", "acceptEdits", Some(&workflow_id))));
+    assert_ne!(bobs["id"], workflow_id.as_str(), "Ana's id edits nothing of Bob's account: it makes a workflow of his own");
+    let ana_sees = |ana: &Agent| ran(act(&ana.dir, &ana.tab, "get_settings", json!({})))["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "Bob's save left Ana's workflow as it was");
+    let bobs_delete = act(&bob.dir, &bob.tab, "delete_connector", json!({ "id": workflow_id })).unwrap();
+    assert_eq!(bobs_delete["outcome"], "pending");
+    let decided = bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done");
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "Bob's approved delete reached his own account's workflows only");
+
+    // Ana's delete is held for her approval, and only her app decides it.
+    let delete = act(&ana.dir, &ana.tab, "delete_connector", json!({ "id": workflow_id })).unwrap();
+    assert_eq!(delete["outcome"], "pending");
+    let delete_id = delete["id"].as_str().unwrap().to_owned();
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "nothing is deleted before she approves");
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": delete_id, "approve": true })), Err(format!("no confirmation {delete_id} waits")));
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": delete_id, "approve": true })).unwrap()["outcome"], "done");
+    assert!(ana_sees(&ana).is_empty());
+
+    // Projects: clone with the account's own token on its own machine, share, list.
+    let source = ana.dir.join("source");
+    source_repo(&source);
+    let cloned = ana.dir.join("cloned");
+    let source_text = source.display().to_string();
+    let copy = ran(act(&ana.dir, &ana.tab, "clone", json!({ "machine": ana.machine, "repo": source_text, "dest": cloned.display().to_string() })));
+    assert_eq!(copy, json!(cloned.canonicalize().unwrap().display().to_string()), "the hub's clone answers the folder");
+    assert!(cloned.join("README.md").is_file());
+    let bobs_clone = bob.dir.join("stolen");
+    assert_eq!(act(&bob.dir, &bob.tab, "clone", json!({ "machine": ana.machine, "repo": source_text, "dest": bobs_clone.display().to_string() })), Err(format!("this account has no machine {}", ana.machine)));
+    assert!(!bobs_clone.exists());
+    let projects = ran(act(&ana.dir, &ana.tab, "list_projects", json!({})));
+    assert!(projects.as_array().unwrap().iter().any(|p| p["path"] == cloned.canonicalize().unwrap().display().to_string().as_str()), "{projects}");
+
+    let project = json!({ "key": "github.com/acme/site", "name": "site", "repo": "github.com/acme/site" });
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "share_project", json!({ "project": project }))), Value::Null);
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "shared_projects", json!({}))), json!([project]));
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "shared_projects", json!({}))), json!([]), "Bob's account shares nothing of Ana's");
+
+    // Sessions: scratch and Captain tabs open, a session cannot prompt itself or a Captain, and a message waits for the Captain's limits.
+    let scratch = ran(act(&ana.dir, &ana.tab, "open_scratch", json!({ "bypass": false })));
+    assert!(scratch.as_str().is_some_and(|tab| ana.node.machine.view(tab).is_ok()));
+    let captain = ran(act(&ana.dir, &ana.tab, "open_orchestrator", json!({ "path": docs })));
+    assert!(ana.node.machine.view(captain.as_str().unwrap()).is_ok_and(|view| !view.running));
+    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": ana.tab, "text": "hi" })), Err("prompt types into another session; your own session is the one reading this".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": captain, "text": "hi" })), Err(format!("{} is a Captain: enqueue hands it a message when it is idle", captain.as_str().unwrap())));
+    assert_eq!(act(&ana.dir, &ana.tab, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "search_threads", json!({ "query": "nothing says this" }))), json!([]));
+
+    // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
+    let almirante = ran(act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })));
+    assert_eq!(almirante["name"], "Almirante");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
+    assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");
+    let prices = ran(act(&ana.dir, &ana.tab, "set_usage_prices", json!({ "prices": { "glm-5.3": { "input": 1.0, "output": 2.0 } }, "aliases": {} })));
+    assert_eq!(prices["prices"]["glm-5.3"]["output"], 2.0);
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "usage_prices", json!({}))), json!({ "prices": {}, "aliases": {} }));
+    assert!(ran(act(&ana.dir, &ana.tab, "skills", json!({})))["copies"].is_array());
+    let missing = ran(act(&ana.dir, &ana.tab, "save_skill", json!({ "text": "# x", "copies": [{ "dir": ana.dir.join("no-skill").display().to_string(), "since": "abc" }] })));
+    assert_eq!(missing["copies"][0]["outcome"], "missing");
+    let usage = ran(act(&ana.dir, &ana.tab, "token_usage", json!({ "since": 0 })));
+    assert!(!usage.is_null(), "{usage}");
+    for (action, args) in [
+        ("list_projects", json!({})),
+        ("project_history", json!({ "path": docs })),
+        ("search_threads", json!({ "query": "deploys" })),
+        ("memory_status", json!({ "path": docs })),
+        ("memory_search", json!({ "path": docs, "query": "deploy" })),
+        ("memory_save", json!({ "path": docs, "title": "Mine", "text": "Not yours." })),
+        ("memory_forget", json!({ "path": docs, "id": 1 })),
+        ("global_orchestrator_settings", json!({})),
+        ("set_global_orchestrator_settings", json!({ "settings": { "name": "Mine" } })),
+        ("usage_prices", json!({})),
+        ("set_usage_prices", json!({ "prices": {}, "aliases": {} })),
+        ("token_usage", json!({ "since": 0 })),
+        ("usage_limits", json!({})),
+        ("skills", json!({})),
+        ("save_skill", json!({ "text": "# x", "copies": [] })),
+        ("make_folder", json!({ "path": bob.dir.join("elsewhere").display().to_string() })),
+        ("create_project", json!({ "name": "stolen" })),
+        ("publish_project", json!({ "path": docs })),
+        ("set_project_account", json!({ "path": docs, "account": null })),
+        ("open_scratch", json!({ "bypass": false })),
+        ("open_orchestrator", json!({ "path": docs })),
+        ("enqueue", json!({ "path": docs, "text": "Ship it.", "request_id": "r-1" })),
+        ("prompt", json!({ "tab": ana.tab, "text": "hi" })),
+        ("save_project_scripts", json!({ "tab": ana.tab, "scripts": [] })),
+    ] {
+        assert_eq!(act_on(&bob.dir, &bob.tab, "rest-ana", action, args), Err(no_machine.clone()), "{action}");
+    }
+    assert_eq!(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": docs })), Err(format!("{docs} is not a project on this machine")), "his own machine has no such folder");
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": bobs_docs })))["count"], 0);
+    assert!(!bob.dir.join("elsewhere").exists());
+
+    // The way of working carries the limits: a change waits for the owner, and lands in his account alone.
+    let tastes = |agent: &Agent| ran(act(&agent.dir, &agent.tab, "get_tastes", json!({})))["captains"]["parallel"].clone();
+    let before = tastes(&ana);
+    assert_eq!(tastes(&bob), before);
+    let change = act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "parallel": 7 } })).unwrap();
+    assert_eq!(change["outcome"], "pending");
+    let reset = act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "parallel" })).unwrap();
+    assert_eq!(reset["outcome"], "pending");
+    assert_eq!(tastes(&ana), before, "nothing changes before she approves");
+    let mut locked = Client::app(&url, &account::login(&url, "ana@acme.dev", "correct horse").unwrap().0);
+    assert_eq!(locked.hub(json!({ "cmd": "decide_confirmation", "id": change["id"], "approve": true })), Err(LOCKED.into()), "a locked app approves no set_taste");
+    assert_eq!(locked.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err(LOCKED.into()), "nor runs it");
+    assert_eq!(tastes(&ana), before);
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": change["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(tastes(&ana), json!(7));
+    assert_eq!(tastes(&bob), before, "Bob's way of working is his own");
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": reset["id"], "approve": true })).unwrap()["outcome"], "done");
+
+    // Delegation stats: the tasks a machine of Ana's recorded are hers alone.
+    let (_, raw_token) = account::register_machine(&url, &ana_token, "ana-raw", "linux").unwrap();
+    let raw = RawMachine::start(&url, &raw_token, |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("rest-ana", true), ("ana-raw", true)]);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now_ms())] })).unwrap();
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 1);
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 0);
+
+    // The trail: Ana's acts are hers, a refusal is a row, and Bob's trail has none of hers.
+    let trail = ran(act(&ana.dir, &ana.tab, "agent_audit", json!({ "limit": 200 })));
+    let rows: Vec<(&str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap())).collect();
+    for expected in [("save_connector", "done"), ("save_connector", "refused"), ("delete_connector", "pending"), ("delete_connector", "approved"), ("clone", "done"), ("share_project", "done"), ("set_taste", "pending"), ("set_taste", "approved"), ("run", "refused")] {
+        assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
+    }
+    let bobs = ran(act(&bob.dir, &bob.tab, "agent_audit", json!({ "limit": 200 })));
+    assert!(bobs.as_array().unwrap().iter().all(|r| r["machine"] == bob.machine.as_str()), "{bobs}");
+    drop(raw);
+}
+
+/// What the app's Approve sends for confirmation `id`, with what the user typed in its dialog.
+fn approve(client: &mut Client, id: &Value, entered: Value) -> Result<Value, String> {
+    client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true, "entered": entered }))
+}
+
+/// The notices the agent's session got, read until the one for confirmation `id`.
+fn notice_of(agent: &Agent, id: &Value) -> String {
+    let id = id.as_str().unwrap();
+    let mut told = String::new();
+    wait_for(&format!("the notice of {id}"), || {
+        if agent.node.machine.view(&agent.tab).is_ok_and(|v| v.queued > 0) {
+            told += &turn_end_context(&agent.dir, &agent.tab);
+        }
+        told.contains(id)
+    });
+    told
+}
+
+/// The account's confirmations that wait, by action.
+fn waiting_actions(client: &mut Client) -> Vec<String> {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    all.as_array().unwrap().iter().filter(|c| c["decision"].is_null()).map(|c| c["action"].as_str().unwrap().to_owned()).collect()
+}
+
+/// The account's audit trail, newest first, as (action, outcome, args, detail).
+fn trail_of(client: &mut Client) -> Vec<(String, String, String, String)> {
+    let rows = client.hub(json!({ "cmd": "agent_audit", "limit": 200 })).unwrap();
+    let text = |row: &Value, field: &str| row[field].as_str().unwrap().to_owned();
+    rows.as_array().unwrap().iter().map(|r| (text(r, "action"), text(r, "outcome"), text(r, "args"), text(r, "detail"))).collect()
+}
+
+#[test]
+fn an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_in_the_app() {
+    let hub = TestHub::start_with_boxes("agent_typed", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    let mut app = Client::app(&url, &token);
+
+    let paired = act(&ana.dir, &ana.tab, "pair_code", json!({})).unwrap();
+    assert_eq!(paired["outcome"], "pending", "{paired}");
+    assert_eq!(approve(&mut ana.client, &paired["id"], json!({})), Err(LOCKED.into()), "approving pair_code needs the password first");
+    assert_eq!(approve(&mut app, &paired["id"], json!({})), Err(LOCKED.into()));
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = approve(&mut ana.client, &paired["id"], json!({})).unwrap();
+    let code = decided["result"]["code"].as_str().unwrap().to_owned();
+    assert_eq!(decided["result"]["command"], format!("curl -fsSL {url}/install.sh | sh -s -- {code}"), "the app gets the code and its command");
+    let told = notice_of(&ana, &paired["id"]);
+    assert!(told.contains(r#""code":"[hidden]""#) && told.contains(r#""command":"[hidden]""#) && !told.contains(&code), "the agent never gets the code: {told}");
+    assert_eq!(account::pair(&url, &code, "ana-new", "linux").unwrap().email, "ana@acme.dev", "the code the app got pairs into ana's account");
+
+    let typed_key = "box_wrongkey";
+    assert_eq!(act(&ana.dir, &ana.tab, "connect_upstash", json!({ "key": BOX_KEY })), Err("an agent never sends a password, key or token: key. The user enters it in the app.".into()));
+    let upstash = act(&ana.dir, &ana.tab, "connect_upstash", json!({})).unwrap()["id"].clone();
+    assert_eq!(approve(&mut app, &upstash, json!({ "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })), Err(LOCKED.into()), "the connect dialog's approval needs the password too");
+    assert_eq!(waiting_actions(&mut app), ["connect_upstash"], "and leaves it waiting");
+    assert_eq!(approve(&mut ana.client, &upstash, json!({})), Err("connect_upstash needs key, which the user types in the app".into()));
+    assert_eq!(approve(&mut ana.client, &upstash, json!({ "key": BOX_KEY, "claude_token": CLAUDE_TOKEN, "name": "x" })), Err("connect_upstash does not take name".into()));
+    assert_eq!(approve(&mut ana.client, &upstash, json!({ "key": typed_key, "claude_token": CLAUDE_TOKEN })), Err("Upstash Box refused the key: Invalid box API key".into()));
+    assert_eq!(waiting_actions(&mut ana.client), ["connect_upstash"], "a refused key leaves it waiting for another");
+    let connected = approve(&mut ana.client, &upstash, json!({ "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    assert_eq!((&connected["outcome"], &connected["result"]), (&json!("done"), &json!({ "key_hint": "…tkey", "claude_hint": "…oken" })));
+    assert_eq!(approve(&mut ana.client, &upstash, json!({ "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })), Err(format!("no confirmation {} waits", upstash.as_str().unwrap())));
+    let told = notice_of(&ana, &upstash);
+    assert!(told.contains(&format!("The user approved your connect_upstash request ({}): done.", upstash.as_str().unwrap())), "one notice, for the run that worked: {told}");
+    assert!(!told.contains("failed"), "the refused key sent no notice: {told}");
+
+    let bloom = "sk-ant-oat01-bloomsecret";
+    let token_ask = act(&ana.dir, &ana.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &token_ask, json!({ "token": bloom })).unwrap()["outcome"], "done");
+    let kept = notice_of(&ana, &token_ask);
+    let removed = act(&ana.dir, &ana.tab, "remove_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &removed, json!({})).unwrap()["outcome"], "done");
+    assert_eq!(approve(&mut ana.client, &act(&ana.dir, &ana.tab, "set_box_access", json!({ "access": { "session": { "mode": "fresh" } } })).unwrap()["id"], json!({})).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["boxes"]["session"]["mode"], "fresh");
+    let gone = act(&ana.dir, &ana.tab, "disconnect_upstash", json!({})).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &gone, json!({})).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["upstash"], Value::Null);
+
+    let added = act(&ana.dir, &ana.tab, "add_account", json!({ "provider": "claude", "name": "Side" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut app, &added, json!({})), Err(LOCKED.into()), "so does the Accounts form's");
+    assert_eq!(approve(&mut ana.client, &added, json!({})).unwrap()["result"]["id"], "side", "a login account needs nothing typed");
+    let go_key = "oc_typed_secret_4821";
+    let keyed = act(&ana.dir, &ana.tab, "set_account_key", json!({ "account": "side" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &keyed, json!({ "key": go_key })), Err("side signs in through its CLI. Replace the API key under Settings > Accounts.".into()));
+    assert_eq!(waiting_actions(&mut ana.client), ["set_account_key"]);
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": keyed, "approve": false })).unwrap()["outcome"], "denied");
+    let signing = act(&ana.dir, &ana.tab, "sign_in", json!({ "account": "side" })).unwrap()["id"].clone();
+    let login_tab = approve(&mut ana.client, &signing, json!({})).unwrap()["result"].as_str().unwrap().to_owned();
+    assert_eq!(ana.node.machine.view(&login_tab).unwrap().account, "side", "the login runs in the account's own home");
+    ana.client.call(&ana.machine, json!({ "cmd": "close_tab", "tab": login_tab })).unwrap();
+    let dropped = act(&ana.dir, &ana.tab, "remove_account", json!({ "account": "side" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &dropped, json!({})).unwrap()["outcome"], "done");
+    let accounts = act(&ana.dir, &ana.tab, "list_accounts", json!({})).unwrap()["result"].to_string();
+    assert!(!accounts.contains("\"side\""), "{accounts}");
+
+    let typed = [BOX_KEY, typed_key, CLAUDE_TOKEN, bloom, go_key, code.as_str()];
+    let trail = trail_of(&mut ana.client);
+    for row in &trail {
+        for secret in typed {
+            assert!(!format!("{row:?}").contains(secret), "{secret} reached the trail: {row:?}");
+        }
+    }
+    let upstash_rows: Vec<(&str, &str, &str)> = trail.iter().filter(|r| r.0 == "connect_upstash").map(|r| (r.1.as_str(), r.2.as_str(), r.3.as_str())).collect();
+    assert_eq!(
+        upstash_rows,
+        [
+            ("done", "{}", ""),
+            ("approved", "{}", ""),
+            ("failed", "{}", "Upstash Box refused the key: Invalid box API key"),
+            ("approved", "{}", ""),
+            ("pending", "{}", ""),
+            ("refused", r#"{"key":"[hidden]"}"#, "an agent never sends a password, key or token: key. The user enters it in the app."),
+        ]
+    );
+    let stored = ana.client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string();
+    for (text, place) in [(stored.as_str(), "the confirmations"), (kept.as_str(), "the notice"), (told.as_str(), "the notice")] {
+        for secret in typed {
+            assert!(!text.contains(secret), "{secret} reached {place}: {text}");
+        }
+    }
+}
+
+/// Another machine of an account, running a node with one tab in its folder `notes`, which holds `todo.md`.
+fn notes_machine(url: &str, token: &str, email: &str, name: &str) -> (Node, PathBuf, String, String) {
+    let dir = node_dir(&format!("surface-{name}"));
+    let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
+    let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    std::fs::create_dir_all(dir.join("notes")).unwrap();
+    std::fs::write(dir.join("notes/todo.md"), "Ship the form.\n").unwrap();
+    let tab = node.machine.open_tab(Some(dir.join("notes").display().to_string()), false).unwrap();
+    wait_for(&format!("{name} online"), || node.online());
+    (node, dir, machine.id, tab)
+}
+
+#[test]
+fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invites_agents_or_files() {
+    let hub = TestHub::start_with_boxes("agent_scope", Signup::Invite, fast());
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let (mini_node, mini_dir, mini, mini_tab) = notes_machine(&url, &ana_token, "ana@acme.dev", "ana-mini");
+    let (vps, vps_token) = account::register_machine(&url, &ana_token, "ana-vps", "linux").unwrap();
+    let updating = json!({ "state": "updating", "to": "0.18.0" });
+    let answered = updating.clone();
+    let vps_raw = RawMachine::start_with(&url, &vps_token, vec![json!({ "kind": "update", "status": { "state": "up_to_date", "version": "test" } })], move |call| match call["cmd"].as_str() {
+        Some("update_self") => RawReply::Ok(answered.clone()),
+        _ => RawReply::Err("not in this test".into()),
+    });
+    ana.client.wait_machines(&[("ana-mac", true), ("ana-mini", true), ("ana-vps", true)]);
+    let on = |agent: &Agent, machine: Option<&str>, action: &str, args: Value| session_tool(&agent.dir, &agent.tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }));
+
+    let machines = act(&ana.dir, &ana.tab, "machines", json!({})).unwrap()["result"].clone();
+    let row = |id: &str| machines.as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone();
+    let mac = row(&ana.machine);
+    assert_eq!((&mac["online"], &mac["version"]), (&json!(true), &json!("0.0.0-test")));
+    assert!(mac["last_seen"].as_i64().unwrap() > 1_700_000_000, "{mac}");
+    wait_for("the vps's update phase", || ana.client.hub(json!({ "cmd": "machines" })).unwrap().to_string().contains("up_to_date"));
+    let vps_row = act(&ana.dir, &ana.tab, "machines", json!({})).unwrap()["result"].as_array().unwrap().iter().find(|m| m["id"] == vps.id.as_str()).unwrap().clone();
+    assert_eq!((&vps_row["version"], &vps_row["update"]), (&json!("test"), &json!({ "state": "up_to_date", "version": "test" })));
+
+    let todo = on(&ana, Some("ana-mini"), "read_file", json!({ "tab": mini_tab, "path": "todo.md" })).unwrap();
+    assert_eq!((&todo["outcome"], &todo["result"]["text"]), (&json!("done"), &json!("Ship the form.\n")));
+    assert_eq!(on(&ana, Some(mini.as_str()), "files", json!({ "tab": mini_tab })).unwrap()["result"], json!(["todo.md"]));
+    let hits = on(&ana, Some("ANA-MINI"), "search", json!({ "tab": mini_tab, "query": "form" })).unwrap()["result"].clone();
+    assert_eq!((&hits[0]["path"], &hits[0]["line"]), (&json!("todo.md"), &json!(1)), "{hits}");
+    let own = |action: &str| Err(format!("{action} reads files on another machine of the account: on your own machine use your own shell and files"));
+    assert_eq!(on(&ana, None, "read_file", json!({ "tab": ana.tab, "path": "todo.md" })), own("read_file"));
+    assert_eq!(on(&ana, Some("ana-mac"), "files", json!({ "tab": ana.tab })), own("files"));
+    assert_eq!(on(&ana, Some(ana.machine.as_str()), "search", json!({ "tab": ana.tab, "query": "x" })), own("search"));
+    assert_eq!(on(&ana, None, "diff", json!({ "tab": ana.tab, "scope": "uncommitted" })), own("diff"));
+
+    mini_node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    std::fs::write(mini_dir.join("accounts/work/.claude.json"), r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer lin_api_mcpsecret"}}}}"#).unwrap();
+    std::fs::write(mini_dir.join("notes/.mcp.json"), r#"{"mcpServers":{"db":{"command":"/usr/local/bin/db-mcp","env":{"DB_PASSWORD":"hunter2"}}}}"#).unwrap();
+    let servers = on(&ana, Some("ana-mini"), "mcp_servers", json!({ "account": "work", "path": mini_dir.join("notes") })).unwrap()["result"].clone();
+    assert_eq!(
+        servers,
+        json!([
+            { "name": "linear", "scope": "user", "transport": "http", "origin": "https://mcp.linear.app" },
+            { "name": "db", "scope": "project", "transport": "stdio", "program": "db-mcp" },
+        ])
+    );
+    assert_eq!(on(&ana, None, "mcp_servers", json!({ "account": "codex" })), Err("codex runs Codex, and mcp_servers reads Claude Code's MCP servers".into()), "the session's own machine answers too");
+
+    let site = ana.node.machine.open_project(ana.dir.join("site")).display().to_string();
+    let workflow = ana
+        .client
+        .hub(json!({ "cmd": "save_connector", "connector": {
+            "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": site, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": "",
+        } }))
+        .unwrap();
+    let connector = workflow["id"].as_str().unwrap().to_owned();
+    let staged = act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })).unwrap();
+    assert_eq!(staged["result"], "this workflow has no column for that stage, so the issue stays where it is", "a session that runs no workflow reaches the account's own");
+
+    let client_id = register_agent(&url, &http);
+    let request = authorize(&url, &http, &client_id, &pkce().1, "st-a");
+    let let_in = act(&ana.dir, &ana.tab, "approve_agent", json!({ "request": request, "scopes": ["sessions"], "projects": [{ "machine": ana.machine, "path": site }] })).unwrap()["id"].clone();
+    let redirect = approve(&mut ana.client, &let_in, json!({})).unwrap()["result"]["redirect"].as_str().unwrap().to_owned();
+    let code = query_of(&redirect)["code"].clone();
+    let told = notice_of(&ana, &let_in);
+    assert!(told.contains(r#""redirect":"[hidden]""#) && !told.contains(&code), "the agent never gets the agent's code: {told}");
+    let grant = ana.client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"][0]["id"].as_str().unwrap().to_owned();
+    let refused = authorize(&url, &http, &client_id, &pkce().1, "st-b");
+    let deny = act(&ana.dir, &ana.tab, "deny_agent", json!({ "request": refused })).unwrap()["id"].clone();
+    assert!(approve(&mut ana.client, &deny, json!({})).unwrap()["result"]["redirect"].as_str().unwrap().contains("error=access_denied"));
+
+    let invite = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(invite["code"].as_str().unwrap())).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let anas_invite = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap()["id"].as_str().unwrap().to_owned();
+    let linear = act(&ana.dir, &ana.tab, "connect_linear", json!({})).unwrap()["id"].clone();
+
+    let none = |m: &str| Err(format!("this account has no machine {m}"));
+    assert_eq!(on(&bob, Some("ana-mini"), "read_file", json!({ "tab": mini_tab, "path": "todo.md" })), none("ana-mini"));
+    assert_eq!(on(&bob, Some(mini.as_str()), "files", json!({ "tab": mini_tab })), none(&mini));
+    assert_eq!(on(&bob, Some("ana-mini"), "mcp_servers", json!({ "account": "work" })), none("ana-mini"));
+    assert_eq!(on(&bob, Some("ana-mini"), "search", json!({ "tab": mini_tab, "query": "form" })), none("ana-mini"));
+    assert_eq!(on(&bob, Some("ana-mini"), "diff", json!({ "tab": mini_tab, "scope": "uncommitted" })), none("ana-mini"));
+    for (action, args) in [
+        ("device_hub", json!({})),
+        ("device_agents", json!({ "allow": true })),
+        ("device", json!({ "op": "list" })),
+        ("list_accounts", json!({})),
+        ("add_account", json!({ "provider": "claude", "name": "Bobs" })),
+        ("set_account_key", json!({ "account": "work" })),
+        ("remove_account", json!({ "account": "work" })),
+        ("sign_in", json!({ "account": "work" })),
+    ] {
+        assert_eq!(on(&bob, Some(ana.machine.as_str()), action, args), none(&ana.machine), "{action}");
+    }
+    assert_eq!(on(&bob, Some("ana-vps"), "update_self", json!({})), none("ana-vps"), "a confirm on another account's machine is refused before it waits");
+    assert_eq!(act(&bob.dir, &bob.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("the workflow was deleted".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })), Err("the workflow was deleted".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })), Err("the workflow was deleted".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), Err("Linear is not connected: connect it in pinned's Connectors settings".into()), "bob's act runs on his own connections");
+    assert_eq!(act(&bob.dir, &bob.tab, "box_status", json!({ "machine": mini })), Err("this machine is no box".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "invites", json!({})).unwrap()["result"]["pending"], json!([]));
+    assert_eq!(act(&bob.dir, &bob.tab, "external_agents", json!({})).unwrap()["result"]["agents"], json!([]));
+    let bob_decides = |bob: &mut Agent, action: &str, args: Value| {
+        let asked = act(&bob.dir, &bob.tab, action, args).unwrap();
+        bob.client.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap()["outcome"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
+    assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
+    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
+    assert_eq!(bob_decides(&mut bob, "answer_box", json!({ "id": "q-ana", "allow": true })), "failed: that box question is gone");
+    let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
+    assert_eq!(approve(&mut bob.client, &linear, json!({ "key": "lin_api_bobsguess" })), Err(format!("no confirmation {} waits", linear.as_str().unwrap())), "bob's app can't decide ana's");
+    assert_eq!(waiting_actions(&mut ana.client), ["connect_linear"], "ana's still waits for her");
+    let unused = ana.client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].clone();
+    assert_eq!(unused.as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(), [anas_invite.as_str()], "ana's unused invite still works: {unused}");
+    assert_eq!(ana.client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].as_array().unwrap().len(), 1, "ana's agent is still in");
+    assert_eq!(vps_raw.calls("update_self"), 0, "ana's vps heard none of bob's");
+
+    let update = on(&ana, Some("ana-vps"), "update_self", json!({})).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &update, json!({})).unwrap()["result"], updating, "approving runs it on the machine it named");
+    assert_eq!(vps_raw.calls("update_self"), 1);
+    let revoke = act(&ana.dir, &ana.tab, "revoke_invite", json!({ "id": anas_invite })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &revoke, json!({})).unwrap()["outcome"], "done");
+    let out = act(&ana.dir, &ana.tab, "revoke_agent", json!({ "id": grant })).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &out, json!({})).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"], json!([]));
+    let unlinked = act(&ana.dir, &ana.tab, "disconnect_linear", json!({})).unwrap()["id"].clone();
+    assert_eq!(approve(&mut ana.client, &unlinked, json!({})).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": linear, "approve": false })).unwrap()["outcome"], "denied");
+    let bobs_rows = trail_of(&mut bob.client);
+    assert!(bobs_rows.iter().all(|r| !["approve_agent", "deny_agent", "connect_linear", "pair_code"].contains(&r.0.as_str())), "bob's trail holds his acts only: {bobs_rows:?}");
+    drop(vps_raw);
+}
+
+/// Every string a server's secrets were typed as, which no answer, list, audit row, error or notice
+/// may hold.
+const MCP_SECRETS: [&str; 4] = ["ana-ctx-secret", "ana-linear-secret", "ana-files-secret", "agent-guessed-region"];
+
+fn holds_no_mcp_secret(what: &str, text: &str) {
+    for secret in MCP_SECRETS {
+        assert!(!text.contains(secret), "{what} shows {secret}: {text}");
+    }
+}
+
+#[test]
+fn an_accounts_mcp_servers_reach_its_own_sessions_and_agents_never_see_or_send_a_secret() {
+    let hub = TestHub::start_with("agent_mcp", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let ana_machine_token = Credentials::load(&ana.dir).unwrap().machine_token;
+    let ctx_server = json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } });
+
+    let (locked_token, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut locked = Client::app(&url, &locked_token);
+    let locked_save = json!({ "cmd": "save_mcp_server", "server": ctx_server, "secrets": { "env": { "API_KEY": "ana-ctx-secret" } } });
+    assert_eq!(locked.hub(locked_save.clone()), Err(pinned_core::surface::LOCKED.into()), "a locked app adds a server only once it unlocks");
+    assert_eq!(locked.hub(json!({ "cmd": "list_mcp_servers" })).unwrap(), json!([]), "listing needs no unlock");
+    locked.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let ctx = locked.hub(locked_save).unwrap();
+    holds_no_mcp_secret("the app's save", &ctx.to_string());
+    let ctx_id = ctx["id"].as_str().unwrap().to_owned();
+    let listed = act(&ana.dir, &ana.tab, "list_mcp_servers", json!({})).unwrap();
+    assert_eq!(listed, json!({ "outcome": "done", "result": [{ "id": ctx_id, "enabled": true, "server": ctx_server }] }));
+
+    let sneaked = json!({ "server": { "name": "geo", "transport": { "type": "stdio", "command": "geo", "env": ["REGION"] } }, "secrets": { "env": { "REGION": "agent-guessed-region" } } });
+    assert_eq!(act(&ana.dir, &ana.tab, "save_mcp_server", sneaked), Err("an agent never sends a password, key or token: secrets. The user enters it in the app.".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "load_mcp_servers", json!({})), Err("load_mcp_servers is not open to agents: a machine's way to load the account's MCP servers, secrets and all, into the sessions it starts".into()));
+    assert_eq!(ana.client.hub(json!({ "cmd": "load_mcp_servers" })), Err("only a machine loads the account's MCP servers into the sessions it starts".into()), "the app never gets the values either");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let linear_server = json!({ "name": "linear", "transport": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": ["Authorization"] } });
+    let add = act(&ana.dir, &ana.tab, "save_mcp_server", json!({ "server": linear_server })).unwrap();
+    assert_eq!(add["outcome"], "pending", "{add}");
+    let waiting = ana.client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    assert_eq!(waiting[0]["args"], json!({ "server": linear_server }), "the approval shows what the agent asked for");
+    assert_eq!(approve(&mut ana.client, &add["id"], json!({})), Err("linear needs a value for Authorization, which the user types in the app".into()));
+    assert_eq!(waiting_actions(&mut ana.client), ["save_mcp_server"], "a missing secret leaves it waiting for the user's form");
+    let added = approve(&mut ana.client, &add["id"], json!({ "secrets.headers.Authorization": "Bearer ana-linear-secret" })).unwrap();
+    assert_eq!((&added["outcome"], &added["result"]["server"]), (&json!("done"), &linear_server));
+    let told = notice_of(&ana, &add["id"]);
+    assert!(told.contains("The user approved your save_mcp_server request"), "{told}");
+    holds_no_mcp_secret("the agent's notice", &told);
+    let linear_id = added["result"]["id"].as_str().unwrap().to_owned();
+
+    assert_eq!(act(&ana.dir, &ana.tab, "enable_mcp_server", json!({ "id": ctx_id, "enabled": false })).unwrap()["result"]["enabled"], false);
+
+    ana.node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    std::fs::write(ana.dir.join("accounts/work/.claude.json"), r#"{"mcpServers":{"files":{"command":"files-mcp","args":["--root","/data"],"env":{"API_TOKEN":"from-the-file"}}}}"#).unwrap();
+    let import = act(&ana.dir, &ana.tab, "import_mcp_server", json!({ "machine": "ana-mac", "account": "work", "name": "files", "project": "github.com/acme/site" })).unwrap();
+    let imported = approve(&mut ana.client, &import["id"], json!({ "secrets.env.API_TOKEN": "ana-files-secret" })).unwrap();
+    assert_eq!(
+        imported["result"]["server"],
+        json!({ "name": "files", "project": "github.com/acme/site", "transport": { "type": "stdio", "command": "files-mcp", "args": ["--root", "/data"], "env": ["API_TOKEN"] } })
+    );
+    let files_id = imported["result"]["id"].as_str().unwrap().to_owned();
+
+    let loads = machine_result(&url, &ana_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap();
+    assert_eq!(
+        loads,
+        json!([
+            { "server": linear_server, "secrets": { "headers": { "Authorization": "Bearer ana-linear-secret" } } },
+            { "server": imported["result"]["server"], "secrets": { "env": { "API_TOKEN": "ana-files-secret" } } },
+        ]),
+        "a machine of the account gets the enabled servers with their secrets"
+    );
+
+    std::fs::write(ana.dir.join("claude"), format!("#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nprintf '%s\\n' \"$@\" > '{}'\nfor a in \"$@\"; do case \"$a\" in */servers.json) cp \"$a\" '{}';; esac; done\nexec cat\n", ana.dir.join("args.txt").display(), ana.dir.join("seen-servers.json").display())).unwrap();
+    wait_for("ana's node back on its link, which the raw machine calls above took over", || ana.node.online());
+    ana.node.machine.start_claude(&ana.tab, 80, 24).unwrap();
+    wait_for("claude's arguments", || ana.dir.join("args.txt").exists());
+    wait_for("the session's MCP config", || ana.dir.join("seen-servers.json").exists());
+    let seen: Value = serde_json::from_str(&std::fs::read_to_string(ana.dir.join("seen-servers.json")).unwrap()).unwrap();
+    assert_eq!(seen, json!({ "mcpServers": { "linear": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": { "Authorization": "Bearer ana-linear-secret" } } } }), "the session in site, which has no remote, loads the account-wide enabled server");
+
+    let remove = act(&ana.dir, &ana.tab, "remove_mcp_server", json!({ "id": files_id })).unwrap();
+    assert_eq!(approve(&mut ana.client, &remove["id"], json!({})).unwrap()["outcome"], "done");
+    let left: Vec<String> = ana.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(left, [ctx_id.clone(), linear_id.clone()]);
+
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let bob_machine_token = Credentials::load(&bob.dir).unwrap().machine_token;
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(act(&bob.dir, &bob.tab, "list_mcp_servers", json!({})).unwrap()["result"], json!([]), "bob's agent lists none of ana's");
+    assert_eq!(bob.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap(), json!([]), "nor does bob's app");
+    assert_eq!(machine_result(&url, &bob_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap(), json!([]), "bob's machine loads none of ana's secrets");
+    wait_for("bob's node back on its link", || bob.node.online());
+    assert_eq!(act(&bob.dir, &bob.tab, "enable_mcp_server", json!({ "id": ctx_id, "enabled": true })), Err(format!("the account has no MCP server {ctx_id}")));
+    assert_eq!(bob.client.hub(json!({ "cmd": "save_mcp_server", "id": linear_id, "server": linear_server })), Err(format!("the account has no MCP server {linear_id}")), "bob's app can't edit ana's");
+    assert_eq!(bob.client.hub(json!({ "cmd": "remove_mcp_server", "id": linear_id })), Err(format!("the account has no MCP server {linear_id}")));
+    let bobs_import = act(&bob.dir, &bob.tab, "import_mcp_server", json!({ "machine": "ana-mac", "account": "work", "name": "files" })).unwrap();
+    assert_eq!(approve(&mut bob.client, &bobs_import["id"], json!({ "secrets.env.API_TOKEN": "x" })), Err("this account has no machine ana-mac".into()), "bob can't read ana's machine's config");
+    let bobs_remove = act(&bob.dir, &bob.tab, "remove_mcp_server", json!({ "id": linear_id })).unwrap();
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_remove["id"], "approve": true })), Err(format!("no confirmation {} waits", bobs_remove["id"].as_str().unwrap())), "ana's app can't decide bob's");
+    assert_eq!(approve(&mut bob.client, &bobs_remove["id"], json!({})).unwrap()["outcome"], format!("failed: the account has no MCP server {linear_id}"));
+    assert_eq!(ana.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().as_array().unwrap().len(), 2, "ana's servers are all still there");
+    assert_eq!(machine_result(&url, &ana_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap()[0]["secrets"]["headers"]["Authorization"], "Bearer ana-linear-secret");
+
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        let trail = trail_of(client);
+        holds_no_mcp_secret(&format!("{who}'s audit trail"), &format!("{trail:?}"));
+        holds_no_mcp_secret(&format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_no_mcp_secret(&format!("{who}'s list"), &client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().to_string());
+    }
+    let anas = trail_of(&mut ana.client);
+    let refused = anas.iter().find(|r| r.0 == "save_mcp_server" && r.1 == "refused").unwrap();
+    assert_eq!(refused.2, r#"{"server":{"name":"geo","transport":{"type":"stdio","command":"geo","env":["REGION"]}},"secrets":"[hidden]"}"#);
+    let failed = anas.iter().find(|r| r.0 == "save_mcp_server" && r.1 == "failed").unwrap();
+    assert_eq!(failed.3, "linear needs a value for Authorization, which the user types in the app");
+    let bobs: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
+    assert_eq!(bobs.into_iter().collect::<Vec<_>>(), ["enable_mcp_server", "import_mcp_server", "list_mcp_servers", "remove_mcp_server"], "bob's trail holds his acts only");
+}
+
+#[test]
+fn an_agents_box_is_held_to_the_box_budget_and_cap_and_counts_as_its_task_once_it_ends() {
+    let hub = TestHub::start_with_boxes("agent_box", Signup::Open, Policy { max_open: 1, ..fast() });
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let open = |budget: Value| act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": budget }));
+
+    assert_eq!(open(Value::Null), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    assert_eq!(open(Value::Null), Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()));
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })).unwrap();
+    assert_eq!(open(json!(5.0)), Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()));
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "a refused box asks Upstash for nothing");
+
+    let opened = open(Value::Null).unwrap();
+    assert_eq!((opened["outcome"].as_str(), opened["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.0)), "the box takes the account's box budget: {opened}");
+    let (box_id, box_machine) = (opened["result"]["id"].as_str().unwrap().to_owned(), opened["result"]["machine"].as_str().unwrap().to_owned());
+    assert_eq!(open(Value::Null), Err("Upstash Box: 1 box is already open, and this account's limit is 1".into()));
+    wait_for("the agent's box session", || box_tabs(&hub.boxes).iter().any(|t| t.running));
+    assert_eq!(act(&ana.dir, &ana.tab, "box_status", json!({ "machine": box_machine })).unwrap()["result"]["id"], box_id.as_str());
+
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    assert_eq!(act(&bob.dir, &bob.tab, "box_status", json!({ "machine": box_machine })), Err("this machine is no box".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "open_box", json!({ "repo": "acme/site" })), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()), "bob's box can't use ana's connection");
+
+    let tab = box_tabs(&hub.boxes)[0].id.clone();
+    ana.client.call(&box_machine, json!({ "cmd": "close_tab", "tab": tab })).unwrap();
+    wait_for("the box to be deleted", || hub.boxes.live().is_empty());
+    let stats = act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })).unwrap()["result"].clone();
+    let slowest = &stats["slowest"][0];
+    assert_eq!(
+        (stats["totals"]["runs"].as_u64(), stats["totals"]["done"].as_u64(), slowest["id"].as_str(), slowest["machine"].as_str(), slowest["machine_name"].as_str(), slowest["delegator"].as_str()),
+        (Some(1), Some(1), Some(box_id.as_str()), Some(ana.machine.as_str()), Some("ana-mac"), Some("Session in site")),
+        "{stats}"
+    );
+    assert!(stats["totals"]["box_ms"].as_u64().unwrap() > 0 && stats["totals"]["box_usd"].as_f64().unwrap() > 0.0, "{stats}");
+    assert_eq!(act(&bob.dir, &bob.tab, "delegation_stats", json!({ "days": 1 })).unwrap()["result"]["totals"]["runs"], 0, "ana's box is not bob's task");
+    let rows: Vec<(String, String)> = trail_of(&mut ana.client).into_iter().filter(|r| r.0 == "open_box").map(|r| (r.1, r.3)).collect();
+    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["failed", "done", "failed", "failed", "failed"], "every open is audited: {rows:?}");
+}
+
+/// What the hub asked of the outside world since the first call here, each as the `host:port` of a
+/// CONNECT. Every HTTPS call this process makes goes through a proxy that records its target and
+/// answers 502, so a test that makes the hub call Slack, GitHub, Linear or Vercel with a made-up key
+/// reaches no real service. A call that never leaves the hub adds nothing.
+fn outside_world() -> &'static Mutex<Vec<String>> {
+    static ASKED: std::sync::OnceLock<&'static Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(|| {
+        let asked: &'static Mutex<Vec<String>> = Box::leak(Box::default());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || refuse_connect(stream, asked));
+            }
+        });
+        for (name, value) in [("HTTPS_PROXY", proxy.as_str()), ("https_proxy", proxy.as_str()), ("NO_PROXY", "127.0.0.1,localhost"), ("no_proxy", "127.0.0.1,localhost")] {
+            std::env::set_var(name, value);
+        }
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let _ = client.get("https://proxy-check.invalid/").send();
+        assert_eq!(asked.lock().unwrap().as_slice(), ["proxy-check.invalid:443"], "HTTPS calls must go through the refusing proxy, or a test would reach a real service");
+        asked
+    })
+}
+
+fn refuse_connect(mut stream: TcpStream, asked: &Mutex<Vec<String>>) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut head = vec![];
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|n| n == 1) {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    let mut words = head.split_whitespace();
+    if let (Some("CONNECT"), Some(target)) = (words.next(), words.next()) {
+        asked.lock().unwrap().push(target.to_owned());
+    }
+    let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+}
+
+/// How many times the hub tried to reach `host` (as `host:port`).
+fn asked_of(host: &str) -> usize {
+    outside_world().lock().unwrap().iter().filter(|target| target.as_str() == host).count()
+}
+
+/// Two accounts on one hub, each with its machine, its agent session and its unlocked app.
+struct Pair {
+    _hub: TestHub,
+    url: String,
+    ana: Agent,
+    bob: Agent,
+}
+
+fn ana_and_bob(name: &str) -> Pair {
+    let hub = TestHub::start_with(name, Signup::Open);
+    outside_world();
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    for app in [&mut ana.client, &mut bob.client] {
+        app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    }
+    Pair { _hub: hub, url, ana, bob }
+}
+
+/// Moves a connection of each service into `who`'s empty account, with a key only the hub keeps.
+/// Nothing reaches the services. Answers the keys.
+fn seed(client: &mut Client, who: &str) -> Vec<String> {
+    let keys = [format!("lin_api_{who}_hubkey_4f9a"), format!("xoxb-{who}-hubkey-4f9a"), format!("ghp_{who}_hubkey_4f9a"), format!("vck_{who}_hubkey_4f9a")];
+    let store = json!({
+        "connectors": [],
+        "linear": { "name": who, "email": format!("{who}@acme.dev"), "organization": format!("{who} org") },
+        "slack": { "team": format!("{who} team"), "userId": format!("U{who}"), "name": format!("{who}-bot") },
+        "github": { "login": who, "name": format!("{who} github") },
+        "vercel": { "key_hint": format!("…{who}") },
+    });
+    let imported = client.hub(json!({ "cmd": "import", "store": store, "linear_key": keys[0], "slack_key": keys[1], "github_key": keys[2], "vercel_key": keys[3] }));
+    assert_eq!(imported, Ok(json!(true)));
+    keys.to_vec()
+}
+
+/// What the account's app shows of its connections and settings.
+fn connections(client: &mut Client) -> Value {
+    let mut settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    settings.as_object_mut().unwrap().remove("checked");
+    settings
+}
+
+/// Every answer, refusal and notice a test saw, which no secret may appear in.
+struct Seen(Vec<String>);
+
+impl Seen {
+    fn log<T: std::fmt::Debug>(&mut self, value: T) -> T {
+        self.0.push(format!("{value:?}"));
+        value
+    }
+}
+
+fn holds_none_of(secrets: &[String], what: &str, text: &str) {
+    for secret in secrets {
+        assert!(!text.contains(secret.as_str()), "{secret} reached {what}: {text}");
+    }
+}
+
+fn nothing_waits(id: &Value) -> Result<Value, String> {
+    Err(format!("no confirmation {} waits", id.as_str().unwrap()))
+}
+
+struct Service {
+    name: &'static str,
+    connect: &'static str,
+    disconnect: &'static str,
+    /// What the user types in the connect dialog.
+    field: &'static str,
+    /// Where the hub would validate that value, as a CONNECT target.
+    host: &'static str,
+    unreachable: &'static str,
+}
+
+const SERVICES: [Service; 4] = [
+    Service { name: "linear", connect: "connect_linear", disconnect: "disconnect_linear", field: "key", host: "api.linear.app:443", unreachable: "Linear unreachable" },
+    Service { name: "slack", connect: "connect_slack", disconnect: "disconnect_slack", field: "token", host: "slack.com:443", unreachable: "Slack unreachable" },
+    Service { name: "github", connect: "connect_github", disconnect: "disconnect_github", field: "token", host: "api.github.com:443", unreachable: "GitHub unreachable" },
+    Service { name: "vercel", connect: "connect_vercel", disconnect: "disconnect_vercel", field: "key", host: "ai-gateway.vercel.sh:443", unreachable: "Vercel AI Gateway: unreachable" },
+];
+
+#[test]
+fn an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_their_owner_and_leave_another_account_alone() {
+    let Pair { _hub, url, mut ana, mut bob } = ana_and_bob("agent_connect");
+    let mut seen = Seen(vec![]);
+    let mut secrets = seed(&mut ana.client, "ana");
+    secrets.extend(seed(&mut bob.client, "bob"));
+    let mut locked = Client::app(&url, &account::login(&url, "ana@acme.dev", "correct horse").unwrap().0);
+
+    for service in &SERVICES {
+        let Service { name, connect, disconnect, field, host, unreachable } = *service;
+        let (typed, bobs_typed, sent) = (format!("typed_{name}_by_ana_7c1d"), format!("typed_{name}_by_bob_7c1d"), format!("sent_{name}_by_agent_9e2b"));
+        secrets.extend([typed.clone(), bobs_typed.clone(), sent.clone()]);
+        let (anas, bobs) = (connections(&mut ana.client), connections(&mut bob.client));
+        assert!(anas[name].is_object() && bobs[name].is_object() && anas[name] != bobs[name], "{name}: each account starts with its own connection");
+
+        // (a) Ana's agent asks; only her unlocked app decides, and she types the key there.
+        assert_eq!(
+            seen.log(act(&ana.dir, &ana.tab, connect, json!({ (field): sent }))),
+            Err(format!("an agent never sends a password, key or token: {field}. The user enters it in the app.")),
+            "{connect}"
+        );
+        let asked = seen.log(act(&ana.dir, &ana.tab, connect, json!({}))).unwrap();
+        assert_eq!(asked["outcome"], "pending", "{asked}");
+        let id = asked["id"].clone();
+        assert_eq!(waiting_actions(&mut ana.client), [connect]);
+        let held = ana.client.hub(json!({ "cmd": "confirmations" })).unwrap();
+        assert_eq!(held[0]["args"], json!({}), "{connect}: the approval holds no key, the dialog asks for it");
+        assert_eq!(seen.log(approve(&mut locked, &id, json!({ (field): typed }))), Err(LOCKED.into()), "{connect}: a locked app can't decide it");
+        assert_eq!(seen.log(approve(&mut ana.client, &id, json!({}))), Err(format!("{connect} needs {field}, which the user types in the app")));
+        assert_eq!(seen.log(approve(&mut ana.client, &id, json!({ (field): typed, "name": "x" }))), Err(format!("{connect} does not take name")));
+        assert_eq!(waiting_actions(&mut ana.client), [connect], "{connect}: a refused form leaves it waiting");
+        let reached = asked_of(host);
+        let failed = seen.log(approve(&mut ana.client, &id, json!({ (field): typed }))).unwrap_err();
+        assert!(failed.starts_with(unreachable), "{connect}: {failed}");
+        assert_eq!(asked_of(host), reached + 1, "{connect}: the hub asked {host} once, and the proxy refused");
+        assert_eq!(waiting_actions(&mut ana.client), [connect], "{connect}: a key that did not check leaves it waiting");
+
+        // (b) Bob's agent and app can neither see nor decide it.
+        assert_eq!(seen.log(approve(&mut bob.client, &id, json!({ (field): bobs_typed }))), nothing_waits(&id), "{connect}");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": false }))), nothing_waits(&id), "{connect}: nor deny it");
+        let bobs_list = bob.client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string();
+        let bobs_agent_list = seen.log(act(&bob.dir, &bob.tab, "confirmations", json!({}))).unwrap().to_string();
+        assert!(!bobs_list.contains(id.as_str().unwrap()) && !bobs_agent_list.contains(id.as_str().unwrap()), "{connect}: bob's lists show ana's: {bobs_list} {bobs_agent_list}");
+        assert_eq!((waiting_actions(&mut bob.client), waiting_actions(&mut ana.client)), (Vec::<String>::new(), vec![connect.to_owned()]));
+        assert_eq!(asked_of(host), reached + 1, "{connect}: bob's tries never left the hub");
+
+        // (c) Bob's own connect is his: ana's app can't decide it, his key goes to the service, and nobody's connections change.
+        let bobs_ask = seen.log(act(&bob.dir, &bob.tab, connect, json!({}))).unwrap();
+        let bobs_id = bobs_ask["id"].clone();
+        assert_eq!((bobs_ask["outcome"].as_str(), bobs_id != id), (Some("pending"), true));
+        assert_eq!(seen.log(approve(&mut ana.client, &bobs_id, json!({ (field): typed }))), nothing_waits(&bobs_id), "{connect}: ana's app can't decide bob's");
+        let bobs_failed = seen.log(approve(&mut bob.client, &bobs_id, json!({ (field): bobs_typed }))).unwrap_err();
+        assert!(bobs_failed.starts_with(unreachable), "{connect}: {bobs_failed}");
+        assert_eq!(asked_of(host), reached + 2);
+        assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_id, "approve": false })).unwrap()["outcome"], "denied");
+        assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": false })).unwrap()["outcome"], "denied");
+        assert_eq!((connections(&mut ana.client), connections(&mut bob.client)), (anas.clone(), bobs.clone()), "{connect}: a denied connect changes no connection");
+
+        // The disconnect: Ana's waits for her alone, Bob's runs on his account only.
+        let off = seen.log(act(&ana.dir, &ana.tab, disconnect, json!({}))).unwrap();
+        assert_eq!(off["outcome"], "pending", "{off}");
+        let off = off["id"].clone();
+        assert_eq!(seen.log(approve(&mut locked, &off, json!({}))), Err(LOCKED.into()), "{disconnect}: a locked app can't decide it");
+        assert_eq!(seen.log(approve(&mut bob.client, &off, json!({}))), nothing_waits(&off), "{disconnect}");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": off, "approve": false }))), nothing_waits(&off));
+        assert_eq!(connections(&mut ana.client), anas, "{disconnect}: nothing changes before ana approves");
+        let bobs_off = seen.log(act(&bob.dir, &bob.tab, disconnect, json!({}))).unwrap()["id"].clone();
+        assert_eq!(seen.log(approve(&mut ana.client, &bobs_off, json!({}))), nothing_waits(&bobs_off), "{disconnect}: ana's app can't decide bob's");
+        let done = seen.log(approve(&mut bob.client, &bobs_off, json!({}))).unwrap();
+        assert_eq!(done["outcome"], "done", "{done}");
+        let mut bob_after = bobs.clone();
+        bob_after[name] = Value::Null;
+        assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: bob lost {name} and nothing else");
+        assert_eq!(connections(&mut ana.client), anas, "{disconnect}: bob's disconnect left ana's connections and settings as they were");
+        assert_eq!(waiting_actions(&mut ana.client), [disconnect], "ana's still waits for her");
+        let done = seen.log(approve(&mut ana.client, &off, json!({}))).unwrap();
+        assert_eq!(done["outcome"], "done", "{done}");
+        let mut ana_after = anas.clone();
+        ana_after[name] = Value::Null;
+        assert_eq!(connections(&mut ana.client), ana_after, "{disconnect}: ana lost {name} and nothing else");
+        assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: and bob's are as they were");
+
+        // (e) The notices each agent got name its own confirmation only, and hold no key.
+        let (anas_told, bobs_told) = (notice_of(&ana, &off), notice_of(&bob, &bobs_off));
+        assert!(!anas_told.contains(bobs_off.as_str().unwrap()) && !bobs_told.contains(off.as_str().unwrap()), "{anas_told} {bobs_told}");
+        seen.log(&anas_told);
+        seen.log(&bobs_told);
+    }
+
+    // (e) No answer, audit row, confirmation, setting or notice holds a key anyone typed or the hub kept.
+    for text in &seen.0 {
+        holds_none_of(&secrets, "an answer or notice", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        let trail = trail_of(client);
+        holds_none_of(&secrets, &format!("{who}'s audit trail"), &format!("{trail:?}"));
+        holds_none_of(&secrets, &format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_none_of(&secrets, &format!("{who}'s settings"), &connections(client).to_string());
+        let key_rows: Vec<&(String, String, String, String)> = trail.iter().filter(|r| r.0.starts_with("connect_") && r.1 == "refused").collect();
+        if who == "ana" {
+            assert_eq!(key_rows.len(), SERVICES.len(), "{trail:?}");
+            assert!(key_rows.iter().all(|r| r.2.contains(r#"[hidden]"#) && r.3.starts_with("an agent never sends a password, key or token")), "{key_rows:?}");
+        } else {
+            assert!(key_rows.is_empty(), "bob sent no key: {key_rows:?}");
+        }
+    }
+    let reached = outside_world().lock().unwrap().clone();
+    assert!(reached.iter().all(|target| target == "proxy-check.invalid:443" || SERVICES.iter().any(|s| s.host == target)), "the hub asked only the services' own hosts: {reached:?}");
+    assert_eq!(reached.len(), 1 + 2 * SERVICES.len(), "one failed check per typed key: {reached:?}");
+}
+
+#[test]
+fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly() {
+    let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_reads");
+    let mut seen = Seen(vec![]);
+    let secrets = seed(&mut ana.client, "ana");
+    let before = connections(&mut ana.client);
+
+    for (action, host, unreachable, none) in [
+        ("linear_suggestions", "api.linear.app:443", "Linear unreachable", "Linear is not connected"),
+        ("slack_suggestions", "slack.com:443", "Slack unreachable", "Slack is not connected"),
+        ("github_repos", "api.github.com:443", "GitHub unreachable", "GitHub is not connected"),
+    ] {
+        let reached = asked_of(host);
+        let hers = seen.log(act(&ana.dir, &ana.tab, action, json!({}))).unwrap_err();
+        assert!(hers.starts_with(unreachable), "{action}: ana's read goes to her connection: {hers}");
+        assert_eq!(asked_of(host), reached + 1, "{action}");
+        assert_eq!(seen.log(act(&bob.dir, &bob.tab, action, json!({}))), Err(none.into()), "{action}: bob has no connection to read");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": action }))), Err(none.into()), "{action}: nor does his app");
+        assert_eq!(asked_of(host), reached + 1, "{action}: a refused read reaches nobody, and never takes ana's key");
+    }
+
+    let draft = json!({ "model": "openai/gpt-5", "description": "when a bug is filed, fix it" });
+    let gateway = "ai-gateway.vercel.sh:443";
+    let reached = asked_of(gateway);
+    let hers = seen.log(act(&ana.dir, &ana.tab, "generate_workflow", draft.clone())).unwrap_err();
+    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's draft goes to her gateway key: {hers}");
+    assert_eq!(asked_of(gateway), reached + 1);
+    let none = "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings";
+    assert_eq!(seen.log(act(&bob.dir, &bob.tab, "generate_workflow", draft.clone())), Err(none.into()), "bob has no gateway key to draft with");
+    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "generate_workflow", "model": "openai/gpt-5", "description": "x" }))), Err(none.into()));
+    assert_eq!(asked_of(gateway), reached + 1, "bob's refused draft reaches nobody");
+
+    // The model list is the gateway's public one: it reads nothing of an account, so both ask the gateway alike.
+    for agent in [&ana, &bob] {
+        let before = asked_of(gateway);
+        let models = seen.log(act(&agent.dir, &agent.tab, "vercel_models", json!({}))).unwrap_err();
+        assert!(models.starts_with("Vercel AI Gateway: unreachable"), "{models}");
+        assert_eq!(asked_of(gateway), before + 1);
+    }
+
+    // Once bob keeps a connection of his own, his reads use it.
+    let bobs_keys = seed(&mut bob.client, "bob");
+    assert!(seen.log(act(&bob.dir, &bob.tab, "slack_suggestions", json!({}))).unwrap_err().starts_with("Slack unreachable"));
+    assert_eq!(connections(&mut ana.client), before, "bob's reads and connection left ana's alone");
+
+    let all: Vec<String> = secrets.into_iter().chain(bobs_keys).collect();
+    for text in &seen.0 {
+        holds_none_of(&all, "an answer", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
+    }
+    let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["generate_workflow", "github_repos", "linear_suggestions", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+}
+
+#[test]
+fn an_agents_box_token_removal_forgets_only_its_own_accounts_token() {
+    let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_box_token");
+    let mut seen = Seen(vec![]);
+    for app in [&mut ana.client, &mut bob.client] {
+        app.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    }
+    let secrets: Vec<String> = ["sk-ant-oat01-ana-bloom-0a1b", "sk-ant-oat01-bob-bloom-1c2d", "sk-ant-oat01-bob-side-9z8y", CLAUDE_TOKEN, BOX_KEY].map(String::from).to_vec();
+    let keep = |agent: &mut Agent, name: &str, token: &str| {
+        let ask = act(&agent.dir, &agent.tab, "set_box_claude_token", json!({ "name": name })).unwrap()["id"].clone();
+        assert_eq!(approve(&mut agent.client, &ask, json!({ "token": token })).unwrap()["outcome"], "done");
+    };
+    keep(&mut ana, "bloom", &secrets[0]);
+    keep(&mut bob, "bloom", &secrets[1]);
+    keep(&mut bob, "side", &secrets[2]);
+    let tokens = |client: &mut Client| connections(client)["box_claude_tokens"].clone();
+    let anas = json!({ "bloom": "…0a1b" });
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas.clone(), json!({ "bloom": "…1c2d", "side": "…9z8y" })));
+
+    let drop_bloom = |agent: &Agent, seen: &mut Seen| seen.log(act(&agent.dir, &agent.tab, "remove_box_claude_token", json!({ "name": "bloom" }))).unwrap();
+    let anas_ask = drop_bloom(&ana, &mut seen);
+    assert_eq!(anas_ask["outcome"], "pending", "{anas_ask}");
+    let bobs_ask = drop_bloom(&bob, &mut seen);
+    let (anas_id, bobs_id) = (anas_ask["id"].clone(), bobs_ask["id"].clone());
+    assert_eq!(seen.log(approve(&mut bob.client, &anas_id, json!({}))), nothing_waits(&anas_id), "bob's app can't decide ana's");
+    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": anas_id, "approve": false }))), nothing_waits(&anas_id));
+    assert_eq!(seen.log(approve(&mut ana.client, &bobs_id, json!({}))), nothing_waits(&bobs_id), "ana's app can't decide bob's");
+    let bobs_list = bob.client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string();
+    assert!(!bobs_list.contains(anas_id.as_str().unwrap()), "{bobs_list}");
+    assert_eq!(waiting_actions(&mut ana.client), ["remove_box_claude_token"]);
+
+    let done = seen.log(approve(&mut bob.client, &bobs_id, json!({}))).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas.clone(), json!({ "side": "…9z8y" })), "bob forgot his bloom and kept side; ana's bloom is as it was");
+    assert_eq!(waiting_actions(&mut ana.client), ["remove_box_claude_token"], "ana's still waits for her");
+
+    // Bob asks again for a name only ana still keeps: it finds nothing of hers to forget.
+    let again = drop_bloom(&bob, &mut seen)["id"].clone();
+    assert_eq!(seen.log(approve(&mut bob.client, &again, json!({}))).unwrap()["outcome"], "failed: no Claude token is kept for bloom");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas, json!({ "side": "…9z8y" })));
+
+    let done = seen.log(approve(&mut ana.client, &anas_id, json!({}))).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (Value::Null, json!({ "side": "…9z8y" })), "ana forgot hers and bob's side stays");
+    let (anas_told, bobs_told) = (notice_of(&ana, &anas_id), notice_of(&bob, &bobs_id));
+    assert!(!anas_told.contains(bobs_id.as_str().unwrap()) && !bobs_told.contains(anas_id.as_str().unwrap()), "{anas_told} {bobs_told}");
+    seen.log(&anas_told);
+    seen.log(&bobs_told);
+
+    for text in &seen.0 {
+        holds_none_of(&secrets, "an answer or notice", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        holds_none_of(&secrets[..3], &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
+        holds_none_of(&secrets[..3], &format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_none_of(&secrets[..3], &format!("{who}'s settings"), &connections(client).to_string());
+    }
 }

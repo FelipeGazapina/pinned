@@ -1,5 +1,7 @@
 const REFUSED = [1008, 4001, 4003];
 const RETRY_MS = [1000, 30000];
+/** The hub's answer to a call only the account's owner makes, until this app unlocks (`surface::LOCKED`). */
+const LOCKED = "unlock with your password in the app to do this";
 
 class Hub {
   constructor(base, token, on) {
@@ -12,12 +14,17 @@ class Hub {
     this.attached = new Map();
     this.retry = RETRY_MS[0];
     this.closed = false;
+    /** What the hub answered the password. It stays in memory, so a login read off this machine's
+     * disk unlocks nothing. */
+    this.unlock = null;
+    this.unlocking = null;
     this.connect();
   }
 
   connect() {
     const ws = (this.ws = new WebSocket(this.url));
-    ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token: this.token }));
+    // The lock makes the login alone, which the app keeps on disk, run no call only the owner makes.
+    ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token: this.token, lock: true, ...(this.unlock ? { unlock: this.unlock } : {}) }));
     ws.onmessage = (e) => this.receive(JSON.parse(e.data));
     ws.onclose = (e) => {
       const wasOnline = this.online;
@@ -68,6 +75,12 @@ class Hub {
       case "settings":
         this.on.settings?.(frame.settings);
         break;
+      case "session_marks":
+        this.on.marks?.(frame.marks);
+        break;
+      case "confirmations":
+        this.on.confirmations?.(frame.items);
+        break;
     }
   }
 
@@ -76,12 +89,38 @@ class Hub {
   }
 
   request(frame) {
+    return this.exchange(frame).catch((e) => (e === LOCKED && this.on.locked ? this.unlockThen(frame) : Promise.reject(e)));
+  }
+
+  exchange(frame) {
     if (!this.online) return Promise.reject("not connected to the hub");
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.send({ ...frame, id });
     });
+  }
+
+  /** Asks for the password once for every call it holds up, then sends `frame` again. */
+  async unlockThen(frame) {
+    this.unlocking ??= this.askUnlock().finally(() => (this.unlocking = null));
+    await this.unlocking;
+    return this.exchange(frame);
+  }
+
+  async askUnlock() {
+    let error = "";
+    for (;;) {
+      const password = await this.on.locked(error);
+      if (password == null) throw "this needs your password";
+      try {
+        this.unlock = (await this.exchange({ type: "hub", call: { cmd: "unlock", password } })).token;
+        return;
+      } catch (e) {
+        error = String(e);
+        if (error.startsWith("too many")) throw e;
+      }
+    }
   }
 
   call(machine, call) {

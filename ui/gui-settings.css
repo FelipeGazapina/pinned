@@ -133,6 +133,32 @@ body[data-mode="gui"] #settings-nav .settings-results:not([hidden]) { display: f
 #settings-nav .settings-results .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: rgb(var(--g-side-muted-rgb) / 0.75); }
 
 
+/* Agent activity: the actions waiting on Felipe as cards, then the audit trail as one list. */
+body[data-mode="gui"] #settings-page .agent-heading { margin: 24px 0 8px; font-size: 14px; font-weight: 600; color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirms { display: flex; flex-direction: column; gap: 8px; }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-audit) { border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirm { padding: 12px 14px; }
+body[data-mode="gui"] #settings .agent-once { margin-top: 16px; padding: 12px 14px; border-radius: 12px; color: var(--g-fg); }
+body[data-mode="gui"] #settings :is(.agent-confirm .who, .agent-once .hint) { color: var(--g-muted); }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-once) button.outline { height: 32px; padding: 0 14px; }
+body[data-mode="gui"] #settings .agent-audit-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 14px; border-top: 1px solid var(--g-border); }
+body[data-mode="gui"] #settings .agent-audit-row:first-child { border-top: 0; }
+body[data-mode="gui"] #settings .agent-audit-row .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+body[data-mode="gui"] #settings .agent-audit-row .head b { font-weight: 500; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .head time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+body[data-mode="gui"] #settings .agent-audit-row > .meta { font-size: 12px; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .args { align-self: flex-start; max-width: 100%; padding: 4px 6px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+body[data-mode="gui"] #settings .agent-audit-row .detail { margin: 0; font-size: 12px; line-height: 1.45; color: var(--g-muted); overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-outcome { margin-left: 0; padding: 1px 8px; font-size: 11px; }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="success"] { border-color: color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 10%, transparent); color: var(--g-success); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="primary"] { border-color: rgb(var(--g-primary-rgb) / 0.35); background: rgb(var(--g-primary-rgb) / 0.1); color: var(--g-primary); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="warning"] { border-color: rgb(var(--g-warning-rgb) / 0.35); background: rgb(var(--g-warning-rgb) / 0.1); color: var(--g-warning-fg); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="error"] { border-color: rgb(var(--g-error-rgb) / 0.4); background: rgb(var(--g-error-rgb) / 0.1); color: var(--g-error); }
+/* The line in a credential form that Approve on an agent's request opened: who asked, and that entering the key approves it. */
+body[data-mode="gui"] #settings .agent-asking { display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.06); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-asking button { margin-left: auto; flex: none; }
+
 /* SettingsSection, SettingsGroup and SettingsRow. */
 .settings-sections { display: flex; flex-direction: column; gap: 32px; }
 .settings-section .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-height: 28px; margin-bottom: 10px; padding: 0 16px; }
@@ -282,3 +308,19 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
+
+/* MCP servers: one card per server, its command or URL in mono, its secrets as set badges; the form lays its fields out two to a row. */
+#settings .mcp-server .card-head { display: flex; align-items: center; justify-content: space-between; }
+#settings .mcp-server .mcp-name { min-width: 0; }
+#settings .mcp-reach { display: block; overflow-wrap: anywhere; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04); font: 12px/1.5 var(--g-mono); }
+#settings .mcp-secrets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#settings .mcp-secrets .badge { margin-left: 0; }
+#settings .mcp-server .confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid; }
+#settings .mcp-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#settings .mcp-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--g-muted); font-size: 13px; }
+#settings .mcp-field :is(input, select, textarea) { width: 100%; }
+#settings .mcp-field input[readonly], #settings .mcp-field textarea[readonly], #settings .mcp-field select:disabled { opacity: 0.75; }
+#settings .mcp-fields :is(.wide, .hint.wide) { grid-column: 1 / -1; }
+#settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }

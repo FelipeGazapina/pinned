@@ -606,7 +606,14 @@ function answerEffort(key) {
   } else return;
   drawEffort();
 }
-const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+// $HOME/model-rows.json, when a sweep writes it, stands for a newer claude whose menu lists other models.
+const MODEL_ROWS = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(process.env.HOME, "model-rows.json"), "utf8"));
+  } catch {
+    return [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.2"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+  }
+})();
 let modelMenu = 0;
 function drawModels() {
   drawScreen([
@@ -873,11 +880,12 @@ function callPinned(name, input) {
 }
 
 // A worker pinned starts on a brief gets it as the one positional argument, and works on it at once.
+// --disallowedTools and --mcp-config take any number of values, as claude's own do.
 const VALUED = new Set(["--settings", "--plugin-dir", "--mcp-config", "--name", "--effort", "--permission-mode", "--model", "--append-system-prompt", "--resume", "--session-id"]);
 const brief = (() => {
   let list = false;
   for (const [i, arg] of args.entries()) {
-    if (arg.startsWith("--")) list = arg === "--disallowedTools";
+    if (arg.startsWith("--")) list = arg === "--disallowedTools" || arg === "--mcp-config";
     else if (!list && !VALUED.has(args[i - 1])) return arg;
   }
 })();

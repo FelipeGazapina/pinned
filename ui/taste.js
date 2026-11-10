@@ -3,10 +3,36 @@
 // save sends. It mirrors crates/core/src/taste.rs; ui/taste.fixture.json holds both to the same
 // presets and briefs. gui-taste.js renders and wires it.
 
-/** The knobs a profile sets: every field but skills and context. */
+/** The knobs a profile sets. `parallel` is also a delegation limit. */
 const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion"];
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context"];
-const TASTE_MAX_PARALLEL = 8;
+/** The delegation limits besides `parallel`, which pinned enforces and no profile sets. */
+const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents"];
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS];
+const TASTE_MAX_PARALLEL = 100;
+const TASTE_TIERS = ["low", "mid", "high"];
+const TASTE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+/** The values a stepper moves through; a value set elsewhere steps to its neighbours here. */
+const TASTE_STEPS = {
+  budget_cents: [0, 50, 100, 150, 200, 300, 500, 1000, 2000, 5000, 10000],
+  box_budget_cents: [0, 50, 100, 200, 300, 500, 1000, 2000, 5000],
+  time_limit_min: [15, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440, 2880, 10080],
+};
+
+/** The next value of a stepper from `value`, one step up (`dir` 1) or down (-1), or `value` at an end. */
+function tasteStep(field, value, dir) {
+  const steps = TASTE_STEPS[field];
+  const next = dir > 0 ? steps.find((v) => v > value) : steps.findLast((v) => v < value);
+  return next ?? value;
+}
+
+/** "US$ 2.50", or "No cap" for 0. */
+const tasteMoney = (cents) => (cents ? `US$ ${(cents / 100).toFixed(2)}` : "No cap");
+
+/** "45 min", "8 h", "1 h 30 min". */
+function tasteMinutes(minutes) {
+  const [h, m] = [Math.floor(minutes / 60), minutes % 60];
+  return h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+}
 
 const TASTE_PRESETS = {
   economical: {
@@ -24,7 +50,7 @@ const TASTE_PRESETS = {
     strategy: "escalate_on_failure",
     ladder: [{ model: "glm-5.3" }, { model: "claude-sonnet-5-5" }, { model: "claude-opus-5-5" }],
     hard_model: { model: "claude-opus-5-5" },
-    parallel: 3,
+    parallel: 5,
     autonomy: "decide_and_tell",
     review_diffs: true,
     second_opinion: false,
@@ -35,7 +61,7 @@ const TASTE_PRESETS = {
     strategy: "strongest_first",
     ladder: [{ model: "claude-opus-5-5" }],
     hard_model: { model: "claude-opus-5-5" },
-    parallel: 6,
+    parallel: 8,
     autonomy: "report_at_end",
     review_diffs: false,
     second_opinion: true,
@@ -46,8 +72,8 @@ const TASTE_PRESETS = {
 
 const TASTE_PROFILES = [
   { id: "economical", label: "Economical", about: "A cheap model with a detailed brief, 2 workers. Asks before a pull request." },
-  { id: "balanced", label: "Balanced", about: "Starts cheap and moves up when a worker fails, 3 workers. Reviews each diff." },
-  { id: "aggressive", label: "Aggressive", about: "The strongest model from the start, 6 workers, a second opinion on risky changes." },
+  { id: "balanced", label: "Balanced", about: "Starts cheap and moves up when a worker fails, 5 workers. Reviews each diff." },
+  { id: "aggressive", label: "Aggressive", about: "The strongest model from the start, 8 workers, a second opinion on risky changes." },
 ];
 
 /** Each strategy's words on the page, and its line of the brief given the ladder's first rung, the
@@ -193,11 +219,16 @@ function tasteRebase(saved, draft, fresh) {
   );
 }
 
-/** A model's cost tier from hints in its id: Rust's `cost_of` in delegate/catalog.rs. */
-function tasteModelTier(id) {
-  const lower = String(id).toLowerCase();
-  if (["haiku", "flash", "mini", "fast", "nano", "lite"].some((hint) => lower.includes(hint))) return "low";
-  if (["opus", "max", "pro", "ultra", "thinking"].some((hint) => lower.includes(hint))) return "high";
+/** A model's cost tier: the `cost` its machine lists for it in `list_accounts` (the one list in
+ * claude_models.rs), else, for a model it doesn't list or a node too old to send `cost`, a guess
+ * from the words of its id, as Rust's `cost_in` makes it. */
+function tasteModelTier(id, models = []) {
+  const listed = models.find((m) => m.slug === id)?.cost;
+  if (listed === "low" || listed === "mid" || listed === "high") return listed;
+  const words = String(id).toLowerCase().split(/[^a-z0-9]+/);
+  const says = (hints) => words.some((word) => hints.includes(word));
+  if (says(["opus", "max", "pro", "ultra", "thinking"])) return "high";
+  if (says(["haiku", "flash", "mini", "fast", "nano", "lite"])) return "low";
   return "mid";
 }
 
@@ -215,7 +246,7 @@ function tasteSpeed(taste) {
 }
 
 /** The models the page offers, in two groups: Claude's current ones, then OpenCode Go's, without
- * the ones Claude already lists. Pass the composer's CLAUDE_MODELS and OPENCODE_GO_MODELS. */
+ * the ones Claude already lists. Pass the composer's claudeModels() and OPENCODE_GO_MODELS. */
 function tasteCatalog(claudeModels, opencodeModels) {
   const claude = claudeModels.filter((m) => !m.legacy);
   const listed = new Set(claude.map((m) => m.slug));

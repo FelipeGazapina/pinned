@@ -28,6 +28,28 @@ fn prompt(previous: &str, thread: &str) -> String {
     )
 }
 
+/// The conversation as the app sends it to be titled: the user's prompts and claude's answers,
+/// only the last `THREAD_CHARS` characters when longer.
+pub fn thread_text(items: &[crate::thread::Item]) -> String {
+    use crate::thread::Item;
+    let text = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::User { text, .. } => Some(format!("USER: {text}")),
+            Item::Text { text, .. } => Some(format!("ASSISTANT: {text}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let count = text.chars().count();
+    if count <= THREAD_CHARS {
+        return text;
+    }
+    format!("[Earlier content truncated]\n{}", text.chars().skip(count - THREAD_CHARS).collect::<String>())
+}
+
+const THREAD_CHARS: usize = 8000;
+
 /// Runs `claude` without tools, hooks or a saved session, since only its answer matters.
 pub fn regenerate(claude: &Path, headless: &crate::machine::Headless<'_>, cwd: &Path, path: Option<&str>, previous: &str, thread: &str) -> Result<String, String> {
     let mut command = crate::process::command(claude);
@@ -78,5 +100,16 @@ mod tests {
         let p = prompt("Old \"one\"", "USER: make it faster");
         assert!(p.contains(r#"The previous title was "Old \"one\"""#), "{p}");
         assert!(p.ends_with("The thread:\nUSER: make it faster"));
+    }
+
+    #[test]
+    fn a_conversation_is_titled_from_its_prompts_and_answers_and_its_last_8000_characters() {
+        use crate::thread::Item;
+        let user = |text: &str| Item::User { id: "u".into(), at: "t".into(), text: text.into(), images: 0, pictures: vec![] };
+        let answer = |text: &str| Item::Text { id: "a".into(), at: "t".into(), text: text.into() };
+        let thinking = Item::Thinking { id: "k".into(), at: "t".into(), text: "hidden".into() };
+        assert_eq!(thread_text(&[user("fix login"), thinking, answer("done")]), "USER: fix login\n\nASSISTANT: done");
+        let long = thread_text(&[user(&"é".repeat(9000))]);
+        assert_eq!(long, format!("[Earlier content truncated]\n{}", "é".repeat(8000)));
     }
 }

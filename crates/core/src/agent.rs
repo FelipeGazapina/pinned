@@ -93,6 +93,9 @@ pub enum ProjectTool {
         request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
+        /// Opens the Capitão in an Upstash Box instead: `true`, or `{ size }`.
+        #[serde(default, rename = "box", skip_serializing_if = "Option::is_none", deserialize_with = "crate::delegate::box_or_true")]
+        boxed: Option<crate::delegate::BoxTarget>,
     },
     /// The global orchestrator's: the latest replies of `project`'s Capitão.
     ReadCaptain {
@@ -126,6 +129,21 @@ pub enum ProjectTool {
     TasteSet { scope: String, patch: crate::taste::TastePatch },
     /// A taste chat's: `Tastes::reset` on the account's tastes, then `TasteGet`.
     TasteReset { scope: String, field: crate::taste::TasteField },
+    /// Everyone's: `surface::listing`, the actions `Act` runs for this session.
+    Actions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search: Option<String>,
+    },
+    /// Everyone's: one action of `surface::ACTIONS`, run by the hub as the user's account and audited.
+    Act {
+        action: String,
+        #[serde(default)]
+        args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
@@ -362,6 +380,22 @@ pub enum Message {
         task: Option<String>,
         #[serde(default)]
         search: String,
+    },
+    /// The delegator's verdict on a finished task: `accepted` or `redone`.
+    TaskReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+        verdict: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// The account's delegation totals over the last `days`.
+    DelegationStats {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u64>,
     },
 }
 

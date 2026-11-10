@@ -3,6 +3,11 @@
 //! `Taste`; a project changes some of the Capitães' knobs with a `TastePatch`. The hub keeps an
 //! account's `Tastes`; a machine keeps the last ones it read in `taste.json`, and a signed-out app
 //! keeps its own there.
+//!
+//! The delegation limits (`parallel`, `tier`, `default_effort`, `max_effort`, `budget_cents`,
+//! `time_limit_min`, `box_budget_cents`) are knobs like the others, so a project overrides each on
+//! its own, but pinned enforces them on `delegate_task` and on boxes instead of only telling the
+//! session. `Limits` is that group, resolved.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +16,14 @@ use std::fmt;
 use std::path::Path;
 
 const FILE: &str = "taste.json";
-const MAX_PARALLEL: u32 = 8;
+/// Where a machine kept its cost style and its worker cap before tastes.
+const OLD_FILE: &str = "orchestration.json";
+/// The old per-machine worker cap's default, now the most any scope may run at once.
+const MAX_PARALLEL: u32 = 100;
+/// A week. Longer than any worker should run unattended.
+const MAX_TIME_LIMIT_MIN: u32 = 7 * 24 * 60;
+/// Eight hours, the old default of `delegate_task`'s `limitMs`.
+const DEFAULT_TIME_LIMIT_MIN: u32 = 8 * 60;
 const OPUS: &str = "claude-opus-5-5";
 
 /// A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.
@@ -49,6 +61,39 @@ pub enum Strategy {
     StrongestFirst,
 }
 
+/// The model cost tier `orchestrator_capabilities` lists for each model.
+pub use crate::delegate::Cost as Tier;
+
+/// How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Effort; 5] = [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    /// None for a level outside the five, such as Cursor's `fast`.
+    pub fn parse(name: &str) -> Option<Effort> {
+        Effort::ALL.into_iter().find(|e| e.name().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
 /// What the agents decide without the user.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -84,13 +129,38 @@ pub struct Taste {
     pub ladder: Vec<ModelRef>,
     /// Where hard work goes. None is the top rung of the ladder.
     pub hard_model: Option<ModelRef>,
-    /// Workers at once, 1 to 8.
+    /// Workers at once in a project, 1 to 100. `delegate_task` refuses one more.
     pub parallel: u32,
     pub autonomy: Autonomy,
     pub review_diffs: bool,
     pub second_opinion: bool,
     pub skills: Vec<SkillRef>,
     pub context: Vec<String>,
+    /// The costliest model tier a worker may run on.
+    pub tier: Tier,
+    /// The effort a worker gets when the call names none. None leaves it to the model.
+    pub default_effort: Option<Effort>,
+    /// The most effort a call may ask for.
+    pub max_effort: Effort,
+    /// What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.
+    pub budget_cents: u32,
+    /// Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.
+    pub time_limit_min: u32,
+    /// A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.
+    pub box_budget_cents: u32,
+}
+
+/// A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct Limits {
+    pub parallel: u32,
+    pub tier: Tier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<Effort>,
+    pub max_effort: Effort,
+    pub budget_cents: u32,
+    pub time_limit_min: u32,
+    pub box_budget_cents: u32,
 }
 
 /// A scope's own changes; a field left out inherits. A patch can set `hard_model` but not clear it.
@@ -114,6 +184,18 @@ pub struct TastePatch {
     pub skills: Option<Vec<SkillRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_cents: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_limit_min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_budget_cents: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -140,6 +222,12 @@ pub enum TasteField {
     SecondOpinion,
     Skills,
     Context,
+    Tier,
+    DefaultEffort,
+    MaxEffort,
+    BudgetCents,
+    TimeLimitMin,
+    BoxBudgetCents,
 }
 
 /// An account's tastes.
@@ -166,20 +254,18 @@ impl Profile {
                 autonomy: Autonomy::AskFirst,
                 review_diffs: true,
                 second_opinion: false,
-                skills: vec![],
-                context: vec![],
+                ..balanced()
             }),
             Profile::Balanced => Some(balanced()),
             Profile::Aggressive => Some(Taste {
                 strategy: Strategy::StrongestFirst,
                 ladder: ladder(&[OPUS]),
                 hard_model: Some(ModelRef::named(OPUS)),
-                parallel: 6,
+                parallel: 8,
                 autonomy: Autonomy::ReportAtEnd,
                 review_diffs: false,
                 second_opinion: true,
-                skills: vec![],
-                context: vec![],
+                ..balanced()
             }),
             Profile::Custom => None,
         }
@@ -195,12 +281,18 @@ fn balanced() -> Taste {
         strategy: Strategy::EscalateOnFailure,
         ladder: ladder(&["glm-5.3", "claude-sonnet-5-5", OPUS]),
         hard_model: Some(ModelRef::named(OPUS)),
-        parallel: 3,
+        parallel: 5,
         autonomy: Autonomy::DecideAndTell,
         review_diffs: true,
         second_opinion: false,
         skills: vec![],
         context: vec![],
+        tier: Tier::High,
+        default_effort: None,
+        max_effort: Effort::Max,
+        budget_cents: 0,
+        time_limit_min: DEFAULT_TIME_LIMIT_MIN,
+        box_budget_cents: 0,
     }
 }
 
@@ -210,16 +302,54 @@ impl Default for Taste {
     }
 }
 
+/// The workers at once each preset had before the defaults rose. Economical kept its 2, so it is
+/// not here. A taste stored with exactly one of these presets' knobs was that preset rather than a
+/// choice, so it reads as the preset again instead of turning Custom.
+const OLD_PRESET_PARALLEL: [(Profile, u32); 2] = [(Profile::Balanced, 3), (Profile::Aggressive, 6)];
+
 impl Taste {
+    /// The preset whose knobs these are. Skills, context and the limits other than `parallel`
+    /// belong to no preset.
     pub fn profile(&self) -> Profile {
-        let knobs = Taste { skills: vec![], context: vec![], ..self.clone() };
+        let knobs = Taste { parallel: self.parallel, ..self.style() };
         Profile::PRESETS.into_iter().find(|p| p.preset().as_ref() == Some(&knobs)).unwrap_or(Profile::Custom)
     }
 
-    /// Sets every knob but skills and context to the preset's. `Custom` changes nothing.
+    /// Sets every knob a preset has to the preset's. `Custom` changes nothing.
     pub fn apply(&mut self, profile: Profile) {
         if let Some(preset) = profile.preset() {
-            *self = Taste { skills: std::mem::take(&mut self.skills), context: std::mem::take(&mut self.context), ..preset };
+            *self = Taste { strategy: preset.strategy, ladder: preset.ladder, hard_model: preset.hard_model, parallel: preset.parallel, autonomy: preset.autonomy, review_diffs: preset.review_diffs, second_opinion: preset.second_opinion, ..self.clone() };
+        }
+    }
+
+    /// This taste's style knobs over the default's everything else.
+    fn style(&self) -> Taste {
+        Taste { strategy: self.strategy, ladder: self.ladder.clone(), hard_model: self.hard_model.clone(), autonomy: self.autonomy, review_diffs: self.review_diffs, second_opinion: self.second_opinion, ..Taste::default() }
+    }
+
+    /// Takes the preset's new workers at once when this taste was stored as that preset on the
+    /// old defaults. Skills, context and the limits other than `parallel` belong to no preset, so
+    /// they never count, and a knob the account really chose leaves the taste Custom.
+    fn raise_parallel(&mut self) {
+        for (profile, old) in OLD_PRESET_PARALLEL {
+            let preset = profile.preset().unwrap();
+            let stored = Taste { parallel: self.parallel, ..self.style() };
+            let was_the_default = Taste { parallel: old, ..preset };
+            if stored == was_the_default {
+                self.parallel = preset.parallel;
+            }
+        }
+    }
+
+    pub fn limits(&self) -> Limits {
+        Limits {
+            parallel: self.parallel,
+            tier: self.tier,
+            default_effort: self.default_effort,
+            max_effort: self.max_effort,
+            budget_cents: self.budget_cents,
+            time_limit_min: self.time_limit_min,
+            box_budget_cents: self.box_budget_cents,
         }
     }
 
@@ -232,6 +362,12 @@ impl Taste {
         }
         if !(1..=MAX_PARALLEL).contains(&self.parallel) {
             return Err(format!("parallel workers go from 1 to {MAX_PARALLEL}"));
+        }
+        if !(1..=MAX_TIME_LIMIT_MIN).contains(&self.time_limit_min) {
+            return Err(format!("the time limit goes from 1 to {MAX_TIME_LIMIT_MIN} minutes"));
+        }
+        if self.default_effort.is_some_and(|effort| effort > self.max_effort) {
+            return Err("the default effort is above the most effort allowed".into());
         }
         Ok(())
     }
@@ -288,8 +424,113 @@ impl Taste {
             TasteField::SecondOpinion => self.second_opinion = default.second_opinion,
             TasteField::Skills => self.skills = default.skills,
             TasteField::Context => self.context = default.context,
+            TasteField::Tier => self.tier = default.tier,
+            TasteField::DefaultEffort => self.default_effort = default.default_effort,
+            TasteField::MaxEffort => self.max_effort = default.max_effort,
+            TasteField::BudgetCents => self.budget_cents = default.budget_cents,
+            TasteField::TimeLimitMin => self.time_limit_min = default.time_limit_min,
+            TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
         }
     }
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Taste::default().limits()
+    }
+}
+
+const RAISE: &str = "in Settings › Way of working";
+
+impl Limits {
+    /// The tighter of each limit, so a worker's own workers never get more than it has.
+    pub fn narrow(self, outer: Limits) -> Limits {
+        let cap = |a: u32, b: u32| if a == 0 || b == 0 { a.max(b) } else { a.min(b) };
+        let max_effort = self.max_effort.min(outer.max_effort);
+        Limits {
+            parallel: self.parallel.min(outer.parallel),
+            tier: self.tier.min(outer.tier),
+            default_effort: self.default_effort.or(outer.default_effort).map(|effort| effort.min(max_effort)),
+            max_effort,
+            budget_cents: cap(self.budget_cents, outer.budget_cents),
+            time_limit_min: self.time_limit_min.min(outer.time_limit_min),
+            box_budget_cents: cap(self.box_budget_cents, outer.box_budget_cents),
+        }
+    }
+
+    /// The effort a worker on `model` runs at: the one asked for, or the default. Refuses a model
+    /// above the tier, a call that names no model under a tier cap, and an effort above the most.
+    /// `claude` is the machine's Claude models, so a model its claude's menu added has its tier.
+    /// An effort outside the five levels, such as Cursor's `fast`, passes unranked.
+    pub fn admit(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
+        if self.tier < Tier::High {
+            let tier = self.tier.name();
+            let Some(model) = model else {
+                return Err(format!("name a model: this project allows models up to the {tier} tier, and a worker without one runs on its account's default. Pick a {tier} model from orchestrator_capabilities, or raise Tier {RAISE}"));
+            };
+            let cost = crate::delegate::cost_in(claude, model);
+            if cost > self.tier {
+                return Err(format!("{model} is a {}-tier model; this project allows up to {tier}. Pick a {tier} model or raise Tier {RAISE}", cost.name()));
+            }
+        }
+        let Some(asked) = effort else { return Ok(self.default_effort.map(|effort| effort.name().to_owned())) };
+        if Effort::parse(asked).is_some_and(|level| level > self.max_effort) {
+            let max = self.max_effort.name();
+            return Err(format!("effort {asked} is above {max}, the most this project allows. Ask for {max} or less, or raise Max effort {RAISE}"));
+        }
+        Ok(Some(asked.to_owned()))
+    }
+
+    pub fn time_limit_ms(&self) -> u64 {
+        u64::from(self.time_limit_min) * 60_000
+    }
+
+    /// Why a worker that spent `cost_usd` must stop, if it passed the budget.
+    pub fn over_budget(&self, cost_usd: Option<f64>) -> Option<String> {
+        let spent = cost_usd?;
+        (self.budget_cents > 0 && spent * 100.0 >= f64::from(self.budget_cents)).then(|| format!("pinned stopped it after it spent US$ {spent:.2}, its budget of {}", usd(self.budget_cents)))
+    }
+
+    /// A box's budget in USD: the one asked for, at most the box budget, which is also the default.
+    pub fn box_budget_usd(&self, asked: Option<f64>) -> Result<Option<f64>, String> {
+        if self.box_budget_cents == 0 {
+            return Ok(asked);
+        }
+        let ceiling = f64::from(self.box_budget_cents) / 100.0;
+        match asked {
+            Some(usd) if usd > ceiling + 1e-9 => Err(format!("a box may spend at most {}; name less, or raise Box budget {RAISE}", self::usd(self.box_budget_cents))),
+            Some(usd) => Ok(Some(usd)),
+            None => Ok(Some(ceiling)),
+        }
+    }
+
+    /// What a session that delegates is told about the limits pinned enforces.
+    pub fn hint(&self) -> String {
+        let effort = match self.default_effort {
+            Some(default) => format!("effort up to {} ({} when a call names none)", self.max_effort.name(), default.name()),
+            None => format!("effort up to {}", self.max_effort.name()),
+        };
+        let mut limits = vec![
+            match self.parallel {
+                1 => "one worker at a time".to_owned(),
+                n => format!("at most {n} workers at once"),
+            },
+            format!("models up to the {} tier", self.tier.name()),
+            effort,
+            format!("{} minutes per worker", self.time_limit_min),
+        ];
+        if self.budget_cents > 0 {
+            limits.push(format!("{} per worker", usd(self.budget_cents)));
+        }
+        if self.box_budget_cents > 0 {
+            limits.push(format!("{} per box", usd(self.box_budget_cents)));
+        }
+        format!("pinned enforces these delegation limits on delegate_task: {}. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it {RAISE} rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.", limits.join(", "))
+    }
+}
+
+fn usd(cents: u32) -> String {
+    format!("US$ {}.{:02}", cents / 100, cents % 100)
 }
 
 impl TastePatch {
@@ -311,6 +552,14 @@ impl TastePatch {
         put(&self.second_opinion, &mut taste.second_opinion);
         put(&self.skills, &mut taste.skills);
         put(&self.context, &mut taste.context);
+        put(&self.tier, &mut taste.tier);
+        if self.default_effort.is_some() {
+            taste.default_effort = self.default_effort;
+        }
+        put(&self.max_effort, &mut taste.max_effort);
+        put(&self.budget_cents, &mut taste.budget_cents);
+        put(&self.time_limit_min, &mut taste.time_limit_min);
+        put(&self.box_budget_cents, &mut taste.box_budget_cents);
     }
 
     /// Takes each field `newer` sets, and keeps the rest.
@@ -329,6 +578,12 @@ impl TastePatch {
         take(newer.second_opinion, &mut self.second_opinion);
         take(newer.skills, &mut self.skills);
         take(newer.context, &mut self.context);
+        take(newer.tier, &mut self.tier);
+        take(newer.default_effort, &mut self.default_effort);
+        take(newer.max_effort, &mut self.max_effort);
+        take(newer.budget_cents, &mut self.budget_cents);
+        take(newer.time_limit_min, &mut self.time_limit_min);
+        take(newer.box_budget_cents, &mut self.box_budget_cents);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -349,10 +604,26 @@ impl TastePatch {
         drop_same(&mut self.second_opinion, &base.second_opinion);
         drop_same(&mut self.skills, &base.skills);
         drop_same(&mut self.context, &base.context);
+        drop_same(&mut self.tier, &base.tier);
+        if self.default_effort.is_some() && self.default_effort == base.default_effort {
+            self.default_effort = None;
+        }
+        drop_same(&mut self.max_effort, &base.max_effort);
+        drop_same(&mut self.budget_cents, &base.budget_cents);
+        drop_same(&mut self.time_limit_min, &base.time_limit_min);
+        drop_same(&mut self.box_budget_cents, &base.box_budget_cents);
     }
 
     pub fn is_empty(&self) -> bool {
         *self == TastePatch::default()
+    }
+
+    /// Whether this patch sets only `parallel`, to the value `base`'s preset had before the
+    /// defaults rose. Such a patch was the old default, not a choice, so its project inherits the
+    /// base's new value again.
+    fn sets_only_old_parallel(&self, base: Profile) -> bool {
+        TastePatch { parallel: self.parallel, ..TastePatch::default() } == *self
+            && OLD_PRESET_PARALLEL.iter().any(|(profile, old)| *profile == base && self.parallel == Some(*old))
     }
 
     fn clear(&mut self, field: TasteField) {
@@ -366,11 +637,28 @@ impl TastePatch {
             TasteField::SecondOpinion => self.second_opinion = None,
             TasteField::Skills => self.skills = None,
             TasteField::Context => self.context = None,
+            TasteField::Tier => self.tier = None,
+            TasteField::DefaultEffort => self.default_effort = None,
+            TasteField::MaxEffort => self.max_effort = None,
+            TasteField::BudgetCents => self.budget_cents = None,
+            TasteField::TimeLimitMin => self.time_limit_min = None,
+            TasteField::BoxBudgetCents => self.box_budget_cents = None,
         }
     }
 }
 
 impl Tastes {
+    /// Reads tastes stored before the parallel defaults rose as what they were saved as: each
+    /// whole taste that was exactly a preset takes that preset's new workers at once, and a
+    /// project patch that set only the old default over its preset's base inherits the base
+    /// again. A knob the account really chose stays as it is.
+    pub fn take_raised_defaults(&mut self) {
+        self.orchestrator.raise_parallel();
+        self.captains.raise_parallel();
+        let base = self.captains.profile();
+        self.projects.retain(|_, patch| !patch.sets_only_old_parallel(base));
+    }
+
     pub fn resolve(&self, scope: &TasteScope) -> Taste {
         match scope {
             TasteScope::Orchestrator => self.orchestrator.clone(),
@@ -527,23 +815,27 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (1 to 8), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries). The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none). The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
     )
 }
 
-/// The tastes in `dir`'s `taste.json`. Without one, an `orchestration.json` from before tastes
-/// existed seeds the Capitães with its cost style's preset, written to `taste.json` so the seed
-/// outlives the style. None when neither is there, or when `taste.json` can't be read, which
-/// the seed must not overwrite.
+/// The tastes in `dir`'s `taste.json`, read as what they were saved as on the current parallel
+/// defaults. Without one, an `orchestration.json` from before tastes existed seeds the Capitães
+/// with its cost style's preset, written to `taste.json` so the seed outlives the style. None when
+/// neither is there, or when `taste.json` can't be read, which the seed must not overwrite.
 pub fn load(dir: Option<&Path>) -> Option<Tastes> {
     let dir = dir?;
     match std::fs::read(dir.join(FILE)) {
         Ok(bytes) => {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| eprintln!("pinned: {} is unreadable, so the default taste applies: {e}", dir.join(FILE).display()))
+                .map(|mut tastes: Tastes| {
+                    tastes.take_raised_defaults();
+                    tastes
+                })
                 .ok();
         }
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -552,8 +844,7 @@ pub fn load(dir: Option<&Path>) -> Option<Tastes> {
         }
         Err(_) => {}
     }
-    // Read as plain JSON, so this keeps working once `orchestration::Style` is gone.
-    let old: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(crate::orchestration::FILE)).ok()?).ok()?;
+    let old: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(OLD_FILE)).ok()?).ok()?;
     let profile = match old["style"].as_str()? {
         "economical" => Profile::Economical,
         "balanced" => Profile::Balanced,
@@ -565,6 +856,36 @@ pub fn load(dir: Option<&Path>) -> Option<Tastes> {
         eprintln!("pinned: could not save the taste seeded from the cost style: {e}");
     }
     Some(tastes)
+}
+
+/// Moves the old per-machine worker cap of `orchestration.json` into the tastes once: a cap below
+/// a scope's workers at once lowers it there, then the file goes. A machine linked to an account
+/// that already has tastes on the hub keeps the hub's; the cap reaches the hub only with the rest
+/// of this machine's tastes, when the account has none yet.
+pub fn migrate_worker_cap(dir: Option<&Path>) {
+    let Some(dir) = dir else { return };
+    let file = dir.join(OLD_FILE);
+    let Ok(bytes) = std::fs::read(&file) else { return };
+    load(Some(dir));
+    let cap = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|old| old["max_workers"].as_u64()).map(|cap| cap.clamp(1, u64::from(MAX_PARALLEL)) as u32);
+    if let Some(cap) = cap.filter(|cap| *cap < MAX_PARALLEL) {
+        let lowered = change(Some(dir), |tastes| {
+            for taste in [&mut tastes.orchestrator, &mut tastes.captains] {
+                taste.parallel = taste.parallel.min(cap);
+            }
+            for patch in tastes.projects.values_mut() {
+                patch.parallel = patch.parallel.map(|parallel| parallel.min(cap));
+            }
+            Ok(())
+        });
+        if let Err(e) = lowered {
+            eprintln!("pinned: could not move the worker cap of {} into the taste: {e}", file.display());
+            return;
+        }
+    }
+    if let Err(e) = std::fs::remove_file(&file) {
+        eprintln!("pinned: could not remove {}: {e}", file.display());
+    }
 }
 
 /// Reads `dir`'s tastes, applies `change` and writes them back, one change at a time. Nothing is
@@ -615,7 +936,7 @@ mod tests {
         let mut taste = Taste { skills: skills.clone(), context: context.clone(), ..Taste::default() };
         taste.apply(Profile::Aggressive);
         assert_eq!(taste.profile(), Profile::Aggressive);
-        assert_eq!((taste.parallel, taste.autonomy, &taste.skills, &taste.context), (6, Autonomy::ReportAtEnd, &skills, &context));
+        assert_eq!((taste.parallel, taste.autonomy, &taste.skills, &taste.context), (8, Autonomy::ReportAtEnd, &skills, &context));
         let before = taste.clone();
         taste.apply(Profile::Custom);
         assert_eq!(taste, before, "Custom changed a knob");
@@ -632,32 +953,38 @@ mod tests {
 
     #[test]
     fn a_project_resolves_as_the_captains_with_its_patch_on_top() {
-        let patch = TastePatch { parallel: Some(5), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
+        let patch = TastePatch { parallel: Some(4), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
         let tastes = Tastes { captains: preset(Profile::Economical), projects: BTreeMap::from([(SITE.to_owned(), patch)]), ..Tastes::default() };
         let expected = Taste {
             strategy: Strategy::CheapWithGuidance,
             ladder: vec![ModelRef::named("deepseek-v4.1-flash"), ModelRef::named("glm-5.3"), ModelRef::named("claude-opus-5-5")],
             hard_model: Some(ModelRef::named("claude-opus-5-5")),
-            parallel: 5,
+            parallel: 4,
             autonomy: Autonomy::ReportAtEnd,
             review_diffs: true,
             second_opinion: false,
             skills: vec![],
             context: vec![],
+            tier: Tier::High,
+            default_effort: None,
+            max_effort: Effort::Max,
+            budget_cents: 0,
+            time_limit_min: 480,
+            box_budget_cents: 0,
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");
-        assert_eq!(tastes.resolve(&TasteScope::Orchestrator).parallel, 3);
+        assert_eq!(tastes.resolve(&TasteScope::Orchestrator).parallel, 5);
     }
 
     #[test]
     fn a_project_field_set_to_the_inherited_value_is_dropped_and_an_empty_patch_goes() {
         let mut tastes = Tastes::default();
-        tastes.set(&site(), TastePatch { parallel: Some(5), autonomy: Some(Autonomy::DecideAndTell), ..TastePatch::default() }).unwrap();
-        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
+        tastes.set(&site(), TastePatch { parallel: Some(4), autonomy: Some(Autonomy::DecideAndTell), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4 } }));
         tastes.set(&site(), TastePatch { second_opinion: Some(true), ..TastePatch::default() }).unwrap();
-        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "second_opinion": true } }), "a later set merges");
-        tastes.set(&site(), TastePatch { parallel: Some(3), second_opinion: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4, "second_opinion": true } }), "a later set merges");
+        tastes.set(&site(), TastePatch { parallel: Some(5), second_opinion: Some(false), ..TastePatch::default() }).unwrap();
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({}));
     }
 
@@ -667,9 +994,12 @@ mod tests {
         tastes.set(&TasteScope::Captains, TastePatch { autonomy: Some(Autonomy::AskFirst), ..TastePatch::default() }).unwrap();
         assert_eq!(tastes.captains.autonomy, Autonomy::AskFirst);
         let before = tastes.clone();
-        let wide = TastePatch { parallel: Some(9), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
-        assert_eq!(tastes.set(&TasteScope::Captains, wide.clone()), Err("parallel workers go from 1 to 8".into()));
-        assert_eq!(tastes.set(&site(), wide), Err("parallel workers go from 1 to 8".into()));
+        let wide = TastePatch { parallel: Some(101), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
+        assert_eq!(tastes.set(&TasteScope::Captains, wide.clone()), Err("parallel workers go from 1 to 100".into()));
+        assert_eq!(tastes.set(&site(), wide), Err("parallel workers go from 1 to 100".into()));
+        let effort = TastePatch { default_effort: Some(Effort::Max), max_effort: Some(Effort::High), ..TastePatch::default() };
+        assert_eq!(tastes.set(&site(), effort), Err("the default effort is above the most effort allowed".into()));
+        assert_eq!(tastes.set(&TasteScope::Captains, TastePatch { time_limit_min: Some(0), ..TastePatch::default() }), Err("the time limit goes from 1 to 10080 minutes".into()));
         assert_eq!(tastes.set(&TasteScope::Orchestrator, TastePatch { ladder: Some(vec![]), ..TastePatch::default() }), Err("the model ladder needs at least one model".into()));
         assert_eq!(tastes.set(&TasteScope::Project { repo: " ".into() }, TastePatch::default()), Err("a project's taste needs the project's repo".into()));
         assert_eq!(tastes, before);
@@ -678,7 +1008,7 @@ mod tests {
     #[test]
     fn a_reset_makes_a_project_inherit_and_gives_the_captains_the_default() {
         let mut tastes = Tastes::default();
-        tastes.set(&site(), TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { parallel: Some(4), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
         tastes.reset(&site(), TasteField::Parallel);
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "review_diffs": false } }));
         tastes.reset(&site(), TasteField::ReviewDiffs);
@@ -701,7 +1031,7 @@ Review each worker's diff before you accept its work."
         );
         assert_eq!(
             preset(Profile::Balanced).brief(),
-            "Run up to 3 workers at once.
+            "Run up to 5 workers at once.
 Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Decide on your own and tell the user what you decided.
@@ -709,7 +1039,7 @@ Review each worker's diff before you accept its work."
         );
         assert_eq!(
             preset(Profile::Aggressive).brief(),
-            "Run up to 6 workers at once.
+            "Run up to 8 workers at once.
 Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
@@ -745,19 +1075,21 @@ Deploys go through the VPS."
 
     #[test]
     fn tastes_travel_as_json_with_a_project_naming_only_its_own_fields() {
-        let patch = TastePatch { parallel: Some(5), hard_model: Some(ModelRef { provider: Some("cursor".into()), model: "grok-4.7".into() }), ..TastePatch::default() };
+        let patch = TastePatch { parallel: Some(4), hard_model: Some(ModelRef { provider: Some("cursor".into()), model: "grok-4.7".into() }), ..TastePatch::default() };
         let tastes = Tastes { orchestrator: preset(Profile::Aggressive), projects: BTreeMap::from([(SITE.to_owned(), patch)]), ..Tastes::default() };
         let opus = json!({ "model": "claude-opus-5-5" });
         let json = json!({
             "orchestrator": {
-                "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+                "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 8, "autonomy": "report_at_end",
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+                "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
-                "parallel": 3, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
+                "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
+                "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
             },
-            "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 5 } },
+            "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
         assert_eq!(serde_json::from_value::<Tastes>(json).unwrap(), tastes);
@@ -767,12 +1099,12 @@ Deploys go through the VPS."
     }
 
     #[test]
-    fn check_refuses_an_empty_ladder_a_nameless_model_and_more_than_eight_workers() {
+    fn check_refuses_an_empty_ladder_a_nameless_model_and_more_than_a_hundred_workers() {
         assert_eq!(Taste::default().check(), Ok(()));
         assert_eq!(Taste { ladder: vec![], ..Taste::default() }.check(), Err("the model ladder needs at least one model".into()));
         assert_eq!(Taste { hard_model: Some(ModelRef::named(" ")), ..Taste::default() }.check(), Err("every model needs a name".into()));
-        assert_eq!(Taste { parallel: 9, ..Taste::default() }.check(), Err("parallel workers go from 1 to 8".into()));
-        assert_eq!(Taste { parallel: 0, ..Taste::default() }.check(), Err("parallel workers go from 1 to 8".into()));
+        assert_eq!(Taste { parallel: 101, ..Taste::default() }.check(), Err("parallel workers go from 1 to 100".into()));
+        assert_eq!(Taste { parallel: 0, ..Taste::default() }.check(), Err("parallel workers go from 1 to 100".into()));
         let project = TastePatch { ladder: Some(vec![]), ..TastePatch::default() };
         let tastes = Tastes { projects: BTreeMap::from([(SITE.to_owned(), project)]), ..Tastes::default() };
         assert_eq!(tastes.check(), Err("the model ladder needs at least one model".into()), "a project is checked resolved");
@@ -815,15 +1147,175 @@ Deploys go through the VPS."
     }
 
     #[test]
+    fn a_taste_stored_on_the_old_parallel_defaults_loads_as_its_preset_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = Tastes {
+            orchestrator: Taste { parallel: 6, ..preset(Profile::Aggressive) },
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            ..Tastes::default()
+        };
+        save(&stored, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!((loaded.orchestrator.profile(), loaded.orchestrator.parallel), (Profile::Aggressive, 8));
+        assert_eq!((loaded.captains.profile(), loaded.captains.parallel), (Profile::Balanced, 5));
+        let written: Tastes = serde_json::from_slice(&std::fs::read(dir.path().join("taste.json")).unwrap()).unwrap();
+        assert_eq!(written, stored, "the upgrade reads, it does not rewrite");
+
+        let chosen = Taste { parallel: 4, ..preset(Profile::Balanced) };
+        save(&Tastes { captains: chosen.clone(), ..Tastes::default() }, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!((loaded.captains.profile(), loaded.captains.parallel), (Profile::Custom, 4), "a value the account really chose stays");
+    }
+
+    #[test]
+    fn a_project_patch_that_set_only_the_old_default_inherits_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = Tastes {
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&stored, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(serde_json::to_value(&loaded.projects).unwrap(), json!({}), "the patch was the old default, so the project inherits again");
+        assert_eq!(loaded.resolve(&site()).parallel, 5);
+
+        let with_more = Tastes {
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), review_diffs: Some(false), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&with_more, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(loaded.resolve(&site()).parallel, 3, "a patch that sets more than the old default is a choice and stays");
+
+        let over_a_choice = Tastes {
+            captains: Taste { parallel: 4, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&over_a_choice, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(
+            (loaded.captains.profile(), loaded.resolve(&site()).parallel),
+            (Profile::Custom, 3),
+            "a patch over a base that is no preset was chosen, so it stays"
+        );
+    }
+
+    #[test]
     fn a_change_to_the_file_lands_and_a_refused_one_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let changed = change(Some(dir.path()), |tastes| tastes.set(&site(), TastePatch { parallel: Some(5), ..TastePatch::default() })).unwrap();
+        let changed = change(Some(dir.path()), |tastes| tastes.set(&site(), TastePatch { parallel: Some(4), ..TastePatch::default() })).unwrap();
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join("taste.json")).unwrap()).unwrap();
-        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }));
+        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 4 } }));
         assert_eq!(serde_json::from_value::<Tastes>(written).unwrap(), changed);
         let refused = change(Some(dir.path()), |tastes| tastes.set(&TasteScope::Captains, TastePatch { parallel: Some(0), ..TastePatch::default() }));
-        assert_eq!(refused, Err("parallel workers go from 1 to 8".into()));
+        assert_eq!(refused, Err("parallel workers go from 1 to 100".into()));
         assert_eq!(load(Some(dir.path())), Some(changed));
     }
-}
 
+    #[test]
+    fn a_projects_limits_beat_the_captains_and_a_preset_leaves_them_alone() {
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { tier: Some(Tier::Mid), budget_cents: Some(500), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { tier: Some(Tier::Low), time_limit_min: Some(60), default_effort: Some(Effort::Medium), ..TastePatch::default() }).unwrap();
+        assert_eq!(
+            tastes.resolve(&site()).limits(),
+            Limits { parallel: 5, tier: Tier::Low, default_effort: Some(Effort::Medium), max_effort: Effort::Max, budget_cents: 500, time_limit_min: 60, box_budget_cents: 0 }
+        );
+        assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).limits().tier, Tier::Mid, "a project with no patch has the Captains' limits");
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "tier": "low", "default_effort": "medium", "time_limit_min": 60 } }));
+        tastes.reset(&site(), TasteField::Tier);
+        assert_eq!(tastes.resolve(&site()).limits().tier, Tier::Mid, "a reset project inherits the tier again");
+
+        let mut captains = tastes.captains.clone();
+        assert_eq!(captains.profile(), Profile::Balanced, "limits other than workers at once make no preset Custom");
+        captains.apply(Profile::Aggressive);
+        assert_eq!((captains.parallel, captains.tier, captains.budget_cents), (8, Tier::Mid, 500), "a preset sets workers at once and keeps the other limits");
+    }
+
+    #[test]
+    fn a_narrowed_limit_is_the_tighter_of_the_two_and_no_cap_is_the_loosest() {
+        let project = Limits { parallel: 5, tier: Tier::High, default_effort: None, max_effort: Effort::Max, budget_cents: 0, time_limit_min: 480, box_budget_cents: 300 };
+        let parent = Limits { parallel: 2, tier: Tier::Mid, default_effort: Some(Effort::Xhigh), max_effort: Effort::High, budget_cents: 200, time_limit_min: 90, box_budget_cents: 0 };
+        let narrowed = Limits { parallel: 2, tier: Tier::Mid, default_effort: Some(Effort::High), max_effort: Effort::High, budget_cents: 200, time_limit_min: 90, box_budget_cents: 300 };
+        assert_eq!(project.narrow(parent), narrowed);
+        assert_eq!(parent.narrow(project), narrowed);
+    }
+
+    #[test]
+    fn admit_checks_the_tier_and_the_effort_and_fills_the_default() {
+        let known = crate::claude_models::known();
+        let limits = Limits { tier: Tier::Mid, default_effort: Some(Effort::Medium), max_effort: Effort::High, ..Limits::default() };
+        assert_eq!(limits.admit(Some("glm-5.3"), None, &known), Ok(Some("medium".into())));
+        assert_eq!(limits.admit(Some("deepseek-v4.1-flash"), Some("high"), &known), Ok(Some("high".into())));
+        assert_eq!(limits.admit(Some("composer-2.5"), Some("fast"), &known), Ok(Some("fast".into())), "a level outside the five passes");
+        assert_eq!(limits.admit(Some("kimi-k3.1-pro"), None, &known), Err("kimi-k3.1-pro is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(limits.admit(Some("glm-5.3"), Some("xhigh"), &known), Err("effort xhigh is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working".into()));
+        assert_eq!(Limits::default().admit(None, None, &known), Ok(None), "with no tier cap a call may leave the model and the effort to the account");
+    }
+
+    #[test]
+    fn the_tier_cap_sees_a_model_claudes_menu_added_at_its_familys_tier() {
+        use crate::claude_models::{known, merged, MenuRow};
+        let menu = [MenuRow { menu: "Fable".into(), version: "5.3".into() }, MenuRow { menu: "Haiku".into(), version: "5.5".into() }];
+        let learned = merged(known(), &menu);
+        let low = Limits { tier: Tier::Low, ..Limits::default() };
+        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Err("claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(Limits { tier: Tier::Mid, ..Limits::default() }.admit(Some("claude-fable-5-3"), None, &learned), Ok(None));
+
+        let mut cheap_fable = known();
+        cheap_fable.iter_mut().filter(|m| m.slug.starts_with("claude-fable-")).for_each(|m| m.cost = crate::delegate::Cost::Low);
+        let learned = merged(cheap_fable, &menu);
+        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Ok(None), "the family's tier, not the words of the id, which say mid");
+    }
+
+    #[test]
+    fn the_box_budget_is_the_default_and_the_ceiling_of_a_boxs_budget() {
+        let limits = Limits { box_budget_cents: 250, ..Limits::default() };
+        assert_eq!(limits.box_budget_usd(None), Ok(Some(2.5)));
+        assert_eq!(limits.box_budget_usd(Some(1.0)), Ok(Some(1.0)));
+        assert_eq!(limits.box_budget_usd(Some(3.0)), Err("a box may spend at most US$ 2.50; name less, or raise Box budget in Settings › Way of working".into()));
+        assert_eq!(Limits::default().box_budget_usd(None), Ok(None), "no box budget sets none");
+        assert_eq!(Limits::default().box_budget_usd(Some(40.0)), Ok(Some(40.0)));
+    }
+
+    #[test]
+    fn a_session_is_told_each_limit_pinned_enforces() {
+        assert_eq!(
+            Limits::default().hint(),
+            "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the high tier, effort up to max, 480 minutes per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
+        );
+        let tight = Limits { parallel: 1, tier: Tier::Low, default_effort: Some(Effort::Low), max_effort: Effort::Medium, budget_cents: 150, time_limit_min: 45, box_budget_cents: 1000 };
+        assert_eq!(
+            tight.hint(),
+            "pinned enforces these delegation limits on delegate_task: one worker at a time, models up to the low tier, effort up to medium (low when a call names none), 45 minutes per worker, US$ 1.50 per worker, US$ 10.00 per box. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
+        );
+        assert_eq!(tight.over_budget(Some(1.49)), None);
+        assert_eq!(tight.over_budget(None), None, "an unpriced worker can't be held to a budget");
+        assert_eq!(tight.over_budget(Some(1.5)), Some("pinned stopped it after it spent US$ 1.50, its budget of US$ 1.50".into()));
+        assert_eq!(Limits::default().over_budget(Some(1000.0)), None, "no budget, no stop");
+    }
+
+    #[test]
+    fn the_old_worker_cap_lowers_each_scope_once_and_the_file_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seeded = Tastes::default();
+        seeded.set(&site(), TastePatch { parallel: Some(6), ..TastePatch::default() }).unwrap();
+        seeded.set(&TasteScope::Project { repo: "github.com/acme/api".into() }, TastePatch { parallel: Some(1), ..TastePatch::default() }).unwrap();
+        save(&seeded, Some(dir.path())).unwrap();
+        std::fs::write(dir.path().join("orchestration.json"), r#"{"max_workers":2}"#).unwrap();
+        migrate_worker_cap(Some(dir.path()));
+        let moved = load(Some(dir.path())).unwrap();
+        assert_eq!((moved.orchestrator.parallel, moved.captains.parallel), (2, 2));
+        assert_eq!(serde_json::to_value(&moved.projects).unwrap(), json!({ "github.com/acme/api": { "parallel": 1 }, "github.com/acme/site": { "parallel": 2 } }));
+        assert!(!dir.path().join("orchestration.json").exists(), "the old file is gone, so the cap moves once");
+
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(fresh.path().join("orchestration.json"), r#"{"style":"quality","max_workers":100}"#).unwrap();
+        migrate_worker_cap(Some(fresh.path()));
+        assert_eq!(load(Some(fresh.path())).map(|t| (t.captains.profile(), t.captains.parallel)), Some((Profile::Aggressive, 8)), "the default cap lowers nothing, and the style still seeds");
+        assert!(!fresh.path().join("orchestration.json").exists());
+    }
+}

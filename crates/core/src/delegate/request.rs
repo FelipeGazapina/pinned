@@ -36,6 +36,11 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             return Err(format!("{effort:?} is not an effort"));
         }
     }
+    let machine = optional_str(&target["machine"]);
+    let boxed = box_from(&target["box"])?;
+    if machine.is_some() && boxed.is_some() {
+        return Err("pass target.machine or target.box, not both".into());
+    }
     let isolation = match args["isolation"].as_str() {
         None | Some("shared") => Isolation::Shared,
         Some("worktree") => Isolation::Worktree,
@@ -61,12 +66,13 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value.as_u64().filter(|ms| *ms > 0).map(Some).ok_or(format!("{key} must be a number of milliseconds above 0")),
     };
-    let limit_ms = millis("limitMs")?.unwrap_or(DEFAULT_LIMIT_MS);
-    let budget_ms = match millis("budgetMs")? {
-        Some(ms) if ms >= limit_ms => return Err(format!("budgetMs must be below limitMs, which is {limit_ms} ms; pass a larger limitMs")),
-        Some(ms) => ms,
-        None => DEFAULT_BUDGET_MS.min(limit_ms / 2),
-    };
+    let limit_ms = millis("limitMs")?;
+    let budget_ms = millis("budgetMs")?;
+    if let (Some(budget), Some(limit)) = (budget_ms, limit_ms) {
+        if budget >= limit {
+            return Err(format!("budgetMs must be below limitMs, which is {limit} ms; pass a larger limitMs"));
+        }
+    }
     let interaction = match args["interactionMode"].as_str() {
         None | Some("inherit") => Interaction::Inherit,
         Some("default") => Interaction::Default,
@@ -102,6 +108,8 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             model,
             effort,
             driver_kind,
+            machine,
+            boxed,
         },
         isolation,
         mode,
@@ -114,6 +122,18 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         tools,
         client_request_id,
     })
+}
+
+/// The budget notice and the run limit, in ms, under a time limit of `ceiling_ms`: the limit asked
+/// for, at most the ceiling, which is also the default; the notice asked for, or else two hours
+/// and at most half the limit.
+pub fn run_limits(budget_ms: Option<u64>, limit_ms: Option<u64>, ceiling_ms: u64) -> Result<(u64, u64), String> {
+    let limit = limit_ms.map_or(ceiling_ms, |ms| ms.min(ceiling_ms));
+    match budget_ms {
+        Some(ms) if ms >= limit => Err(format!("budgetMs must be below the run limit, which is {limit} ms; ask for less, or raise Time limit in Settings › Way of working")),
+        Some(ms) => Ok((ms, limit)),
+        None => Ok((DEFAULT_BUDGET_MS.min(limit / 2), limit)),
+    }
 }
 
 fn account_from(target: &Value) -> Result<(Option<String>, Option<String>), String> {
@@ -150,6 +170,21 @@ fn driver_provider(kind: &str) -> Result<Provider, String> {
         "codex" => Ok(Provider::Codex),
         "cursor" => Ok(Provider::Cursor),
         other => Err(format!("driverKind must be claude, codex, or cursor, not {other:?}")),
+    }
+}
+
+/// A `box` field that reads `true` or `{ size?, repo? }`, as `send_to_captain` takes it.
+pub fn box_or_true<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<BoxTarget>, D::Error> {
+    box_from(&Value::deserialize(de)?).map_err(serde::de::Error::custom)
+}
+
+/// `target.box`: `true`, or `{ size?, repo? }`.
+fn box_from(value: &Value) -> Result<Option<BoxTarget>, String> {
+    match value {
+        Value::Null | Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(BoxTarget::default())),
+        Value::Object(_) => serde_json::from_value(value.clone()).map(Some).map_err(|e| format!("target.box: {e}")),
+        other => Err(format!("target.box must be true or {{ size, repo }}, not {other}")),
     }
 }
 

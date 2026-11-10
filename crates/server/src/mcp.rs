@@ -751,6 +751,7 @@ mod tests {
             prompt_title: None,
             role: None,
             spawned_by: None,
+            spawned_on: None,
             orchestrator_global: false,
             taste_chat: false,
             orchestrator_turn: false,

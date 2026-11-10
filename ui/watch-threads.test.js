@@ -54,6 +54,7 @@ test("a hub hello sends the current watch again", () => {
   sandbox.hub = { hub: () => Promise.resolve() };
   sandbox.onHubSettings = () => {};
   sandbox.showAgentConsent = () => {};
+  sandbox.marksHub = { hello: () => Promise.resolve() };
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const start = main.indexOf("    hello(frame) {");
   const end = main.indexOf("    machines:", start);
@@ -157,6 +158,8 @@ function page() {
       transport,
     },
     closing: new Set(),
+    marksHub: { leave() {} },
+    TAURI: null,
     viewListeners: [],
     document: { hidden: false, body: { dataset: {} } },
     guiOn: () => true,
@@ -182,6 +185,7 @@ function page() {
     refreshProjects() {},
     retryUploadImages() {},
     refreshSyncStopped() {},
+    resetAgentSurface() {},
     settingsOpen: () => false,
     render: () => sandbox.publishThreadWatch(),
     POLL_MS: 1200,

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Two people on one invite hub. The stack's account (Ana) makes invite codes in Settings, Bruno
 // creates his own account with one on the sign-in screen and pairs his own node, and each
-// account's orchestrator, sessions, projects page and memory show nothing of the other.
+// account's orchestrator, sessions, projects page and memory show nothing of the other. The app's
+// login is locked, so Ana's first invite asks for her password, which the script types.
 //
 //   SWEEP_SIGNUP=invite SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... CHROME_BIN=... node scripts/web-sweep/invite.js
@@ -55,6 +56,17 @@ const waitFor = async (what, fn, timeout = 20000) => {
   throw new Error(`timed out waiting for ${what}`);
 };
 const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, name) });
+
+/** The password prompt the hub's LOCKED answer opens on a call only the account's owner makes, such
+ * as the first invite code: the account's password closes it and the held call is sent again. The
+ * page asks once, so every call after it runs. */
+async function unlock(page, person) {
+  await page.waitForSelector("dialog[open] form [name=password]", { timeout: 20000 });
+  check((await page.textContent("dialog[open] form h3")) === "Enter your password", `${person.who}: the invite asks for the password`);
+  await page.fill("dialog[open] form [name=password]", person.password);
+  await page.click("dialog[open] form button.primary");
+  await waitFor(`${person.who}'s prompt to close`, () => page.evaluate(() => !document.querySelector("dialog[open]")));
+}
 
 async function signupStatus(body) {
   const res = await fetch(`${HUB}/api/signup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -174,6 +186,7 @@ function sawNothingOf(view, other) {
   await openAccountPage(ana);
   check(/Create an invite code/.test(await ana.textContent(".card.invites")), "no invite button");
   await ana.click('[data-action="create-invite"]');
+  await unlock(ana, ANA);
   await ana.waitForSelector(".card.invites .row.command code");
   const revokedCode = await ana.textContent(".card.invites .row.command code");
   await ana.click('[data-action="create-invite"]');

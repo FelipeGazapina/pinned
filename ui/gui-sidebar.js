@@ -38,11 +38,9 @@ const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", 
  * manual settles and un-settles, snoozes, renames, and threads kept out of auto-settle. */
 const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
 try {
-  const saved = JSON.parse(load("gui-marks")) ?? {};
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) sideMarks[m] = sessionsOnly(saved[m]);
-  for (const m of ["pins", "order"]) sideMarks[m] = (saved[m] ?? []).filter((k) => k.startsWith("session:"));
+  Object.assign(sideMarks, storedSideMarks(JSON.parse(load("gui-marks"))));
 } catch {}
-const saveMarks = () => save("gui-marks", JSON.stringify(sideMarks));
+const saveMarks = () => storeMarks("gui-marks");
 onRekey((from, to) => {
   for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].map((k) => (k === from ? to : k));
   for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
@@ -72,7 +70,32 @@ let archived = [];
 try {
   archived = JSON.parse(load("gui-archived")) ?? [];
 } catch {}
-const saveArchived = () => save("gui-archived", JSON.stringify(archived));
+const saveArchived = () => storeMarks("gui-archived");
+/** Marks, seen times and the archive live on the account's hub once it keeps them (marks.js), and
+ * always in this browser's storage too. */
+const MARK_STORES = { "gui-marks": () => sideMarks, "gui-archived": () => archived, "gui-seen": () => seenAt };
+const storeMarks = (key) => {
+  save(key, JSON.stringify(MARK_STORES[key]()));
+  marksHub.saved();
+};
+const marksHub = marksSync({
+  read: () => ({ sideMarks, seenAt, archived: archived.map((entry) => ({ ...entry, machine: hubIdOf(entry.machine) })) }),
+  write(state) {
+    // A settle that came from the hub ran its settle script on the device that made it.
+    for (const [key, at] of Object.entries(state.sideMarks.settled)) if (sideMarks.settled[key] !== at) settledSeen.add(key);
+    Object.assign(sideMarks, state.sideMarks);
+    seenAt = state.seenAt;
+    archived = state.archived.map((entry) => ({ ...entry, machine: localIdOf(entry.machine) }));
+  },
+  persist: () => Object.keys(MARK_STORES).forEach((key) => save(key, JSON.stringify(MARK_STORES[key]()))),
+  load,
+  save,
+  call: (call) => (hub ? hub.hub(call) : Promise.reject("not connected to the hub")),
+  changed() {
+    render();
+    if (settingsOpen() && page === "archive") showArchive();
+  },
+});
 /** Rows picked with ⌘-click and Shift-click, by tab key, and where a Shift-click range starts. */
 const selected = new Set();
 let selectFrom = null;
@@ -209,8 +232,13 @@ const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) =>
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[threadKey(tab)] = lastActivity(tab);
-  save("gui-seen", JSON.stringify(seenAt));
+  const key = threadKey(tab);
+  // Seen only moves forward, so two devices showing one thread never take it back from each other.
+  const seen = Math.max(seenAt[key] || 0, lastActivity(tab));
+  if (seenAt[key] !== seen) {
+    seenAt[key] = seen;
+    storeMarks("gui-seen");
+  }
   if (wokeNow(tab)) {
     delete sideMarks.snoozed[threadKey(tab)];
     saveMarks();
@@ -303,29 +331,37 @@ function snoozeLimitStops() {
   }
 }
 
-/** The fixed rows above the projects: the global orchestrator's own row, with how many threads
- * wait on Felipe, then those threads. The row names the orchestrator as its settings do and its host
- * machine under that. Empty while no machine can hold the conversation. */
+/** The fixed rows above the projects: the global orchestrator's own row, with how many things
+ * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
+ * orchestrator as its settings do and its host machine under that, and is left out while no
+ * machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
   const host = globalHostMachine();
-  if (!host) return [];
-  const waiting = globalWaitingRows();
-  const row = document.createElement("button");
-  row.type = "button";
-  row.className = "global-row";
-  row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
-  row.dataset.globalOpen = "true";
-  const count = waiting.length ? `<span class="count" title="${waiting.length} waiting on you">${waiting.length}</span>` : "";
-  row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
-  if (!waiting.length) return [row];
+  const asks = agentWaitingRows();
+  if (!host && !asks.length) return [];
+  const threads = globalWaitingRows();
+  const waiting = [...asks, ...threads];
+  const n = agentConfirmations.length + threads.length;
+  const top = [];
+  if (host) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "global-row";
+    row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
+    row.dataset.globalOpen = "true";
+    const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
+    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
+    top.push(row);
+  }
+  if (!waiting.length) return top;
   const head = document.createElement("button");
   head.type = "button";
   head.className = "waiting-head";
   head.dataset.shelf = "waiting";
   head.setAttribute("aria-expanded", ui.waitingOpen);
-  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span><span class="count">${waiting.length}</span>${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-  return [row, head, ...(ui.waitingOpen ? waiting : [])];
+  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+  return [...top, head, ...(ui.waitingOpen ? waiting : [])];
 }
 
 /** What each `waitingKindOf` answer reads as, and the tone of its dot. */
@@ -398,7 +434,7 @@ function spawnTree(list) {
   const byId = new Map(list.map((t) => [`${t.machine}:${t.view.id}`, t]));
   const roots = [];
   const kids = new Map();
-  const parentOf = (t) => t.view.spawned_by && byId.get(`${t.machine}:${t.view.spawned_by}`);
+  const parentOf = (t) => t.view.spawned_by && byId.get(spawnerKey(t));
   // A thread whose spawner chain leads back to itself has no top to hang from, so it stands on its own.
   const loops = (tab) => {
     const seen = new Set();
@@ -1028,7 +1064,7 @@ function discardDraft(tab) {
 }
 function markUnread(tab) {
   seenAt[threadKey(tab)] = 0;
-  save("gui-seen", JSON.stringify(seenAt));
+  storeMarks("gui-seen");
   renderSidebar();
 }
 
@@ -1300,6 +1336,7 @@ threadList.addEventListener("click", (e) => {
   const projectsLink = e.target.closest("[data-global-projects]");
   if (projectsLink && typeof openGlobalProjects === "function") return openGlobalProjects();
   if (e.target.closest("[data-global-open]")) return openGlobalChat();
+  if (e.target.closest("[data-agent]")) return agentSurfaceClick(e);
   const waiting = e.target.closest(".waiting-row");
   if (waiting) {
     const tab = tabByKey(waiting.dataset.waiting);

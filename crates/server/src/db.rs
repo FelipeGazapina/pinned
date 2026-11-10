@@ -2,7 +2,7 @@
 //! are stored as their sha256, so the database alone can't sign anyone in. A second, optional
 //! database keeps what users chose to share to improve the app, such as rated dictations.
 
-use crate::boxes::{BoxRow, Phase, Remains};
+use crate::boxes::{BoxRow, BoxWork, Opener, Phase, Remains};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
@@ -10,10 +10,13 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
+use pinned_core::delegate::TaskRecord;
+use pinned_core::marks::{self, MarkChange, SessionMarks};
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
-use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite};
+use pinned_core::surface::{ActorRole, AuditEntry, AuditOutcome, Confirmation, Decision};
+use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite, NEVER_EXPIRES};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -21,6 +24,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -33,15 +37,22 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   name text not null, os text not null, token_hash bytea unique not null,
   created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
 alter table machines add column if not exists version text not null default '';
+-- Set once an app that asks for the password signs in with the login: the login alone then runs
+-- no call only the account's owner makes (`surface::owner_only`).
+alter table logins add column if not exists locked boolean not null default false;
 -- Null until the account first sets or imports its tastes.
 alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
 -- A code one account made that lets one person create their own account, on a hub in invite mode.
+-- It lives until it is used or revoked. Rows made before 0.17.22 carried a 7-day date, which
+-- nothing reads anymore and this clears.
 create table if not exists invites (id uuid primary key, code_hash bytea unique not null,
   account uuid not null references accounts on delete cascade, hint text not null,
-  created_at timestamptz not null default now(), expires_at timestamptz not null,
+  created_at timestamptz not null default now(), expires_at timestamptz,
   used_by uuid references accounts on delete set null, used_at timestamptz);
+alter table invites alter column expires_at drop not null;
+update invites set expires_at = null where used_at is null and expires_at is not null;
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
   path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
   primary key (account, project, path));
@@ -73,6 +84,33 @@ create table if not exists agent_sessions (id uuid primary key, grant_id uuid no
 create table if not exists agent_calls (grant_id uuid not null references agent_grants on delete cascade, key text not null,
   tool text not null, args_hash bytea not null, state text not null, session uuid, result jsonb,
   created_at timestamptz not null default now(), primary key (grant_id, key));
+-- One finished delegated task per row, as the machine that ran it last sent it. `ended` is unix
+-- milliseconds. A removed machine's rows stay: they are the account's history.
+create table if not exists delegation_tasks (account uuid not null references accounts on delete cascade,
+  machine uuid not null, id text not null, ended bigint not null, record jsonb not null,
+  primary key (account, machine, id));
+create index if not exists delegation_tasks_ended on delegation_tasks (account, ended);
+-- One conversation's marks per row, as the `marks::SessionMarks` it holds. A session with no mark has no row.
+create table if not exists session_marks (account uuid not null references accounts on delete cascade,
+  session text not null, marks jsonb not null, updated timestamptz not null default now(),
+  primary key (account, session));
+-- What agents did as the user: one row per act, refusal, or decision on a confirmation.
+create table if not exists agent_actions (id uuid primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, role text not null, action text not null, args text not null,
+  outcome text not null, detail text not null default '', request_id text, at timestamptz not null default now());
+create index if not exists agent_actions_at on agent_actions (account, at desc);
+create index if not exists agent_actions_request on agent_actions (account, machine, tab, action, request_id) where request_id is not null;
+-- A confirm act that waits on the user's approval in the app, then what they decided and it came to.
+-- `notified` turns true once the session that asked has the notice.
+create table if not exists agent_confirmations (id uuid primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, session text, role text not null, title text not null default '',
+  action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
+  decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
+  target text, result jsonb, unique (account, machine, tab, action, request_id));
+-- A box an agent opened through act, until the box ends and is recorded as that session's task.
+-- `started` is unix milliseconds.
+create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, role text not null, started bigint not null);
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -94,6 +132,9 @@ const LOGIN_IDLE_DAYS: i32 = 90;
 pub struct Db {
     sealer: Sealer,
     connection: Connection,
+    /// Opened on first use. The shared connection pipelines every caller's statements, so a
+    /// transaction there would take in other callers' statements too.
+    transactions: Arc<tokio::sync::Mutex<Option<Client>>>,
 }
 
 /// The learning database. It holds no accounts, so its rows name the account only by id.
@@ -163,6 +204,61 @@ pub enum Invited {
     NoInvite,
     /// The code is good but the email is taken. The code stays unused.
     EmailTaken,
+}
+
+/// An audit row as an act writes it.
+pub struct Audit<'a> {
+    pub account: Uuid,
+    pub machine: Uuid,
+    pub tab: &'a str,
+    pub role: ActorRole,
+    pub action: &'a str,
+    pub args: &'a str,
+    pub outcome: AuditOutcome,
+    pub detail: &'a str,
+    pub request_id: Option<&'a str>,
+}
+
+/// A login token's account, and whether an app locked it (`Db::login`).
+pub struct Login {
+    pub account: Uuid,
+    pub locked: bool,
+}
+
+/// A confirmation as the hub keeps it: what the user sees, and the Claude session that asked,
+/// which finds its tab after a restart.
+pub struct Held {
+    pub confirmation: Confirmation,
+    pub session: Option<String>,
+    /// What running it answered, as the agent may see it.
+    pub result: Value,
+}
+
+const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result";
+
+fn held(r: &tokio_postgres::Row) -> Held {
+    let role: String = r.get(6);
+    let action: String = r.get(7);
+    let decided_at: Option<i64> = r.get(11);
+    let confirmation = Confirmation {
+        id: r.get::<_, Uuid>(0).to_string(),
+        at: r.get(1),
+        machine: r.get::<_, Uuid>(2).to_string(),
+        machine_name: r.get(3),
+        tab: r.get(4),
+        title: r.get(5),
+        role: serde_json::from_value(Value::String(role)).unwrap_or(ActorRole::Session),
+        about: pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned()),
+        action,
+        args: r.get(8),
+        target: r.get(14),
+        request_id: r.get(9),
+        decision: decided_at.and(r.get::<_, Option<bool>>(10)).map(|approved| if approved { Decision::Approved } else { Decision::Denied }),
+        decided_at,
+        outcome: r.get(12),
+    };
+    Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null) }
 }
 
 pub struct MachineRow {
@@ -250,6 +346,10 @@ fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
         connector: r.get(4),
         subject: serde_json::from_value(r.get(5)).map_err(unreadable)?,
         spec: serde_json::from_value(r.get(6)).map_err(unreadable)?,
+        work: match r.get::<_, Value>(6).get("work") {
+            Some(work) => serde_json::from_value(work.clone()).map_err(unreadable)?,
+            None => BoxWork::Run,
+        },
         size: serde_json::from_value(Value::String(r.get(7))).map_err(unreadable)?,
         phase: Phase::load(r.get(8), r.get(9)),
         age: std::time::Duration::from_secs_f64(r.get::<_, f64>(10).max(0.0)),
@@ -260,6 +360,10 @@ fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
 
 fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
     row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
+}
+
+fn stored_marks(account: Uuid, value: Value) -> Result<SessionMarks, String> {
+    serde_json::from_value(value).map_err(|e| format!("account {account} has unreadable session marks: {e}"))
 }
 
 impl Learning {
@@ -305,7 +409,7 @@ impl Learning {
 
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await? })
+        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
@@ -449,18 +553,18 @@ impl Db {
         Ok(token.text)
     }
 
-    /// The account a login token belongs to, marking the login used.
-    pub async fn login(&self, token: &str) -> Result<Option<Uuid>, String> {
+    /// The login `token` opens, marking it used, and locked from now on when `lock`.
+    pub async fn login(&self, token: &str, lock: bool) -> Result<Option<Login>, String> {
         let row = self
             .client().await?
             .query_opt(
-                "update logins set last_used = now() where token_hash = $1 \
-                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account",
-                &[&hash(token), &LOGIN_IDLE_DAYS],
+                "update logins set last_used = now(), locked = locked or $3 where token_hash = $1 \
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account, locked",
+                &[&hash(token), &LOGIN_IDLE_DAYS, &lock],
             )
             .await
             .map_err(err)?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(row.map(|r| Login { account: r.get(0), locked: r.get(1) }))
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), String> {
@@ -552,7 +656,10 @@ impl Db {
     /// row, and whether it is the one just written.
     pub async fn reserve_box(&self, row: &BoxRow) -> Result<(BoxRow, bool), String> {
         let client = self.client().await?;
-        let (subject, spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        let (subject, mut spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        if row.work != BoxWork::Run {
+            spec["work"] = serde_json::to_value(&row.work).unwrap();
+        }
         let (phase, reason) = row.phase.stored();
         let size = serde_json::to_value(row.size).unwrap().as_str().unwrap().to_owned();
         let inserted = client
@@ -633,6 +740,33 @@ impl Db {
         Ok(row.get(0))
     }
 
+    /// Keeps that the agent session `opener` opened box row `id` at unix ms `started`.
+    pub async fn hold_agent_box(&self, id: &str, account: Uuid, opener: &Opener, started: u64) -> Result<(), String> {
+        let started = i64::try_from(started).map_err(|_| format!("box {id} started at an impossible time"))?;
+        self.client()
+            .await?
+            .execute(
+                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
+                &[&id, &account, &opener.machine, &opener.tab, &opener.role.name(), &started],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The agent session that opened the account's box row `id`, and when, while it is not recorded yet.
+    pub async fn agent_box(&self, account: Uuid, id: &str) -> Result<Option<(Opener, u64)>, String> {
+        let row = self.client().await?.query_opt("select machine, tab, role, started from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err)?;
+        Ok(row.map(|r| {
+            let role = serde_json::from_value(Value::String(r.get(2))).unwrap_or(ActorRole::Session);
+            (Opener { machine: r.get(0), tab: r.get(1), role }, u64::try_from(r.get::<_, i64>(3)).unwrap_or(0))
+        }))
+    }
+
+    pub async fn forget_agent_box(&self, account: Uuid, id: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
+    }
+
     pub async fn delete_box(&self, id: &str) -> Result<(), String> {
         self.client().await?.execute("delete from boxes where id = $1", &[&id]).await.map_err(err).map(drop)
     }
@@ -658,18 +792,183 @@ impl Db {
     }
 
     pub async fn create_invite(&self, account: Uuid) -> Result<NewInvite, String> {
-        let client = self.client().await?;
-        client.execute("delete from invites where used_at is null and expires_at < now()", &[]).await.map_err(err)?;
         let (id, code) = (Uuid::new_v4(), invite_code());
-        let row = client
-            .query_one(
-                "insert into invites (id, code_hash, account, hint, expires_at) values ($1, $2, $3, $4, now() + interval '7 days')
-                 returning extract(epoch from expires_at)::bigint",
+        self.client()
+            .await?
+            .execute(
+                "insert into invites (id, code_hash, account, hint) values ($1, $2, $3, $4)",
                 &[&id, &invite_hash(&code), &account, &code[..4].to_owned()],
             )
             .await
             .map_err(err)?;
-        Ok(NewInvite { id: id.to_string(), code, expires_at: row.get(0) })
+        Ok(NewInvite { id: id.to_string(), code, expires_at: NEVER_EXPIRES })
+    }
+
+    /// Writes one row of the account's audit trail.
+    pub async fn audit(&self, row: &Audit<'_>) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The account's audit rows, newest first: `limit` of them from unix second `before` and earlier.
+    /// A page repeats the rows of its boundary second, which the client drops by id.
+    pub async fn audit_rows(&self, account: Uuid, before: Option<i64>, limit: i64) -> Result<Vec<AuditEntry>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select a.id, extract(epoch from a.at)::bigint, a.machine, coalesce(m.name, ''), a.tab, a.role, a.action, a.args, a.outcome, a.detail, a.request_id
+                 from agent_actions a left join machines m on m.id = a.machine and m.account = a.account
+                 where a.account = $1 and ($2::bigint is null or a.at < to_timestamp($2::bigint + 1)) order by a.at desc limit $3",
+                &[&account, &before, &limit],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows
+            .iter()
+            .map(|r| AuditEntry {
+                id: r.get::<_, Uuid>(0).to_string(),
+                at: r.get(1),
+                machine: r.get::<_, Uuid>(2).to_string(),
+                machine_name: r.get(3),
+                tab: r.get(4),
+                role: serde_json::from_value(Value::String(r.get(5))).unwrap_or(ActorRole::Session),
+                action: r.get(6),
+                args: r.get(7),
+                outcome: AuditOutcome::parse(r.get(8)).unwrap_or(AuditOutcome::Failed),
+                detail: r.get(9),
+                request_id: r.get(10),
+            })
+            .collect())
+    }
+
+    /// What the first `action` with `request_id` from the session in `tab` on `machine` came to, and when.
+    pub async fn audited(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<(AuditOutcome, i64)>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "select outcome, extract(epoch from at)::bigint from agent_actions where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5 order by at limit 1",
+                &[&account, &machine, &tab, &action, &request_id],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| (AuditOutcome::parse(r.get(0)).unwrap_or(AuditOutcome::Failed), r.get(1))))
+    }
+
+    /// Holds a confirm act for the user and answers its id, or, with false, the id of the one the same
+    /// session already asked for with the same action and `request_id`.
+    pub async fn hold_confirmation(&self, account: Uuid, machine: Uuid, session: Option<&str>, asked: &Confirmation) -> Result<(Uuid, bool), String> {
+        let client = self.client().await?;
+        let id = Uuid::new_v4();
+        let request_id = asked.request_id.as_deref();
+        let inserted = client
+            .query_opt(
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 on conflict (account, machine, tab, action, request_id) do nothing returning id",
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
+            )
+            .await
+            .map_err(err)?;
+        if inserted.is_some() {
+            return Ok((id, true));
+        }
+        let row = client
+            .query_one(
+                "select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5",
+                &[&account, &machine, &asked.tab, &asked.action, &request_id],
+            )
+            .await
+            .map_err(err)?;
+        Ok((row.get(0), false))
+    }
+
+    /// The account's confirmation `id`.
+    pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
+        let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");
+        Ok(self.client().await?.query_opt(&query, &[&account, &id]).await.map_err(err)?.as_ref().map(held))
+    }
+
+    /// The account's confirmations that wait, oldest first, then its last 20 decided, newest first.
+    pub async fn confirmations(&self, account: Uuid) -> Result<Vec<Confirmation>, String> {
+        let query = format!(
+            "(select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+               where c.account = $1 and c.decided_at is null order by c.created_at)
+             union all
+             (select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+               where c.account = $1 and c.decided_at is not null order by c.decided_at desc limit 20)"
+        );
+        Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
+    }
+
+    /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
+    /// account's, or decided already.
+    pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
+        let client = self.client().await?;
+        let taken = client
+            .execute("update agent_confirmations set decided_at = now(), approved = $3 where account = $1 and id = $2 and decided_at is null", &[&account, &id, &approved])
+            .await
+            .map_err(err)?;
+        if taken == 0 {
+            return Ok(None);
+        }
+        self.confirmation(account, id).await
+    }
+
+    /// Gives every confirmation decided more than `running` ago and still without an outcome one: a
+    /// hub that stopped between the decision and its outcome left it. A denial ran nothing; an
+    /// approval may have run, so it reads as failed with `approved_outcome`. Answers each with its account.
+    pub async fn finish_interrupted(&self, approved_outcome: &str, running: Duration) -> Result<Vec<(Uuid, Held)>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "update agent_confirmations set outcome = case when approved then $1 else 'denied' end, result = 'null'::jsonb \
+                 where decided_at < now() - make_interval(secs => $2) and outcome is null returning account, id",
+                &[&approved_outcome, &running.as_secs_f64()],
+            )
+            .await
+            .map_err(err)?;
+        let mut finished = vec![];
+        for row in &rows {
+            let account: Uuid = row.get(0);
+            finished.extend(self.confirmation(account, row.get(1)).await?.map(|held| (account, held)));
+        }
+        Ok(finished)
+    }
+
+    /// Puts a decided confirmation back to waiting, as a credential action whose run failed, so the
+    /// user can type another key.
+    pub async fn reopen_confirmation(&self, account: Uuid, id: Uuid) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("update agent_confirmations set decided_at = null, approved = null, outcome = null, result = null where id = $1 and account = $2", &[&id, &account])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    pub async fn finish_confirmation(&self, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set outcome = $2, result = $3 where id = $1", &[&id, &outcome, result]).await.map_err(err).map(drop)
+    }
+
+    /// The account's confirmations decided in the last week whose session on `machine` has no notice yet.
+    pub async fn unnotified(&self, account: Uuid, machine: Uuid) -> Result<Vec<Held>, String> {
+        let query = format!(
+            "select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+             where c.account = $1 and c.machine = $2 and c.decided_at > now() - interval '7 days' and c.outcome is not null and not c.notified order by c.decided_at"
+        );
+        Ok(self.client().await?.query(&query, &[&account, &machine]).await.map_err(err)?.iter().map(held).collect())
+    }
+
+    pub async fn notified(&self, id: Uuid) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set notified = true where id = $1", &[&id]).await.map_err(err).map(drop)
     }
 
     /// The account's codes nobody has used yet, newest first.
@@ -677,13 +976,13 @@ impl Db {
         let rows = self
             .client().await?
             .query(
-                "select id, hint, extract(epoch from created_at)::bigint, extract(epoch from expires_at)::bigint from invites
-                 where account = $1 and used_at is null and expires_at > now() order by created_at desc",
+                "select id, hint, extract(epoch from created_at)::bigint from invites
+                 where account = $1 and used_at is null order by created_at desc",
                 &[&account],
             )
             .await
             .map_err(err)?;
-        Ok(rows.iter().map(|r| InviteView { id: r.get::<_, Uuid>(0).to_string(), hint: r.get(1), created_at: r.get(2), expires_at: r.get(3) }).collect())
+        Ok(rows.iter().map(|r| InviteView { id: r.get::<_, Uuid>(0).to_string(), hint: r.get(1), created_at: r.get(2), expires_at: NEVER_EXPIRES }).collect())
     }
 
     /// False when the account has no unused code `id`.
@@ -699,7 +998,7 @@ impl Db {
         let row = self
             .client().await?
             .query_one(
-                "with invite as (select id from invites where code_hash = $1 and used_at is null and expires_at > now() for update),
+                "with invite as (select id from invites where code_hash = $1 and used_at is null for update),
                  made as (insert into accounts (id, email, password_hash) select $2, $3, $4 from invite on conflict (email) do nothing returning id),
                  spent as (update invites set used_by = made.id, used_at = now() from made, invite where invites.id = invite.id returning invites.id)
                  select exists (select 1 from invite), exists (select 1 from made), exists (select 1 from spent)",
@@ -744,10 +1043,71 @@ impl Db {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
     }
 
+    /// Stores `record` as the machine's latest word on that task.
+    pub async fn save_task_record(&self, account: Uuid, machine: Uuid, record: &TaskRecord) -> Result<(), String> {
+        let ended = i64::try_from(record.ended).map_err(|_| format!("task {} ended at an impossible time", record.id))?;
+        let value = serde_json::to_value(record).map_err(|e| e.to_string())?;
+        self.client()
+            .await?
+            .execute(
+                "insert into delegation_tasks (account, machine, id, ended, record) values ($1, $2, $3, $4, $5)
+                 on conflict (account, machine, id) do update set ended = excluded.ended, record = excluded.record",
+                &[&account, &machine, &record.id, &ended, &value],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    pub async fn task_record(&self, account: Uuid, machine: Uuid, id: &str) -> Result<Option<TaskRecord>, String> {
+        let row = self.client().await?.query_opt("select record from delegation_tasks where account = $1 and machine = $2 and id = $3", &[&account, &machine, &id]).await.map_err(err)?;
+        row.map(|r| serde_json::from_value(r.get(0)).map_err(|e| format!("task {id} has an unreadable record: {e}"))).transpose()
+    }
+
+    /// The account's task records that ended at `since` (unix ms) or later. An unreadable one is skipped.
+    pub async fn task_records(&self, account: Uuid, since: u64) -> Result<Vec<TaskRecord>, String> {
+        let since = i64::try_from(since).unwrap_or(i64::MAX);
+        let rows = self.client().await?.query("select record from delegation_tasks where account = $1 and ended >= $2", &[&account, &since]).await.map_err(err)?;
+        Ok(rows.iter().filter_map(|r| serde_json::from_value(r.get(0)).ok()).collect())
+    }
+
+    /// The box time already billed to the other tasks of `machine`, in milliseconds.
+    pub async fn billed_box_ms(&self, account: Uuid, machine: Uuid, except: &str) -> Result<u64, String> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "select coalesce(sum((record->'usage'->>'box_ms')::bigint), 0)::bigint from delegation_tasks where account = $1 and machine = $2 and id <> $3",
+                &[&account, &machine, &except],
+            )
+            .await
+            .map_err(err)?;
+        Ok(u64::try_from(row.get::<_, i64>(0)).unwrap_or(0))
+    }
+
+    /// When the box `machine` runs in was made, in unix milliseconds, while it is one of the account's boxes.
+    pub async fn box_created_ms(&self, account: Uuid, machine: Uuid) -> Result<Option<u64>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select (extract(epoch from created_at) * 1000)::bigint from boxes where account = $1 and machine = $2", &[&account, &machine])
+            .await
+            .map_err(err)?;
+        Ok(row.and_then(|r| u64::try_from(r.get::<_, i64>(0)).ok()))
+    }
+
+    /// The account's tastes, read as what they were saved as on the current parallel defaults.
     pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {
         let row = self.client().await?.query_one("select tastes from accounts where id = $1", &[&account]).await.map_err(err)?;
         let stored: Option<Value> = row.get(0);
-        stored.map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))).transpose()
+        match stored {
+            None => Ok(None),
+            Some(tastes) => {
+                let mut tastes: Tastes = serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))?;
+                tastes.take_raised_defaults();
+                Ok(Some(tastes))
+            }
+        }
     }
 
     pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
@@ -760,6 +1120,50 @@ impl Db {
         let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
         let updated = self.client().await?.execute("update accounts set tastes = $2 where id = $1 and tastes is null", &[&account, &tastes]).await.map_err(err)?;
         Ok(updated == 1)
+    }
+
+    pub async fn session_marks(&self, account: Uuid) -> Result<Vec<SessionMarks>, String> {
+        let rows = self.client().await?.query("select marks from session_marks where account = $1 order by session", &[&account]).await.map_err(err)?;
+        rows.iter().map(|r| stored_marks(account, r.get(0))).collect()
+    }
+
+    /// The session's marks, empty when it has none.
+    pub async fn session_marks_of(&self, account: Uuid, session: &str) -> Result<SessionMarks, String> {
+        let row = self.client().await?.query_opt("select marks from session_marks where account = $1 and session = $2", &[&account, &session]).await.map_err(err)?;
+        row.map_or_else(|| Ok(SessionMarks::new(session)), |r| stored_marks(account, r.get(0)))
+    }
+
+    /// Lands `changes` in order and answers the sessions they named as they are now. A session left
+    /// with no mark loses its row.
+    pub async fn mark_sessions(&self, account: Uuid, changes: Vec<MarkChange>) -> Result<Vec<SessionMarks>, String> {
+        let named: Vec<String> = changes.iter().map(|change| change.session.clone()).collect();
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        let rows = tx
+            .query("select session, marks from session_marks where account = $1 and session = any($2) for update", &[&account, &named])
+            .await
+            .map_err(err)?;
+        let mut current: BTreeMap<String, SessionMarks> = BTreeMap::new();
+        for row in rows {
+            current.insert(row.get(0), stored_marks(account, row.get(1))?);
+        }
+        let touched = marks::apply(&mut current, changes);
+        let (gone, kept): (Vec<&SessionMarks>, Vec<&SessionMarks>) = touched.iter().partition(|row| row.is_empty());
+        let gone: Vec<&str> = gone.iter().map(|row| row.session.as_str()).collect();
+        tx.execute("delete from session_marks where account = $1 and session = any($2)", &[&account, &gone]).await.map_err(err)?;
+        let kept = serde_json::to_value(kept).map_err(|e| e.to_string())?;
+        tx.execute(
+            "insert into session_marks (account, session, marks) select $1::uuid, given->>'session', given from jsonb_array_elements($2::jsonb) given \
+             on conflict (account, session) do update set marks = excluded.marks, updated = now()",
+            &[&account, &kept],
+        )
+        .await
+        .map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(touched)
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {

@@ -81,6 +81,8 @@ pub struct NewTask {
 pub enum Claim {
     Fresh(Box<Task>),
     Existing(String),
+    /// This many workers already work in the task's project, the most it allows at once.
+    Full(usize),
 }
 
 impl Delegates {
@@ -97,16 +99,21 @@ impl Delegates {
         delegates
     }
 
-    /// How many tasks are still working. The orchestrator's global worker cap counts these
-    /// plus its live worker threads.
-    /// A child with a thread is counted as that worker tab instead.
-    pub fn active_count(&self) -> usize {
-        self.tasks.lock().unwrap().iter().filter(|task| task.state == WorkState::Working && task.thread.is_none()).count()
+    /// How many tasks still at work run in `project`, the repository their folders belong to.
+    pub fn working_in(&self, project: &Path) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
+    }
+
+    /// The folder of each task still at work.
+    #[cfg(test)]
+    pub fn working_cwds(&self) -> Vec<PathBuf> {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal()).map(|task| task.cwd.clone()).collect()
     }
 
     /// Ties the task to the pinned thread that shows it.
     pub fn link_thread(&self, id: &str, thread: Thread) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.thread_tab = Some(thread.tab.clone());
             task.thread = Some(thread);
         }
     }
@@ -144,8 +151,16 @@ impl Delegates {
         ready
     }
 
-    /// The same caller and `clientRequestId` returns the task already started.
-    pub fn claim(&self, new: NewTask) -> Claim {
+    /// The task the caller already started with this `clientRequestId`.
+    pub fn requested(&self, caller_key: &str, request_id: Option<&str>) -> Option<String> {
+        let request_id = request_id?;
+        self.tasks.lock().unwrap().iter().find(|task| task.caller_key == caller_key && task.client_request_id.as_deref() == Some(request_id)).map(|task| task.id.clone())
+    }
+
+    /// The same caller and `clientRequestId` returns the task already started. Otherwise a new
+    /// task starts unless `at_once` tasks already work in its project, counted under the same lock
+    /// so two callers can't both take the last place.
+    pub fn claim(&self, new: NewTask, at_once: Option<u32>) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(request_id) = new.client_request_id.as_deref() {
             if let Some(existing) = tasks.iter().find(|task| {
@@ -154,7 +169,15 @@ impl Delegates {
                 return Claim::Existing(existing.id.clone());
             }
         }
+        if let Some(most) = at_once {
+            let project = crate::history::project_of(&new.cwd);
+            let working = tasks.iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count();
+            if working >= most as usize {
+                return Claim::Full(working);
+            }
+        }
         let task = fresh(new);
+        mark_redone(&mut tasks, &task);
         tasks.push(task.clone());
         drop(tasks);
         self.persist();
@@ -162,9 +185,10 @@ impl Delegates {
     }
 
     pub fn begin(&self, new: NewTask) -> Task {
-        match self.claim(new) {
+        match self.claim(new, None) {
             Claim::Fresh(task) => *task,
             Claim::Existing(id) => self.tasks.lock().unwrap().iter().find(|task| task.id == id).unwrap().clone(),
+            Claim::Full(_) => unreachable!("begin sets no limit"),
         }
     }
 
@@ -191,6 +215,113 @@ impl Delegates {
         self.persist();
     }
 
+    /// The delegation limits the task runs under, which its own children inherit.
+    pub fn hold_to(&self, id: &str, limits: crate::taste::Limits) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.limits = limits;
+        }
+        self.persist();
+    }
+
+    /// Who started the task and the effort it asked for, which its record keeps.
+    pub fn describe(&self, id: &str, delegator: Delegator, effort: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.delegator = delegator;
+            task.effort = effort;
+        }
+        self.persist();
+    }
+
+    /// Records what each working task used, and stops the ones past their budget.
+    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], path: Option<&str>) {
+        let over: Vec<(String, String)> = {
+            let mut tasks = self.tasks.lock().unwrap();
+            used.iter()
+                .filter_map(|(id, usage)| {
+                    let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
+                    task.usage = *usage;
+                    task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
+                })
+                .collect()
+        };
+        for (id, reason) in &over {
+            self.stop_for_limit(id, "budget", reason, path);
+        }
+        if !over.is_empty() {
+            self.persist();
+        }
+    }
+
+    /// Stops a task and its descendants because it passed `limit` (`time` or `budget`). Its record
+    /// says it was stopped by that limit; the descendants read as cancelled with the same reason.
+    pub fn stop_for_limit(&self, id: &str, limit: &str, reason: &str, path: Option<&str>) {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.state.terminal()) else { return };
+            task.limit = Some(limit.to_owned());
+        }
+        self.stop_tree(id, reason, path);
+        self.persist();
+    }
+
+    /// The delegator's verdict on a finished task's result.
+    pub fn review(&self, caller: &Caller, id: &str, verdict: Verdict, note: Option<String>) -> Result<Value, String> {
+        let record = {
+            let mut tasks = self.tasks.lock().unwrap();
+            if !tasks.iter().any(|task| task.id == id) {
+                return Err(format!("no task {id}"));
+            }
+            if !allows(&tasks, id, caller) {
+                return Err(format!("task {id} belongs to another session"));
+            }
+            let task = tasks.iter_mut().find(|task| task.id == id).unwrap();
+            if !task.state.terminal() {
+                return Err(format!("{id} is still working; review it once it ends"));
+            }
+            task.review = Some(Review { verdict, auto: false, note: note.filter(|note| !note.trim().is_empty()), at: unix_millis() });
+            task.recorded = false;
+            record(task)
+        };
+        self.persist();
+        Ok(json!({ "taskId": id, "review": record.and_then(|r| r.review) }))
+    }
+
+    /// Marks a finished task accepted from a signal, unless it already has a verdict. Says whether
+    /// it changed the task.
+    pub fn accept_auto(&self, id: &str, note: String) -> bool {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.iter_mut().find(|task| task.id == id && task.state.terminal() && task.review.is_none()) else { return false };
+        task.review = Some(Review { verdict: Verdict::Accepted, auto: true, note: Some(note), at: unix_millis() });
+        task.recorded = false;
+        drop(tasks);
+        self.persist();
+        true
+    }
+
+    /// The record of every finished task.
+    pub fn records(&self) -> Vec<TaskRecord> {
+        self.tasks.lock().unwrap().iter().filter_map(record).collect()
+    }
+
+    /// The records the hub does not hold as they are now, at most `max`.
+    pub fn unrecorded(&self, max: usize) -> Vec<TaskRecord> {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.recorded).filter_map(record).take(max).collect()
+    }
+
+    /// Notes that the hub took `sent`. A task that changed since keeps its turn for the next send.
+    pub fn mark_recorded(&self, sent: &[TaskRecord]) {
+        let mut changed = false;
+        for task in self.tasks.lock().unwrap().iter_mut() {
+            if sent.iter().any(|r| r.id == task.id && record(task).as_ref() == Some(r)) {
+                task.recorded = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
     pub fn enforce_limits(&self, now: Instant, path: Option<&str>) {
         let (late, over, quiet) = {
             let mut tasks = self.tasks.lock().unwrap();
@@ -199,6 +330,10 @@ impl Delegates {
             let mut quiet = vec![];
             for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
                 let ran = millis(now.saturating_duration_since(task.run.begun));
+                // The machine that runs it holds it to its limit and reports how it ended.
+                if task.remote.is_some() && ran >= task.run.limit_ms {
+                    continue;
+                }
                 if ran >= task.run.limit_ms {
                     over.push((task.id.clone(), format!("pinned stopped it after {}, its limit", span(ran))));
                 } else if task.quiet_after_reply(now) {
@@ -216,7 +351,7 @@ impl Delegates {
             self.push_report(report);
         }
         for (id, reason) in &over {
-            self.stop_tree(id, reason, path);
+            self.stop_for_limit(id, "time", reason, path);
         }
         for id in &quiet {
             self.end_quiet(id, path);
@@ -254,6 +389,77 @@ impl Delegates {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.started -= by.as_millis() as u64;
         }
+    }
+
+    /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
+    pub fn set_remote(&self, id: &str, remote: RemoteTarget) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.remote = Some(remote);
+        }
+    }
+
+    /// The remote task's status as the machine running it last answered, when it is time to ask
+    /// again: never more often than `every`, so a waiting `delegate_task` does not flood the hub.
+    pub fn remote_due(&self, id: &str, now: Instant, every: Duration) -> Option<RemoteTarget> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter_mut().find(|task| task.id == id && !task.state.terminal())?;
+        let remote = task.remote.as_mut()?;
+        if remote.looked.is_some_and(|at| now.saturating_duration_since(at) < every) {
+            return None;
+        }
+        remote.looked = Some(now);
+        Some(remote.clone())
+    }
+
+    /// Ends a task that runs on another machine as that machine reports it. Only a working task
+    /// that `tab` owns and `from` runs takes it. Returns whether it did.
+    pub fn settle_remote(&self, id: &str, tab: &str, from: &str, end: &RemoteEnd) -> bool {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id) else { return false };
+            let owned = matches!(&task.parent, Parent::Tab(parent) if parent == tab);
+            if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| remote.machine != from) {
+                return false;
+            }
+            task.state = match end.state.as_str() {
+                "failed" => WorkState::Failed,
+                "cancelled" => WorkState::Cancelled,
+                _ => WorkState::ResultAvailable,
+            };
+            task.summary = end.summary.clone();
+            task.error = end.error.clone();
+            task.ended = Some(unix_millis());
+        }
+        self.persist();
+        true
+    }
+
+    /// Claims the end of each finished task that a tab on another machine delegated here, for the
+    /// hub to take back to it: that machine, its tab, its own id for the task and how it ended.
+    /// `release_notice` puts back the ids whose end did not get through.
+    pub fn claim_remote_ends(&self) -> Vec<(String, String, String, String, RemoteEnd)> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let mut ends = vec![];
+        for task in tasks.iter_mut().filter(|task| task.state.terminal() && !task.delivered) {
+            let Parent::Tab(key) = &task.parent else { continue };
+            let Some((machine, tab)) = Origin::of_key(key) else { continue };
+            let Some(origin_task) = task.client_request_id.clone() else { continue };
+            task.delivered = true;
+            let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone() };
+            ends.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, end));
+        }
+        drop(tasks);
+        if !ends.is_empty() {
+            self.persist();
+        }
+        ends
+    }
+
+    /// The task started for `origin_task` of the tab on another machine that `parent_key` names.
+    pub fn for_origin(&self, parent_key: &str, origin_task: &str) -> Option<String> {
+        let tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter().find(|task| matches!(&task.parent, Parent::Tab(key) if key == parent_key) && task.client_request_id.as_deref() == Some(origin_task))?;
+        Some(task.id.clone())
     }
 
     pub fn note_parent(&self, id: &str, session: Option<String>) {
@@ -620,6 +826,11 @@ impl Delegates {
         self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: Some(request) });
     }
 
+    /// Whether a report still queued for `tab` holds `needle`, such as a notice's id.
+    pub fn holds_report(&self, tab: &str, needle: &str) -> bool {
+        self.reports.lock().unwrap().iter().any(|report| report.tab == tab && report.text.contains(needle))
+    }
+
     fn push_report(&self, report: Report) {
         let session = report.session.filter(|session| !session.is_empty());
         self.reports.lock().unwrap().push(Report { session, ..report });
@@ -745,6 +956,7 @@ impl Delegates {
             model: task.model.clone(),
             cwd: task.cwd.clone(),
             access: task.access,
+            limits: task.limits,
         })
     }
 
@@ -752,6 +964,8 @@ impl Delegates {
         let tasks = self.tasks.lock().unwrap();
         tasks
             .iter()
+            // A task on another machine shows as its thread there, nested under this tab.
+            .filter(|task| task.remote.is_none())
             .filter(|task| match &task.thread {
                 Some(thread) => !thread.runs && thread.tab == tab,
                 None => root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab),
@@ -924,6 +1138,7 @@ pub struct Lineage {
     pub model: Option<String>,
     pub cwd: PathBuf,
     pub access: Access,
+    pub limits: crate::taste::Limits,
 }
 
 impl Task {
@@ -942,6 +1157,14 @@ impl Task {
             }
             StreamEvent::Background(pending) => {
                 self.run.background = pending;
+                None
+            }
+            StreamEvent::Usage(report) => {
+                self.usage.tokens_in += report.tokens_in;
+                self.usage.tokens_out += report.tokens_out;
+                if report.cost_usd.is_some() {
+                    self.usage.cost_usd = report.cost_usd;
+                }
                 None
             }
             StreamEvent::Step(item) => {
@@ -1037,12 +1260,19 @@ fn status_json(task: &Task) -> Value {
         "elapsedSecs": end.saturating_sub(task.started) / 1000,
         "budgetSecs": task.run.budget_ms / 1000,
         "limitSecs": task.run.limit_ms / 1000,
+        "usage": crate::usage::TaskUsage { wall_ms: end.saturating_sub(task.started), ..task.usage },
         "background": task.run.background.iter().map(|work| work.description.as_str()).collect::<Vec<_>>(),
         "endedBy": task.ended_by,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
         "tabId": task.thread.as_ref().map(|thread| thread.tab.clone()),
     });
+    if let Some(limit) = &task.limit {
+        body["stoppedByLimit"] = json!(limit);
+    }
+    if let Some(review) = &task.review {
+        body["review"] = json!(review);
+    }
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
     } else if task.summary.is_some() && !task.run.background.is_empty() {
@@ -1139,7 +1369,11 @@ fn notice_line(task: &Task) -> String {
         _ => "result available".into(),
     };
     let note = task.ended_by.as_deref().map(|how| format!(" {how}.")).unwrap_or_default();
-    let thread = task.thread.as_ref().map(|thread| format!(" Its thread is {}.", thread.tab)).unwrap_or_default();
+    let thread = match (&task.remote, &task.thread) {
+        (Some(remote), _) => format!(" It ran on {}{}.", remote.name, remote.tab.as_deref().map(|tab| format!(", in thread {tab}")).unwrap_or_default()),
+        (None, Some(thread)) => format!(" Its thread is {}.", thread.tab),
+        (None, None) => String::new(),
+    };
     format!("[pinned] Delegated task {} \"{}\" ({who}) finished: {outcome}.{note}{thread} Call task_status with taskId \"{}\".", task.id, task.title, task.id)
 }
 
@@ -1249,6 +1483,66 @@ fn fresh(new: NewTask) -> Task {
         ended_by: None,
         run: Run::default(),
         thread: None,
+        remote: None,
+        limits: crate::taste::Limits::default(),
+        usage: crate::usage::TaskUsage::default(),
+        delegator: Delegator::default(),
+        effort: None,
+        limit: None,
+        review: None,
+        thread_tab: None,
+        recorded: false,
+    }
+}
+
+/// The record a finished task leaves. A working one has none yet, and one that ran on another
+/// machine leaves its record there.
+fn record(task: &Task) -> Option<TaskRecord> {
+    if !task.state.terminal() || task.remote.is_some() {
+        return None;
+    }
+    let for_elsewhere = matches!(&task.parent, Parent::Tab(key) if Origin::of_key(key).is_some());
+    let ended = task.ended.unwrap_or(task.started);
+    let outcome = match (task.state, &task.limit) {
+        (WorkState::Failed, _) => TaskOutcome::Failed,
+        (WorkState::Cancelled, Some(_)) => TaskOutcome::Limit,
+        (WorkState::Cancelled, None) => TaskOutcome::Cancelled,
+        _ => TaskOutcome::Done,
+    };
+    Some(TaskRecord {
+        id: task.id.clone(),
+        machine: String::new(),
+        machine_name: String::new(),
+        title: task.title.clone(),
+        delegator: task.delegator.clone(),
+        provider: task.provider,
+        account: task.account.clone(),
+        model: task.model.clone(),
+        tier: task.model.as_deref().map(|model| cost_of(model).name().to_owned()),
+        effort: task.effort.clone(),
+        target: if for_elsewhere { RunTarget::Machine } else { RunTarget::Local },
+        started: task.started,
+        ended,
+        usage: TaskUsage { wall_ms: ended.saturating_sub(task.started), ..task.usage },
+        outcome,
+        reason: if outcome == TaskOutcome::Done { None } else { task.error.clone() },
+        limit: task.limit.clone().filter(|_| outcome == TaskOutcome::Limit),
+        review: task.review.clone(),
+        thread: task.thread_tab.clone(),
+    })
+}
+
+/// A task that starts again under the same title, from the same caller, means the earlier one's
+/// result was not used: the newest earlier one that ended and has no verdict yet is redone.
+fn mark_redone(tasks: &mut [Task], fresh: &Task) {
+    let title = fresh.title.trim().to_lowercase();
+    let earlier = tasks
+        .iter_mut()
+        .filter(|task| task.caller_key == fresh.caller_key && task.state.terminal() && task.review.is_none() && task.title.trim().to_lowercase() == title)
+        .max_by_key(|task| task.started);
+    if let Some(task) = earlier {
+        task.review = Some(Review { verdict: Verdict::Redone, auto: true, note: Some(format!("started again as {}", fresh.id)), at: unix_millis() });
+        task.recorded = false;
     }
 }
 
@@ -1303,6 +1597,27 @@ struct SavedTask {
     budget_ms: u64,
     #[serde(default = "default_limit")]
     limit_ms: u64,
+    #[serde(default)]
+    limits: crate::taste::Limits,
+    #[serde(default)]
+    usage: crate::usage::TaskUsage,
+    #[serde(default)]
+    delegator: Delegator,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    limit: Option<String>,
+    #[serde(default)]
+    review: Option<Review>,
+    #[serde(default)]
+    thread_tab: Option<String>,
+    /// A task saved before records existed has nothing worth sending, so it counts as sent.
+    #[serde(default = "already_recorded")]
+    recorded: bool,
+}
+
+fn already_recorded() -> bool {
+    true
 }
 
 impl SavedTask {
@@ -1339,6 +1654,14 @@ impl SavedTask {
             ended_by: task.ended_by.clone(),
             budget_ms: task.run.budget_ms,
             limit_ms: task.run.limit_ms,
+            limits: task.limits,
+            usage: task.usage,
+            delegator: task.delegator.clone(),
+            effort: task.effort.clone(),
+            limit: task.limit.clone(),
+            review: task.review.clone(),
+            thread_tab: task.thread_tab.clone(),
+            recorded: task.recorded,
         }
     }
 
@@ -1376,6 +1699,15 @@ impl SavedTask {
             ended_by: self.ended_by,
             run: Run { budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
             thread: None,
+            remote: None,
+            limits: self.limits,
+            usage: self.usage,
+            delegator: self.delegator,
+            effort: self.effort,
+            limit: self.limit,
+            review: self.review,
+            thread_tab: self.thread_tab,
+            recorded: self.recorded,
         }
     }
 }

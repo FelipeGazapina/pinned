@@ -19,8 +19,6 @@ Object.assign(ICON_PATHS, {
   "folder-git-2": `<path d="M18 19a5 5 0 0 1-5-5v8"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/><circle cx="13" cy="12" r="2"/><circle cx="20" cy="19" r="2"/>`,
 });
 
-/** Claude's models as T3 Code lists them, newest first. `menu` names the row of claude's own /model
- * menu that picks one for the session alone; a model it doesn't list restarts claude with --model. */
 document.body.insertAdjacentHTML("afterbegin", `<div id="file-icon-sprite" aria-hidden="true">${fileIcons.sprite}</div>`);
 /** T3 Code's file-type icon for `path`, or a folder's. */
 function fileTypeIcon(path, cls = "") {
@@ -32,20 +30,13 @@ function fileTypeIcon(path, cls = "") {
 const REASONING = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultracode: "Ultracode", ultrathink: "Ultrathink" };
 const ALL_REASONING = Object.keys(REASONING);
 const NO_ULTRACODE = ALL_REASONING.filter((e) => e !== "ultracode");
-const CLAUDE_MODELS = [
-  { slug: "claude-fable-5-1", name: "Claude Fable 5.1", menu: "Fable", efforts: ALL_REASONING, context: 1e6 },
+/** Claude's current models for a machine whose pinned doesn't send its own list in `list_accounts`.
+ * A newer machine sends every model, legacy ones too, from its Rust catalog. */
+const CLAUDE_FALLBACK_MODELS = [
+  { slug: "claude-fable-5-2", name: "Claude Fable 5.2", menu: "Fable", efforts: ALL_REASONING, context: 1e6 },
   { slug: "claude-opus-5-5", name: "Claude Opus 5.5", menu: "Opus", efforts: ALL_REASONING, fast: true, context: 1e6 },
   { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", menu: "Sonnet", efforts: NO_ULTRACODE, context: 1e6 },
-  { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", menu: "Haiku", efforts: NO_ULTRACODE, context: 1e6, isNew: true },
-  { slug: "claude-fable-5", name: "Claude Fable 5", legacy: true, efforts: ALL_REASONING, context: 1e6 },
-  { slug: "claude-opus-5", name: "Claude Opus 5", legacy: true, efforts: ALL_REASONING, fast: true, context: 1e6 },
-  { slug: "claude-opus-4-8", name: "Claude Opus 4.8", legacy: true, efforts: ALL_REASONING, fast: true, context: 1e6 },
-  { slug: "claude-opus-4-7", name: "Claude Opus 4.7", legacy: true, efforts: NO_ULTRACODE, context: 1e6 },
-  { slug: "claude-opus-4-6", name: "Claude Opus 4.6", legacy: true, efforts: ["low", "medium", "high", "max", "ultrathink"], fast: true, context: 2e5 },
-  { slug: "claude-opus-4-5", name: "Claude Opus 4.5", legacy: true, efforts: ["low", "medium", "high", "max"], fast: true, context: 2e5 },
-  { slug: "claude-sonnet-5", name: "Claude Sonnet 5", legacy: true, efforts: NO_ULTRACODE, context: 1e6 },
-  { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", legacy: true, efforts: ["low", "medium", "high", "max", "ultrathink"], context: 2e5 },
-  { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5", legacy: true, efforts: [], context: 2e5 },
+  { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", menu: "Haiku", efforts: NO_ULTRACODE, context: 1e6, new: true },
 ];
 /** The OpenCode Go gateway's models and context windows, from `GET /inference/go/v1/models` on
  * 2026-11-02. They change with the gateway; keep this list in step with `opencode_go.rs`. Every
@@ -272,6 +263,8 @@ function watchMenu(tab) {
     requestAnimationFrame(() => {
       queued = false;
       const lines = screenLines(tab);
+      const models = modelMenuOn(lines);
+      if (models) learnModelMenu(tab, lines, models);
       const menu = tab.answering ? null : menuOn(lines);
       const dialog = menu || tab.answering ? null : terminalDialog(tab);
       // claude hides its mode line and effort marks while a menu or a dialog is up.
@@ -1157,7 +1150,27 @@ function modelName(tab) {
   return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
 }
 const authOf = (tab) => accountOf(tab.machine, tab.view.account)?.auth ?? "login";
-const modelsForAccount = (account) => (account?.auth === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_MODELS);
+/** Claude's models as the machine's catalog lists them, newest first. `menu` names the row of
+ * claude's own /model menu that picks one for the session alone; a model it doesn't list restarts
+ * claude with --model. */
+const modelsForAccount = (account) => (account?.auth === "opencode-go" ? OPENCODE_GO_MODELS : account?.models?.length ? account.models : CLAUDE_FALLBACK_MODELS);
+/** Claude's models where no account is at hand: the active machine's, else any machine's. */
+function claudeModels() {
+  const listed = (m) => m?.accounts?.find((a) => a.provider === "claude" && a.auth !== "opencode-go" && a.models?.length)?.models;
+  return listed(machines.get(active?.machine)) ?? [...machines.values()].map(listed).find(Boolean) ?? CLAUDE_FALLBACK_MODELS;
+}
+/** Hands claude's /model menu on `tab`'s screen to its machine, which keeps the models it names,
+ * so one Claude Code adds shows up without a pinned release. Each menu goes once per machine. */
+function learnModelMenu(tab, lines, menu) {
+  const m = machines.get(tab.machine);
+  const seen = menu.options.map((o) => o.head).join("\n");
+  if (!m || m.modelMenuSeen === seen) return;
+  m.modelMenuSeen = seen;
+  callOn(tab.machine, { cmd: "learn_model_menu", lines }).then((models) => {
+    for (const a of m.accounts ?? []) if (a.provider === "claude" && a.auth !== "opencode-go") a.models = models;
+    if (!composerMenu.hidden && composerMenu.dataset.kind === "models" && active) renderModels(active);
+  }, () => {});
+}
 const modelsFor = (tab) => modelsForAccount(accountOf(tab.machine, tab.view.account));
 const modelOf = (tab) => {
   const name = modelName(tab);
@@ -1312,7 +1325,7 @@ function renderModels(tab) {
     const go = account.auth === "opencode-go";
     const checked = account.id === tab.view.account && !!current && (m.slug === current.slug || m.name === current.name);
     const favorited = modelFavorites.includes(m.slug);
-    return `<div class="model" data-row="${esc(m.slug)}" data-account="${esc(account.id)}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.isNew ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
+    return `<div class="model" data-row="${esc(m.slug)}" data-account="${esc(account.id)}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.new ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
       <div class="sub">${icon(go ? "opencode" : "claude")}<span>${esc(providerLabel(account))}</span></div></div>${checked ? icon("check", "check") : ""}
       <button type="button" class="fav${favorited ? " on" : ""}" data-fav="${esc(m.slug)}" aria-label="${favorited ? "Remove from favorites" : "Add to favorites"}" title="${favorited ? "Remove from favorites" : "Add to favorites"}">${icon("star")}</button></div>`;
   };

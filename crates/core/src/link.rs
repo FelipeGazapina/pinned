@@ -75,7 +75,7 @@ impl Shared {
         self.pending.lock().unwrap().insert(id, answer);
         if !self.send(&MachineFrame::Call { id, call }) {
             self.pending.lock().unwrap().remove(&id);
-            return Err("not connected to the hub".into());
+            return Err(OFFLINE.into());
         }
         match answered.recv_timeout(CALL_WAIT) {
             Ok(result) => result,
@@ -128,6 +128,9 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     });
     Link { shared, stop, thread, syncing }
 }
+
+/// What a hub call answers while the link is down.
+pub const OFFLINE: &str = "not connected to the hub";
 
 impl Link {
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
@@ -348,7 +351,10 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     let sharing = machine.clone();
-    std::thread::spawn(move || sharing.share_tastes_again());
+    std::thread::spawn(move || {
+        sharing.share_tastes_again();
+        sharing.send_records();
+    });
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
     for (account, usage) in machine.usage() {
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });

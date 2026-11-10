@@ -14,13 +14,20 @@ const TASTE_FIELD_LABELS = {
   strategy: "Strategy",
   ladder: "Model ladder",
   hard_model: "Hard work model",
-  parallel: "Parallel workers",
+  parallel: "Workers at once",
   autonomy: "Autonomy",
   review_diffs: "Review each diff",
   second_opinion: "Second opinion",
   skills: "Skills",
   context: "Context",
+  tier: "Model tier",
+  default_effort: "Default effort",
+  max_effort: "Most effort",
+  budget_cents: "Budget per worker",
+  time_limit_min: "Time limit per worker",
+  box_budget_cents: "Box budget",
 };
+const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
 const tasteShown = () => tasteResolve(tasteUi.draft, tasteUi.scope);
 const tasteDirty = () => tasteUi.saved != null && !tasteSame(tasteUi.saved, tasteUi.draft);
@@ -172,16 +179,55 @@ function tasteModelsHtml(t, catalog, names) {
   </section>`;
 }
 
+/** A labelled − value + row. `down` and `up` are the values a click sets, null at an end. */
+function tasteStepperHtml(field, shown, down, up, noun) {
+  const step = (value, dir, what) => `<button type="button" data-act="step" data-field="${field}" data-value="${value ?? ""}" aria-label="${what} ${noun}"${value == null ? " disabled" : ""}>${icon(dir)}</button>`;
+  return `<div class="taste-field taste-inline">${tasteLabelHtml(field)}
+    <span class="taste-stepper">${step(down, "minus", "Less")}<output aria-live="polite">${esc(shown)}</output>${step(up, "plus", "More")}</span></div>`;
+}
+
+function tasteParallelHtml(t) {
+  return tasteStepperHtml("parallel", String(t.parallel), t.parallel > 1 ? t.parallel - 1 : null, t.parallel < TASTE_MAX_PARALLEL ? t.parallel + 1 : null, "workers at once");
+}
+
+/** A stepper over `TASTE_STEPS[field]`, labelled by `label`. */
+function tasteLadderHtml(t, field, label, noun) {
+  const value = t[field];
+  const near = (dir) => {
+    const next = tasteStep(field, value, dir);
+    return next === value ? null : next;
+  };
+  return tasteStepperHtml(field, label(value), near(-1), near(1), noun);
+}
+
+function tasteLimitsHtml(t) {
+  const note = (text, rest = "") => `<section class="taste-section"><div class="taste-heading"><h2>Delegation limits</h2><p>${text}</p></div>${rest}</section>`;
+  if (tasteUi.scope.kind === "orchestrator") return note("The orchestrator starts no workers itself. Each Captain follows the limits under Captains (all) or its project.");
+  if (t.tier == null) return note("Update pinned on the hub to set the other delegation limits.", tasteParallelHtml(t));
+  const tiers = TASTE_TIERS.map((tier) => `<button type="button" data-act="set" data-field="tier" data-value="${tier}" aria-pressed="${tier === t.tier}" title="${TASTE_TIER_ABOUT[tier]}">${tier[0].toUpperCase()}${tier.slice(1)}</button>`).join("");
+  const efforts = (selected, none) => `${none ? `<option value=""${selected == null ? " selected" : ""}>${none}</option>` : ""}${TASTE_EFFORTS.map((e) => `<option value="${e}"${e === selected ? " selected" : ""}>${e}</option>`).join("")}`;
+  return `<section class="taste-section taste-limits"><div class="taste-heading"><h2>Delegation limits</h2><p>pinned holds every worker to these. A call past them is refused, and a worker past its time or budget is stopped.</p></div>
+    ${tasteParallelHtml(t)}
+    <div class="taste-field">${tasteLabelHtml("tier")}<div class="taste-seg" role="group" aria-label="Model tier">${tiers}</div>
+      <span class="taste-quiet">The costliest tier a worker's own model may be. ${TASTE_TIER_ABOUT[t.tier]} and below. The models a worker picks for its own subagents are not held to it.</span></div>
+    <div class="taste-limit-pair">
+      <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.default_effort} <select data-effort="default_effort">${efforts(t.default_effort, "The model's own")}</select></label>${tasteTagHtml("default_effort")}</div>
+      <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.max_effort} <select data-effort="max_effort">${efforts(t.max_effort)}</select></label>${tasteTagHtml("max_effort")}</div>
+    </div>
+    ${tasteLadderHtml(t, "time_limit_min", tasteMinutes, "time per worker")}
+    ${tasteLadderHtml(t, "budget_cents", tasteMoney, "budget per worker")}
+    ${tasteLadderHtml(t, "box_budget_cents", tasteMoney, "budget per box")}
+    <p class="taste-quiet">The budget counts what a Claude Code worker's tokens cost at list prices, its subagents' included. Cursor and Codex workers are held to time and tier only.</p>
+  </section>`;
+}
+
 function tastePaceHtml(t) {
   const autonomies = TASTE_AUTONOMIES.map((a) => `<button type="button" data-act="set" data-field="autonomy" data-value="${a.id}" aria-pressed="${a.id === t.autonomy}">${a.label}</button>`).join("");
   const toggle = (field, title, about) => `<div class="taste-switch-row">
     <button type="button" class="taste-switch" role="switch" aria-checked="${t[field]}" aria-label="${title}" data-act="toggle" data-field="${field}"><span></span></button>
     <span class="taste-switch-text"><b>${title}</b><span>${about}</span></span><span class="taste-tags">${tasteTagHtml(field)}</span></div>`;
   return `<section class="taste-section"><h2>Pace</h2>
-    <div class="taste-field taste-inline"><div class="taste-label"><span>Parallel workers</span>${tasteTagHtml("parallel")}</div>
-      <span class="taste-stepper"><button type="button" data-act="parallel" data-step="-1" aria-label="Fewer parallel workers"${t.parallel <= 1 ? " disabled" : ""}>${icon("minus")}</button>
-      <output aria-live="polite">${t.parallel}</output>
-      <button type="button" data-act="parallel" data-step="1" aria-label="More parallel workers"${t.parallel >= TASTE_MAX_PARALLEL ? " disabled" : ""}>${icon("plus")}</button></span></div>
+    ${tasteUi.scope.kind === "orchestrator" ? tasteParallelHtml(t) : ""}
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
     ${toggle("review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${toggle("second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
@@ -223,7 +269,7 @@ function tastePreviewHtml(t) {
   const dots = [0, 1, 2].map((i) => `<span${i < speed ? ' class="on"' : ""}></span>`).join("");
   return `<aside class="taste-preview"><h2>${tasteUi.scope.kind === "orchestrator" ? `What the ${esc(globalSettings.name)} receives` : "What the Captain receives"}</h2>
     <div class="taste-box"><div class="taste-lines">${lines}</div>
-      <div class="taste-meters"><div><span>Cost per task</span><span title="A rough estimate from each model's cost tier">${tasteCost(t)}</span></div>
+      <div class="taste-meters"><div><span>Cost per task</span><span title="A rough estimate from each model's cost tier">${tasteCost(t, (id) => tasteModelTier(id, claudeModels()))}</span></div>
       <div><span>Speed</span><span class="taste-speed" role="img" aria-label="Speed ${speed} of 3">${dots}</span></div></div></div>
     <p class="taste-hint">Changes with the fields on the left.</p></aside>`;
 }
@@ -251,7 +297,7 @@ function tasteRender() {
   }
   const scope = tasteUi.scope;
   const t = tasteShown();
-  const catalog = tasteCatalog(CLAUDE_MODELS, OPENCODE_GO_MODELS);
+  const catalog = tasteCatalog(claudeModels(), OPENCODE_GO_MODELS);
   const names = new Map(catalog.flatMap((group) => group.models.map((m) => [m.slug, m.name])));
   const repos = [...Object.keys(tasteUi.draft.projects ?? {}), ...(scope.kind === "project" ? [scope.repo] : [])];
   const tabs = [
@@ -270,8 +316,9 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
+    ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
   const back = focused && [...pageView.querySelectorAll("button, select, input")].find((el) => tasteFocusKey(el) === focused);
@@ -287,7 +334,7 @@ const TASTE_ACTS = {
   set: (b) => tasteEditField(b.dataset.field, b.dataset.value),
   toggle: (b) => tasteEditField(b.dataset.field, !tasteShown()[b.dataset.field]),
   reset: (b) => tasteEdit(tasteResetField(tasteUi.draft, tasteUi.scope, b.dataset.field)),
-  parallel: (b) => tasteEditField("parallel", tasteShown().parallel + Number(b.dataset.step)),
+  step: (b) => tasteEditField(b.dataset.field, Number(b.dataset.value)),
   up: (b) => tasteMoveRung(b.dataset.rung, -1),
   down: (b) => tasteMoveRung(b.dataset.rung, 1),
   remove: (b) => tasteEditField("ladder", tasteShown().ladder.filter((ref) => tasteRefKey(ref) !== b.dataset.rung)),
@@ -315,8 +362,18 @@ pageView.addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]");
   if (b && !b.disabled) TASTE_ACTS[b.dataset.act](b);
 });
+/** An effort pick. Lowering the most effort below the default brings the default down with it. */
+function tasteEditEffort(field, value) {
+  const t = tasteShown();
+  const max = field === "max_effort" ? value : t.max_effort;
+  const fallen = t.default_effort && TASTE_EFFORTS.indexOf(t.default_effort) > TASTE_EFFORTS.indexOf(max);
+  tasteEdit(tasteSetFields(tasteUi.draft, tasteUi.scope, fallen ? { [field]: value, default_effort: max } : { [field]: value }));
+}
+
 pageView.addEventListener("change", (e) => {
-  if (document.body.dataset.page !== "taste" || !e.target.value) return;
+  if (document.body.dataset.page !== "taste") return;
+  if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
+  if (!e.target.value) return;
   if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);
   else if (e.target.matches("[data-hard-model]")) tasteEditField("hard_model", tasteRefOf(e.target.value));
 });
@@ -351,5 +408,6 @@ SHELL_PAGES.taste = {
     tasteRender();
     tasteFetch();
     tasteFetchProjects();
+    delegationFetch();
   },
 };

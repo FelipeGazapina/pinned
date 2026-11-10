@@ -421,6 +421,9 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+    /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
+    /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
+    Confirm,
 }
 
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
@@ -612,7 +615,7 @@ impl SessionState {
     pub fn of(tab: &TabView) -> SessionState {
         match waiting_kind(tab) {
             Some(WaitingKind::Failed) => SessionState::Error,
-            Some(WaitingKind::NeedsInput) => SessionState::WaitingOnInput,
+            Some(WaitingKind::NeedsInput | WaitingKind::Confirm) => SessionState::WaitingOnInput,
             None if !tab.running => SessionState::Settled,
             None if tab.status == Some(AgentStatus::Working) || tab.orchestrator_turn => SessionState::Running,
             None => SessionState::Idle,
@@ -691,6 +694,7 @@ Para cada pedido:
 2. #projeto no texto força o projeto, e @máquina força a máquina. Cada marca vale só para o parágrafo em que aparece: um texto com parágrafos para projetos diferentes vira uma mensagem para cada Capitão.
 3. Quando o mesmo repo está em várias máquinas, prefira a máquina com um Capitão rodando (livre ou trabalhando), depois a sua própria máquina ({machine}), depois a primeira online, e passe machine em send_to_captain. Se ainda houver dúvida, pergunte ao Felipe antes de enviar qualquer coisa.
 4. Use um request_id novo em cada mensagem. Repita um request_id só para reenviar a mesma mensagem depois de um erro.
+4b. Quando o Felipe pede o Capitão numa Upstash Box, ou nenhuma máquina dele deve rodar o trabalho, passe box: true (ou {{ \"size\": \"large\" }}) em send_to_captain em vez de machine. O hub abre a box com a conexão Upstash da conta, clona o repo e inicia o Capitão lá; a resposta é iniciado com a máquina da box, que liga em alguns minutos e aparece em projects(). A box é apagada quando o Capitão fica parado. Uma nova mensagem para o mesmo projeto com box vai para a box que já roda.
 5. send_to_captain responde entregue (digitado agora), na_fila (o Capitão está ocupado e lê quando terminar), iniciado (o Capitão começou com a mensagem) ou ocupado (tente de novo mais tarde). Conte ao Felipe em uma frase.
 
 Capitão reports arrive as messages that start with \"[pinned] Capitão <project> (<machine>)\". Sum each one up for Felipe in a few lines: what was done, what is left and what needs Felipe. read_captain(project) reads a Capitão's last replies, and waiting() lists what waits on Felipe on every machine.
@@ -733,6 +737,18 @@ pub enum RelayTo {
     /// A report for the account's global orchestrator, as `Call::OrchestratorReport` takes it. The
     /// hub takes it only from a machine whose Capitão tab `report.tab` works in `report.path`.
     Orchestrator { report: CaptainReport },
+    /// `text` for the Capitão of `repo` in an Upstash Box the hub opens with the account's own
+    /// connection, or the box that already runs it. Taken only from the global orchestrator's host.
+    CaptainBox {
+        repo: String,
+        #[serde(default)]
+        size: crate::connectors::BoxSize,
+        text: String,
+        #[serde(default)]
+        sender: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<BusyPolicy>,
+    },
 }
 
 #[cfg(test)]
