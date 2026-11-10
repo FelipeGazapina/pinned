@@ -34,6 +34,7 @@ pub mod model2vec;
 pub mod opencode_go;
 pub mod panel;
 pub mod plugin;
+pub mod preauth;
 pub mod private;
 pub mod process;
 pub mod projects;
