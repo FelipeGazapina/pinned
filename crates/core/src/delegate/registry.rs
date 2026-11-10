@@ -20,6 +20,17 @@ pub struct Delegates {
     limits: ProviderLimits,
 }
 
+/// A delegated task seen from the thread that runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadEnd {
+    /// It ended: a result, a failure or a cancel.
+    pub terminal: bool,
+    /// Its result reached the session that delegated it.
+    pub delivered: bool,
+    /// Unix seconds of the later of its end and its delivery.
+    pub at: u64,
+}
+
 /// How many taken notices a machine remembers: a hub resends only those decided in the last week.
 const NOTICES_KEPT: usize = 4000;
 
@@ -144,6 +155,19 @@ impl Delegates {
 
     pub fn working_in(&self, project: &Path) -> usize {
         self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
+    }
+
+    /// How many tasks still at work were started by the session `caller_key` names, `tab:<id>`.
+    pub fn working_for(&self, caller_key: &str) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && task.caller_key == caller_key).count()
+    }
+
+    /// How each task whose pinned thread is `tab` stands, for the auto-archive rule. `at` is the
+    /// later of the task's end and its delivery, 0 while neither is known.
+    pub fn thread_ends(&self, tab: &str) -> Vec<ThreadEnd> {
+        let tasks = self.tasks.lock().unwrap();
+        let on_tab = tasks.iter().filter(|task| task.thread.as_ref().is_some_and(|thread| thread.tab == tab));
+        on_tab.map(|task| ThreadEnd { terminal: task.state.terminal(), delivered: task.delivered, at: (task.ended.unwrap_or(0) / 1000).max(task.delivered_at.unwrap_or(0)) }).collect()
     }
 
     /// The folder of each task still at work.
@@ -525,7 +549,7 @@ impl Delegates {
         {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.delivered) else { return };
-            task.delivered = true;
+            task.deliver();
         }
         self.persist();
     }
@@ -700,7 +724,7 @@ impl Delegates {
             let mut tasks = self.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
             if task.state.terminal() {
-                task.delivered = true;
+                task.deliver();
                 let mut body = status_json(task);
                 body["next"] = json!(result_next(task));
                 body
@@ -755,7 +779,7 @@ impl Delegates {
             let mut tasks = self.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
             if task.state.terminal() {
-                task.delivered = true;
+                task.deliver();
             }
             status_json(task)
         };
@@ -786,7 +810,7 @@ impl Delegates {
         }
         let task = tasks.iter_mut().find(|task| task.id == id).unwrap();
         if task.state.terminal() {
-            task.delivered = true;
+            task.deliver();
         }
         Ok(status_json(task))
     }
@@ -848,7 +872,7 @@ impl Delegates {
         let mut lines: Vec<String> = ready.iter().map(|index| notice_line(&tasks[*index])).collect();
         let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
         for index in &ready {
-            tasks[*index].delivered = true;
+            tasks[*index].deliver();
         }
         for index in pending {
             reports[index].claimed = true;
@@ -880,7 +904,7 @@ impl Delegates {
         if task.delivered {
             return Err(format!("{id} was already sent"));
         }
-        task.delivered = true;
+        task.deliver();
         let line = notice_line(task);
         drop(tasks);
         self.persist();
@@ -1242,6 +1266,11 @@ pub struct Lineage {
 }
 
 impl Task {
+    fn deliver(&mut self) {
+        self.delivered = true;
+        self.delivered_at = Some(unix_millis() / 1000);
+    }
+
     fn note(&mut self, event: StreamEvent) -> Option<HeldExit> {
         if self.state != WorkState::Working {
             return None;
@@ -1592,6 +1621,7 @@ fn fresh(new: NewTask) -> Task {
         newest_text: None,
         mode: new.mode,
         delivered: false,
+        delivered_at: None,
         isolated: new.isolated,
         caller_key: new.caller_key,
         client_request_id: new.client_request_id,
@@ -1707,6 +1737,8 @@ struct SavedTask {
     #[serde(default)]
     delivered: bool,
     #[serde(default)]
+    delivered_at: Option<u64>,
+    #[serde(default)]
     isolated: bool,
     caller_key: String,
     #[serde(default)]
@@ -1772,6 +1804,7 @@ impl SavedTask {
             conversation: task.conversation.clone(),
             mode: task.mode,
             delivered: task.delivered,
+            delivered_at: task.delivered_at,
             isolated: task.isolated,
             caller_key: task.caller_key.clone(),
             client_request_id: task.client_request_id.clone(),
@@ -1817,6 +1850,7 @@ impl SavedTask {
             newest_text: self.assistant,
             mode: self.mode,
             delivered: self.delivered,
+            delivered_at: self.delivered_at,
             isolated: self.isolated,
             caller_key: self.caller_key,
             client_request_id: self.client_request_id,
