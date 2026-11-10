@@ -125,9 +125,10 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         push_confirmations(hub, account).await;
         return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
     }
+    let widened = surface::widening(&admitted.call).unwrap_or_default();
     match run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await {
         Ok(result) => {
-            trail.ran(AuditOutcome::Done, "").await;
+            trail.ran(AuditOutcome::Done, &widened).await;
             json(ActAnswer::Done { result: surface::redact(result, admitted.action.hides) })
         }
         Err(error) => {

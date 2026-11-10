@@ -439,7 +439,7 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 
 The audit row of something that already ran is written after it runs. When that write fails, the hub logs it and still answers, so the session does not run the action twice.
 
-**Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal, or for a decision what running it came to.
+**Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal. For an act that loosened a session's permissions it says so (`surface::widening`): `loosened permissions: <tab> now skips its permission prompts` for `set_bypass` with `on: true`, and `loosened permissions: the new tab in <path> skips its permission prompts` for `open_tab` with `bypass`.
 
 `AuditEntry` (outbound root):
 
@@ -492,7 +492,7 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
   - for a tab with wider access than the caller's (`child_access`, `tighten`): `<tab> runs with full access, wider than your session's auto`.
 - Any other action with `starts_work: true` is refused by `ActFor` until its unit gives it a limits path: `<name> starts work, and nothing holds it to the limits yet`.
 - `restart_claude`, `set_model`, `set_bypass`, `rewind`, `switch_account` and `set_workspace` also start a stopped tab, so `ActFor` runs them only on a tab whose session runs: `<cmd> restarts a running session, and <tab> runs none: start_claude starts it as your worker`.
-- `set_bypass` with `on: true` runs only for a caller with full access: `set_bypass on skips a session's permission prompts, and your own session asks for them`.
+- `set_bypass` stays `write`: permission changes run directly, and loosening goes to the audit trail (13.4). With `on: true` it runs only for a caller with full access, so an agent never grants more than it has: `set_bypass on skips a session's permission prompts, and your own session asks for them`.
 - Every other call runs as `Machine::call` runs it. `ActFor` waits as long as its inner call (`may_wait`).
 
 ### 13.7 Secrets

@@ -4871,5 +4871,9 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(keyed(&ana.tab, "machines"), "repeat");
     assert_eq!(keyed(&global, "machines"), "done", "another session's request_id is its own");
     assert_eq!(keyed(&ana.tab, "confirmations"), "done", "and so is another action's");
+
+    assert_eq!(act(&ana.dir, &ana.tab, "open_tab", json!({ "path": docs, "bypass": true })).unwrap()["outcome"], "done");
+    let latest = &ana.client.hub(json!({ "cmd": "agent_audit", "limit": 1 })).unwrap()[0];
+    assert_eq!((&latest["action"], &latest["detail"]), (&json!("open_tab"), &json!(format!("loosened permissions: the new tab in {docs} skips its permission prompts"))));
     drop(bob);
 }

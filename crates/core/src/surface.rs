@@ -591,6 +591,16 @@ pub struct Decided {
     pub result: Value,
 }
 
+/// What the audit row of a call that ran says beyond its arguments: that it loosened a session's
+/// permissions.
+pub fn widening(call: &Parsed) -> Option<String> {
+    match call {
+        Parsed::Node(Call::SetBypass { tab, on: true, .. }) => Some(format!("loosened permissions: {tab} now skips its permission prompts")),
+        Parsed::Node(Call::OpenTab { path, bypass: true }) => Some(format!("loosened permissions: the new tab in {} skips its permission prompts", path.as_deref().unwrap_or("the default folder"))),
+        _ => None,
+    }
+}
+
 /// The text a session gets when the user decides its confirmation.
 pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
     let action = &confirmation.action;
@@ -811,6 +821,15 @@ mod tests {
         assert!(missing.starts_with("rename_machine: missing field `name`"), "{missing}");
         let Err(shape) = parse(find("machines").unwrap(), &json!(["m1"])) else { panic!("an array") };
         assert_eq!(shape, "machines: args must be an object of the action's fields");
+    }
+
+    #[test]
+    fn the_trail_notes_a_call_that_loosens_a_sessions_permissions() {
+        let note = |action: &str, args: Value| widening(&parse(find(action).unwrap(), &args).unwrap());
+        assert_eq!(note("set_bypass", json!({ "tab": "tab-1", "on": true, "cols": 80, "rows": 24 })).as_deref(), Some("loosened permissions: tab-1 now skips its permission prompts"));
+        assert_eq!(note("open_tab", json!({ "path": "/w/site", "bypass": true })).as_deref(), Some("loosened permissions: the new tab in /w/site skips its permission prompts"));
+        assert_eq!(note("set_bypass", json!({ "tab": "tab-1", "on": false, "cols": 80, "rows": 24 })), None);
+        assert_eq!(note("open_tab", json!({ "path": null, "bypass": false })), None);
     }
 
     #[test]
