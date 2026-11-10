@@ -40,6 +40,7 @@ function showAccount() {
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>
+    ${repoInsightHtml()}
     ${TAURI ? "" : notificationsHtml()}
     <form class="card new-password">
       <div class="card-head"><div><b>Password</b></div></div>
@@ -50,6 +51,7 @@ function showAccount() {
       <div class="actions"><button class="primary">Change password</button></div>
     </form>
     ${invitesHtml()}`;
+  bindRepoInsight();
   settingsPage.querySelector(".new-password").onsubmit = (e) => {
     e.preventDefault();
     changePassword(e.target);
@@ -150,6 +152,32 @@ const NOTIFICATIONS = {
 };
 
 // The browser remembers the answer, so the card reads it from there each time.
+/** The account's one switch for the global Orchestrator's read-only repo tools. Off until turned on. */
+function repoInsightHtml() {
+  const on = !!settings.repo_insight?.on;
+  return `<div class="card repo-insight">
+      <div class="side-setting"><div><label for="repo-insight">Orchestrator repo access</label>
+        <p class="meta">Lets the global Orchestrator read this account's repositories to plan and check work: it sees files and searches them, never changes them. Files that may hold secrets are left out, and every read is listed in Agent activity.</p>
+        <p class="error" id="repo-insight-error"></p></div>
+        <label class="switch"><input type="checkbox" id="repo-insight" aria-label="Orchestrator repo access"${on ? " checked" : ""}><span></span></label></div>
+    </div>`;
+}
+
+function bindRepoInsight() {
+  const input = document.getElementById("repo-insight");
+  if (!input) return;
+  input.onchange = async () => {
+    const error = document.getElementById("repo-insight-error");
+    error.textContent = "";
+    try {
+      settings.repo_insight = await connectorCall("set_repo_insight", { settings: { on: input.checked } });
+    } catch (e) {
+      input.checked = !input.checked;
+      error.textContent = String(e);
+    }
+  };
+}
+
 function notificationsHtml() {
   const permission = window.Notification && navigator.serviceWorker ? Notification.permission : "unsupported";
   const [badge, hint] = NOTIFICATIONS[permission];
