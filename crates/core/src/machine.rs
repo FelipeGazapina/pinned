@@ -69,6 +69,9 @@ const START_RETRY: Duration = Duration::from_secs(5);
 /// How often this machine asks after each task it delegated elsewhere on its own, so one whose
 /// machine is gone, whose box never connected or whose end got lost ends here too.
 const REMOTE_CHECK: Duration = Duration::from_secs(60);
+/// How long a thread held for its delegated tasks stays idle with all of them ended before its own
+/// task ends, so the notice of the last one gets to start the turn that answers it.
+const HOLD_CLEAR: Duration = Duration::from_secs(5);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -246,18 +249,40 @@ struct Screen {
     viewers: Vec<(ViewerId, Sink)>,
     /// Counts starts, so a replaced session's last bytes can't land on its successor's screen.
     session: u64,
+    /// The session's terminal size, as (rows, cols).
+    size: (u16, u16),
+    /// Reads the screen while the session waits on a menu, to tell when the user answered it.
+    watch: Option<crate::menu_watch::MenuWatch>,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
+        self.watch = None;
         self.session += 1;
         self.session
+    }
+
+    fn watch_menu(&mut self) {
+        if self.watch.is_none() {
+            let (rows, cols) = self.size;
+            self.watch = Some(crate::menu_watch::MenuWatch::new(rows, cols, self.kept.make_contiguous(), Instant::now()));
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.size = (rows, cols);
+        if let Some(watch) = self.watch.as_mut() {
+            watch.resize(rows, cols);
+        }
     }
 
     fn push(&mut self, session: u64, bytes: &[u8]) {
         if session != self.session {
             return;
+        }
+        if let Some(watch) = self.watch.as_mut() {
+            watch.feed(bytes, Instant::now());
         }
         self.kept.extend(bytes);
         let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
@@ -326,6 +351,11 @@ struct ThreadChild<'a> {
 struct BackgroundWait {
     since: Instant,
     shells_only: bool,
+    /// The transcript listed background work still running at the turn's end. Claude Code starts
+    /// a turn when that work hands back, so only a wait on tasks alone ends from the delegate pass.
+    in_session: bool,
+    /// Since when nothing is left to wait on while the thread stays idle.
+    clear_since: Option<Instant>,
 }
 
 struct Tab {
@@ -490,7 +520,9 @@ impl Tab {
             Some(AgentStatus::Done) => true,
             Some(AgentStatus::NeedsInput) => !self.interrupted,
             None => self.claude_session.is_some(),
-            Some(AgentStatus::Working | AgentStatus::Failed) => false,
+            // A turn held for work it left running is over: a task's notice may wake it.
+            Some(AgentStatus::Working) => self.background_wait.is_some(),
+            Some(AgentStatus::Failed) => false,
         }
     }
 
@@ -2180,7 +2212,11 @@ impl Machine {
             t.held.clear();
             (t.session.take(), t.screen.clone())
         })?;
-        let session = screen.lock().unwrap().restart();
+        let session = {
+            let mut screen = screen.lock().unwrap();
+            screen.size = (size.rows, size.cols);
+            screen.restart()
+        };
         // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
         // would otherwise reach the viewers. It kills it silently, so its exit can't be mistaken for the new one's.
         drop(old);
@@ -2309,6 +2345,8 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.resize(tab, cols, rows);
         }
+        let screen = self.tab(tab, |t| t.screen.clone())?;
+        screen.lock().unwrap().resize(rows, cols);
         self.tab(tab, |t| match t.session.as_ref() {
             Some(s) => s.resize(pty::size(cols, rows)),
             None => Ok(()),
@@ -4934,9 +4972,18 @@ impl Machine {
         if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
             self.delegates.set_conversation(&task, session);
         }
+        let reply = self.reply_of(tab, event);
+        if error.is_none() {
+            self.delegates.turn_finished(&task, reply.clone(), vec![]);
+        }
         // The meter reads a working task only; this reads the turn that just ended before it settles.
         self.meter_workers();
-        let parent = self.delegates.settle_thread(&task, self.reply_of(tab, event), error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // A cap the finished turn crossed ended the task with this reply; the pass delivers its notice.
+        if self.delegates.is_terminal(&task) {
+            self.arm_delegate_pass();
+            return true;
+        }
+        let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -4952,17 +4999,76 @@ impl Machine {
         }
     }
 
-    /// Whether the worker's turn that just ended left background work it started pending, which
-    /// Claude Code resumes the worker with once it hands back. Notes since when the worker waits.
-    fn waits_on_background(&self, tab: &str) -> bool {
-        let started = self.tab(tab, |t| t.started).ok().flatten();
+    /// Whether the thread's turn that just ended left work it started still running: background
+    /// shells or subagents, which Claude Code resumes it with once they hand back, or pinned tasks
+    /// it delegated whose end has not reached it. Notes since when it waits, and tells its own task
+    /// what it waits on and its reply so far.
+    fn waits_on_background(&self, tab: &str, event: &AgentEvent) -> bool {
+        let (started, task) = self.tab(tab, |t| (t.started, t.task.clone())).unwrap_or_default();
         let pending = self.transcript(tab).ok().and_then(|file| thread::pending_background(&file, started).ok()).unwrap_or_default();
-        let wait = (!pending.is_empty()).then(|| BackgroundWait { since: Instant::now(), shells_only: pending.iter().all(|b| *b == thread::Background::Shell) });
+        let children = self.delegates.waited_children(tab, task.as_deref());
+        let shells = pending.iter().filter(|b| **b == thread::Background::Shell).count();
+        let wait = (!pending.is_empty() || !children.is_empty()).then(|| BackgroundWait {
+            since: Instant::now(),
+            shells_only: children.is_empty() && shells == pending.len(),
+            in_session: !pending.is_empty(),
+            clear_since: None,
+        });
         let _ = self.tab(tab, |t| t.background_wait = wait);
-        if wait.is_some() {
-            self.arm_delegate_pass();
+        if wait.is_none() {
+            return false;
         }
-        wait.is_some()
+        if let Some(task) = task {
+            let mut held_on = vec![];
+            if shells > 0 {
+                held_on.push(crate::delegate::many_of(shells, "background shell"));
+            }
+            if pending.len() > shells {
+                held_on.push(crate::delegate::many_of(pending.len() - shells, "background subagent"));
+            }
+            self.delegates.turn_finished(&task, self.reply_of(tab, event), held_on);
+        }
+        self.arm_delegate_pass();
+        true
+    }
+
+    /// Ends the hold of each idle thread whose delegated tasks all ended and reached it, with no
+    /// background work of its own, once that stays so for `HOLD_CLEAR`: its latest reply is its end.
+    fn end_finished_holds(&self, now: Instant) {
+        let held: Vec<(String, Option<String>)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.background_wait.is_some_and(|w| !w.in_session) && t.turn_pending.is_none()).map(|(id, t)| (id.clone(), t.task.clone())).collect();
+        let mut ended = vec![];
+        for (tab, task) in held {
+            let clear = self.delegates.waited_children(&tab, task.as_deref()).is_empty();
+            let ripe = self.tab(&tab, |t| {
+                let Some(wait) = t.background_wait.as_mut() else { return false };
+                wait.clear_since = if clear { Some(wait.clear_since.unwrap_or(now)) } else { None };
+                if !wait.clear_since.is_some_and(|since| now.saturating_duration_since(since) >= HOLD_CLEAR) || t.turn_pending.is_some() {
+                    return false;
+                }
+                t.background_wait = None;
+                t.status = Some(AgentStatus::Done);
+                t.updated = Some(unix_now());
+                true
+            });
+            if ripe == Ok(true) {
+                ended.push(tab);
+            }
+        }
+        for tab in ended {
+            self.end_hold(&tab);
+        }
+    }
+
+    /// A held thread's wait is over: its task ends with its latest reply, or a worker without one reports.
+    fn end_hold(&self, tab: &str) {
+        let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        if !self.settle_thread_task(tab, &event) {
+            if let Ok(Some((Role::Worker, project))) = self.tab(tab, |t| role_of(&t.env)) {
+                self.report_worker(tab, &project, &event, Some(AgentStatus::Working));
+            }
+        }
+        self.maybe_deliver(tab);
+        self.emit_tabs();
     }
 
     /// Ends the wait of a worker left waiting only on background shells and quiet for as long as a
@@ -4970,25 +5076,58 @@ impl Machine {
     /// it is the worker's last.
     fn end_quiet_waits(&self, now: Instant) {
         let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
-        let ended: Vec<(String, PathBuf)> = {
+        let ended: Vec<String> = {
             let mut tabs = self.tabs.lock().unwrap();
             let ripe = tabs.iter_mut().filter(|(_, t)| t.background_wait.is_some_and(|w| w.shells_only && now.saturating_duration_since(w.since) >= quiet));
-            ripe.filter_map(|(id, t)| {
+            ripe.map(|(id, t)| {
                 t.background_wait = None;
                 t.status = Some(AgentStatus::Done);
                 t.updated = Some(unix_now());
-                Some((id.clone(), role_of(&t.env)?.1))
+                id.clone()
             })
             .collect()
         };
-        for (tab, project) in ended {
-            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
-            if !self.settle_thread_task(&tab, &event) {
-                self.report_worker(&tab, &project, &event, Some(AgentStatus::Working));
+        for tab in ended {
+            self.end_hold(&tab);
+        }
+    }
+
+    /// Each session that waited on the user mid-turn and whose menu the user answered works again
+    /// now, instead of at its next hook event: its ask clears and its task's time limit counts.
+    fn clear_answered_asks(&self, now: Instant) {
+        let asking: Vec<(String, Arc<Mutex<Screen>>)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).map(|(id, t)| (id.clone(), t.screen.clone())).collect();
+        let mut changed = false;
+        for (tab, screen) in asking {
+            {
+                let mut screen = screen.lock().unwrap();
+                if !screen.watch.as_ref().is_some_and(|watch| watch.answered(now)) {
+                    continue;
+                }
+                screen.watch = None;
             }
-            self.maybe_deliver(&tab);
+            changed |= self
+                .tab(&tab, |t| {
+                    let asked = t.status == Some(AgentStatus::NeedsInput) && t.interrupted;
+                    if asked {
+                        t.status = Some(AgentStatus::Working);
+                        t.message = None;
+                        t.ask_detail = None;
+                        t.updated = Some(unix_now());
+                    }
+                    asked
+                })
+                .unwrap_or(false);
+        }
+        if changed {
             self.emit_tabs();
         }
+    }
+
+    /// Pauses the time limit of each task whose thread here waits on the user mid-turn, and
+    /// resumes the others'. A task on another machine pauses on that machine's word.
+    fn note_user_waits(&self, now: Instant) {
+        let waiting: Vec<String> = self.tabs.lock().unwrap().values().filter(|t| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).filter_map(|t| t.task.clone()).collect();
+        self.delegates.note_user_waits(&waiting, now);
     }
 
     /// The last steps of a thread's conversation, as `task_status` lists them.
@@ -5097,6 +5236,8 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.clear_answered_asks(Instant::now());
+                machine.note_user_waits(Instant::now());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.send_remote_asks(Instant::now());
@@ -5106,6 +5247,7 @@ impl Machine {
                 }
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
+                machine.end_finished_holds(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
@@ -5327,7 +5469,13 @@ impl Machine {
                 }
             }
             let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
-            let held = worker && event.status == AgentStatus::Done && self.waits_on_background(tab);
+            // A workflow's Run now has no role, but a task: it ends like a worker's.
+            let task = self.tab(tab, |t| t.task.clone()).ok().flatten();
+            let holds = worker || (role.is_none() && task.is_some());
+            let held = holds && event.status == AgentStatus::Done && self.waits_on_background(tab, &event);
+            if let (Some(task), AgentStatus::Working) = (&task, event.status) {
+                self.delegates.turn_started(task);
+            }
             self.record_status(tab, &event);
             if held {
                 let _ = self.tab(tab, |t| t.status = Some(AgentStatus::Working));
@@ -5342,7 +5490,8 @@ impl Machine {
                     }
                 }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
-                // A workflow's Run now is a task with no worker role: its first finished turn ends it too.
+                None if held => {}
+                // A workflow's Run now is a task with no worker role: its turn ends it like a worker's.
                 None => {
                     self.settle_thread_task(tab, &event);
                 }
@@ -5585,6 +5734,18 @@ impl Machine {
         });
         if changed == Ok(true) {
             self.save_sessions();
+        }
+        let asks = event.status == AgentStatus::NeedsInput && !was_done;
+        if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
+            let mut screen = screen.lock().unwrap();
+            if asks {
+                screen.watch_menu();
+            } else {
+                screen.watch = None;
+            }
+        }
+        if asks {
+            self.arm_delegate_pass();
         }
         if event.status == AgentStatus::NeedsInput && !was_done && self.tab(tab, |t| t.ask_detail.is_none()).unwrap_or(false) {
             self.find_ask_detail_later(tab);
@@ -12323,6 +12484,113 @@ Have another model review a risky change before it goes ahead.";
         m.end_quiet_waits(Instant::now() + quiet);
         assert_eq!((state()["workState"].as_str(), state()["summary"].as_str()), (Some("result_available"), Some("The dev server runs on :3000.")));
         assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A task the thread `tab` delegated, as `delegate_task` from it records one.
+    #[cfg(unix)]
+    fn task_from(m: &Machine, tab: &str, title: &str) -> String {
+        m.delegates
+            .begin(crate::delegate::NewTask {
+                parent: crate::delegate::Parent::Tab(tab.into()),
+                tool: None,
+                title: title.into(),
+                account: "work".into(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: std::env::temp_dir(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{tab}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_that_ends_its_turn_while_its_own_task_works_ends_after_that_task_with_its_latest_reply() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-waits-child");
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let sub = task_from(&m, &child, "Rust half");
+        append(&transcript, &[said("The Rust half runs in its own task; I'll merge once it ends.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+
+        let held = status();
+        assert_eq!(held["workState"], "working", "{held}");
+        assert_eq!(held["summary"], "The Rust half runs in its own task; I'll merge once it ends.");
+        assert_eq!(held["waitsOn"]["tasks"], json!([{ "taskId": sub, "title": "Rust half", "workState": "working" }]));
+        assert_eq!(m.delegates.claim_notice(&captain), None, "the captain hears nothing yet");
+        m.end_finished_holds(Instant::now() + HOLD_CLEAR * 10);
+        assert_eq!(status()["workState"], "working", "its task still works");
+
+        m.delegates.settle_thread(&sub, Some("Rust half merged.".into()), None, None, vec![], None);
+        let (notice, _) = m.delegates.claim_notice(&child).expect("the sub-task's notice for the worker");
+        m.record_event(hook_event(&child, "working", &transcript, Some(&notice)));
+        append(&transcript, &[said("Both halves are in: PR #12 is green.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("Both halves are in: PR #12 is green.")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_worker_whose_tasks_all_ended_and_reached_it_ends_once_it_stays_idle() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-hold-clears");
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let sub = task_from(&m, &child, "Rust half");
+        append(&transcript, &[json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "Waiting on the Rust half." }] } })]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.delegates.settle_thread(&sub, Some("Rust half merged.".into()), None, None, vec![], None);
+        m.delegates.claim_notice(&child).unwrap();
+
+        let now = Instant::now();
+        m.end_finished_holds(now);
+        m.end_finished_holds(now + HOLD_CLEAR - Duration::from_millis(1));
+        assert_eq!(status()["workState"], "working", "the last notice may still start a turn");
+        m.end_finished_holds(now + HOLD_CLEAR);
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("Waiting on the Rust half.")));
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_answered_approval_clears_the_wait_while_the_turn_runs_and_the_time_limit_counts_again() {
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-approval-answered");
+        let screen = m.tab(&child, |t| t.screen.clone()).unwrap();
+        let put = |bytes: &[u8]| {
+            let mut screen = screen.lock().unwrap();
+            let session = screen.session;
+            screen.push(session, bytes);
+        };
+        screen.lock().unwrap().resize(24, 80);
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        put("\x1b[2J\x1b[H Bash command\r\n\r\n   cargo publish\r\n\r\n Do you want to proceed?\r\n \u{276f} 1. Yes\r\n   2. No, and tell Claude what to do differently (esc)\r\n".as_bytes());
+        m.record_event(AgentEvent { message: Some("Claude needs your permission to use Bash".into()), ..hook_event(&child, "needs-input", &transcript, None) });
+        let asked = Instant::now();
+        m.note_user_waits(asked);
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::NeedsInput));
+        assert_eq!(m.delegates.get(&task).unwrap().run.user_wait, Some(asked), "the time limit paused");
+
+        m.clear_answered_asks(asked + crate::menu_watch::SETTLE * 4);
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::NeedsInput), "the menu is still up");
+
+        put(b"\x1b[5;1H\x1b[J \xe2\x8f\xba Bash(cargo publish)\r\n   Running\xe2\x80\xa6\r\n");
+        let answered = Instant::now() + crate::menu_watch::SETTLE;
+        m.clear_answered_asks(answered);
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.message.clone()), (Some(AgentStatus::Working), None), "cleared while the turn runs, before any hook");
+        m.note_user_waits(answered);
+        let run = m.delegates.get(&task).unwrap().run;
+        assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
         let _ = std::fs::remove_dir_all(dir);
     }
 

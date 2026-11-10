@@ -18,7 +18,13 @@ pub struct Delegates {
     warming: Arc<AtomicBool>,
     /// The accounts a usage limit stopped, kept in `provider-limits.json` beside the tasks.
     limits: ProviderLimits,
+    /// When the tasks were last written, so a working task's counted time is saved at least each
+    /// `COUNTED_SAVE_EVERY` and a crash loses at most that much of it.
+    saved_at: Mutex<Instant>,
 }
+
+/// How often the counted time of working tasks reaches disk while nothing else changes.
+const COUNTED_SAVE_EVERY: Duration = Duration::from_secs(60);
 
 /// What the news that a remote worker waits on the user says between the worker and the ask.
 pub const ASK_NOTICE: &str = " waits on the user for ";
@@ -81,6 +87,7 @@ impl Default for Delegates {
             cursor: Arc::new(Mutex::new(None)),
             warming: Arc::new(AtomicBool::new(false)),
             limits: ProviderLimits::default(),
+            saved_at: Mutex::new(Instant::now()),
         }
     }
 }
@@ -324,14 +331,98 @@ impl Delegates {
 
     /// Stops a task and its descendants because it passed `limit` (`time` or `budget`). Its record
     /// says it was stopped by that limit; the descendants read as cancelled with the same reason.
+    ///
+    /// A thread task whose turn already finished, held only for work it left running, is done:
+    /// its reply is the result, and only what still runs under it is cancelled.
     pub fn stop_for_limit(&self, id: &str, limit: &str, reason: &str, path: Option<&str>) {
-        {
+        let finished = {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.state.terminal()) else { return };
-            task.limit = Some(limit.to_owned());
+            if task.state == WorkState::Working && task.run.turn_done {
+                task.ended_by = Some(format!("{reason}, after its turn had finished; its last reply is the result"));
+                true
+            } else {
+                task.limit = Some(limit.to_owned());
+                false
+            }
+        };
+        if !finished {
+            self.stop_tree(id, reason, path);
+            self.persist();
+            return;
         }
-        self.stop_tree(id, reason, path);
+        let order = {
+            let tasks = self.tasks.lock().unwrap();
+            let mut order = vec![];
+            postorder(&tasks, id, &mut order);
+            order
+        };
+        for child in order.iter().filter(|child| *child != id) {
+            self.stop_one(child, reason, path);
+        }
+        let dirs = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(index) = tasks.iter().position(|task| task.id == id && task.state == WorkState::Working) else { return };
+            self.forget_pid(id);
+            let summary = tasks[index].summary.clone();
+            close(&mut tasks, index, HeldExit { summary, error: None, failed: false })
+        };
+        for dir in dirs {
+            crate::branches::drop_worktree(&dir, path);
+        }
         self.persist();
+    }
+
+    /// The thread running task `id` finished a turn that said `reply`. Until a new turn starts, a
+    /// limit that passes ends the task with that reply instead of cancelling it.
+    pub fn turn_finished(&self, id: &str, reply: Option<String>, held_on: Vec<String>) {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.iter_mut().find(|task| task.id == id && task.state == WorkState::Working) else { return };
+        task.run.turn_done = true;
+        task.run.held_on = held_on;
+        if reply.is_some() {
+            task.summary = reply;
+        }
+    }
+
+    /// The thread running task `id` started a turn.
+    pub fn turn_started(&self, id: &str) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.run.turn_done = false;
+            task.run.held_on.clear();
+        }
+    }
+
+    /// The tasks a thread still waits on before its own task can end: each one started from its
+    /// tab `tab` or from its task `task` that still works, or whose end has not reached it yet, as
+    /// (id, title).
+    pub fn waited_children(&self, tab: &str, task: Option<&str>) -> Vec<(String, String)> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.iter().filter(|child| Some(child.id.as_str()) != task && child_of(child, tab, task) && (!child.state.terminal() || !child.delivered)).map(|child| (child.id.clone(), child.title.clone())).collect()
+    }
+
+    /// Pauses the time limit of each working task whose worker waits on the user: the local
+    /// threads `waiting` names, and the tasks whose worker on another machine says it waits.
+    /// Resumes it for the rest. Saves the counted time each `COUNTED_SAVE_EVERY`.
+    pub fn note_user_waits(&self, waiting: &[String], now: Instant) {
+        let working = {
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
+                let waits = waiting.contains(&task.id) || task.remote.as_ref().is_some_and(|remote| remote.waiting.is_some());
+                match (waits, task.run.user_wait) {
+                    (true, None) => task.run.user_wait = Some(now),
+                    (false, Some(since)) => {
+                        task.run.paused += now.saturating_duration_since(since);
+                        task.run.user_wait = None;
+                    }
+                    _ => {}
+                }
+            }
+            tasks.iter().any(|task| !task.state.terminal())
+        };
+        if working && self.saved_at.lock().unwrap().elapsed() >= COUNTED_SAVE_EVERY {
+            self.persist();
+        }
     }
 
     /// The delegator's verdict on a finished task's result.
@@ -403,7 +494,7 @@ impl Delegates {
             let mut quiet = vec![];
             let mut elsewhere = vec![];
             for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
-                let ran = millis(now.saturating_duration_since(task.run.begun));
+                let ran = task.run.counted(now);
                 if let (Some(remote), true) = (&task.remote, ran >= task.run.limit_ms) {
                     if ran >= task.run.limit_ms.saturating_add(millis(REMOTE_GRACE)) {
                         over.push((task.id.clone(), format!("pinned stopped it after {}, past its limit of {}: {} never reported its end", span(ran), span(task.run.limit_ms), remote.name)));
@@ -468,6 +559,14 @@ impl Delegates {
     pub(crate) fn backdate(&self, id: &str, by: Duration) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.started -= by.as_millis() as u64;
+        }
+    }
+
+    /// Moves the task's start back by `by` on the clock its time limit reads, as if it had worked that long.
+    #[cfg(test)]
+    pub(crate) fn backdate_run(&self, id: &str, by: Duration) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.run.begun = task.run.begun.checked_sub(by).unwrap_or(task.run.begun);
         }
     }
 
@@ -879,11 +978,24 @@ impl Delegates {
         if !allows(tasks, id, caller) {
             return Err(format!("task {id} belongs to another session"));
         }
+        let children = held_children(tasks, id);
         let task = tasks.iter_mut().find(|task| task.id == id).unwrap();
         if task.state.terminal() {
             task.deliver();
         }
-        Ok(status_json(task))
+        let mut body = status_json(task);
+        if task.state == WorkState::Working && task.run.turn_done && (!children.is_empty() || !task.run.held_on.is_empty()) {
+            let mut what: Vec<String> = children.iter().map(|child| format!("task {} \"{}\" ({})", child["taskId"].as_str().unwrap_or_default(), child["title"].as_str().unwrap_or_default(), child["workState"].as_str().unwrap_or_default())).collect();
+            what.extend(task.run.held_on.iter().cloned());
+            body["waitsOn"] = json!({ "tasks": children, "background": task.run.held_on });
+            body["next"] = json!(format!(
+                "its turn ended and summary holds its reply so far; it still waits on {}; pinned ends it with its latest reply once those end and it is idle; to stop it now, call task_cancel with taskId \"{}\"; otherwise {}",
+                what.join(", "),
+                task.id,
+                working_next(task)
+            ));
+        }
+        Ok(body)
     }
 
     fn stop_tree(&self, id: &str, reason: &str, path: Option<&str>) {
@@ -1211,6 +1323,7 @@ impl Delegates {
     }
 
     fn persist(&self) {
+        *self.saved_at.lock().unwrap() = Instant::now();
         let Some(path) = self.store.clone() else { return };
         let saved = SavedFile {
             tasks: self.tasks.lock().unwrap().iter().map(SavedTask::from_task).collect(),
@@ -1652,6 +1765,10 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+pub fn many_of(count: usize, noun: &str) -> String {
+    many(count, noun)
+}
+
 fn many(count: usize, noun: &str) -> String {
     match count {
         1 => format!("1 {noun}"),
@@ -1951,6 +2068,10 @@ struct SavedTask {
     remote: Option<SavedRemote>,
     #[serde(default)]
     remote_tab: Option<String>,
+    /// The milliseconds a working task had counted toward its time limit when this was written.
+    /// A restart counts on from there, so the time pinned was down does not count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    counted_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1966,6 +2087,12 @@ struct SavedRemote {
 fn began(started: u64) -> Instant {
     let now = Instant::now();
     now.checked_sub(Duration::from_millis(unix_millis().saturating_sub(started))).unwrap_or(now)
+}
+
+/// When a task that had counted `ms` toward its time limit began, on this process's clock.
+fn counted_from(ms: u64) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(Duration::from_millis(ms)).unwrap_or(now)
 }
 
 /// Why a restart ended a task.
@@ -2036,6 +2163,7 @@ impl SavedTask {
             worker_session: task.worker_session.clone(),
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
             remote_tab: task.remote_tab.clone(),
+            counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
     }
 
@@ -2072,7 +2200,7 @@ impl SavedTask {
             held: None,
             parent_session: self.parent_session,
             ended_by: self.ended_by,
-            run: Run { begun: began(self.started), budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
+            run: Run { begun: self.counted_ms.map_or_else(|| began(self.started), counted_from), budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
             thread: None,
             worker_session: self.worker_session,
             resuming: self.thread_runs && self.state == "working",
@@ -2162,6 +2290,25 @@ fn release(tasks: &mut [Task]) -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// The tasks the thread running task `id` still waits on, as `task_status` lists them.
+fn held_children(tasks: &[Task], id: &str) -> Vec<Value> {
+    let Some(task) = tasks.iter().find(|task| task.id == id && task.state == WorkState::Working) else { return vec![] };
+    let Some(thread) = &task.thread else { return vec![] };
+    tasks
+        .iter()
+        .filter(|child| child.id != id && child_of(child, &thread.tab, Some(id)) && (!child.state.terminal() || !child.delivered))
+        .map(|child| json!({ "taskId": child.id, "title": child.title, "workState": child.state.as_str() }))
+        .collect()
+}
+
+/// Whether `child` was started from the tab `tab` or from the task `task`.
+fn child_of(child: &Task, tab: &str, task: Option<&str>) -> bool {
+    match &child.parent {
+        Parent::Tab(parent) => parent == tab,
+        Parent::Task(parent) => task == Some(parent.as_str()),
+    }
 }
 
 fn has_working_descendant(tasks: &[Task], id: &str) -> bool {

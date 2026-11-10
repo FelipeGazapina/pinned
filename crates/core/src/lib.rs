@@ -29,6 +29,7 @@ pub mod machine;
 pub mod marks;
 pub mod mcp;
 pub mod memory;
+pub mod menu_watch;
 pub mod model2vec;
 pub mod opencode_go;
 pub mod panel;
