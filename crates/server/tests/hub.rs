@@ -5629,7 +5629,7 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     let reset = act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "parallel" })).unwrap();
     assert_eq!(reset["outcome"], "pending");
     assert_eq!(tastes(&ana), before, "nothing changes before she approves");
-    let mut locked = Client::app(&url, &ana_token);
+    let mut locked = Client::app(&url, &account::login(&url, "ana@acme.dev", "correct horse").unwrap().0);
     assert_eq!(locked.hub(json!({ "cmd": "decide_confirmation", "id": change["id"], "approve": true })), Err(LOCKED.into()), "a locked app approves no set_taste");
     assert_eq!(locked.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err(LOCKED.into()), "nor runs it");
     assert_eq!(tastes(&ana), before);
