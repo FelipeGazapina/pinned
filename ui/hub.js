@@ -68,6 +68,9 @@ class Hub {
       case "settings":
         this.on.settings?.(frame.settings);
         break;
+      case "session_marks":
+        this.on.marks?.(frame.marks);
+        break;
     }
   }
 

@@ -193,8 +193,10 @@ function marksSync(io) {
   /** Sends what the hub lacks; true once it has everything. A failed send waits for the next connect. */
   const sync = () => (onHub ? (draining ??= drain()) : Promise.resolve(false));
 
-  function leave() {
-    if (onHub) io.persist();
+  /** Back to storage, on sign-out and when the hub cannot keep marks. `keep` writes the hub's marks
+   * there; otherwise the page forgets them. */
+  function leave(keep) {
+    if (onHub) keep ? io.persist() : io.write(withSessionMarks(io.read(), markState(new Map())));
     onHub = false;
     known = new Map();
     joining = null;
@@ -215,7 +217,7 @@ function marksSync(io) {
     } catch (e) {
       if (at !== epoch) return;
       joining = null;
-      if (/unknown variant|can't answer/.test(String(e))) leave();
+      if (/unknown variant|can't answer/.test(String(e))) leave(true);
       return;
     }
     if (at !== epoch) return;

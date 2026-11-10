@@ -308,12 +308,19 @@ test("two devices that pin at once end with the same order", async () => {
   assert.deepEqual(here([...hub.rows.values()]), [{ session: "s1", pin: 0 }, { session: "s2", pin: 1 }]);
 });
 
-test("signing out keeps the hub's marks in storage for the signed-out app", async () => {
+test("signing out of the app keeps the hub's marks in storage, and of the web page keeps none", async () => {
   const hub = fakeHub();
   hub.rows = byRow([{ session: "s1", title: "Kept", seen: 7 }]);
+  const web = device(hub);
+  await web.marks.hello();
+  web.marks.leave(false);
+  assert.deepEqual(web.storage, {});
+  assert.deepEqual(web.state, blank());
+  assert.equal(web.marks.saved(), false);
+
   const mine = device(hub);
   await mine.marks.hello();
-  mine.marks.leave();
+  mine.marks.leave(true);
   assert.deepEqual(here(mine.storage), {
     "gui-marks": JSON.stringify({ pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: { "session:s1": "Kept" }, noAutoSettle: {} }),
     "gui-archived": "[]",
