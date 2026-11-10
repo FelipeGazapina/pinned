@@ -690,8 +690,8 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
         syncer.cycle(&shared, &machine, &file);
-        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null), "an idle cycle keeps the state it holds and doesn't rewrite the file");
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
         let _ = std::fs::remove_dir_all(dir);
     }
 
