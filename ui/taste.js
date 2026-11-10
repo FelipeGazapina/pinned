@@ -3,10 +3,36 @@
 // save sends. It mirrors crates/core/src/taste.rs; ui/taste.fixture.json holds both to the same
 // presets and briefs. gui-taste.js renders and wires it.
 
-/** The knobs a profile sets: every field but skills and context. */
+/** The knobs a profile sets. `parallel` is also a delegation limit. */
 const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion"];
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context"];
-const TASTE_MAX_PARALLEL = 8;
+/** The delegation limits besides `parallel`, which pinned enforces and no profile sets. */
+const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents"];
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS];
+const TASTE_MAX_PARALLEL = 100;
+const TASTE_TIERS = ["low", "mid", "high"];
+const TASTE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+/** The values a stepper moves through; a value set elsewhere steps to its neighbours here. */
+const TASTE_STEPS = {
+  budget_cents: [0, 50, 100, 150, 200, 300, 500, 1000, 2000, 5000, 10000],
+  box_budget_cents: [0, 50, 100, 200, 300, 500, 1000, 2000, 5000],
+  time_limit_min: [15, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440, 2880, 10080],
+};
+
+/** The next value of a stepper from `value`, one step up (`dir` 1) or down (-1), or `value` at an end. */
+function tasteStep(field, value, dir) {
+  const steps = TASTE_STEPS[field];
+  const next = dir > 0 ? steps.find((v) => v > value) : steps.findLast((v) => v < value);
+  return next ?? value;
+}
+
+/** "US$ 2.50", or "No cap" for 0. */
+const tasteMoney = (cents) => (cents ? `US$ ${(cents / 100).toFixed(2)}` : "No cap");
+
+/** "45 min", "8 h", "1 h 30 min". */
+function tasteMinutes(minutes) {
+  const [h, m] = [Math.floor(minutes / 60), minutes % 60];
+  return h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+}
 
 const TASTE_PRESETS = {
   economical: {

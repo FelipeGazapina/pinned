@@ -25,7 +25,6 @@ pub mod machine;
 pub mod memory;
 pub mod model2vec;
 pub mod opencode_go;
-pub mod orchestration;
 pub mod panel;
 pub mod plugin;
 pub mod private;

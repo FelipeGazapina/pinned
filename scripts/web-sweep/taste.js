@@ -95,7 +95,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   await scope(page, "Captain alpha");
   check((await page.textContent(".taste-scopes .taste-quiet")) === "Inherits from Captains (all).", "a project tab says it inherits");
   check((await page.locator(".taste-tag").count()) === 0, "a fresh project tags no field: everything comes from Captains (all)");
-  await page.click('button[aria-label="More parallel workers"]');
+  await page.click('button[aria-label="More workers at once"]');
   await page.click('.taste-switch[aria-label="Second opinion on risky changes"]');
   await page.fill("[data-note-input]", "Deploys go through the VPS.");
   await page.click(".taste-note-form .primary");
@@ -149,7 +149,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   check(overflow <= 0, `nothing overflows sideways on the phone (${overflow}px)`);
   await shot(small, "taste-phone");
   await small.click('.taste-scopes button:text-is("Captain alpha")');
-  await small.click('button[aria-label="Fewer parallel workers"]');
+  await small.click('button[aria-label="Less workers at once"]');
   await waitFor("the phone's unsaved footer", () => small.isVisible(".taste-unsaved"));
   await small.evaluate(() => document.querySelector("#page-view .page-body").scrollTo(0, 1e6));
   await shot(small, "taste-phone-edited");
@@ -158,7 +158,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
   await page.evaluate(() => openPage("taste"));
   await waitFor("the page again", () => page.isVisible(".taste-split"));
   await scope(page, "Captains (all)");
-  await page.click('button[aria-label="More parallel workers"]');
+  await page.click('button[aria-label="More workers at once"]');
   await page.click('.taste-foot [data-act="save"]');
   await waitFor("the Captains saved at 4", async () => (await brief(page)).startsWith("Run up to 4 workers at once.") && !(await page.isVisible(".taste-foot")));
   const watcher = await desktop.newPage();

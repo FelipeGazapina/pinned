@@ -5108,6 +5108,45 @@
                   "cmd",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_tasks"
+                  },
+                  "records": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/TaskRecord"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "records"
+                ]
+              },
+              {
+                "description": "`delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`\n(1, 7 or 30), on every machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegation_stats"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "days"
+                ]
               }
             ]
           },
@@ -6666,6 +6705,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -6731,6 +6824,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -6743,7 +6867,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -6773,7 +6903,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -6799,7 +6935,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -6858,7 +7000,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -6889,6 +7031,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -6900,7 +7085,290 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "TaskRecord": {
+            "description": "One finished delegated task, as the hub keeps it for the account.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "machine": {
+                "description": "The machine whose registry holds the task. The hub stamps both from the socket.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "title": {
+                "type": "string"
+              },
+              "delegator": {
+                "$ref": "#/$defs/Delegator"
+              },
+              "provider": {
+                "$ref": "#/$defs/Provider"
+              },
+              "account": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tier": {
+                "description": "The model's cost tier: low, mid or high.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/RunTarget",
+                "default": "local"
+              },
+              "started": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "usage": {
+                "$ref": "#/$defs/TaskUsage"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "reason": {
+                "description": "Why it failed or stopped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "The limit that stopped it: `time`, or `budget` once spend is enforced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "review": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Review"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thread": {
+                "description": "The worker thread that showed it, on `machine`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "title",
+              "delegator",
+              "provider",
+              "account",
+              "target",
+              "started",
+              "ended",
+              "usage",
+              "outcome"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
+            "type": "string",
+            "enum": [
+              "local",
+              "box"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
+            ]
+          },
+          "Review": {
+            "description": "Whether the delegator used the result. `auto` marks one pinned set from a signal: the\ntask's pull request merged, or the same delegator started a task with the same title again.",
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "$ref": "#/$defs/Verdict"
+              },
+              "auto": {
+                "type": "boolean",
+                "default": false
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "verdict",
+              "auto",
+              "at"
+            ]
+          },
+          "Verdict": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "redone"
             ]
           },
           "Target2": {
@@ -11939,6 +12407,45 @@
                   "cmd",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_tasks"
+                  },
+                  "records": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/TaskRecord"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "records"
+                ]
+              },
+              {
+                "description": "`delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`\n(1, 7 or 30), on every machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegation_stats"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "days"
+                ]
               }
             ]
           },
@@ -13442,6 +13949,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -13507,6 +14068,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -13519,7 +14111,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -13549,7 +14147,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -13575,7 +14179,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -13629,7 +14239,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -13660,8 +14270,324 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
+          },
+          "TaskRecord": {
+            "description": "One finished delegated task, as the hub keeps it for the account.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "machine": {
+                "description": "The machine whose registry holds the task. The hub stamps both from the socket.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "title": {
+                "type": "string"
+              },
+              "delegator": {
+                "$ref": "#/$defs/Delegator"
+              },
+              "provider": {
+                "$ref": "#/$defs/Provider"
+              },
+              "account": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tier": {
+                "description": "The model's cost tier: low, mid or high.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/RunTarget",
+                "default": "local"
+              },
+              "started": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "usage": {
+                "$ref": "#/$defs/TaskUsage"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "reason": {
+                "description": "Why it failed or stopped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "The limit that stopped it: `time`, or `budget` once spend is enforced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "review": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Review"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thread": {
+                "description": "The worker thread that showed it, on `machine`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "delegator",
+              "provider",
+              "account",
+              "started",
+              "ended",
+              "usage",
+              "outcome"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
+            "type": "string",
+            "enum": [
+              "local",
+              "box"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
+            ]
+          },
+          "Review": {
+            "description": "Whether the delegator used the result. `auto` marks one pinned set from a signal: the\ntask's pull request merged, or the same delegator started a task with the same title again.",
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "$ref": "#/$defs/Verdict"
+              },
+              "auto": {
+                "type": "boolean",
+                "default": false
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "verdict",
+              "at"
+            ]
+          },
+          "Verdict": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "redone"
+            ]
           },
           "Target2": {
             "type": "object",
@@ -15843,6 +16769,45 @@
                   "cmd",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_tasks"
+                  },
+                  "records": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/TaskRecord"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "records"
+                ]
+              },
+              {
+                "description": "`delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`\n(1, 7 or 30), on every machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegation_stats"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "days"
+                ]
               }
             ]
           },
@@ -17508,6 +18473,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -17573,6 +18592,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -17585,7 +18635,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -17615,7 +18671,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -17641,7 +18703,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -17700,7 +18768,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -17731,6 +18799,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -17742,7 +18853,299 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
+            ]
+          },
+          "TaskRecord": {
+            "description": "One finished delegated task, as the hub keeps it for the account.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "machine": {
+                "description": "The machine whose registry holds the task. The hub stamps both from the socket.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "title": {
+                "type": "string"
+              },
+              "delegator": {
+                "$ref": "#/$defs/Delegator"
+              },
+              "provider": {
+                "$ref": "#/$defs/Provider"
+              },
+              "account": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tier": {
+                "description": "The model's cost tier: low, mid or high.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/RunTarget",
+                "default": "local"
+              },
+              "started": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "usage": {
+                "$ref": "#/$defs/TaskUsage"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "reason": {
+                "description": "Why it failed or stopped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "The limit that stopped it: `time`, or `budget` once spend is enforced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "review": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Review"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thread": {
+                "description": "The worker thread that showed it, on `machine`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "machine",
+              "machine_name",
+              "title",
+              "delegator",
+              "provider",
+              "account",
+              "target",
+              "started",
+              "ended",
+              "usage",
+              "outcome"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Provider": {
+            "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "cursor"
+            ]
+          },
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
+            "type": "string",
+            "enum": [
+              "local",
+              "box"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
+            ]
+          },
+          "Review": {
+            "description": "Whether the delegator used the result. `auto` marks one pinned set from a signal: the\ntask's pull request merged, or the same delegator started a task with the same title again.",
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "$ref": "#/$defs/Verdict"
+              },
+              "auto": {
+                "type": "boolean",
+                "default": false
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "verdict",
+              "auto",
+              "at"
+            ]
+          },
+          "Verdict": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "redone"
             ]
           }
         }
@@ -19745,6 +21148,45 @@
                   "cmd",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub keeps these records of its delegated tasks, as they\nare now. The hub stamps the machine, and box time for a machine that is a box.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_tasks"
+                  },
+                  "records": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/TaskRecord"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "records"
+                ]
+              },
+              {
+                "description": "`delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`\n(1, 7 or 30), on every machine.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delegation_stats"
+                  },
+                  "days": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "days"
+                ]
               }
             ]
           },
@@ -21353,6 +22795,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -21418,6 +22914,37 @@
               "enabled"
             ]
           },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort2": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -21430,7 +22957,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Tastes": {
@@ -21460,7 +22993,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "captains": {
@@ -21486,7 +23025,13 @@
                   "review_diffs": true,
                   "second_opinion": false,
                   "skills": [],
-                  "context": []
+                  "context": [],
+                  "tier": "high",
+                  "default_effort": null,
+                  "max_effort": "max",
+                  "budget_cents": 0,
+                  "time_limit_min": 480,
+                  "box_budget_cents": 0
                 }
               },
               "projects": {
@@ -21540,7 +23085,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -21571,8 +23116,333 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort2",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
+          },
+          "TaskRecord": {
+            "description": "One finished delegated task, as the hub keeps it for the account.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "machine": {
+                "description": "The machine whose registry holds the task. The hub stamps both from the socket.",
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "title": {
+                "type": "string"
+              },
+              "delegator": {
+                "$ref": "#/$defs/Delegator"
+              },
+              "provider": {
+                "$ref": "#/$defs/Provider"
+              },
+              "account": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tier": {
+                "description": "The model's cost tier: low, mid or high.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/RunTarget",
+                "default": "local"
+              },
+              "started": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "usage": {
+                "$ref": "#/$defs/TaskUsage"
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "reason": {
+                "description": "Why it failed or stopped.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "The limit that stopped it: `time`, or `budget` once spend is enforced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "review": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Review"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thread": {
+                "description": "The worker thread that showed it, on `machine`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "delegator",
+              "provider",
+              "account",
+              "started",
+              "ended",
+              "usage",
+              "outcome"
+            ]
+          },
+          "Delegator": {
+            "description": "The session that started a task.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/DelegatorKind"
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project's repo (`host/owner/name`), else its folder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "DelegatorKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "global_orchestrator",
+                  "captain",
+                  "worker"
+                ]
+              },
+              {
+                "description": "A thread with no role: the user's own session.",
+                "type": "string",
+                "const": "session"
+              }
+            ]
+          },
+          "Provider": {
+            "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "cursor"
+            ]
+          },
+          "RunTarget": {
+            "description": "Where the task ran, from its delegator's side.",
+            "type": "string",
+            "enum": [
+              "local",
+              "box"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
+            ]
+          },
+          "Review": {
+            "description": "Whether the delegator used the result. `auto` marks one pinned set from a signal: the\ntask's pull request merged, or the same delegator started a task with the same title again.",
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "$ref": "#/$defs/Verdict"
+              },
+              "auto": {
+                "type": "boolean",
+                "default": false
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "description": "Unix milliseconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "verdict",
+              "at"
+            ]
+          },
+          "Verdict": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "redone"
+            ]
           }
         }
       }
@@ -24236,6 +26106,591 @@
               "from",
               "port",
               "to"
+            ]
+          }
+        }
+      }
+    },
+    "DelegationStats": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "DelegationStats",
+        "description": "The account's delegated tasks that ended in the last `days`.",
+        "type": "object",
+        "properties": {
+          "days": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "since": {
+            "description": "Unix milliseconds: tasks that ended from then on.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/$defs/Group"
+          },
+          "by_model": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_provider": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_project": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_delegator": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_outcome": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "slowest": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TaskBrief"
+            }
+          },
+          "priciest": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TaskBrief"
+            }
+          }
+        },
+        "required": [
+          "days",
+          "since",
+          "totals",
+          "by_model",
+          "by_provider",
+          "by_project",
+          "by_delegator",
+          "by_outcome",
+          "slowest",
+          "priciest"
+        ],
+        "$defs": {
+          "Group": {
+            "description": "The tasks of one model, project, delegator or outcome.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "runs": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "done": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "limited": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cancelled": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "accepted": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "redone": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "median_wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The sum over tasks whose cost is known; `priced` counts them.",
+                "type": "number",
+                "format": "double"
+              },
+              "median_cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "priced": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "box_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "limits": {
+                "description": "How many tasks each limit stopped, by its name.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              }
+            },
+            "required": [
+              "key",
+              "label",
+              "runs",
+              "done",
+              "failed",
+              "limited",
+              "cancelled",
+              "accepted",
+              "redone",
+              "wall_ms",
+              "median_wall_ms",
+              "cost_usd",
+              "priced",
+              "tokens_in",
+              "tokens_out",
+              "box_usd",
+              "box_ms"
+            ]
+          },
+          "TaskBrief": {
+            "description": "One task in the slowest and most expensive lists.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "thread": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delegator": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "limit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "machine",
+              "machine_name",
+              "delegator",
+              "outcome",
+              "wall_ms",
+              "ended"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "DelegationStats",
+        "description": "The account's delegated tasks that ended in the last `days`.",
+        "type": "object",
+        "properties": {
+          "days": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "since": {
+            "description": "Unix milliseconds: tasks that ended from then on.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/$defs/Group"
+          },
+          "by_model": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_provider": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_project": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_delegator": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "by_outcome": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Group"
+            }
+          },
+          "slowest": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TaskBrief"
+            }
+          },
+          "priciest": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/TaskBrief"
+            }
+          }
+        },
+        "required": [
+          "days",
+          "since",
+          "totals",
+          "by_model",
+          "by_provider",
+          "by_project",
+          "by_delegator",
+          "by_outcome",
+          "slowest",
+          "priciest"
+        ],
+        "$defs": {
+          "Group": {
+            "description": "The tasks of one model, project, delegator or outcome.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "runs": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "done": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "limited": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "cancelled": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "accepted": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "redone": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "median_wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The sum over tasks whose cost is known; `priced` counts them.",
+                "type": "number",
+                "format": "double"
+              },
+              "median_cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "priced": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "box_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "limits": {
+                "description": "How many tasks each limit stopped, by its name.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              }
+            },
+            "required": [
+              "key",
+              "label",
+              "runs",
+              "done",
+              "failed",
+              "limited",
+              "cancelled",
+              "accepted",
+              "redone",
+              "wall_ms",
+              "median_wall_ms",
+              "cost_usd",
+              "priced",
+              "tokens_in",
+              "tokens_out",
+              "box_usd",
+              "box_ms"
+            ]
+          },
+          "TaskBrief": {
+            "description": "One task in the slowest and most expensive lists.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "thread": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delegator": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "$ref": "#/$defs/TaskOutcome"
+              },
+              "limit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "ended": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "machine",
+              "delegator",
+              "outcome",
+              "wall_ms",
+              "ended"
+            ]
+          },
+          "TaskOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              {
+                "description": "pinned stopped it at one of its limits, which `limit` names.",
+                "type": "string",
+                "const": "limit"
+              }
             ]
           }
         }
@@ -31328,7 +33783,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "captains": {
@@ -31354,7 +33815,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "projects": {
@@ -31413,7 +33880,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -31444,6 +33911,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             },
             "required": [
@@ -31455,7 +33965,13 @@
               "review_diffs",
               "second_opinion",
               "skills",
-              "context"
+              "context",
+              "tier",
+              "default_effort",
+              "max_effort",
+              "budget_cents",
+              "time_limit_min",
+              "box_budget_cents"
             ]
           },
           "Strategy": {
@@ -31518,6 +34034,37 @@
             "required": [
               "name",
               "enabled"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ]
           },
           "TastePatch": {
@@ -31600,6 +34147,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           }
@@ -31634,7 +34235,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "captains": {
@@ -31660,7 +34267,13 @@
               "review_diffs": true,
               "second_opinion": false,
               "skills": [],
-              "context": []
+              "context": [],
+              "tier": "high",
+              "default_effort": null,
+              "max_effort": "max",
+              "budget_cents": 0,
+              "time_limit_min": 480,
+              "box_budget_cents": 0
             }
           },
           "projects": {
@@ -31714,7 +34327,7 @@
                 }
               },
               "parallel": {
-                "description": "Workers at once, 1 to 8.",
+                "description": "Workers at once in a project, 1 to 100. `delegate_task` refuses one more.",
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
@@ -31745,6 +34358,49 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "tier": {
+                "description": "The costliest model tier a worker may run on.",
+                "$ref": "#/$defs/Cost",
+                "default": "high"
+              },
+              "default_effort": {
+                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "max_effort": {
+                "description": "The most effort a call may ask for.",
+                "$ref": "#/$defs/Effort",
+                "default": "max"
+              },
+              "budget_cents": {
+                "description": "What one worker may spend, in US cents, as its transcript prices it. 0 sets no cap.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "time_limit_min": {
+                "description": "Minutes a worker runs before pinned stops it: the default and the ceiling of `limitMs`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 480
+              },
+              "box_budget_cents": {
+                "description": "A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               }
             }
           },
@@ -31808,6 +34464,37 @@
             "required": [
               "name",
               "enabled"
+            ]
+          },
+          "Cost": {
+            "description": "What a model costs to run, coarsely: routing by tier beats stale per-token prices.",
+            "oneOf": [
+              {
+                "description": "Haiku and flash models: sweeps, translations, first drafts.",
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "description": "The middle default when nothing is known.",
+                "type": "string",
+                "const": "mid"
+              },
+              {
+                "description": "Opus and max efforts: architecture and hairy bugs.",
+                "type": "string",
+                "const": "high"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "How hard a model thinks, from least to most, as `orchestrator_capabilities` names the levels.",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
             ]
           },
           "TastePatch": {
@@ -31890,6 +34577,60 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "tier": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Cost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "default_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "time_limit_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "box_budget_cents": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           }

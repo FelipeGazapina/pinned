@@ -7,8 +7,8 @@ const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
 
 /// What a model costs to run, coarsely: routing by tier beats stale per-token prices.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Cost {
     /// Haiku and flash models: sweeps, translations, first drafts.
     Low,
@@ -106,13 +106,25 @@ pub fn cursor_models(list: &str) -> Vec<ModelChoice> {
         .collect()
 }
 
-/// A rough cost tier from the model id, for routing when no price list covers it.
+/// A model's cost tier, with Claude's models as pinned knows them. A machine that learned its
+/// claude's /model menu asks [`cost_in`] with its own list.
 pub fn cost_of(id: &str) -> Cost {
+    cost_in(&crate::claude_models::known(), id)
+}
+
+/// A model's cost tier: the one `claude` gives it when it lists the model, otherwise a rough one
+/// from the words of its id. A costly word wins, so `opus-fast` is high, and `minimax` is no `mini`.
+pub fn cost_in(claude: &[ClaudeModel], id: &str) -> Cost {
+    if let Some(model) = claude.iter().find(|m| m.slug == id) {
+        return model.cost;
+    }
     let id = id.to_ascii_lowercase();
-    if ["haiku", "flash", "mini", "fast", "nano", "lite"].iter().any(|hint| id.contains(hint)) {
-        Cost::Low
-    } else if ["opus", "max", "pro", "ultra", "thinking"].iter().any(|hint| id.contains(hint)) {
+    let words: Vec<&str> = id.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let says = |hints: &[&str]| words.iter().any(|word| hints.contains(word));
+    if says(&["opus", "max", "pro", "ultra", "thinking"]) {
         Cost::High
+    } else if says(&["haiku", "flash", "mini", "fast", "nano", "lite"]) {
+        Cost::Low
     } else {
         Cost::Mid
     }

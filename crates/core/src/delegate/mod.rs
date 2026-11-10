@@ -186,10 +186,11 @@ pub struct Request {
     pub isolation: Isolation,
     pub mode: Mode,
     pub timeout_ms: u64,
-    #[serde(default = "default_budget")]
-    pub budget_ms: u64,
-    #[serde(default = "default_limit")]
-    pub limit_ms: u64,
+    /// As asked; `run_limits` settles both under the caller's time limit.
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
+    #[serde(default)]
+    pub limit_ms: Option<u64>,
     #[serde(default)]
     pub interaction: Interaction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,6 +308,19 @@ pub struct Task {
     /// The pinned thread that shows this child under its parent. Not saved: a restart cancels
     /// every working task, and tab ids do not outlive the process.
     pub thread: Option<Thread>,
+    /// The delegation limits it runs under. Its own children are held to them or tighter.
+    pub limits: crate::taste::Limits,
+    /// What it used so far, as its transcript reports it.
+    pub usage: crate::usage::TaskUsage,
+    pub delegator: Delegator,
+    pub effort: Option<String>,
+    /// The limit that stopped it, when one did.
+    pub limit: Option<String>,
+    pub review: Option<Review>,
+    /// The thread's tab, kept for the record after the tab is gone.
+    pub thread_tab: Option<String>,
+    /// The hub holds this task's record as it is now.
+    pub recorded: bool,
 }
 
 /// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
@@ -376,6 +390,8 @@ pub enum StreamEvent {
     TurnStart,
     Step(Item),
     Background(Vec<Background>),
+    /// A finished turn's tokens, and the process's cost so far when the provider prints it.
+    Usage(UsageReport),
     TurnEnd { text: String, error: Option<String> },
 }
 
@@ -394,11 +410,13 @@ pub struct SpawnSpec<'a> {
 
 mod catalog;
 mod drivers;
+mod metrics;
 mod registry;
 mod request;
 
 pub use catalog::*;
 pub use drivers::*;
+pub use metrics::*;
 pub use registry::*;
 pub use request::*;
 
@@ -408,6 +426,12 @@ pub(crate) use drivers::{driver, replay};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_costly_word_in_a_model_id_outranks_a_cheap_one() {
+        let tiers: Vec<_> = ["claude-opus-5-5", "claude-haiku-5-5", "opus-fast", "gpt-6-max-mini", "minimax-m3", "minimax-m3.1-flash", "qwen3.8-max", "glm-5.3"].iter().map(|id| cost_of(id).name()).collect();
+        assert_eq!(tiers, ["high", "low", "high", "high", "mid", "low", "high", "mid"]);
+    }
 
     fn fixture(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -632,8 +656,8 @@ mod tests {
                 isolation: Isolation::Worktree,
                 mode: Mode::Wait,
                 timeout_ms: 5000,
-                budget_ms: 90_000,
-                limit_ms: 600_000,
+                budget_ms: Some(90_000),
+                limit_ms: Some(600_000),
                 interaction: Interaction::Plan,
                 runtime: None,
                 role: None,
@@ -679,8 +703,8 @@ mod tests {
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
                 timeout_ms: DEFAULT_TIMEOUT_MS,
-                budget_ms: 7_200_000,
-                limit_ms: 28_800_000,
+                budget_ms: None,
+                limit_ms: None,
                 interaction: Interaction::Inherit,
                 runtime: None,
                 role: None,
@@ -693,11 +717,11 @@ mod tests {
             "budgetMs must be a number of milliseconds above 0"
         );
         assert_eq!(
-            parse_request(&json!({"task": "x", "budgetMs": 36_000_000})).unwrap_err(),
-            "budgetMs must be below limitMs, which is 28800000 ms; pass a larger limitMs"
+            parse_request(&json!({"task": "x", "budgetMs": 36_000_000, "limitMs": 36_000_000})).unwrap_err(),
+            "budgetMs must be below limitMs, which is 36000000 ms; pass a larger limitMs"
         );
         let long = parse_request(&json!({"task": "x", "budgetMs": 36_000_000, "limitMs": 72_000_000})).unwrap();
-        assert_eq!((long.budget_ms, long.limit_ms), (36_000_000, 72_000_000));
+        assert_eq!((long.budget_ms, long.limit_ms), (Some(36_000_000), Some(72_000_000)));
         assert_eq!(parse_request(&json!({})).unwrap_err(), "task is required");
         assert_eq!(
             parse_request(&json!({"task": "x", "mode": "soon"})).unwrap_err(),
@@ -707,9 +731,22 @@ mod tests {
 
     #[test]
     fn a_limit_alone_puts_the_budget_notice_before_it() {
-        let limits = |args: Value| parse_request(&args).map(|request| (request.budget_ms, request.limit_ms));
-        assert_eq!(limits(json!({"task": "x", "limitMs": 3_600_000})), Ok((1_800_000, 3_600_000)));
-        assert_eq!(limits(json!({"task": "x", "limitMs": 43_200_000})), Ok((7_200_000, 43_200_000)));
+        let eight_hours = 28_800_000;
+        assert_eq!(run_limits(None, Some(3_600_000), eight_hours), Ok((1_800_000, 3_600_000)));
+        assert_eq!(run_limits(None, Some(43_200_000), 86_400_000), Ok((7_200_000, 43_200_000)));
+    }
+
+    #[test]
+    fn the_time_limit_is_the_default_and_the_ceiling_of_limit_ms() {
+        let hour = 3_600_000;
+        assert_eq!(run_limits(None, None, 8 * hour), Ok((2 * hour, 8 * hour)), "no limitMs runs to the time limit");
+        assert_eq!(run_limits(None, None, 12 * hour), Ok((2 * hour, 12 * hour)), "a time limit above the old 8 h default is the default");
+        assert_eq!(run_limits(None, Some(20 * hour), hour), Ok((hour / 2, hour)), "a longer limitMs is cut to the time limit");
+        assert_eq!(run_limits(Some(30 * 60_000), Some(20 * hour), hour), Ok((30 * 60_000, hour)));
+        assert_eq!(
+            run_limits(Some(2 * hour), Some(20 * hour), hour),
+            Err("budgetMs must be below the run limit, which is 3600000 ms; ask for less, or raise Time limit in Settings › Way of working".into())
+        );
     }
 
     #[test]
@@ -964,6 +1001,15 @@ grok-4.7-high - Grok 4.7  High
             at: String::new(),
             text: "Look at the tests.".into()
         }));
+        assert_eq!(
+            [cursor.usage, claude.usage, codex.usage],
+            [
+                UsageReport { tokens_in: 16_289 + 24_224, tokens_out: 71, cost_usd: None },
+                UsageReport { tokens_in: 6 + 17_998 + 69_766, tokens_out: 177, cost_usd: Some(0.004517060000000001) },
+                UsageReport { tokens_in: 10, tokens_out: 4, cost_usd: None },
+            ],
+            "each provider's turn usage, with the cost only Claude prints"
+        );
         let failed = (driver(Provider::Codex).parse)(
             r#"{"type":"turn.failed","error":{"message":"rate limit"}}"#,
         );
@@ -1018,6 +1064,42 @@ grok-4.7-high - Grok 4.7  High
             client_request_id: None,
             role: None,
         })
+    }
+
+    #[test]
+    fn two_callers_cannot_both_take_the_last_place_at_once() {
+        let delegates = Arc::new(Delegates::default());
+        let ask = |caller: usize, cwd: &str| NewTask {
+            parent: Parent::Tab(format!("tab-{caller}")),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: PathBuf::from(cwd),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:tab-{caller}"),
+            client_request_id: None,
+            role: None,
+        };
+        assert!(matches!(delegates.claim(ask(0, "/p/.claude/worktrees/w1"), Some(2)), Claim::Fresh(_)));
+        assert!(matches!(delegates.claim(ask(0, "/elsewhere"), Some(1)), Claim::Fresh(_)), "another project has its own places");
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let callers: Vec<_> = (1..=8)
+            .map(|caller| {
+                let (delegates, start, new) = (delegates.clone(), start.clone(), ask(caller, "/p"));
+                std::thread::spawn(move || {
+                    start.wait();
+                    delegates.claim(new, Some(2))
+                })
+            })
+            .collect();
+        let claims: Vec<_> = callers.into_iter().map(|caller| caller.join().unwrap()).collect();
+        let fresh = claims.iter().filter(|claim| matches!(claim, Claim::Fresh(_))).count();
+        let full: Vec<_> = claims.iter().filter_map(|claim| if let Claim::Full(working) = claim { Some(*working) } else { None }).collect();
+        assert_eq!((fresh, full), (1, vec![2; 7]), "the worker in p's worktree and one more fill p's two places");
     }
 
     fn parent() -> Caller {
@@ -1328,6 +1410,105 @@ grok-4.7-high - Grok 4.7  High
             "{status}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn start(delegates: &Delegates, provider: Provider, model: Option<&str>, title: &str) -> Task {
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: title.into(),
+            account: provider.spec().builtin.into(),
+            provider,
+            model: model.map(str::to_owned),
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let captain = Delegator { kind: DelegatorKind::Captain, tab: Some("tab-1".into()), project: Some("github.com/acme/site".into()), project_name: Some("site".into()) };
+        delegates.describe(&task.id, captain, Some("high".into()));
+        task
+    }
+
+    fn line(delegates: &Delegates, id: &str, line: &str) {
+        delegates.apply(id, ChildEvent::Line(line.to_owned()), None);
+    }
+
+    #[test]
+    fn a_finished_failed_limited_and_cancelled_task_each_keep_their_record_across_a_reload() {
+        let dir = scratch("records");
+        let file = dir.join("delegates.json");
+        let delegates = Delegates::load(Some(file.clone()));
+        let done = start(&delegates, Provider::Claude, Some("claude-opus-5-5"), "Fix the login");
+        line(&delegates, &done.id, INIT);
+        line(&delegates, &done.id, REPLY);
+        line(&delegates, &done.id, r#"{"type":"result","result":"PR opened","total_cost_usd":0.42,"usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":90,"output_tokens":300}}"#);
+        let failed = start(&delegates, Provider::Claude, Some("claude-sonnet-5-5"), "Port the parser");
+        line(&delegates, &failed.id, r#"{"type":"result","is_error":true,"result":"rate limit","usage":{"input_tokens":500,"output_tokens":20}}"#);
+        let limited = start(&delegates, Provider::Cursor, Some("grok-4.7"), "Profile the sync");
+        delegates.set_limits(&limited.id, 1_000, 2_000);
+        let cancelled = start(&delegates, Provider::Claude, Some("claude-haiku-5-5"), "Sweep the docs");
+        later(&delegates, Duration::from_secs(5));
+        delegates.cancel(&parent(), &cancelled.id, "the parent asked", None).unwrap();
+        drop(delegates);
+
+        let delegates = Delegates::load(Some(file));
+        let records = delegates.records();
+        let by = |id: &str| records.iter().find(|r| r.id == id).unwrap().clone();
+        let summary = |r: &TaskRecord| json!([r.title, r.outcome, r.reason, r.limit, r.model, r.tier, r.effort, r.delegator.label(), r.usage.tokens_in, r.usage.tokens_out, r.usage.cost_usd]);
+        assert_eq!(summary(&by(&done.id)), json!(["Fix the login", "done", null, null, "claude-opus-5-5", "high", "high", "Captain site", 1100, 300, 0.42]));
+        assert_eq!(summary(&by(&failed.id)), json!(["Port the parser", "failed", "rate limit", null, "claude-sonnet-5-5", "mid", "high", "Captain site", 500, 20, null]));
+        let limit = by(&limited.id);
+        assert_eq!(json!([limit.outcome, limit.limit, limit.model]), json!(["limit", "time", "grok-4.7"]));
+        assert!(limit.reason.as_deref().is_some_and(|r| r.starts_with("pinned stopped it after")), "{:?}", limit.reason);
+        assert_eq!(summary(&by(&cancelled.id)), json!(["Sweep the docs", "cancelled", "the parent asked", null, "claude-haiku-5-5", "low", "high", "Captain site", 0, 0, null]));
+        for record in &records {
+            assert_eq!(record.usage.wall_ms, record.ended - record.started, "{}", record.id);
+            assert_eq!(record.target, RunTarget::Local);
+        }
+        let status = delegates.status(&parent(), &limited.id).unwrap();
+        assert_eq!(status["stoppedByLimit"], "time", "{status}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delegator_marks_a_result_accepted_and_the_same_title_started_again_marks_the_last_one_redone() {
+        let delegates = Delegates::default();
+        let first = start(&delegates, Provider::Codex, None, "Fix the login");
+        let working = (parent(), first.id.clone());
+        assert_eq!(delegates.review(&working.0, &working.1, Verdict::Accepted, None).unwrap_err(), format!("{} is still working; review it once it ends", first.id));
+        line(&delegates, &first.id, r#"{"type":"turn.failed","error":{"message":"tests fail"}}"#);
+        let other = Caller { tab: Some("tab-2".into()), task: None };
+        assert_eq!(delegates.review(&other, &first.id, Verdict::Accepted, None).unwrap_err(), format!("task {} belongs to another session", first.id));
+
+        let second = start(&delegates, Provider::Codex, None, " fix the LOGIN ");
+        let review = delegates.get(&first.id).unwrap().review.unwrap();
+        assert_eq!((review.verdict, review.auto, review.note), (Verdict::Redone, true, Some(format!("started again as {}", second.id))));
+        line(&delegates, &second.id, r#"{"type":"turn.completed"}"#);
+        delegates.review(&parent(), &second.id, Verdict::Accepted, Some("merged by hand".into())).unwrap();
+        let third = start(&delegates, Provider::Codex, None, "Fix the login");
+        let kept = delegates.get(&second.id).unwrap().review.unwrap();
+        assert_eq!((kept.verdict, kept.auto, kept.note.as_deref()), (Verdict::Accepted, false, Some("merged by hand")), "a verdict the delegator gave stays");
+        assert!(!delegates.accept_auto(&second.id, "its PR merged".into()));
+        assert!(!delegates.get(&second.id).unwrap().review.unwrap().auto, "a signal does not overwrite the delegator");
+        assert!(!delegates.accept_auto(&third.id, "its PR merged".into()), "a task still working gets no verdict");
+
+        let sent = delegates.unrecorded(10);
+        assert_eq!(sent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str(), second.id.as_str()], "only finished tasks have a record");
+        delegates.mark_recorded(&sent);
+        assert!(delegates.unrecorded(10).is_empty());
+        line(&delegates, &third.id, r#"{"type":"turn.completed"}"#);
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(delegates.accept_auto(&third.id, "its PR #7 merged".into()));
+        assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [third.id.as_str()], "a merge is sent once");
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(!delegates.accept_auto(&third.id, "its PR #7 merged".into()), "the next poll of the merged PR changes nothing");
+        assert!(delegates.unrecorded(10).is_empty(), "and sends nothing");
+        delegates.review(&parent(), &first.id, Verdict::Accepted, None).unwrap();
+        assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str()], "a new verdict is sent again");
     }
 
     #[test]
@@ -1927,15 +2108,9 @@ exec '{real}' "$@"
             client_request_id: Some(request.into()),
             role: None,
         };
-        let first = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let first = delegates.begin(spec("tab:tab-1", "tab-1", "req-7")).id;
         delegates.apply(&first, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
-        let again = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
-            Claim::Existing(id) => id,
-            Claim::Fresh(task) => task.id,
-        };
+        let again = delegates.begin(spec("tab:tab-1", "tab-1", "req-7")).id;
         assert_eq!(again, first);
         let replay = delegates.started_json(&again).unwrap();
         assert_eq!(replay["summary"], "DONE");
@@ -1951,10 +2126,7 @@ exec '{real}' "$@"
         assert_eq!(merge_cursor_list(Some("composer-2.5 - Composer\n"), "   "), "composer-2.5 - Composer\n");
         assert_eq!(merge_cursor_list(None, ""), "");
         assert_eq!(merge_cursor_list(Some("old\n"), "new\n"), "new\n");
-        let fresh_id = match delegates.claim(spec("tab:tab-1", "tab-1", "req-8")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let fresh_id = delegates.begin(spec("tab:tab-1", "tab-1", "req-8")).id;
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
@@ -1963,10 +2135,7 @@ exec '{real}' "$@"
         let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &fresh_id).unwrap();
         assert_eq!(status["workState"], "working");
         assert_eq!(status["next"], next);
-        let other = match delegates.claim(spec("tab:tab-2", "tab-2", "req-7")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let other = delegates.begin(spec("tab:tab-2", "tab-2", "req-7")).id;
         assert_ne!(other, first);
     }
 
