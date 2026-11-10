@@ -601,6 +601,7 @@ function addTab(machine, view) {
     cursorBlink: true,
     allowTransparency: true,
     theme: { background: "#00000000" },
+    scrollback: 0,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -611,9 +612,8 @@ function addTab(machine, view) {
   button.innerHTML = `<span class="dot"></span><span class="badge" hidden></span><span class="badge account" hidden></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
   tabList.append(button);
 
-  const sink = { write: (bytes) => term.write(bytes), reset: () => term.reset() };
-  const tab = { key: keyOf(machine, view.id), machine, view, term, fit, el, button, sink };
-  tab.attached = Promise.resolve(machines.get(machine).transport.attach(view.id, sink)).catch((e) => console.warn("attach", e));
+  const tab = { key: keyOf(machine, view.id), machine, view, term, fit, el, button, sink: null, attached: Promise.resolve() };
+  attachTerm(tab);
   tabs.push(tab);
   term.onData((data) => typeInto(tab, data));
   button.querySelector(".close").onclick = () => closeTab(tab);
@@ -633,6 +633,73 @@ function addTab(machine, view) {
   return tab;
 }
 
+/** Streams the tab's session into its terminal, after the output its machine keeps of it. A sink
+ * that was replaced writes nothing, so what an earlier attach still delivers can't land twice. */
+function attachTerm(tab) {
+  const transport = machines.get(tab.machine)?.transport;
+  if (!transport) return;
+  const before = tab.sink;
+  let replayed = false;
+  const sink = {
+    write(bytes) {
+      if (tab.sink !== sink) return;
+      tab.term.write(bytes);
+      // The terminal started over, so the line that says how to restart goes back under the replay.
+      if (!replayed && before && tab.exitNote) tab.term.write(tab.exitNote);
+      replayed = true;
+    },
+    reset: () => tab.term.reset(),
+  };
+  tab.sink = sink;
+  tab.attached = tab.attached
+    .then(async () => {
+      if (!before) return;
+      await transport.detach(tab.view.id, before);
+      const state = inputState(tab.term);
+      tab.term.reset();
+      tab.term.write(state);
+    })
+    .then(() => transport.attach(tab.view.id, sink))
+    .catch((e) => console.warn("attach", e));
+}
+
+/** The codes that put a terminal that starts over back in the state `term` is in: which screen it
+ * draws on, and how it sends keys, pastes, focus and the mouse. The session set those once, maybe
+ * long before the output its machine still keeps, and a replay of that output sets only what it holds. */
+function inputState(term) {
+  const modes = term.modes;
+  const set = (code, on) => `\x1b[?${code}${on ? "h" : "l"}`;
+  const mouse = { x10: 9, vt200: 1000, drag: 1002, any: 1003 }[modes.mouseTrackingMode];
+  return (
+    (term.buffer.active.type === "alternate" ? set(1049, true) : "") +
+    set(1, modes.applicationCursorKeysMode) +
+    set(66, modes.applicationKeypadMode) +
+    set(2004, modes.bracketedPasteMode) +
+    set(1004, modes.sendFocusMode) +
+    (mouse ? set(mouse, true) : "")
+  );
+}
+
+const SCROLLBACK = 1000;
+/** Terminals that keep their history after they leave the screen, so going back and forth between a few shows no replay. */
+const HISTORIES_KEPT = 3;
+let historyClock = 0;
+/** A terminal off screen holds its screen and no history: the app view reads no more than the
+ * screen, and a thousand lines for every tab was most of what the terminals held. One that comes
+ * on screen gets its history back from the output its machine keeps, as one that attaches late does. */
+function keepHistory(tab) {
+  const had = tab.historyAt > 0;
+  tab.historyAt = ++historyClock;
+  if (had) return;
+  tab.term.options.scrollback = SCROLLBACK;
+  attachTerm(tab);
+  const kept = tabs.filter((t) => t.historyAt).sort((a, b) => b.historyAt - a.historyAt);
+  for (const old of kept.slice(HISTORIES_KEPT)) {
+    old.historyAt = 0;
+    old.term.options.scrollback = 0;
+  }
+}
+
 function typeInto(tab, data) {
   if (tab.view.running) return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data });
   if (data === "\r") startTab(tab);
@@ -648,6 +715,7 @@ async function startClaude(tab) {
   await tab.attached;
   refit(tab);
   try {
+    tab.exitNote = null;
     await callOn(tab.machine, { cmd: "start_claude", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows });
     tab.view = { ...tab.view, running: true };
     render();
@@ -716,6 +784,7 @@ function removeTab(tab, forget) {
   if (i < 0) return;
   tabs.splice(i, 1);
   machines.get(tab.machine)?.transport.detach(tab.view.id, tab.sink);
+  tab.sink = null;
   tab.term.dispose();
   tab.el.remove();
   tab.button.remove();
@@ -760,6 +829,8 @@ const MIN_TERM_ROWS = 4;
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
+  // The app view lays the terminal out under its closed drawer, where nobody can scroll it.
+  if (tab === active && (!guiOn() || document.body.dataset.drawer === "open")) keepHistory(tab);
   const dims = tab.fit.proposeDimensions();
   if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
   tab.fit.fit();
@@ -1141,8 +1212,9 @@ function onMachineEvent(machine, event) {
   const tab = tabByKey(keyOf(machine, event.tab));
   if (!tab) return;
   tab.view = { ...tab.view, running: false };
-  if (tab.view.program !== "sign-in") return tab.term.write("\r\n\x1b[2m[claude exited, press Enter to restart]\x1b[0m\r\n");
-  tab.term.write("\r\n\x1b[2m[sign-in ended, press Enter to run it again]\x1b[0m\r\n");
+  tab.exitNote = `\r\n\x1b[2m[${tab.view.program !== "sign-in" ? "claude exited, press Enter to restart" : "sign-in ended, press Enter to run it again"}]\x1b[0m\r\n`;
+  tab.term.write(tab.exitNote);
+  if (tab.view.program !== "sign-in") return;
   accountsOf(machine, true).then(() => settingsOpen() && page === "accounts" && showAccountsPage(), console.warn);
 }
 listen("machine", (event) => onMachineEvent(LOCAL, event));
