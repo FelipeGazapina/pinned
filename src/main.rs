@@ -441,6 +441,7 @@ fn main() {
             commands::clone_repo,
             commands::save_connector,
             commands::delete_connector,
+            commands::run_workflow,
             commands::generate_workflow,
             commands::pick_folder,
             account::account,

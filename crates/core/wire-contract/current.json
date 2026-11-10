@@ -665,6 +665,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -5129,6 +5150,23 @@
                 ]
               },
               {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
                 "type": "object",
                 "properties": {
@@ -9530,6 +9568,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -13916,6 +13975,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "delete_connector"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
                   },
                   "id": {
                     "type": "string"
@@ -19124,6 +19200,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "delete_connector"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
                   },
                   "id": {
                     "type": "string"
@@ -24733,6 +24826,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "delete_connector"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
                   },
                   "id": {
                     "type": "string"
@@ -36209,6 +36319,60 @@
             ]
           }
         }
+      }
+    },
+    "RunStarted": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunStarted",
+        "description": "The session a workflow's Run now started.",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string"
+          },
+          "tab": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "machine",
+          "machine_name",
+          "tab"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunStarted",
+        "description": "The session a workflow's Run now started.",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string"
+          },
+          "tab": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "machine",
+          "machine_name",
+          "tab"
+        ]
       }
     },
     "Session": {
@@ -48074,6 +48238,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -52925,6 +53110,27 @@
                 "required": [
                   "cmd",
                   "run"
+                ]
+              },
+              {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
                 ]
               },
               {

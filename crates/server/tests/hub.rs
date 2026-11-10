@@ -5474,6 +5474,79 @@ fn source_repo(dir: &Path) {
 }
 
 #[test]
+fn a_run_now_starts_a_workflows_session_under_the_limits_and_another_account_can_neither_run_see_nor_pay_for_it() {
+    let hub = TestHub::start_with("run_now", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "now-ana");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let code = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "now-bob");
+    let site = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |name: &str, mode: &str| json!({ "cmd": "save_connector", "connector": {
+        "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+        "folder": site, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": mode, "worktree": false, "instructions": "Check the build.",
+    } });
+    let id = ana.client.hub(workflow("Nightly", "acceptEdits")).unwrap()["id"].as_str().unwrap().to_owned();
+    let stats = |client: &mut Client| client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let bobs_tabs = bob.node.machine.tabs().len();
+
+    // Bob's account can't run Ana's workflow, from his app or his agent, nor see it.
+    let unknown = format!("this account has no workflow {id}");
+    assert_eq!(bob.client.hub(json!({ "cmd": "run_workflow", "id": id })), Err(unknown.clone()));
+    assert_eq!(act(&bob.dir, &bob.tab, "run_workflow", json!({ "id": id })), Err(unknown.clone()));
+    assert_eq!(bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"], json!([]));
+
+    // Ana's Run now starts the workflow's session on her machine, and its first turn is a task in her metrics.
+    let started = ana.client.hub(json!({ "cmd": "run_workflow", "id": id })).unwrap();
+    assert_eq!((&started["workflow"], &started["machine"], &started["machine_name"]), (&json!(id), &json!(ana.machine), &json!("now-ana")));
+    let tab = started["tab"].as_str().unwrap().to_owned();
+    let view = ana.node.machine.view(&tab).unwrap();
+    assert_eq!((view.connector.as_deref(), view.running, view.cwd.as_str()), (Some(id.as_str()), true, site.as_str()));
+    hook(&ana.dir, json!({ "kind": "agent", "status": "working", "tab": tab }));
+    hook(&ana.dir, json!({ "kind": "agent", "status": "done", "tab": tab }));
+    wait_for("the run's record at the hub", || stats(&mut ana.client)["totals"]["runs"] == 1);
+    let recorded = stats(&mut ana.client);
+    assert_eq!((recorded["slowest"][0]["title"].as_str(), recorded["slowest"][0]["machine"].as_str()), (Some("Nightly · Run now"), Some(ana.machine.as_str())), "{recorded}");
+
+    // Her agent runs it too, as its own task, audited.
+    let by_agent = ran(act(&ana.dir, &ana.tab, "run_workflow", json!({ "id": id })));
+    assert_eq!((&by_agent["workflow"], &by_agent["machine"]), (&json!(id), &json!(ana.machine)));
+    let agents_tab = by_agent["tab"].as_str().unwrap().to_owned();
+    assert_eq!(ana.node.machine.view(&agents_tab).unwrap().spawned_by.as_deref(), Some(ana.tab.as_str()));
+
+    // A Run now past the limits starts nothing and says why, in the app and to an agent.
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "tier": "low" } })).unwrap();
+    let too_big = "claude-sonnet-5-5 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working".to_owned();
+    let anas_tabs = ana.node.machine.tabs().len();
+    assert_eq!(ana.client.hub(json!({ "cmd": "run_workflow", "id": id })), Err(too_big.clone()));
+    assert_eq!(act(&ana.dir, &ana.tab, "run_workflow", json!({ "id": id })), Err(too_big.clone()));
+    assert_eq!(ana.node.machine.tabs().len(), anas_tabs, "a refused run leaves no tab");
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "tier": "high" } })).unwrap();
+    let wide = ana.client.hub(workflow("Wide", "bypassPermissions")).unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(act(&ana.dir, &ana.tab, "run_workflow", json!({ "id": wide })), Err("run_workflow would run a session that skips its permission prompts, and your own session asks for them".into()));
+
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("run_workflow", "failed", "run_workflow would run a session that skips its permission prompts, and your own session asks for them"),
+            ("run_workflow", "failed", too_big.as_str()),
+            ("run_workflow", "done", ""),
+        ],
+        "Ana's trail holds her agent's runs and none of Bob's"
+    );
+    assert!(trail.as_array().unwrap().iter().all(|r| r["machine"] == ana.machine.as_str()));
+    let bobs_trail = bob.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert_eq!(bobs_trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap())).collect::<Vec<_>>(), [("run_workflow", "failed")]);
+    assert_eq!(stats(&mut bob.client)["totals"]["runs"], 0, "Bob is charged for none of Ana's runs");
+    assert_eq!(bob.node.machine.tabs().len(), bobs_tabs, "and none started on his machine");
+    drop(bob);
+}
+
+#[test]
 fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it() {
     let hub = TestHub::start_with("agent_surface_rest", Signup::Invite);
     let url = hub.url.clone();
@@ -5494,7 +5567,8 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
         assert_eq!(class(name).as_deref(), Some(expected), "{name}");
     }
-    assert!(class("run_workflow").is_none() && class("run").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
+    assert_eq!(class("run_workflow").as_deref(), Some("write"), "a Run now is held to the caller's limits, with no approval");
+    assert!(class("run").is_none() && class("run_now").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
 
     // Workflows: save, edit, list, and a refusal for one that skips permission prompts.
     let workflow = |name: &str, mode: &str, id: Option<&str>| {

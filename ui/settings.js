@@ -764,14 +764,45 @@ function connectorsHtml() {
 
 function cardHtml(c, i) {
   const steps = flowOf(c).filter(([id]) => isOn(c, id));
+  const run = runNowHtml(c);
   return `<div class="flow-card" data-index="${i}" data-on="${c.enabled}">
     <button class="open" data-action="edit-connector">
       <span class="chain">${steps.map(([id]) => iconHtml(STEPS[id])).join("<i></i>")}</span>
       <b>${esc(c.name)}</b>
       <span class="hint">${esc(sentence(c))}</span>
     </button>
+    ${run.button}
     ${switchHtml('data-toggle="enabled"', c.enabled)}
+    ${run.outcome}
   </div>`;
+}
+
+/** Each workflow's last Run now, by id: `{ state: "running" }`, the `RunStarted` it answered
+ * with `state: "started"`, or `{ state: "refused", error }`. Kept while the app runs. */
+const runNow = new Map();
+
+/** Why a workflow has no session of its own to run now, or null when it has one. */
+function runNowBlocked(c) {
+  if (c.trigger?.kind === "slack-message") return "It sorts Slack messages into other workflows and has no session of its own.";
+  if (c.trigger?.kind === "called") return "It answers only the Slack threads another workflow hands it.";
+  if (!TRIGGERS[c.trigger?.kind]) return "Repair its trigger first.";
+  return null;
+}
+
+/** The card's Run now button and the line under it with how the last run went. */
+function runNowHtml(c) {
+  const blocked = runNowBlocked(c);
+  const last = runNow.get(c.id);
+  if (blocked) return { button: `<button class="secondary run-now" disabled title="${esc(blocked)}">Run now</button>`, outcome: "" };
+  if (last?.state === "running") return { button: `<button class="secondary run-now" disabled aria-busy="true">Starting…</button>`, outcome: "" };
+  const button = `<button class="secondary run-now" data-action="run-now" title="Start this workflow's session now, without waiting for its trigger">Run now</button>`;
+  if (last?.state === "started") {
+    const where = last.machine_name || machineName(last.machine);
+    const open = `<button class="link" data-action="run-now-open" data-machine="${esc(last.machine)}" data-tab="${esc(last.tab)}">Open session</button>`;
+    return { button, outcome: `<p class="run-now-outcome started" role="status">Started on ${esc(where)}. ${open}</p>` };
+  }
+  if (last?.state === "refused") return { button, outcome: `<p class="run-now-outcome refused" role="alert">Didn't start: ${esc(last.error)}</p>` };
+  return { button, outcome: "" };
 }
 
 const who = (c) => (c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude");
@@ -1788,6 +1819,24 @@ const actions = {
     if (graphApi()) draft.graph = graphApi().startingGraph(draft);
     edit(-1, draft);
     showStep(draft.graph.nodes[0]?.id, true);
+  },
+  async "run-now"(button) {
+    const c = settings.connectors[Number(button.closest(".flow-card").dataset.index)];
+    if (!c || runNow.get(c.id)?.state === "running") return;
+    runNow.set(c.id, { state: "running" });
+    redraw();
+    try {
+      runNow.set(c.id, { state: "started", ...(await connectorCall("run_workflow", { id: c.id })) });
+    } catch (err) {
+      runNow.set(c.id, { state: "refused", error: String(err?.message ?? err) });
+    }
+    if (settingsOpen() && page === "connectors" && view.name === "list") redraw();
+  },
+  "run-now-open"(button) {
+    revealTab(button.dataset.machine, button.dataset.tab).catch((err) => {
+      const line = button.closest(".run-now-outcome");
+      if (line) line.textContent = `Couldn't open that session: ${err?.message ?? err}`;
+    });
   },
   "edit-connector"(button) {
     edit(Number(button.closest(".flow-card").dataset.index));
