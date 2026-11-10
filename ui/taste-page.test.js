@@ -11,10 +11,15 @@ const tastesWith = (over = {}) => ({ orchestrator: balanced, captains: balanced,
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const unesc = (text) => text.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
 
+const group = (key, label, over = {}) => ({ key, label, runs: 0, done: 0, failed: 0, limited: 0, cancelled: 0, accepted: 0, redone: 0, wall_ms: 0, median_wall_ms: 0, cost_usd: 0, priced: 0, tokens_in: 0, tokens_out: 0, box_usd: 0, box_ms: 0, ...over });
+const noStats = (days) => ({ days, since: 0, totals: group("all", "All tasks"), by_model: [], by_provider: [], by_project: [], by_delegator: [], by_outcome: [], slowest: [], priciest: [] });
+const openTabs = ["m-mini/tab-7"];
+
 /** The page in a vm: `answer(cmd, args)` plays the backend, and each control is found in the HTML
  * the page last drew, so a click only reaches what a user could see. */
-function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = async () => "tab-1" } = {}) {
+function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = async () => "tab-1", stats = () => noStats(7) } = {}) {
   const listeners = {};
+  const threads = [];
   const drawn = [];
   const calls = [];
   const opened = [];
@@ -28,9 +33,13 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     icon: (name) => `<svg data-icon="${name}"></svg>`,
     esc,
     connectorCall: async (cmd, args = {}) => {
+      if (cmd === "delegation_stats") return stats(args.days);
       calls.push([cmd, JSON.parse(JSON.stringify(args))]);
       return answer(cmd, args);
     },
+    tabByKey: (key) => (openTabs.includes(key) ? { key } : null),
+    keyOf: (machine, tab) => `${machine}/${tab}`,
+    tell: () => {},
     onlineMachines: () => Object.keys(projects),
     machines: new Map(Object.keys(projects).map((id) => [id, { view: { online: true, name: id } }])),
     machineName: (id) => id,
@@ -41,7 +50,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
       if (call.cmd === "open_taste_chat") return (opened.push([machine, JSON.parse(JSON.stringify(call))]), chat(machine, call));
       return projects[machine];
     },
-    revealTab: async (machine, id) => ({ machine, id }),
+    revealTab: async (machine, id) => (threads.push([machine, id]), { machine, id }),
     startTab: (tab) => opened.push(["start", tab]),
     CLAUDE_MODELS: [
       { slug: "claude-opus-5-5", name: "Claude Opus 5.5" },
@@ -58,7 +67,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
   vm.createContext(context);
   const skillsSrc = read("gui-skills.js").split("\n");
   const line = (start) => skillsSrc.find((l) => l.startsWith(start));
-  vm.runInContext(`${line("const baseName = ")}\n${line("const scopeLabel = ")}\n${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("gui-taste.js")}`, context);
+  vm.runInContext(`${line("const baseName = ")}\n${line("const scopeLabel = ")}\n${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("delegation.js")}\n${read("gui-taste.js")}\n${read("gui-delegation.js")}`, context);
   const html = () => drawn.at(-1);
   const control = (pattern) => {
     const tag = [...html().matchAll(/<(?:button|select|input|form)\b[^>]*>/g)].map((m) => m[0]).find((t) => pattern.test(t));
@@ -72,6 +81,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     context,
     calls,
     opened,
+    threads,
     timers,
     html,
     control,
@@ -79,6 +89,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     show: async () => (context.SHELL_PAGES.taste.show(), settle()),
     click: async (pattern) => (fire("click", { target: { closest: () => control(pattern) } }), settle()),
     pick: (attr, value) => fire("change", { target: { value, matches: (sel) => sel === `[${attr}]` } }),
+    pickEffort: async (target) => (fire("change", { target }), settle()),
     type: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-note-input]" } }),
     submit: () => fire("submit", { target: { matches: (sel) => sel === "[data-note-form]" }, preventDefault() {} }),
     submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
@@ -125,7 +136,7 @@ test("Loading shows while the first read runs, and an older hub asks for an upda
 test("an edit flashes the lines it changed, makes the profile Custom and shows the footer", async () => {
   const p = page();
   await p.show();
-  await p.click(/aria-label="More parallel workers"/);
+  await p.click(/aria-label="More workers at once"/);
   const html = p.html();
   assert.deepEqual(lines(html), ["* Run up to 4 workers at once.", ...balancedBrief().slice(1)]);
   assert.match(html, /<div class="taste-card custom active"><b>Custom<\/b>/);
@@ -141,14 +152,14 @@ test("a project tab marks only the fields changed there, and Reset inherits agai
   await p.click(/data-act="scope" data-kind="project"/);
   let html = p.html();
   assert.match(html, /<span class="taste-quiet">Inherits from Captains \(all\)\.<\/span>/);
-  assert.match(html, /<span>Parallel workers<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="parallel"/);
+  assert.match(html, /<span>Workers at once<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="parallel"/);
   assert.equal(html.match(/changed here/g).length, 1, "only the project's own field is tagged");
   assert.doesNotMatch(html, /inherited/);
   assert.match(html, /<div class="taste-label"><span>Strategy<\/span><\/div>/);
   assert.equal(lines(html)[0], "Run up to 5 workers at once.");
   await p.click(/data-act="reset" data-field="parallel"/);
   html = p.html();
-  assert.match(html, /<div class="taste-label"><span>Parallel workers<\/span><\/div>/);
+  assert.match(html, /<div class="taste-label"><span>Workers at once<\/span><\/div>/);
   assert.doesNotMatch(html, /changed here/);
   assert.equal(lines(html)[0], "* Run up to 3 workers at once.");
   assert.match(html, /aria-pressed="true"[^>]*>Captain site</, "an offline project's tab stays open once its patch is gone");
@@ -262,7 +273,7 @@ test("a failed save keeps the draft, says why, and the next save sends only what
   await p.click(/data-act="scope" data-kind="orchestrator"/);
   await p.click(/data-profile="economical"/);
   await p.click(/data-act="scope" data-kind="captains"/);
-  await p.click(/aria-label="Fewer parallel workers"/);
+  await p.click(/aria-label="Less workers at once"/);
   await p.click(/data-act="save"/);
   let html = p.html();
   assert.match(html, /<span class="taste-unsaved">Unsaved changes<\/span><span class="taste-error" role="alert">the model ladder needs at least one model<\/span>/);
@@ -320,7 +331,7 @@ test("showing the page again keeps a dirty draft over a fresh read, and a failed
   let read = () => tastesWith();
   const p = page({ answer: () => read() });
   await p.show();
-  await p.click(/aria-label="More parallel workers"/);
+  await p.click(/aria-label="More workers at once"/);
   read = () => tastesWith({ captains: { ...balanced, autonomy: "ask_first" } });
   await p.show();
   assert.equal(lines(p.html())[0], "Run up to 4 workers at once.");
@@ -331,4 +342,118 @@ test("showing the page again keeps a dirty draft over a fresh read, and a failed
   await p.show();
   assert.match(p.html(), /<footer class="taste-foot"><span class="taste-error" role="alert">hub offline<\/span>/);
   assert.equal(lines(p.html())[0], "Run up to 3 workers at once.", "the last read stays on screen");
+});
+
+const limits = { tier: "high", default_effort: null, max_effort: "max", budget_cents: 0, time_limit_min: 480, box_budget_cents: 0 };
+const limited = (over = {}) => tastesWith({ orchestrator: { ...balanced, ...limits }, captains: { ...balanced, ...limits }, ...over });
+
+test("the Captains' delegation limits show their values, and editing them saves only what changed", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? limited() : limited({ captains: { ...balanced, ...limits, ...args.patch } })) });
+  await p.show();
+  let html = p.html();
+  assert.match(html, /<h2>Delegation limits<\/h2><p>pinned holds every worker to these. A call past them is refused, and a worker past its time or budget is stopped.<\/p>/);
+  assert.match(html, /data-field="tier" data-value="high" aria-pressed="true"/);
+  assert.match(html, /<span>Time limit per worker<\/span>(?:(?!<output).)*<output aria-live="polite">8 h<\/output>/s);
+  assert.match(html, /<span>Budget per worker<\/span>(?:(?!<output).)*<output aria-live="polite">No cap<\/output>/s);
+  assert.ok(p.control(/aria-label="Less budget per worker"/).disabled, "no cap is the lowest a budget goes");
+  assert.match(html, /<select data-effort="default_effort"><option value="" selected>The model's own<\/option>/);
+
+  await p.click(/data-field="tier" data-value="mid"/);
+  await p.click(/aria-label="Less time per worker"/);
+  await p.click(/aria-label="More budget per worker"/);
+  await p.click(/aria-label="More budget per worker"/);
+  await p.pickEffort({ value: "medium", dataset: { effort: "default_effort" }, matches: (sel) => sel === "[data-effort]" });
+  html = p.html();
+  assert.match(html, /<output aria-live="polite">6 h<\/output>/);
+  assert.match(html, /<output aria-live="polite">US\$ 1.00<\/output>/);
+  assert.match(html, /class="taste-card active" data-act="profile" data-profile="balanced"/, "a limit other than workers at once leaves the profile as it was");
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "captains" }, patch: { tier: "mid", default_effort: "medium", budget_cents: 100, time_limit_min: 360 } }]);
+});
+
+test("lowering the most effort below the default brings the default down", async () => {
+  const p = page({ answer: () => limited({ captains: { ...balanced, ...limits, default_effort: "xhigh" } }) });
+  await p.show();
+  const target = { value: "high", dataset: { effort: "max_effort" }, matches: (sel) => sel === "[data-effort]" };
+  await p.pickEffort(target);
+  const html = p.html();
+  assert.match(html, /<select data-effort="default_effort">(?:(?!<\/select>).)*<option value="high" selected>/s);
+  assert.match(html, /<select data-effort="max_effort">(?:(?!<\/select>).)*<option value="high" selected>/s);
+});
+
+test("a project tab marks a limit changed here, and the orchestrator tab keeps only workers at once", async () => {
+  const p = page({ answer: () => limited({ projects: { [SITE]: { box_budget_cents: 300 } } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  let html = p.html();
+  assert.match(html, /<span>Box budget<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="box_budget_cents"/);
+  assert.match(html, /<output aria-live="polite">US\$ 3.00<\/output>/);
+  assert.match(html, /<div class="taste-label"><span>Model tier<\/span><\/div>/, "an inherited limit carries no tag");
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  html = p.html();
+  assert.match(html, /The orchestrator starts no workers itself\. Each Captain follows the limits under Captains \(all\) or its project\./);
+  assert.doesNotMatch(html, /data-field="tier"/);
+  assert.match(html, /aria-label="More workers at once"/, "the orchestrator's brief still names its workers at once");
+});
+
+test("a hub too old for delegation limits says so instead of drawing empty fields", async () => {
+  const p = page();
+  await p.show();
+  assert.match(p.html(), /Update pinned on the hub to set the other delegation limits\./);
+  assert.match(p.html(), /aria-label="More workers at once"/, "workers at once, which every hub has, stays");
+});
+
+const statsFor = (days) => ({
+  ...noStats(days),
+  totals: group("all", "All tasks", { runs: 5, done: 2, failed: 1, limited: 2, accepted: 1, redone: 1, median_wall_ms: 30 * 60000, cost_usd: 9.5, priced: 4, box_usd: 0.5, box_ms: 40 * 60000, tokens_in: 2_400_000, tokens_out: 52_000, limits: { time: 2 } }),
+  by_model: [
+    group("claude-opus-5-5", "claude-opus-5-5", { runs: 3, done: 1, limited: 2, median_wall_ms: 120 * 60000, cost_usd: 9, priced: 3, limits: { time: 2 } }),
+    group("glm-5.3", "glm-5.3", { runs: 2, done: 1, failed: 1, median_wall_ms: 5 * 60000, cost_usd: 0.5, priced: 1, box_usd: 0.5, box_ms: 40 * 60000 }),
+  ],
+  by_outcome: [group("done", "Done", { runs: 2, done: 2 }), group("limit", "Stopped by a limit", { runs: 2, limited: 2, limits: { time: 2 } })],
+  slowest: [
+    { id: "task-1", title: "Profile the sync", machine: "m-mini", machine_name: "Mac mini", thread: "tab-7", model: "claude-opus-5-5", delegator: "Captain site", outcome: "limit", limit: "time", wall_ms: 120 * 60000, ended: 1 },
+    { id: "task-2", title: "Old thread", machine: "m-book", machine_name: "MacBook", thread: "tab-1", model: "glm-5.3", delegator: "Global orchestrator", outcome: "done", wall_ms: 5 * 60000, ended: 1 },
+  ],
+});
+
+test("delegation metrics show totals, a hint per breakdown naming the limit it tunes, and links to open threads", async () => {
+  const asked = [];
+  const p = page({ stats: (days) => (asked.push(days), statsFor(days)) });
+  await p.show();
+  const html = p.html();
+  assert.deepEqual(asked, [7], "the page opens on 7 days");
+  assert.match(html, /<h2>Delegation metrics<\/h2>/);
+  assert.deepEqual([...html.matchAll(/<dt>([^<]+)<\/dt><dd>([^<]+)<\/dd>/g)].map(([, k, v]) => `${k}: ${unesc(v)}`), [
+    "Tasks: 5",
+    "Done: 2 · 40%",
+    "Median time: 30 min",
+    "Spend: $10.00",
+    "Tokens in / out: 2.4M / 52k",
+    "Accepted / redone: 1 / 1",
+  ]);
+  const hints = [...html.matchAll(/<li>([^<]+) <span class="delegation-tune">→ ([^<]+)<\/span><\/li>/g)].map(([, text, field]) => `${unesc(text)} → ${unesc(field)}`);
+  assert.deepEqual(hints, [
+    "2 of 3 claude-opus-5-5 tasks hit the time limit → Time limit",
+    "1 of 2 glm-5.3 tasks failed → Tier",
+    "$0.50 on boxes over 40 min → Upstash Box budget",
+    "2 of 2 tasks hit the time limit → Time limit",
+  ]);
+  assert.match(html, /data-act="delegation-open" data-machine="m-mini" data-tab="tab-7">Profile the sync<\/button>/);
+  assert.match(html, /<span class="delegation-title">Old thread<\/span>/, "a thread no longer open is not a link");
+  await p.click(/data-act="delegation-open"/);
+  assert.deepEqual(p.threads, [["m-mini", "tab-7"]]);
+  await p.click(/data-act="delegation-days" data-days="30"/);
+  assert.deepEqual(asked, [7, 30]);
+  assert.match(p.html(), /data-days="30" aria-pressed="true">30 d</);
+  assert.equal(p.calls.filter(([cmd]) => cmd !== "get_tastes").length, 0, "reading metrics saves nothing");
+});
+
+test("delegation metrics say when nothing ended and when the hub is too old", async () => {
+  const empty = page();
+  await empty.show();
+  assert.match(empty.html(), /No delegated task ended in this period\./);
+  const old = page({ stats: () => Promise.reject(new Error("unknown variant `delegation_stats`")) });
+  await old.show();
+  assert.match(old.html(), /Update pinned on the hub to see delegation metrics\./);
 });

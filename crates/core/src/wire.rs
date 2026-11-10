@@ -1028,7 +1028,8 @@ pub enum HubCall {
     /// From a machine: the started task's JSON. Runs `request` on the machine or in the Upstash Box
     /// its target names, for the asking machine's tab `tab`, whose own id for the task is `task`.
     /// `repo` is the caller's git origin, which the worker's checkout is found or cloned by;
-    /// `access` is the widest the caller may hand a child.
+    /// `access` is the widest the caller may hand a child; `delegator` and `limits` are who asked
+    /// and the limits it runs under, which the worker is held to and recorded with.
     Delegate {
         tab: TabId,
         task: String,
@@ -1036,6 +1037,10 @@ pub enum HubCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
         access: crate::delegate::Access,
+        #[serde(default)]
+        delegator: crate::delegate::Delegator,
+        #[serde(default)]
+        limits: crate::taste::Limits,
     },
     /// From a machine: the status JSON of the task its tab `tab` delegated to `machine` as `task`,
     /// or its state once cancelled when `cancel` gives a reason.
@@ -1054,6 +1059,12 @@ pub enum HubCall {
     SetBoxClaudeToken { name: String, token: String },
     /// `connectors::Settings::box_claude_tokens`, without the token kept for `name`.
     RemoveBoxClaudeToken { name: String },
+    /// From a machine: `null`, once the hub keeps these records of its delegated tasks, as they
+    /// are now. The hub stamps the machine, and box time for a machine that is a box.
+    RecordTasks { records: Vec<crate::delegate::TaskRecord> },
+    /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
+    /// (1, 7 or 30), on every machine.
+    DelegationStats { days: u32 },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1656,10 +1667,11 @@ mod tests {
             json!({ "cmd": "remote_ended", "from": "m2", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
         );
         let request = crate::delegate::parse_request(&json!({ "task": "Fix it.", "target": { "box": { "size": "large" } } })).unwrap();
-        let delegate = serde_json::to_value(HubCall::Delegate { tab: "tab-1".into(), task: "task-1".into(), request: Box::new(request), repo: Some("git@github.com:o/r.git".into()), access: crate::delegate::Access::ReadOnly }).unwrap();
+        let delegate = serde_json::to_value(HubCall::Delegate { tab: "tab-1".into(), task: "task-1".into(), request: Box::new(request), repo: Some("git@github.com:o/r.git".into()), access: crate::delegate::Access::ReadOnly, delegator: Default::default(), limits: Default::default() }).unwrap();
         assert_eq!((delegate["cmd"].as_str(), delegate["access"].as_str()), (Some("delegate"), Some("read_only")));
         assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
             json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),

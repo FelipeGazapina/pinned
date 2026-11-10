@@ -843,17 +843,18 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
     let opus = json!({ "model": "claude-opus-5-5" });
     let aggressive = json!({
-        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
     });
-    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
-    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 101 } })), Err("parallel workers go from 1 to 100".into()));
     let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
     assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
     client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();
@@ -2166,7 +2167,11 @@ struct BoxAccount {
 
 impl BoxAccount {
     fn new(hub: &TestHub) -> BoxAccount {
-        let (token, account) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        BoxAccount::named(hub, "ana@acme.dev")
+    }
+
+    fn named(hub: &TestHub, email: &str) -> BoxAccount {
+        let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
         let mut client = Client::connect(&hub.url, &token);
         client.wait("hello", |f| f["type"] == "hello");
         assert_eq!(
@@ -4035,6 +4040,40 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     }
 }
 
+#[test]
+fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
+    let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    for client in [&mut ana.client, &mut bob.client] {
+        client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    }
+    let limits = json!({ "box_budget_cents": 100, "tier": "mid", "time_limit_min": 60 });
+    let anas = ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": limits })).unwrap();
+    assert_eq!((anas["captains"]["box_budget_cents"].as_u64(), anas["captains"]["tier"].as_str()), (Some(100), Some("mid")));
+    let bobs = bob.client.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(
+        (bobs["captains"]["box_budget_cents"].as_u64(), bobs["captains"]["tier"].as_str(), bobs["captains"]["time_limit_min"].as_u64()),
+        (Some(0), Some("high"), Some(480)),
+        "ana's limits never show in bob's tastes"
+    );
+
+    let open = |client: &mut Client, budget: Option<f64>| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": budget }));
+    assert_eq!(open(&mut ana.client, Some(5.0)), Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()));
+    let anas_box = open(&mut ana.client, None).unwrap();
+    assert_eq!(anas_box["budget_usd"].as_f64(), Some(1.0), "a box with no budget named gets the account's box budget");
+    let bobs_box = open(&mut bob.client, Some(5.0)).unwrap();
+    assert_eq!(bobs_box["budget_usd"].as_f64(), Some(5.0), "ana's box budget never bounds bob's box");
+    let machine = anas_box["machine"].as_str().unwrap();
+    assert_eq!(
+        ana.client.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "adding funds stops at the box budget too"
+    );
+    let bobs_machine = bobs_box["machine"].as_str().unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "extend_box", "machine": bobs_machine, "extra_usd": 1.0 })).unwrap()["budget_usd"].as_f64(), Some(6.0));
+}
+
 /// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.
 fn running_tab(client: &mut Client, machine: &str, path: &str) -> String {
     let tab = client.call(machine, json!({ "cmd": "open_tab", "path": path, "bypass": false })).unwrap().as_str().unwrap().to_owned();
@@ -4326,6 +4365,15 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
     assert_eq!(fleet.mac.machine.tabs().len(), 1, "mac opened no thread of its own for it");
     wait_for("projects() to count the worker on mini", || workers_on(&mut fleet.client, &mini) == 1);
     assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+    let more: Vec<Value> = ["Deps", "Docs"]
+        .iter()
+        .map(|title| delegate_from(&mac_dir, &captain, json!({ "task": format!("Update the {title}."), "title": title, "target": { "machine": mini, "providerInstanceId": "work" } })).unwrap())
+        .collect();
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, json!({ "task": "One too many.", "target": { "machine": "mini" } })),
+        Err("3 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()),
+        "workers on another machine count against the caller's Workers at once"
+    );
 
     let transcripts = mini_dir.join("accounts/work/projects/site");
     std::fs::create_dir_all(&transcripts).unwrap();
@@ -4340,11 +4388,18 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
         "task_status on mac reports the end and the child's last reply"
     );
 
-    let second = delegate_from(&mac_dir, &captain, json!({ "task": "Bump the deps.", "title": "Deps", "target": { "machine": mini, "providerInstanceId": "work" } })).unwrap();
-    let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": second["taskId"], "reason": "not now" })).unwrap();
-    assert_eq!((cancel["workState"].as_str(), cancel["error"].as_str()), (Some("cancelled"), Some("not now")));
-    let remote = fleet.mini.machine.view(second["tabId"].as_str().unwrap()).unwrap();
-    assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
+    for second in &more {
+        let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": second["taskId"], "reason": "not now" })).unwrap();
+        assert_eq!((cancel["workState"].as_str(), cancel["error"].as_str()), (Some("cancelled"), Some("not now")));
+        let remote = fleet.mini.machine.view(second["tabId"].as_str().unwrap()).unwrap();
+        assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
+    }
+    let stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 3);
+    std::thread::sleep(Duration::from_millis(1500));
+    let stats = stats();
+    let ran: Vec<(&str, &str)> = stats["slowest"].as_array().unwrap().iter().map(|t| (t["machine"].as_str().unwrap(), t["delegator"].as_str().unwrap())).collect();
+    assert_eq!((stats["totals"]["runs"].as_u64(), ran), (Some(3), vec![(mini.as_str(), "Captain site"); 3]), "one record per worker, from mini that ran it, under mac's Captain: {stats}");
 
     let refused = |target: Value| delegate_from(&mac_dir, &captain, json!({ "task": "Anything.", "target": target }));
     assert_eq!(refused(json!({ "machine": "nowhere" })), Err("this account has no machine nowhere".into()));
@@ -4352,7 +4407,7 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
     pair(&fleet.hub.url, &mut fleet.client, "laptop", &temp("remote_machine-laptop"));
     assert_eq!(refused(json!({ "machine": "laptop" })), Err("laptop is offline, so it can't take the worker; nothing ran elsewhere".into()));
     assert_eq!(refused(json!({ "box": true })), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
-    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 2, "no refusal started a worker anywhere");
+    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 3, "no refusal started a worker anywhere");
 }
 
 #[test]
@@ -4413,6 +4468,14 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "result_available");
     wait_for("the row to go", || ana.rows(&hub) == 0);
     ana.client.wait_machines(&[("mac", true)]);
+    let stats = ana.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ran = &stats["slowest"][0];
+    assert_eq!(
+        (stats["totals"]["runs"].as_u64(), ran["machine"].as_str(), ran["delegator"].as_str(), ran["title"].as_str()),
+        (Some(1), Some(machine.as_str()), Some("Captain site"), Some("Slow suite")),
+        "the box recorded its worker before it went: {stats}"
+    );
+    assert!(stats["totals"]["box_ms"].as_u64().unwrap() > 0, "and was billed its box time: {stats}");
 
     let again = delegate_from(&mac_dir, &captain, json!({ "task": "Run it again.", "title": "Again", "target": { "box": true } })).unwrap();
     let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": again["taskId"], "reason": "not now" })).unwrap();
@@ -4490,4 +4553,146 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
+}
+
+fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {
+    let mut record = json!({
+        "id": id, "machine": "spoofed", "title": format!("task {id}"),
+        "delegator": { "kind": "captain", "tab": "tab-1", "project": "github.com/acme/site", "project_name": "site" },
+        "provider": "claude", "account": "claude", "model": model, "started": ended - minutes * 60_000, "ended": ended,
+        "usage": { "tokens_in": 1000, "tokens_out": 100, "wall_ms": minutes * 60_000 },
+        "outcome": outcome,
+    });
+    if let Some(cost) = cost {
+        record["usage"]["cost_usd"] = json!(cost);
+    }
+    if outcome == "limit" {
+        record["limit"] = json!("time");
+    }
+    record
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+#[test]
+fn an_accounts_delegated_task_records_and_totals_reach_only_that_account() {
+    let hub = TestHub::start("iso_delegation");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_machine, ana_machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_machine_token, |_| RawReply::Ok(Value::Null));
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let now = now_ms();
+    let stats = |days: u32| json!({ "cmd": "delegation_stats", "days": days });
+
+    let anas = json!([task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now), task_record("task-2", "claude-opus-5-5", "limit", 120, Some(6.0), now)]);
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": anas })), Ok(Value::Null));
+    let bobs = json!([task_record("task-1", "glm-5.3", "failed", 3, None, now)]);
+    assert_eq!(bob_raw.ask(json!({ "cmd": "record_tasks", "records": bobs })), Ok(Value::Null), "the same task id on bob's machine is bob's own");
+    assert_eq!(ana.hub(json!({ "cmd": "record_tasks", "records": [] })), Err("only a machine records the tasks it ran".into()));
+
+    let ana_stats = ana.hub(stats(7)).unwrap();
+    assert_eq!(
+        json!([ana_stats["totals"]["runs"], ana_stats["totals"]["limited"], ana_stats["totals"]["cost_usd"], ana_stats["by_model"][0]["key"], ana_stats["by_model"][0]["limits"]]),
+        json!([2, 1, 7.5, "claude-opus-5-5", { "time": 1 }])
+    );
+    assert_eq!(
+        json!([ana_stats["slowest"][0]["id"], ana_stats["slowest"][0]["machine"], ana_stats["slowest"][0]["machine_name"]]),
+        json!(["task-2", ana_machine.id, "ana-mac"]),
+        "the hub names the machine that sent it"
+    );
+    assert!(!ana_stats.to_string().contains("glm-5.3"), "bob's task is in ana's totals: {ana_stats}");
+    let bob_stats = bob.hub(stats(30)).unwrap();
+    assert_eq!((bob_stats["totals"]["runs"].as_u64(), bob_stats["totals"]["failed"].as_u64()), (Some(1), Some(1)));
+    assert!(!bob_stats.to_string().contains("opus"), "ana's tasks are in bob's totals: {bob_stats}");
+    assert_eq!(bob_raw.ask(stats(7)).unwrap()["totals"], bob.hub(stats(7)).unwrap()["totals"], "bob's machine reads bob's totals");
+    assert_eq!(ana.hub(stats(2)), Err("days must be 1, 7 or 30, not 2".into()));
+
+    let mut accepted = task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now);
+    accepted["review"] = json!({ "verdict": "accepted", "at": now });
+    assert_eq!(ana_raw.ask(json!({ "cmd": "record_tasks", "records": [accepted] })), Ok(Value::Null));
+    let again = ana.hub(stats(7)).unwrap();
+    assert_eq!((again["totals"]["runs"].as_u64(), again["totals"]["accepted"].as_u64()), (Some(2), Some(1)), "a record sent again replaces the first");
+    assert_eq!(bob.hub(stats(7)).unwrap()["totals"]["accepted"], 0);
+    let old = task_record("task-3", "claude-opus-5-5", "done", 10, None, now - 8 * 24 * 60 * 60 * 1000);
+    ana_raw.ask(json!({ "cmd": "record_tasks", "records": [old] })).unwrap();
+    assert_eq!((ana.hub(stats(7)).unwrap()["totals"]["runs"].as_u64(), ana.hub(stats(30)).unwrap()["totals"]["runs"].as_u64()), (Some(2), Some(3)));
+}
+
+#[test]
+fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() {
+    let hub = TestHub::start("delegation_box");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let first = task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 20 * 60_000);
+    let second = task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first.clone(), second] })).unwrap();
+    raw.ask(json!({ "cmd": "record_tasks", "records": [first] })).unwrap();
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
+    let usd = stats["totals"]["box_usd"].as_f64().unwrap();
+    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}
+
+#[test]
+fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive() {
+    let hub = TestHub::start("delegation_box_overlap");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let boxed = |name: &str, minutes_ago: u64| {
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        admin_on(&hub.database, &format!(
+            "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('{0}', '{ana_account}', '{0}', 'box_{0}', 'interactive', '{{\"issue\":\"{0}\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'medium', 'running', now() - interval '{minutes_ago} minutes')",
+            machine.id,
+        ));
+        RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null))
+    };
+    let site = boxed("Box · site", 60);
+    let api = boxed("Box · api", 30);
+    ana.wait_machines(&[("Box · site", true), ("Box · api", true)]);
+    let now = now_ms();
+
+    // On site, task-a started first and ended last; task-b ran inside it. They arrive in start order.
+    let a = task_record("task-a", "claude-sonnet-5-5", "done", 50, Some(0.0), now);
+    let b = task_record("task-b", "claude-sonnet-5-5", "done", 20, Some(0.0), now - 20 * 60_000);
+    site.ask(json!({ "cmd": "record_tasks", "records": [a, b] })).unwrap();
+    // On api, six tasks end four minutes apart and each record is sent on its own, all at once.
+    std::thread::scope(|s| {
+        for k in 0..6u64 {
+            let api = &api;
+            s.spawn(move || {
+                let record = task_record(&format!("task-api-{k}"), "glm-5.3", "done", 1, Some(0.0), now - k * 4 * 60_000);
+                api.ask(json!({ "cmd": "record_tasks", "records": [record] })).unwrap();
+            });
+        }
+    });
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let box_minutes = |id: &str| {
+        let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+    };
+    assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
+    assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
+    let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
+    assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
 }

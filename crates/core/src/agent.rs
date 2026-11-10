@@ -366,6 +366,22 @@ pub enum Message {
         #[serde(default)]
         search: String,
     },
+    /// The delegator's verdict on a finished task: `accepted` or `redone`.
+    TaskReview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+        verdict: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// The account's delegation totals over the last `days`.
+    DelegationStats {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u64>,
+    },
 }
 
 #[cfg(test)]

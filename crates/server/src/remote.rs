@@ -4,7 +4,7 @@
 //! only among that account's own, so a machine reaches no machine, box or task of another account.
 
 use crate::hub::{Account, Hub, Unanswered, RUN_WAIT};
-use pinned_core::delegate::{Access, Origin, RemoteEnd, Request};
+use pinned_core::delegate::{Origin, RemoteEnd, Request};
 use pinned_core::github;
 use pinned_core::link::is_unknown_command;
 use pinned_core::wire::{Call, HubCall, TabId};
@@ -18,17 +18,18 @@ const LOOK_WAIT: Duration = Duration::from_secs(30);
 /// socket sent the call.
 pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, call: HubCall) -> Result<Value, String> {
     match call {
-        HubCall::Delegate { tab, task, request, repo, access } => delegate(hub, account, from, tab, task, *request, repo, access).await,
+        HubCall::Delegate { tab, task, request, repo, access, delegator, limits } => {
+            let machine_name = account.name_of(from).unwrap_or_else(|| from.to_owned());
+            let origin = Origin { machine: from.to_owned(), machine_name, tab, task, access, delegator, limits };
+            delegate(hub, account, from, origin, *request, repo).await
+        }
         HubCall::RemoteTask { machine, tab, task, cancel } => remote_task(hub, account, from, &machine, tab, task, cancel).await,
         HubCall::RemoteEnded { to, tab, task, end } => ended(hub, account, from, &to, tab, task, end).await,
         _ => Err("that is not a delegate call".into()),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, tab: TabId, task: String, request: Request, repo: Option<String>, access: Access) -> Result<Value, String> {
-    let machine_name = account.name_of(from).unwrap_or_else(|| from.to_owned());
-    let origin = Origin { machine: from.to_owned(), machine_name, tab, task, access };
+async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Origin, request: Request, repo: Option<String>) -> Result<Value, String> {
     if let Some(boxed) = request.target.boxed.clone() {
         return hub.boxes.open_delegate(hub, account, origin, request, repo, boxed).await;
     }

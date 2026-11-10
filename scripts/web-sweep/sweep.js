@@ -4529,7 +4529,7 @@ async function sweep(profileName) {
     check(!/ran it/.test(await termText()), "claude finished before the banner was checked");
     check(!/Approval/.test(row), `after the answer, while claude still works: ${JSON.stringify(row)}`);
     await waitTerm(/ran it/);
-    await waitFor("the held model pick to apply", async () => (await text("#model-button")) === "Fable 5.1", 10000);
+    await waitFor("the held model pick to apply", async () => (await text("#model-button")) === "Fable 5.2", 10000);
     return options.join(" | ");
   });
 
@@ -4729,7 +4729,7 @@ async function sweep(profileName) {
     else await page.keyboard.press("Meta+Shift+M");
     await waitFor("the model picker", () => page.locator('#composer-menu[data-kind="models"] .model').first().isVisible());
     const names = await page.locator("#composer-menu .model .name").allTextContents();
-    check(names.join("|") === "Claude Fable 5.1|Claude Opus 5.5|Claude Sonnet 5.5|Claude Haiku 5.5New|Legacy models", `models: ${names.join("|")}`);
+    check(names.join("|") === "Claude Fable 5.2|Claude Opus 5.5|Claude Sonnet 5.5|Claude Haiku 5.5New|Legacy models", `models: ${names.join("|")}`);
     if (touch) await page.tap("#model-button");
     else await page.keyboard.press("Escape");
     await waitFor("the picker to close", async () => !(await page.locator("#composer-menu").isVisible()));
@@ -5055,7 +5055,11 @@ async function sweep(profileName) {
     const models = await page.evaluate((lines) => modelMenuOn(lines), screen("claude-2.1.310-model-menu.txt"));
     const rows = models?.options.map((o) => `${o.n}${o.chosen ? "*" : ""} ${o.head.split(/\s/)[0]}`).join(", ");
     check(rows === "1* Default, 2 Sonnet, 3 Fable, 4 Opus, 5 Haiku", `/model rows: ${rows}`);
-    return rows;
+    // 2.1.321 names each row by its model and adds an unnumbered "More models" row.
+    const current = await page.evaluate((lines) => modelMenuOn(lines), screen("claude-2.1.321-model-menu.txt"));
+    const now = current?.options.map((o) => `${o.n}${o.chosen ? "*" : ""} ${o.head.split(/\s/)[0]}`).join(", ");
+    check(now === "1 Default, 2* Opus, 3 Fable, 4 Sonnet, 5 Haiku", `2.1.321 /model rows: ${now}`);
+    return `${rows}; ${now}`;
   });
 
   await step("composer: the model picker searches, stars favorites, and picks a model for this session", async () => {

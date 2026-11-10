@@ -348,7 +348,10 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     let sharing = machine.clone();
-    std::thread::spawn(move || sharing.share_tastes_again());
+    std::thread::spawn(move || {
+        sharing.share_tastes_again();
+        sharing.send_records();
+    });
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
     for (account, usage) in machine.usage() {
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
