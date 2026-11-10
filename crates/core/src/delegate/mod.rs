@@ -1476,6 +1476,28 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
+    #[test]
+    fn a_resumed_task_keeps_counting_toward_its_time_limit_from_its_original_start() {
+        let dir = scratch("limit-across-restart");
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_on(&first, Provider::Claude);
+        first.link_thread(&task.id, Thread { tab: "tab-1".into(), runs: true });
+        first.backdate(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.set_worker_session(&task.id, "s-worker");
+        drop(first);
+
+        let after = Delegates::load(Some(file));
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a thread's worker is resumed by the restart, not ended");
+        after.enforce_limits(Instant::now(), None);
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a minute of its limit is left");
+        after.enforce_limits(Instant::now() + Duration::from_secs(120), None);
+        let ended = after.get(&task.id).unwrap();
+        assert_eq!(ended.state, WorkState::Cancelled);
+        assert!(ended.error.unwrap().contains("its limit"), "the limit counted the time before the restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn after_each_stop(name: &str, provider: Provider, lines: &[&str]) -> Vec<Value> {
         let dir = scratch(name);
         let file = dir.join("delegates.json");
@@ -1518,8 +1540,8 @@ grok-4.7-high - Grok 4.7  High
             vec![
                 json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
                 json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
-                json!(["quit", "cancelled", "PR opened", "stopped by restart"]),
-                json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
+                json!(["quit", "cancelled", "PR opened", RESTART_ENDED]),
+                json!(["crash", "cancelled", "PR opened", RESTART_ENDED]),
             ]
         );
     }

@@ -10534,6 +10534,139 @@ Have another model review a risky change before it goes ahead.";
         (task.state.as_str().to_owned(), task.error)
     }
 
+    /// A machine over `dir`'s config as `limited_captain` made it, as after the app restarted.
+    #[cfg(unix)]
+    fn restarted(dir: &Path) -> Arc<Machine> {
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn reports(tab: &str, session: &str, status: AgentStatus, reply: Option<&str>) -> AgentEvent {
+        AgentEvent { session: Some(session.into()), reply: reply.map(str::to_owned), ..hook(tab, status) }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_working_thread_task_survives_a_restart_on_the_tab_its_session_got_and_still_ends() {
+        let (m, dir, captain) = limited_captain("restart-keeps", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.record_event(reports(&worker, "s-worker", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 2);
+        let by_session = |session: &str| tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some(session)).unwrap()).cloned().unwrap();
+        let (captain_now, worker_now) = (by_session("s-captain"), by_session("s-worker"));
+        assert_ne!(worker_now, worker, "a restart gives the worker's tab a new id");
+        let info = after.delegates.get(&task).unwrap();
+        assert_eq!(info.state.as_str(), "working", "its worker's session resumed, so the task did not fail: {:?}", info.error);
+        assert_eq!((info.thread.map(|t| (t.tab, t.runs)), info.parent), (Some((worker_now.clone(), true)), crate::delegate::Parent::Tab(captain_now.clone())), "the task follows its worker and its parent by session");
+        assert_eq!(after.tab(&worker_now, |t| t.task.clone()).unwrap(), Some(task.clone()));
+
+        after.record_event(reports(&worker_now, "s-worker", AgentStatus::Done, Some("Fixed the parser.")));
+        let ended = after.delegates.get(&task).unwrap();
+        assert_eq!((ended.state.as_str(), ended.summary.as_deref()), ("result_available", Some("Fixed the parser.")), "the resumed worker's turn ends it as before");
+        let notice = after.delegates.claim_notice(&captain_now).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task) && notice.contains("result available"), "the captain that came back hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_task_whose_session_never_reported_ends_with_the_reason_and_a_crash_does_not_save_the_time_it_ran() {
+        let (m, dir, captain) = limited_captain("restart-no-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        after.restore_tabs();
+        assert_eq!(state_of(&after, &task), ("cancelled".into(), Some(crate::delegate::RESTART_ENDED.into())));
+        let notice = after.delegates.claim_notice(&after.tabs.lock().unwrap().keys().next().cloned().unwrap()).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the parent is told why: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_task_is_still_working_after_the_origin_restarts_and_takes_its_end_by_the_old_tab_id() {
+        use crate::delegate::RemoteTarget;
+        let root = temp("remote-origin-restart");
+        let (app, config) = (root.join("app"), root.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some("s-parent".into()));
+        let task = delegated_elsewhere(&before, &tab, "m-mini", "mini");
+        before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()) });
+        before.record_event(reports(&tab, "s-parent", AgentStatus::Working, None));
+        before.quit();
+        drop(before);
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_ne!(tabs[0], tab, "the parent has a new tab id");
+        assert_eq!(state_of(&after, &task), ("working".into(), None), "the machine that runs it was not restarted");
+        let remote = after.delegates.get(&task).unwrap().remote.expect("the remote survives the restart");
+        assert_eq!((remote.machine.as_str(), remote.name.as_str(), remote.tab.as_deref()), ("m-mini", "mini", Some("tab-9")));
+
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        after.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { tab, .. } => {
+                seen.lock().unwrap().push(tab);
+                Err("mini is offline".into())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        after.check_remotes(Instant::now());
+        assert_eq!(*asked.lock().unwrap(), vec![tab.clone()], "the 60 s look asks after it by the tab id the other machine knows");
+
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None };
+        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), false, "only the machine that runs it ends it");
+        assert!(after.remote_ended("m-mini", &tab, &task, &end), "the end the machine sends, naming the old tab id, is taken");
+        let done = after.delegates.get(&task).unwrap();
+        assert_eq!((done.state.as_str(), done.summary.as_deref()), ("result_available", Some("Green.")));
+        let notice = after.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task), "the parent's new tab hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_host_that_restarts_keeps_reporting_its_end_to_the_machine_that_asked() {
+        let (m, dir, captain) = limited_captain("restart-host", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let origin = crate::delegate::Origin {
+            machine: "m-mac".into(),
+            machine_name: "mac".into(),
+            tab: "tab-7".into(),
+            task: "task-mac".into(),
+            access: crate::delegate::Access::Auto,
+            delegator: Default::default(),
+            limits: Default::default(),
+        };
+        let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+        let started: Value = serde_json::from_str(&m.start_for_origin(origin, request, Some("git@github.com:acme/app.git".into()), None).unwrap_or_else(|e| panic!("{e}"))).unwrap();
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&worker, "s-host", AgentStatus::Working, None));
+        let _ = captain;
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        let worker_now = tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some("s-host")).unwrap()).cloned().unwrap();
+        assert!(after.tab(&worker_now, |t| t.origin.is_some()).unwrap(), "the worker still answers to the tab on the other machine");
+        after.record_event(reports(&worker_now, "s-host", AgentStatus::Done, Some("Done there.")));
+        assert_eq!(after.delegates.remote_ends().into_iter().map(|(id, machine, tab, origin_task, end)| (id, machine, tab, origin_task, end.state)).collect::<Vec<_>>(), vec![(task, "m-mac".into(), "tab-7".into(), "task-mac".into(), "result_available".into())]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+
     #[test]
     fn a_remote_task_past_its_limit_ends_here_when_its_machine_never_reports() {
         let m = machine();
@@ -11332,7 +11465,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(notice.contains(&finished), "the finished task was forgotten: {notice}");
         assert!(notice.contains("result available"), "the finished task's notice was forgotten: {notice}");
         assert!(notice.contains(&running.id), "the killed child was forgotten: {notice}");
-        assert!(notice.contains("stopped by restart"), "the killed child did not say why: {notice}");
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the killed child did not say why: {notice}");
         let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
         assert_eq!(status["summary"], "DONE");
         let _ = std::fs::remove_dir_all(root);

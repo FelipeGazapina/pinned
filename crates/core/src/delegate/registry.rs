@@ -771,18 +771,33 @@ impl Delegates {
         Ok(body)
     }
 
+    /// Ends the working tasks that cannot outlive this process, so the next launch finds them
+    /// ended with a reason. A thread's worker whose session is saved stays working: the next
+    /// launch resumes it. So does a task that runs on another machine.
     pub fn stop_for_restart(&self, path: Option<&str>) {
-        let roots: Vec<String> = {
+        let order: Vec<String> = {
             let tasks = self.tasks.lock().unwrap();
-            tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))).map(|task| task.id.clone()).collect()
+            let mut order = vec![];
+            for task in tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))) {
+                postorder(&tasks, &task.id, &mut order);
+            }
+            order
         };
-        for id in roots {
-            self.stop_tree(&id, "stopped by restart", path);
-        }
-        for id in self.running() {
-            self.stop_one(&id, "stopped by restart", path);
+        for id in order.into_iter().chain(self.running()) {
+            if !self.outlives_restart(&id) {
+                self.stop_one(&id, RESTART_ENDED, path);
+            }
         }
         self.persist();
+    }
+
+    fn outlives_restart(&self, id: &str) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.iter().find(|task| task.id == id).is_some_and(|task| {
+            task.state == WorkState::Working
+                && (task.thread.as_ref().is_some_and(|thread| thread.runs) && task.worker_session.is_some()
+                    || task.remote.as_ref().is_some_and(|remote| !remote.machine.is_empty()))
+        })
     }
 
     fn read(&self, tasks: &mut [Task], caller: &Caller, id: &str) -> Result<Value, String> {
