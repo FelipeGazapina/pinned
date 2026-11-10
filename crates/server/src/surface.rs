@@ -17,6 +17,11 @@ const NOTICE_WAIT: Duration = Duration::from_secs(20);
 /// After a machine connects, when to try the notices it missed again: its tabs come back after
 /// the link, once the app restores them, and a notice finds its session only then.
 const NOTICE_TRIES: [Duration; 4] = [Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(90)];
+/// Why an approval a hub stopped in the middle of reads as failed: it may have run.
+const INTERRUPTED: &str = "the hub restarted before it could tell whether this ran; check before asking again";
+/// Longer than any decision takes to run. Younger ones without an outcome may still be running on
+/// the hub a deploy is replacing.
+pub const DECIDING_AT_MOST: Duration = Duration::from_secs(5 * 60);
 
 /// The session that acts, as its machine last reported its tab.
 struct Caller {
@@ -227,6 +232,25 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
         }
     });
     json(Decided { decision, outcome, result })
+}
+
+/// Gives each confirmation a hub that stopped between the decision and its outcome left one: a
+/// denial is denied, an approval failed with `INTERRUPTED` and a `failed` audit row. Then tells its
+/// session, or leaves the notice to `deliver_notices` once its machine connects.
+pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
+    for (account, held) in hub.db.finish_interrupted(&format!("failed: {INTERRUPTED}"), DECIDING_AT_MOST).await? {
+        let asked = &held.confirmation;
+        if asked.decision == Some(Decision::Approved) {
+            let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+            trail.ran(AuditOutcome::Failed, INTERRUPTED).await;
+            eprintln!("pinned-server: confirmation {} was approved when a hub stopped; it reads as failed", asked.id);
+        }
+        if !matches!(notify(hub, &*hub.account(account).await?, &held).await, Ok(true)) {
+            eprintln!("pinned-server: the session that asked for confirmation {} gets its notice once its machine connects", asked.id);
+        }
+    }
+    Ok(())
 }
 
 /// Runs an approved confirmation for the session that asked, on the machine it named.

@@ -24,6 +24,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -886,6 +887,27 @@ impl Db {
             return Ok(None);
         }
         self.confirmation(account, id).await
+    }
+
+    /// Gives every confirmation decided more than `running` ago and still without an outcome one: a
+    /// hub that stopped between the decision and its outcome left it. A denial ran nothing; an
+    /// approval may have run, so it reads as failed with `approved_outcome`. Answers each with its account.
+    pub async fn finish_interrupted(&self, approved_outcome: &str, running: Duration) -> Result<Vec<(Uuid, Held)>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "update agent_confirmations set outcome = case when approved then $1 else 'denied' end, result = 'null'::jsonb \
+                 where decided_at < now() - make_interval(secs => $2) and outcome is null returning account, id",
+                &[&approved_outcome, &running.as_secs_f64()],
+            )
+            .await
+            .map_err(err)?;
+        let mut finished = vec![];
+        for row in &rows {
+            let account: Uuid = row.get(0);
+            finished.extend(self.confirmation(account, row.get(1)).await?.map(|held| (account, held)));
+        }
+        Ok(finished)
     }
 
     pub async fn finish_confirmation(&self, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {

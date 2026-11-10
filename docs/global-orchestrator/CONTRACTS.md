@@ -522,6 +522,7 @@ The desktop app keeps its login in `account.json`, and the web app keeps its log
 - `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
 - `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.
 - A node keeps only its machine token. `pinned-server login` ends the login after it adds the machine. A node that finds a login an older pinned kept in `account.json` removes it from the file and ends it at the hub.
+- A hub that stopped between a decision and its outcome leaves the confirmation decided with no outcome. When a hub starts, and again 5 minutes later, it gives every such confirmation decided more than 5 minutes earlier an outcome: `denied`, or `failed: the hub restarted before it could tell whether this ran; check before asking again` with a `failed` audit row. A younger one may still be running on the hub that a deploy replaces, so the hub leaves it alone. The session gets its notice at once, or when its machine connects.
 
 A login read off a disk still runs every other client call: it reads sessions, types into tabs and starts sessions on the account's machines. After this change, the machine that runs the desktop app is the only one that keeps a login.
 

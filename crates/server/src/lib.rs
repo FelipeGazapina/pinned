@@ -49,6 +49,15 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
     let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy);
+    surface::finish_interrupted(&hub).await?;
+    // Again once a decision the hub before this one ran can no longer be running.
+    let later = hub.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(surface::DECIDING_AT_MOST).await;
+        if let Err(e) = surface::finish_interrupted(&later).await {
+            eprintln!("pinned-server: could not finish the confirmations a stopped hub left: {e}");
+        }
+    });
     hub.watch_all().await?;
     let app = http::router(hub.clone(), config.ui, config.downloads, learning).into_make_service_with_connect_info::<SocketAddr>();
     let server = tokio::spawn(async move {

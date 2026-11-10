@@ -5212,3 +5212,102 @@ fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     assert_eq!(Credentials::load(&dir).unwrap().machine_token, machine_token, "the machine token stays");
 }
 
+fn wait_long(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !done() {
+        assert!(start.elapsed() < limit, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_hub_restarted_between_a_decision_and_its_outcome_finishes_it_and_tells_the_session() {
+    let mut hub = TestHub::start_with("interrupted", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-studio");
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let removal = act(&ana.dir, &ana.tab, "remove_machine", json!({ "id": spare.id })).unwrap()["id"].as_str().unwrap().to_owned();
+    let invite = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    let running = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    // Where a hub that stopped mid-decision leaves them: decided, with no outcome and no notice. The
+    // third was decided a moment ago, so the hub a deploy replaces may still be running it.
+    admin_on(
+        &hub.database,
+        &format!(
+            "update agent_confirmations set decided_at = now() - interval '6 minutes', approved = true where id = '{removal}';
+             update agent_confirmations set decided_at = now() - interval '6 minutes', approved = false where id = '{invite}';
+             update agent_confirmations set decided_at = now(), approved = true where id = '{running}'"
+        ),
+    );
+    hub.restart();
+
+    wait_long("both notices in the agent's queue", Duration::from_secs(30), || ana.node.machine.view(&ana.tab).unwrap().queued >= 2);
+    let told = turn_end_context(&ana.dir, &ana.tab);
+    assert!(told.contains(&format!("[pinned] The user approved your remove_machine request ({removal}): failed: the hub restarted before it could tell whether this ran; check before asking again.")), "{told}");
+    assert!(told.contains(&format!("[pinned] The user denied your create_invite request ({invite}). It did not run.")), "{told}");
+    let mut app = Client::app(&url, &ana_token);
+    let confirmations = app.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let outcomes: Vec<(String, String)> = confirmations.as_array().unwrap().iter().filter_map(|c| Some((c["id"].as_str()?.to_owned(), c["outcome"].as_str()?.to_owned()))).collect();
+    assert!(outcomes.contains(&(removal.clone(), "failed: the hub restarted before it could tell whether this ran; check before asking again".into())), "{outcomes:?}");
+    assert!(outcomes.contains(&(invite.clone(), "denied".into())), "{outcomes:?}");
+    let young = confirmations.as_array().unwrap().iter().find(|c| c["id"] == running.as_str()).unwrap();
+    assert_eq!(young.get("outcome"), None, "one decided a moment ago is left to the hub that may be running it: {young}");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-spare", "ana-studio"], "the restarted hub runs nothing it can't tell ran");
+    let latest = &app.hub(json!({ "cmd": "agent_audit", "limit": 1 })).unwrap()[0];
+    assert_eq!((&latest["action"], &latest["outcome"], &latest["detail"]), (&json!("remove_machine"), &json!("failed"), &json!("the hub restarted before it could tell whether this ran; check before asking again")));
+}
+
+#[test]
+fn a_notice_missed_while_its_machine_was_offline_is_tried_again_after_it_reconnects_until_its_tab_is_back() {
+    let hub = TestHub::start("notice_retry");
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, raw_token) = account::register_machine(&url, &ana_token, "raw", "linux").unwrap();
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let tab = json!({ "id": "tab-1", "cwd": "/repo", "bypass": false, "running": true, "status": "done", "title": null, "message": null, "resume_at": null, "opened": 1, "session": "s-1" });
+    let first = Instant::now();
+    let machine = RawMachine::start_with(&url, &raw_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+    let act = json!({ "cmd": "act", "act": { "tab": "tab-1", "action": "remove_machine", "args": { "id": spare.id } } });
+    let mut asked = machine.ask(act.clone());
+    while asked == Err("raw runs no session tab-1".into()) {
+        asked = machine.ask(act.clone());
+    }
+    let id = asked.unwrap()["id"].as_str().unwrap().to_owned();
+    // Each connection's retries run on: this one's look, 3 s in, must find nothing waiting, so only
+    // the reconnect's retries remain.
+    std::thread::sleep(Duration::from_millis(3500).saturating_sub(first.elapsed()));
+    drop(machine);
+    wait_for("raw offline", || app.machines().contains(&("raw".to_owned(), false)));
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = app.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "it ran while its machine was offline; only the notice waits");
+
+    // The machine is back, and its tab comes back only after the hub's first try.
+    let notices: Arc<Mutex<Vec<(Instant, Value)>>> = Arc::default();
+    let seen = notices.clone();
+    let back = Instant::now();
+    let machine = RawMachine::start(&url, &raw_token, move |call| {
+        if call["cmd"] != "notice" {
+            return RawReply::Ok(Value::Null);
+        }
+        let mut seen = seen.lock().unwrap();
+        seen.push((Instant::now(), call.clone()));
+        RawReply::Ok(json!(seen.len() > 1))
+    });
+    wait_long("the second try", Duration::from_secs(25), || notices.lock().unwrap().len() >= 2);
+    std::thread::sleep(Duration::from_secs(1));
+    let notices = notices.lock().unwrap().clone();
+    let at: Vec<f64> = notices.iter().map(|(at, _)| at.duration_since(back).as_secs_f64()).collect();
+    assert!((3.0..6.0).contains(&at[0]) && (10.0..13.0).contains(&(at[1] - at[0])), "tried 3 s after it connected, then 10 s later: {at:?}");
+    assert_eq!(notices[1].1, json!({ "cmd": "notice", "tab": "tab-1", "session": "s-1", "text": format!("[pinned] The user approved your remove_machine request ({id}): done."), "id": id }));
+    assert_eq!(notices.len(), 2, "taken, so tried no more");
+    drop(machine);
+
+    wait_for("raw offline again", || app.machines().contains(&("raw".to_owned(), false)));
+    let again = RawMachine::start(&url, &raw_token, |_| RawReply::Ok(json!(true)));
+    wait_for("raw back", || app.machines().contains(&("raw".to_owned(), true)));
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(again.calls("notice"), 0, "a reconnect after the notice was taken sends it no more");
+}
