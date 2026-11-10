@@ -429,10 +429,10 @@ pub enum WaitingKind {
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
 /// `ui/global-chat.js` follows the same cases, which `waiting_cases.json` lists for both tests.
 ///
-/// A question or an approval mid-turn waits while the session runs. A finished turn waits when its
-/// last reply asked the user something, whether or not Claude Code's idle notice came after it.
-/// The idle notice alone asks nothing. The global orchestrator's own tab never waits: the user
-/// talks to it directly.
+/// Only a session that cannot go on without the user waits: a question (`AskUserQuestion`) or an
+/// approval pending mid-turn, or a failure. A finished turn that ended asking something is an
+/// `offer_of`, which waits on nobody. The global orchestrator's own tab never waits: the user talks
+/// to it directly.
 pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     if tab.orchestrator_global {
         return None;
@@ -440,27 +440,42 @@ pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     match tab.status {
         Some(AgentStatus::Failed) => Some(WaitingKind::Failed),
         Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => Some(WaitingKind::NeedsInput),
-        Some(AgentStatus::Working) => None,
-        _ => tab.question.as_ref().map(|_| WaitingKind::NeedsInput),
+        _ => None,
     }
 }
 
-/// The question a reply puts to the user: its last sentence outside code that ends in a question
-/// mark, cut at `QUESTION_CHARS`. None when it asks nothing.
+/// How long a finished turn's question stays an offer.
+pub const OFFER_SECS: u64 = 24 * 60 * 60;
+
+/// What the finished turn of `tab` offered or asked in its last paragraph, while that still stands
+/// at `now` (Unix seconds): the tab's session runs, its turn is over, and it is not a worker (whose
+/// result already went up to the thread that started it, the delivery its task ends on). An offer
+/// drops after `OFFER_SECS`. `ui/global-chat.js`'s `offerOf` follows the same cases.
+pub fn offer_of(tab: &TabView, now: u64) -> Option<&str> {
+    let finished = tab.running && !matches!(tab.status, Some(AgentStatus::Working | AgentStatus::Failed)) && !(tab.status == Some(AgentStatus::NeedsInput) && tab.interrupted);
+    let fresh = tab.updated.is_none_or(|at| now.saturating_sub(at) < OFFER_SECS);
+    (!tab.orchestrator_global && finished && fresh && tab.role != Some(Role::Worker)).then_some(tab.question.as_deref()).flatten()
+}
+
+/// The question a reply puts to the user: its last paragraph's last sentence, when that paragraph
+/// ends in a question mark outside code, cut at `QUESTION_CHARS`. None when the reply ends on
+/// anything else, so a question quoted or answered earlier in the reply asks nothing.
 pub fn question_in(reply: &str) -> Option<String> {
-    let chars: Vec<char> = reply.chars().collect();
-    let ends_sentence = |i: usize| chars.get(i + 1).is_none_or(|next| next.is_whitespace() || matches!(next, '*' | '_' | ')' | '"' | '\u{201d}' | '\u{bb}'));
+    let chars: Vec<char> = reply.trim_end().chars().collect();
+    let paragraph = (1..chars.len()).rev().find(|&i| chars[i] == '\n' && chars[i - 1] == '\n').map_or(0, |i| i + 1);
+    let closes = |c: &char| c.is_whitespace() || matches!(c, '*' | '_' | ')' | '"' | '\u{201d}' | '\u{bb}');
+    let ends_sentence = |i: usize| chars.get(i + 1).is_none_or(closes);
     let mut in_code = false;
     let mut end = None;
-    for (i, c) in chars.iter().enumerate() {
+    for (i, c) in chars.iter().enumerate().skip(paragraph) {
         match c {
             '`' => in_code = !in_code,
             '?' | '\u{ff1f}' if !in_code && ends_sentence(i) => end = Some(i),
             _ => {}
         }
     }
-    let end = end?;
-    let start = (0..end).rev().find(|&i| chars[i] == '\n' || (matches!(chars[i], '.' | '!' | '?' | '\u{ff1f}') && chars[i + 1].is_whitespace())).map_or(0, |i| i + 1);
+    let end = end.filter(|&end| chars[end + 1..].iter().all(closes))?;
+    let start = (paragraph..end).rev().find(|&i| chars[i] == '\n' || (matches!(chars[i], '.' | '!' | '?' | '\u{ff1f}') && chars[i + 1].is_whitespace())).map_or(paragraph, |i| i + 1);
     let sentence: String = chars[start..=end].iter().collect();
     let sentence = sentence.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '-' | '#' | '>')).split_whitespace().collect::<Vec<_>>().join(" ");
     Some(crate::thread::clip(&sentence, QUESTION_CHARS))
@@ -489,6 +504,11 @@ pub fn captain_tab<'a>(tabs: &'a [TabView], path: &str) -> Option<&'a TabView> {
 /// on the user there. An offline machine's checkouts are listed with no Capitão, and nothing of it
 /// waits, since its tabs are not live.
 pub fn overview(machines: &[MachineSnapshot]) -> Overview {
+    overview_at(machines, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// `overview` as it stands at `now`, in Unix seconds: the time an offer's 24 hours run against.
+pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
     let mut projects: Vec<OverviewProject> = vec![];
     let mut waiting = vec![];
     let mut sessions = vec![];
@@ -515,7 +535,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
         }
         // What waits on the user is the sessions in those two states, so the two lists never differ.
         for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
-            let session = session(machine, tab);
+            let session = session(machine, tab, now);
             let kind = match session.state {
                 SessionState::WaitingOnInput => Some(WaitingKind::NeedsInput),
                 SessionState::Error => Some(WaitingKind::Failed),
@@ -566,7 +586,8 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PrLink>,
     pub state: SessionState,
-    /// What it asks the user, or the error that stopped it.
+    /// What it asks the user, or the error that stopped it. An idle session's is the offer its
+    /// finished turn ended on, which waits on nobody.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Unix seconds of its last message, else of its last status.
@@ -602,8 +623,8 @@ pub enum SessionState {
     Running,
     /// Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.
     Idle,
-    /// It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,
-    /// or a finished turn whose last reply asked the user something.
+    /// It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending
+    /// mid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.
     WaitingOnInput,
     /// It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).
     Error,
@@ -635,7 +656,7 @@ impl Session {
 
 /// One tab as a session. `overview` lists one per tab of each online machine, the global
 /// orchestrator's own tab left out.
-fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
+fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
     let folder = history::project_of(Path::new(&tab.cwd));
     let listed = machine.projects.iter().find(|p| Path::new(&p.path) == folder);
     let path = folder.display().to_string();
@@ -662,7 +683,10 @@ fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
         title: tab.title.clone().or_else(|| tab.prompt_title.clone()),
         branch: tab.branch.clone(),
         pr: tab.pr.clone(),
-        message: tab.question.clone().or_else(|| tab.message.clone()).filter(|_| matches!(state, SessionState::WaitingOnInput | SessionState::Error)),
+        message: match state {
+            SessionState::WaitingOnInput | SessionState::Error => tab.message.clone(),
+            _ => offer_of(tab, now).map(str::to_owned),
+        },
         state,
         last_activity: tab.last_message_at.or(tab.updated),
     }
@@ -905,9 +929,16 @@ mod tests {
         );
         assert_eq!(
             question_in("**A produção ainda não tem a correção.** O hub continua na v0.17.19, então o clique segue quebrado até sair a v0.17.20. Quer que eu faça a release?\n\n**O PR #89 corrige o mesmo bug.** A segunda saída é fechar o #89."),
-            Some("Quer que eu faça a release?".into()),
-            "personal-harness's workflow thread asks mid-reply"
+            None,
+            "a question mid-reply, with more after it, is not what the turn ended on"
         );
+        assert_eq!(
+            question_in("Why did the CI fail? A missing semicolon in app.ts, now fixed. All 214 checks pass and the PR is merged, nothing left for you to do."),
+            None,
+            "a rhetorical opener answered in the same paragraph"
+        );
+        assert_eq!(question_in("Merged the fix.\n\nWant me to cut the release?\n\n"), Some("Want me to cut the release?".into()), "trailing blank lines");
+        assert_eq!(question_in("Done. Want me to open the PR? Say yes and I will."), None, "a question the paragraph goes on from");
         assert_eq!(question_in("Mandei ao Orquestrador o caminho de cliques; ele já recebeu. Não mexi no código."), None, "the Captain's report asks nothing");
         assert_eq!(question_in("Use `a?.b`, see https://x.dev/search?q=1, then:\n```js\nconst ok = done ? 1 : 2; // why?\n```\nDone."), None, "question marks in code and links");
         assert_eq!(question_in("1. **Ship it now?**"), Some("Ship it now?".into()));
@@ -916,15 +947,39 @@ mod tests {
     #[test]
     fn waiting_counts_exactly_the_cases_the_sidebar_shares() {
         let cases: serde_json::Value = serde_json::from_str(include_str!("waiting_cases.json")).unwrap();
-        let verdict = |case: &serde_json::Value| {
+        let now = cases["now"].as_u64().unwrap();
+        let tab_of = |case: &serde_json::Value| {
             let mut view = cases["base"].clone();
             view.as_object_mut().unwrap().extend(case["view"].as_object().unwrap().clone());
-            let tab: TabView = serde_json::from_value(view).unwrap();
+            serde_json::from_value::<TabView>(view).unwrap()
+        };
+        let verdict = |case: &serde_json::Value| {
+            let tab = tab_of(case);
             let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.21", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
-            (case["case"].clone(), serde_json::to_value(overview(&machines).waiting.first().map(|w| w.kind)).unwrap())
+            (case["case"].clone(), serde_json::to_value(overview_at(&machines, now).waiting.first().map(|w| w.kind)).unwrap(), offer_of(&tab, now).is_some())
         };
         let cases_list = cases["cases"].as_array().unwrap();
-        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone())).collect::<Vec<_>>());
+        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone(), c["offer"] == true)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_finished_turn_ending_in_a_question_is_not_blocked_but_a_pending_prompt_and_a_stopped_thread_are_told_apart() {
+        let tab = |id: &str, running: bool, status, interrupted: bool, question: Option<&str>| TabView { interrupted, question: question.map(str::to_owned), message: Some("msg".into()), updated: Some(1794239000), ..view(id, "/w/site", None, running, Some(status)) };
+        let book = [
+            tab("tab-1-1", true, AgentStatus::Done, false, Some("Quer que eu abra o PR?")),
+            tab("tab-1-2", true, AgentStatus::NeedsInput, true, None),
+            tab("tab-1-3", false, AgentStatus::Done, false, Some("Quer que eu abra o PR?")),
+        ];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.24", projects: &[], tabs: &book, problem: None }];
+        let overview = overview_at(&machines, 1794240000);
+        assert_eq!(overview.waiting.iter().map(|w| w.tab.as_str()).collect::<Vec<_>>(), ["tab-1-2"], "only the pending prompt blocks");
+        let sessions = overview.sessions.unwrap();
+        let by = |id: &str| sessions.iter().find(|s| s.id == id).map(|s| (s.state, s.message.as_deref())).unwrap();
+        assert_eq!(by("tab-1-1"), (SessionState::Idle, Some("Quer que eu abra o PR?")), "the offer rides on the idle session");
+        assert_eq!(by("tab-1-2"), (SessionState::WaitingOnInput, Some("msg")));
+        assert_eq!(by("tab-1-3"), (SessionState::Settled, None), "a stopped thread lists nothing");
+        let later = overview_at(&machines, 1794240000 + OFFER_SECS);
+        assert_eq!(later.sessions.unwrap().iter().find(|s| s.id == "tab-1-1").unwrap().message, None, "24 hours drop the offer");
     }
 
     #[test]
@@ -955,7 +1010,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
             serde_json::json!([
-                { "id": "tab-b-9", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "branch": "felipega/fix-and-ops", "state": "waiting_on_input", "message": "Should I open the PR now?", "last_activity": 1794241000 },
+                { "id": "tab-b-9", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "branch": "felipega/fix-and-ops", "state": "idle", "message": "Should I open the PR now?", "last_activity": 1794241000 },
                 { "id": "tab-b-2", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "title": "Someone mentioned you in the Slack thread", "branch": "felipega/fix-and-ops", "state": "idle", "last_activity": 1794240000 },
                 { "id": "tab-b-3", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "state": "waiting_on_input", "message": "Claude needs your permission to use Bash", "last_activity": 1794239000 },
                 { "id": "tab-b-7", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "worker", "captain": "tab-b-5", "branch": "pinned/sub", "pr": { "number": 92, "url": "https://github.com/o/client-apps/pull/92" }, "state": "idle", "last_activity": 1794235000 },
@@ -976,12 +1031,11 @@ mod tests {
             waiting,
             [
                 ("tab-b-3", WaitingKind::NeedsInput, Some("Claude needs your permission to use Bash")),
-                ("tab-b-9", WaitingKind::NeedsInput, Some("Should I open the PR now?")),
                 ("tab-d-1", WaitingKind::Failed, Some("API Error: 500")),
             ],
-            "what waits is the sessions waiting on input or stopped on an error, a loose thread that asked included"
+            "what waits is the sessions waiting on input or stopped on an error; a loose thread that asked is an offer, not a wait"
         );
-        assert_eq!(overview.waiting[2].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
+        assert_eq!(overview.waiting[1].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
     }
 
     #[test]

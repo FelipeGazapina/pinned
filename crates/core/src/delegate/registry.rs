@@ -370,16 +370,25 @@ impl Delegates {
         }
     }
 
-    pub fn enforce_limits(&self, now: Instant, path: Option<&str>) {
-        let (late, over, quiet) = {
+    /// Stops each task past its time limit and ends quiet ones. A task on another machine gets
+    /// `REMOTE_GRACE` past its limit for that machine to report its end; the ones stopped here are
+    /// returned as (tab, task, machine), for the machine to be told best-effort.
+    pub fn enforce_limits(&self, now: Instant, path: Option<&str>) -> Vec<(String, String, RemoteTarget)> {
+        let (late, over, quiet, elsewhere) = {
             let mut tasks = self.tasks.lock().unwrap();
             let mut late = vec![];
             let mut over = vec![];
             let mut quiet = vec![];
+            let mut elsewhere = vec![];
             for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
                 let ran = millis(now.saturating_duration_since(task.run.begun));
-                // The machine that runs it holds it to its limit and reports how it ended.
-                if task.remote.is_some() && ran >= task.run.limit_ms {
+                if let (Some(remote), true) = (&task.remote, ran >= task.run.limit_ms) {
+                    if ran >= task.run.limit_ms.saturating_add(millis(REMOTE_GRACE)) {
+                        over.push((task.id.clone(), format!("pinned stopped it after {}, past its limit of {}: {} never reported its end", span(ran), span(task.run.limit_ms), remote.name)));
+                        if let Parent::Tab(tab) = &task.parent {
+                            elsewhere.push((tab.clone(), task.id.clone(), remote.clone()));
+                        }
+                    }
                     continue;
                 }
                 if ran >= task.run.limit_ms {
@@ -393,7 +402,7 @@ impl Delegates {
                     }
                 }
             }
-            (late, over, quiet)
+            (late, over, quiet, elsewhere)
         };
         for report in late {
             self.push_report(report);
@@ -407,6 +416,7 @@ impl Delegates {
         if !over.is_empty() || !quiet.is_empty() {
             self.persist();
         }
+        elsewhere
     }
 
     fn end_quiet(&self, id: &str, path: Option<&str>) {
@@ -437,6 +447,22 @@ impl Delegates {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.started -= by.as_millis() as u64;
         }
+    }
+
+    /// Each working task on another machine that no one asked after for `every`, with its tab and
+    /// how long it ran, marked asked now.
+    pub fn remotes_due(&self, now: Instant, every: Duration) -> Vec<(String, String, RemoteTarget, Duration)> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let mut due = vec![];
+        for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
+            let (Parent::Tab(tab), Some(remote)) = (&task.parent, task.remote.as_mut()) else { continue };
+            if remote.machine.is_empty() || remote.looked.is_some_and(|at| now.saturating_duration_since(at) < every) {
+                continue;
+            }
+            remote.looked = Some(now);
+            due.push((tab.clone(), task.id.clone(), remote.clone(), now.saturating_duration_since(task.run.begun)));
+        }
+        due
     }
 
     /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
@@ -482,25 +508,31 @@ impl Delegates {
         true
     }
 
-    /// Claims the end of each finished task that a tab on another machine delegated here, for the
-    /// hub to take back to it: that machine, its tab, its own id for the task and how it ended.
-    /// `release_notice` puts back the ids whose end did not get through.
-    pub fn claim_remote_ends(&self) -> Vec<(String, String, String, String, RemoteEnd)> {
-        let mut tasks = self.tasks.lock().unwrap();
+    /// The end of each finished task that a tab on another machine delegated here and whose end
+    /// that machine has not taken yet: this task, that machine, its tab, its own id for the task
+    /// and how it ended. `remote_end_sent` marks one taken; until then it stays on disk, across
+    /// restarts, to be sent again.
+    pub fn remote_ends(&self) -> Vec<(String, String, String, String, RemoteEnd)> {
+        let tasks = self.tasks.lock().unwrap();
         let mut ends = vec![];
-        for task in tasks.iter_mut().filter(|task| task.state.terminal() && !task.delivered) {
+        for task in tasks.iter().filter(|task| task.state.terminal() && !task.delivered) {
             let Parent::Tab(key) = &task.parent else { continue };
             let Some((machine, tab)) = Origin::of_key(key) else { continue };
             let Some(origin_task) = task.client_request_id.clone() else { continue };
-            task.delivered = true;
             let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone() };
             ends.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, end));
         }
-        drop(tasks);
-        if !ends.is_empty() {
-            self.persist();
-        }
         ends
+    }
+
+    /// The hub passed task `id`'s end back to the machine that delegated it.
+    pub fn remote_end_sent(&self, id: &str) {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.delivered) else { return };
+            task.delivered = true;
+        }
+        self.persist();
     }
 
     /// The task started for `origin_task` of the tab on another machine that `parent_key` names.

@@ -299,6 +299,11 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .waiting-row .texts { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .waiting-row .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--g-side-fg); }
 .waiting-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-side-muted); }
+.waiting-row .where .kind { color: var(--g-side-fg); font-weight: 500; }
+/* A finished turn that ended asking something waits on nobody: greyed, under its own head, with a hollow dot. */
+.waiting-row.offer { opacity: 0.62; }
+.waiting-row.offer .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--g-side-muted); }
+.offers-head .count { color: var(--g-side-muted); background: rgb(var(--g-ink-rgb) / 0.08); }
 /* An agent's action that waits on Felipe's Approve or Deny, above the waiting threads. Its arguments
    wrap whole, since they are what Approve runs. */
 .agent-asks { flex: none; display: flex; flex-direction: column; }
