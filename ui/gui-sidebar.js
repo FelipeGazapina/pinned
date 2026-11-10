@@ -38,11 +38,9 @@ const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", 
  * manual settles and un-settles, snoozes, renames, and threads kept out of auto-settle. */
 const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
 try {
-  const saved = JSON.parse(load("gui-marks")) ?? {};
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) sideMarks[m] = sessionsOnly(saved[m]);
-  for (const m of ["pins", "order"]) sideMarks[m] = (saved[m] ?? []).filter((k) => k.startsWith("session:"));
+  Object.assign(sideMarks, storedSideMarks(JSON.parse(load("gui-marks"))));
 } catch {}
-const saveMarks = () => save("gui-marks", JSON.stringify(sideMarks));
+const saveMarks = () => storeMarks("gui-marks");
 onRekey((from, to) => {
   for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].map((k) => (k === from ? to : k));
   for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
@@ -72,7 +70,32 @@ let archived = [];
 try {
   archived = JSON.parse(load("gui-archived")) ?? [];
 } catch {}
-const saveArchived = () => save("gui-archived", JSON.stringify(archived));
+const saveArchived = () => storeMarks("gui-archived");
+/** Marks, seen times and the archive live on the account's hub once it keeps them (marks.js), and
+ * always in this browser's storage too. */
+const MARK_STORES = { "gui-marks": () => sideMarks, "gui-archived": () => archived, "gui-seen": () => seenAt };
+const storeMarks = (key) => {
+  save(key, JSON.stringify(MARK_STORES[key]()));
+  marksHub.saved();
+};
+const marksHub = marksSync({
+  read: () => ({ sideMarks, seenAt, archived: archived.map((entry) => ({ ...entry, machine: hubIdOf(entry.machine) })) }),
+  write(state) {
+    // A settle that came from the hub ran its settle script on the device that made it.
+    for (const [key, at] of Object.entries(state.sideMarks.settled)) if (sideMarks.settled[key] !== at) settledSeen.add(key);
+    Object.assign(sideMarks, state.sideMarks);
+    seenAt = state.seenAt;
+    archived = state.archived.map((entry) => ({ ...entry, machine: localIdOf(entry.machine) }));
+  },
+  persist: () => Object.keys(MARK_STORES).forEach((key) => save(key, JSON.stringify(MARK_STORES[key]()))),
+  load,
+  save,
+  call: (call) => (hub ? hub.hub(call) : Promise.reject("not connected to the hub")),
+  changed() {
+    render();
+    if (settingsOpen() && page === "archive") showArchive();
+  },
+});
 /** Rows picked with ⌘-click and Shift-click, by tab key, and where a Shift-click range starts. */
 const selected = new Set();
 let selectFrom = null;
@@ -209,8 +232,13 @@ const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) =>
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[threadKey(tab)] = lastActivity(tab);
-  save("gui-seen", JSON.stringify(seenAt));
+  const key = threadKey(tab);
+  // Seen only moves forward, so two devices showing one thread never take it back from each other.
+  const seen = Math.max(seenAt[key] || 0, lastActivity(tab));
+  if (seenAt[key] !== seen) {
+    seenAt[key] = seen;
+    storeMarks("gui-seen");
+  }
   if (wokeNow(tab)) {
     delete sideMarks.snoozed[threadKey(tab)];
     saveMarks();
@@ -1036,7 +1064,7 @@ function discardDraft(tab) {
 }
 function markUnread(tab) {
   seenAt[threadKey(tab)] = 0;
-  save("gui-seen", JSON.stringify(seenAt));
+  storeMarks("gui-seen");
   renderSidebar();
 }
 

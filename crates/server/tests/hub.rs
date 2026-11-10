@@ -3891,6 +3891,161 @@ fn synced_files_skills_and_shared_projects_stay_in_their_account() {
     assert_eq!(bob.hub(json!({ "cmd": "sync_list", "project": project })).unwrap()[0]["sha"], sha256_hex(b"bob's plans"));
 }
 
+fn mark(changes: Value) -> Value {
+    json!({ "cmd": "mark_sessions", "changes": changes })
+}
+
+/// Every `session_marks` push the client got, after it read all that came.
+fn marks_pushed(client: &mut Client) -> Vec<Value> {
+    settle(client);
+    client.frames.iter().filter(|f| f["type"] == "session_marks").cloned().collect()
+}
+
+#[test]
+fn a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it() {
+    let hub = TestHub::start("marks_live");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let archived = json!({ "machine": "m-1", "cwd": "/w/site", "name": "Fix login", "project": "site", "at": 1700000100.5, "title": "Fix login", "pinned": true });
+    let filed = laptop.hub(mark(json!([
+        { "session": "s1", "mark": { "title": "Fix login" } },
+        { "session": "s1", "mark": { "pin": 0 } },
+        { "session": "s1", "mark": { "archived": archived } },
+    ])));
+    let row = json!({ "session": "s1", "title": "Fix login", "pin": 0, "archived": archived });
+    assert_eq!(filed, Ok(json!([row])));
+    let filed_push = json!({ "type": "session_marks", "marks": [row] });
+    assert_eq!(phone.wait("the phone hears the laptop's marks", |f| f["type"] == "session_marks"), filed_push, "the push carries the row as the hub keeps it");
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+
+    assert_eq!(laptop.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    let cleared_push = json!({ "type": "session_marks", "marks": [{ "session": "s1" }] });
+    for client in [&mut laptop, &mut phone] {
+        client.wait("the clear's push", |f| *f == cleared_push);
+        assert_eq!(marks_pushed(client), [filed_push.clone(), cleared_push.clone()], "each device hears each change once, in order");
+    }
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a session with no mark left has no row");
+}
+
+#[test]
+fn every_device_ends_on_the_marks_the_hub_kept_after_a_burst_of_changes() {
+    let hub = TestHub::start("marks_burst");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    // Sent without waiting, so the hub runs them at once and they race for the session's row.
+    for seen in 0..20 {
+        laptop.send(json!({ "type": "hub", "id": 100 + seen, "call": mark(json!([{ "session": "s1", "mark": { "seen": seen as f64 } }])) }));
+    }
+    for id in 100..120 {
+        let reply = laptop.wait(&format!("reply {id}"), |f| f["type"] == "reply" && f["id"] == id);
+        assert!(reply.get("err").is_none(), "{reply}");
+    }
+    let kept = laptop.hub(json!({ "cmd": "session_marks" })).unwrap();
+    for client in [&mut laptop, &mut phone] {
+        let pushed = marks_pushed(client);
+        assert_eq!(pushed.len(), 20, "one push per change");
+        assert_eq!(pushed.last().unwrap()["marks"], kept, "the last push a device heard is the row the hub kept");
+    }
+}
+
+#[test]
+fn another_accounts_marks_stay_its_own_even_on_the_same_session_id() {
+    let hub = TestHub::start("iso_marks");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let anas = json!({ "session": "s1", "title": "Ana's plan", "pin": 2 });
+    assert_eq!(ana.hub(mark(json!([{ "session": "s1", "mark": { "title": "Ana's plan" } }, { "session": "s1", "mark": { "pin": 2 } }]))), Ok(json!([anas])));
+
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob reads none of ana's marks");
+    let bobs = json!({ "session": "s1", "title": "Bob's notes" });
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": { "title": "Bob's notes" } }]))), Ok(json!([bobs])), "bob's change on ana's session id starts from no marks");
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([bobs])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's change left ana's row alone");
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's clear left ana's row alone");
+
+    assert_eq!(marks_pushed(&mut ana), [json!({ "type": "session_marks", "marks": [anas] })], "ana heard only her own change");
+    assert_eq!(mentioning(&mut bob, "Ana's plan"), Vec::<Value>::new(), "bob's socket carried none of ana's marks");
+}
+
+#[test]
+fn a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark() {
+    let hub = TestHub::start("marks_refused");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let unnamed = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }, { "session": "", "mark": { "pin": 0 } }])));
+    assert_eq!(unnamed, Err("a mark needs a session id".into()));
+    let long = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "x".repeat(pinned_core::marks::MAX_TEXT + 1) } }])));
+    assert_eq!(long, Err("a mark's text may be at most 2000 bytes".into()));
+
+    let (_, machine_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let refused = Err("a machine may only forward a workflow session's callbacks".to_owned());
+    assert_eq!(machine_result(&url, &machine_token, mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }]))), refused);
+    assert_eq!(machine_result(&url, &machine_token, json!({ "cmd": "session_marks" })), refused);
+
+    assert_eq!(laptop.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "not even a refused call's good change was kept");
+    assert_eq!(marks_pushed(&mut laptop), Vec::<Value>::new());
+    assert_eq!(marks_pushed(&mut phone), Vec::<Value>::new());
+}
+
+#[test]
+fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_forgets_it() {
+    let hub = TestHub::start("marks_archive");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let dir = temp("marks-archive-node");
+    let creds = pair(&url, &mut ana, "box", &dir);
+    let machine = creds.machine_id.clone();
+    std::fs::write(dir.join("sessions.json"), format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display())).unwrap();
+    let _node = Node::resume(&dir, creds);
+    // A resume answers once Claude has drawn for 2s, and the stand-in's `cat` draws nothing.
+    let drawing = dir.join("claude-drawing");
+    std::fs::write(&drawing, "#!/bin/sh\necho resumed\nexec cat\n").unwrap();
+    std::fs::set_permissions(&drawing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&drawing, dir.join("claude")).unwrap();
+    ana.wait_machines(&[("box", true)]);
+    let tabs_of = |f: &Value| (f["type"] == "event" && f["machine"] == machine.as_str() && f["event"]["kind"] == "tabs").then(|| f["event"]["tabs"].as_array().cloned().unwrap_or_default());
+    let listed = ana.wait("the restored tab", |f| tabs_of(f).is_some_and(|tabs| tabs.iter().any(|t| t["session"] == "conv-1")));
+    let restored = tabs_of(&listed).unwrap().into_iter().find(|t| t["session"] == "conv-1").unwrap();
+    let (tab, cwd) = (restored["id"].as_str().unwrap().to_owned(), restored["cwd"].as_str().unwrap().to_owned());
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 4 } }]))).unwrap();
+
+    let not_bobs = Err(format!("this account has no tab {tab} on machine {machine}"));
+    assert_eq!(bob.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })), not_bobs);
+    assert_eq!(bob.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": tab })), not_bobs);
+
+    let from = ana.frames.len();
+    let row = ana.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })).unwrap();
+    let at = row["archived"]["at"].as_f64().unwrap();
+    assert!(at > 1.7e9, "archived at {at}");
+    let project = cwd.rsplit('/').next().unwrap();
+    assert_eq!(
+        row,
+        json!({ "session": "conv-1", "archived": { "machine": machine, "cwd": cwd, "name": "Fix login", "project": project, "at": at, "title": "Fix login", "pinned": true } })
+    );
+    wait_frame(&mut ana, from, "the archived tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == tab.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+    assert_eq!(bob.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })), Err("this account has no archived conversation conv-1".into()));
+
+    let back = ana.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })).unwrap();
+    let reopened = back["tab"].as_str().unwrap().to_owned();
+    assert_eq!(back, json!({ "machine": machine, "tab": reopened }));
+    assert_ne!(reopened, tab);
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])), "its name and pin are back");
+
+    let from = ana.frames.len();
+    assert_eq!(ana.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": reopened })), Ok(Value::Null));
+    wait_frame(&mut ana, from, "the deleted tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == reopened.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
+    assert_eq!(mentioning(&mut bob, "Fix login"), Vec::<Value>::new(), "bob heard nothing of ana's thread");
+}
+
 #[test]
 fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
     let hub = TestHub::start("iso_pair");
@@ -4875,5 +5030,6 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(act(&ana.dir, &ana.tab, "open_tab", json!({ "path": docs, "bypass": true })).unwrap()["outcome"], "done");
     let latest = &ana.client.hub(json!({ "cmd": "agent_audit", "limit": 1 })).unwrap()[0];
     assert_eq!((&latest["action"], &latest["detail"]), (&json!("open_tab"), &json!(format!("loosened permissions: the new tab in {docs} skips its permission prompts"))));
+    assert_eq!(act(&ana.dir, &ana.tab, "session_marks", json!({})).unwrap(), json!({ "outcome": "done", "result": [] }), "a hub read runs as the app's call");
     drop(bob);
 }

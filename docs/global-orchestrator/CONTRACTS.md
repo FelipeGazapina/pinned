@@ -502,7 +502,7 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
 
 ### 13.8 What P1 wires
 
-Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
+Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. P2's `session_marks` is a read, so it is wired too; P2's other session actions (`stop_turn`, `mark_sessions`, `archive_session`, `unarchive_session`, `delete_session`) are classified and left to P2 to wire. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
 
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
 
