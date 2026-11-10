@@ -908,7 +908,7 @@ const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isG
 function globalReportsHtml(user, t, tab, first, by, reports) {
   const mine = user.text.slice(0, reports[0].start).trim();
   const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
-  const rows = reports.map((report) => reportRowHtml(report, user.at)).join("");
+  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`)).join("");
   if (globalSettings.group_reports !== false && reports.length > 1) {
     const key = `reports:${user.id}`;
     const open = t.open.has(key);
@@ -917,17 +917,25 @@ function globalReportsHtml(user, t, tab, first, by, reports) {
   return `${lead}<div class="reports">${rows}</div>`;
 }
 
-/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread. */
-function reportRowHtml(report, at) {
-  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
+/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread.
+ * A long report folds to a few lines under "Show more", which `key` in `t.open` opens. */
+function reportRowHtml(report, at, t, key) {
+  const none = report.text.trim() === "(no reply)";
+  const long = !none && isLongText(report.text);
+  const clamped = long && !t?.open.has(key);
+  const body = none ? "<p>Captain didn't write a reply. Open its thread.</p>" : markdown(report.text);
+  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md${clamped ? " clamped" : ""}">${body}</div>${long ? `<button type="button" class="show-full" data-toggle="${esc(key)}" aria-expanded="${!clamped}">${clamped ? "Show more" : "Show less"}</button>` : ""}</div>`;
 }
+
+/** Whether a message is long enough to fold: past 600 characters or 8 lines. */
+const isLongText = (text) => text.length > 600 || text.split("\n").length > 8;
 
 /** The prompt bubble as every other thread draws it. */
 function userBubbleHtml(user, t, tab, first, by) {
   const cited = citationsIn(user.text);
   if (cited) user = { ...user, text: cited.text, citations: cited.citations };
   const key = `full:${user.id}`;
-  const long = user.text.length > 600 || user.text.split("\n").length > 8;
+  const long = isLongText(user.text);
   const clamped = long && !t.open.has(key);
   const pictures = user.pictures ?? [];
   const uploads = imagePathsIn(user.text);
