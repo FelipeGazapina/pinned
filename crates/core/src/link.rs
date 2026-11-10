@@ -429,6 +429,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     std::thread::spawn(move || {
         sharing.share_tastes_again();
         sharing.send_records();
+        sharing.warm_statuses();
         report_state(&reporting, &sharing);
     });
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });

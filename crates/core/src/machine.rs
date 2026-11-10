@@ -1553,16 +1553,30 @@ impl Machine {
         }
     }
 
+    /// Asks, and waits for, each account that has no status yet, all at once. The link calls it once
+    /// when it connects, so the first report lists every account. A reconnect asks nobody again.
+    pub fn warm_statuses(&self) {
+        std::thread::scope(|scope| {
+            for account in self.accounts.list().into_iter().filter(|account| account.auth != Auth::OpenCodeGo && self.statuses.get(&account.id).is_none()) {
+                if let Some(ticket) = self.statuses.claim(&account.id, accounts::STATUS_FRESH) {
+                    scope.spawn(move || self.ask_status(&account, ticket));
+                }
+            }
+        });
+    }
+
     fn refresh_status(&self, account: Account, fresh: Duration) {
         if account.auth == Auth::OpenCodeGo {
             return;
         }
         let Some(ticket) = self.statuses.claim(&account.id, fresh) else { return };
         let Some(machine) = self.me.upgrade() else { return };
-        std::thread::spawn(move || {
-            let status = machine.accounts.status(&account, &machine.launch.bin(account.provider), machine.launch.path_env.as_deref());
-            machine.statuses.finish(&account.id, ticket, status);
-        });
+        std::thread::spawn(move || machine.ask_status(&account, ticket));
+    }
+
+    fn ask_status(&self, account: &Account, ticket: u64) {
+        let status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        self.statuses.finish(&account.id, ticket, status);
     }
 
     /// An account's sign-in changed or the account is gone: what was kept is wrong, so the next
@@ -5086,9 +5100,8 @@ impl Machine {
     }
 
     /// The summary this machine reports to the hub every 20 s. It runs no agent CLI: an account's
-    /// sign-in is what the last refresh found, and an account not asked yet is left out until the
-    /// refresh this starts has. The hub never refuses on an account it was not told of without
-    /// asking `state` first.
+    /// sign-in is what the last refresh found, and an account nobody asked yet is left out until the
+    /// refresh this starts has finished. The hub rechecks with `state` before it refuses a worker.
     pub fn report_state(&self) -> crate::load::MachineState {
         let state = self.summary(Look::Reported);
         self.refresh_statuses();
@@ -13125,6 +13138,25 @@ Have another model review a risky change before it goes ahead.";
         }
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(status_runs(&claude) - after_add, 1, "nine reports ran the built-in account's CLI once and the added account's never");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn warming_before_the_first_report_lists_every_account_and_a_second_warm_asks_nobody() {
+        let dir = temp("report-warm");
+        let claude = counting_claude(&dir);
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.warm_statuses();
+        assert_eq!(status_runs(&claude), 1, "the built-in Claude account was asked once");
+        for _ in 0..3 {
+            m.warm_statuses();
+            let state = m.report_state();
+            assert!(state.accounts.iter().any(|a| a.id == "claude" && a.can_run_child_task), "{state:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(status_runs(&claude), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
