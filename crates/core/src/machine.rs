@@ -3551,6 +3551,7 @@ impl Machine {
     pub fn restore_tabs(&self) -> Vec<TabId> {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
+            self.delegates.end_unresumed();
             return vec![];
         };
         let now = unix_now();
@@ -3590,10 +3591,37 @@ impl Machine {
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
         self.delegates.rebind(&sessions);
+        self.resume_workers(&sessions);
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
         }
         ids
+    }
+
+    /// Ties each working task that a restart carried over to its worker's restored tab, and ends the
+    /// ones whose worker did not come back. A worker's tab gets back what its spawn gave it.
+    fn resume_workers(&self, sessions: &[(String, String)]) {
+        for (task, tab) in self.delegates.resume_workers(sessions) {
+            let Some(info) = self.delegates.get(&task) else { continue };
+            let origin = match &info.parent {
+                crate::delegate::Parent::Tab(key) => crate::delegate::Origin::of_key(key).map(|(machine, tab)| crate::delegate::Origin {
+                    machine: machine.to_owned(),
+                    machine_name: String::new(),
+                    tab: tab.to_owned(),
+                    task: info.client_request_id.clone().unwrap_or_default(),
+                    access: info.access,
+                    delegator: info.delegator.clone(),
+                    limits: info.limits,
+                }),
+                crate::delegate::Parent::Task(_) => None,
+            };
+            let _ = self.tab(&tab, |t| {
+                t.task = Some(task.clone());
+                t.title = Some(info.title.clone());
+                t.origin = origin;
+            });
+        }
+        self.delegates.end_unresumed();
     }
 
     /// Each account's usage, as its sessions last reported it.
@@ -3908,7 +3936,7 @@ impl Machine {
         if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
             self.delegates.status(&caller, id)?;
             if !remote.machine.is_empty() {
-                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
                 match self.call_hub(cancel) {
                     Ok(answer) => self.settle_from(tab, id, &remote, &answer),
                     // The task ends here whatever the other side says, or it would hang here for good.
@@ -4006,7 +4034,7 @@ impl Machine {
         if remote.machine.is_empty() {
             return None;
         }
-        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: None };
         let answer = self.call_hub(asked).ok()?;
         self.settle_from(tab, id, remote, &answer);
         Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
@@ -4023,17 +4051,16 @@ impl Machine {
             summary: answer["summary"].as_str().map(str::to_owned),
             error: answer["error"].as_str().map(str::to_owned),
         };
-        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end).is_some() {
             self.emit_tabs();
         }
     }
 
     /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
     fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
-        if !self.delegates.settle_remote(task, tab, from, end) {
-            return false;
-        }
-        self.maybe_deliver(tab);
+        // The tab that delegated it may have a new id since: a restart gives every tab one.
+        let Some(parent) = self.delegates.settle_remote(task, tab, from, end) else { return false };
+        self.maybe_deliver(&parent);
         self.emit_tabs();
         true
     }
@@ -4044,7 +4071,7 @@ impl Machine {
     fn check_remotes(&self, now: Instant) {
         use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
         for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
-            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.clone(), task: id.clone(), cancel: None };
+            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(&id, &tab), task: id.clone(), cancel: None };
             let failed = match self.call_hub(asked) {
                 Ok(answer) => {
                     self.settle_from(&tab, &id, &remote, &answer);
@@ -4066,7 +4093,7 @@ impl Machine {
 
     /// Tells the machine that runs a task this machine ended that it ended, best-effort.
     fn cancel_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, reason: &str) {
-        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
         if let Err(e) = self.call_hub(cancel) {
             eprintln!("pinned: could not tell {} that {id} ended here: {e}", remote.name);
         }
@@ -4988,7 +5015,7 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed)) = self.tab(tab, |t| {
+        let Ok((new, changed, task)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
             if new {
                 t.tally = Tally::default();
@@ -5000,11 +5027,14 @@ impl Machine {
                 t.cwd = worktree;
                 changed = true;
             }
-            t.claude_session = Some(session);
-            (new, changed)
+            t.claude_session = Some(session.clone());
+            (new, changed, t.task.clone())
         }) else {
             return false;
         };
+        if let Some(task) = task {
+            self.delegates.set_worker_session(&task, &session);
+        }
         if changed {
             self.save_sessions();
             self.stamp_parent_sessions();
