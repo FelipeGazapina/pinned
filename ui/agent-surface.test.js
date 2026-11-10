@@ -119,6 +119,35 @@ test("an action on another machine names it, by its name when the app knows the 
   assert.deepEqual(titles, ["Open tab on iMac", "Open tab on Mac mini", "Open tab"]);
 });
 
+test("a session action reads as a sentence naming the thread, by the name the sidebar shows", () => {
+  const { context } = app();
+  context.machines.set("imac-id", { view: { name: "iMac" }, tabs: [{ id: "tab-9", session: "s-9", title: "Fix login", cwd: "/Users/me/site" }, { id: "tab-8", cwd: "/Users/me/docs" }] });
+  context.sideMarks = { titles: { "session:s-9": "Login, renamed" } };
+  context.archived = [{ session: "s-4", name: "Old spike" }];
+  const title = (action, args, machine = "imac-id") => context.agentActionTitle(action, args, machine);
+  assert.equal(title("delete_session", { machine: "imac-id", tab: "tab-9" }, "macbook-id"), "Delete “Login, renamed” for good");
+  assert.equal(title("archive_session", { machine: "imac-id", tab: "tab-8" }, "macbook-id"), "Archive “docs”");
+  assert.equal(title("stop_turn", { tab: "tab-9" }), "Stop the turn of “Login, renamed”");
+  assert.equal(title("set_model", { tab: "tab-9", model: "claude-sonnet-5-5", cols: 120, rows: 32 }), "Switch “Login, renamed” to claude-sonnet-5-5");
+  assert.equal(title("set_bypass", { tab: "tab-9", on: true }), "Skip permission prompts in “Login, renamed”");
+  assert.equal(title("set_bypass", { tab: "tab-9", on: false }), "Ask for permissions in “Login, renamed”");
+  assert.equal(title("set_workspace", { tab: "tab-9", worktree: null }), "Move “Login, renamed” to its project's checkout");
+  assert.equal(title("restart_claude", { tab: "tab-gone" }), "Restart a thread", "a thread the app doesn't list has no name to give");
+  assert.equal(title("unarchive_session", { session: "s-4" }), "Unarchive “Old spike”");
+  assert.equal(title("unarchive_session", { session: "s-0" }), "Unarchive a conversation");
+  const marks = [{ session: "s-9", mark: { title: "Fix login" } }, { session: "s-9", mark: { pin: 0 } }, { session: "s-8", mark: { seen: null } }];
+  assert.equal(title("mark_sessions", { changes: marks }), "Rename, pin and mark unread 2 conversations");
+  assert.equal(title("mark_sessions", { changes: [{ session: "s-9", mark: { snoozed: null } }] }), "Wake a conversation");
+  assert.equal(title("rename_machine", { id: "imac-id", name: "x" }), "Rename machine iMac", "other actions read as before");
+});
+
+test("a session action's audit row, with a summary cut short, still reads as its action", () => {
+  const { context } = app();
+  const row = (action, args) => context.agentAuditRowHtml({ id: "a", at: 1794249424, machine: "macbook-id", machine_name: "MacBook", tab: "tab-1", role: "worker", action, args, outcome: "done", detail: "" });
+  assert.match(row("archive_session", '{"machine":"macbook-id","tab":"tab-1"}'), /<b>Archive a thread<\/b>/);
+  assert.match(row("mark_sessions", '{"changes":[{"session":"s-1","mark":{"title":"A very long na…'), /<b>Mark sessions<\/b>/);
+});
+
 test("Approve asks the hub to decide, holds both buttons while it waits, then tells the outcome", async () => {
   let reply;
   const { context, calls, told, state } = app({ answer: () => new Promise((resolve) => (reply = resolve)) });

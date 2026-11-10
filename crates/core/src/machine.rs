@@ -857,6 +857,7 @@ impl Machine {
             }
             Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
+            Call::OpenRun { run } => json(self.open_run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
             Call::Upload { name, data } => {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
@@ -2600,6 +2601,10 @@ impl Machine {
         let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
         if let Call::StartClaude { tab, cols, rows } = call {
             return json(self.start_for(caller, &tab, cols, rows)?);
+        }
+        if let Call::SetModel { model, .. } = &call {
+            // An agent moves a session only to a model its own project allows, as it starts a worker.
+            self.caller_limits(caller)?.admit(Some(model), None, &self.claude_models())?;
         }
         let cmd = surface::cmd_of(&call);
         if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
@@ -8976,6 +8981,123 @@ Have another model review a risky change before it goes ahead.";
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
         (m, dir, captain)
+    }
+
+    /// `thread_claude` that also answers the headless title call.
+    #[cfg(unix)]
+    fn titling_claude(claude: &Path) {
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nif [ \"$1\" = \"-p\" ]; then echo '{\"title\":\"Fix login\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(claude, script).unwrap();
+        std::fs::set_permissions(claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_runs_each_session_action_through_act_on_a_started_tab() {
+        let (m, dir, captain) = limited_captain("act-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        titling_claude(&claude);
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        // The tab runs under an added account, whose home is in the test's folder: the built-in one is the real ~/.claude.
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Spare".into(), auth: None, key: None }).unwrap();
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| (t.account, t.model) = (work, Some("claude-haiku-5-5".into()))).unwrap();
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        let first = started(&claude, &tab);
+        assert!(!first.iter().any(|a| a == "--dangerously-skip-permissions"), "{first:?}");
+        let has = |args: &[String], pair: &[&str]| args.windows(pair.len()).any(|w| w == pair);
+
+        assert_eq!(act(json!({ "cmd": "stop_turn", "tab": tab })), Ok(Value::Null));
+
+        assert_eq!(act(json!({ "cmd": "restart_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--model", "claude-haiku-5-5"]));
+
+        let set = |model: &str| act(json!({ "cmd": "set_model", "tab": tab, "model": model, "cols": 80, "rows": 24 }));
+        assert_eq!(set("claude-opus-5-5"), Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(set("claude-sonnet-5-5"), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--model", "claude-sonnet-5-5"]), "the session restarts on the model");
+        assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-sonnet-5-5"));
+
+        let bypass = |on: bool| act(json!({ "cmd": "set_bypass", "tab": tab, "on": on, "cols": 80, "rows": 24 }));
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        assert_eq!(bypass(true), Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into()));
+        assert!(!m.view(&tab).unwrap().bypass, "a refused loosening changes nothing");
+        m.tab(&captain, |t| t.bypass = true).unwrap();
+        assert_eq!(bypass(true), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--dangerously-skip-permissions"]));
+        assert_eq!(bypass(false), Ok(json!(path)));
+        assert!(!started(&claude, &tab).iter().any(|a| a == "--dangerously-skip-permissions"), "asking again is always allowed");
+
+        assert_eq!(act(json!({ "cmd": "set_workspace", "tab": tab, "worktree": null, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        started(&claude, &tab);
+
+        assert_eq!(act(json!({ "cmd": "regenerate_title", "tab": tab, "previous": "", "thread": "USER: the login page fails" })), Ok(json!("Fix login")));
+
+        let account = m.tab(&tab, |t| t.account.clone()).unwrap();
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = |kind: &str, uuid: &str, minute: u8| json!({ "type": kind, "uuid": uuid, "sessionId": "sess-1", "timestamp": format!("2026-11-09T10:0{minute}:00Z"), "message": { "role": kind, "content": "hi" } }).to_string();
+        std::fs::write(projects.join("sess-1.jsonl"), [line("user", "u1", 0), line("assistant", "a1", 1), line("user", "u2", 2), line("assistant", "a2", 3)].join("\n") + "\n").unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("sess-1".into())).unwrap();
+        let transcripts = || std::fs::read_dir(&projects).unwrap().count();
+
+        let forked = act(json!({ "cmd": "fork", "tab": tab, "through": "a1" })).unwrap();
+        let copy = forked.as_str().expect("the new tab's id").to_owned();
+        assert_eq!(transcripts(), 2, "the conversation was copied");
+        assert!(!m.view(&copy).unwrap().running, "a fork opens a tab and starts nothing");
+
+        let web = Path::new(&path).join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        act(json!({ "cmd": "set_folder", "tab": copy, "path": web.display().to_string() })).unwrap();
+        assert_eq!(m.view(&copy).unwrap().cwd, web.display().to_string());
+
+        assert_eq!(act(json!({ "cmd": "rewind", "tab": tab, "before": "u2", "files": false, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        assert!(has(&started(&claude, &tab), &["--resume"]), "the session resumes the rewound copy");
+        assert_eq!(transcripts(), 3);
+        assert_ne!(m.tab(&tab, |t| t.claude_session.clone()).unwrap().as_deref(), Some("sess-1"));
+
+        assert_eq!(act(json!({ "cmd": "switch_account", "tab": tab, "account": "spare", "cols": 80, "rows": 24 })), Ok(json!(path)));
+        let moved = started(&claude, &tab);
+        assert_eq!(m.tab(&tab, |t| t.account.id.clone()).unwrap(), "spare");
+        assert!(moved[3].ends_with("accounts/spare"), "it runs under the other account now: {moved:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_restarts_nothing_on_a_stopped_tab_but_the_session_it_runs() {
+        let (m, dir, captain) = limited_captain("act-stopped", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let stopped = m.open_tab(Some(path), false).unwrap();
+        let tab = stopped.as_str();
+        let asks = [
+            ("restart_claude", json!({ "tab": tab, "cols": 80, "rows": 24 })),
+            ("set_model", json!({ "tab": tab, "model": "claude-sonnet-5-5", "cols": 80, "rows": 24 })),
+            ("set_bypass", json!({ "tab": tab, "on": false, "cols": 80, "rows": 24 })),
+            ("rewind", json!({ "tab": tab, "before": "u1", "files": false, "cols": 80, "rows": 24 })),
+            ("switch_account", json!({ "tab": tab, "account": "work", "cols": 80, "rows": 24 })),
+            ("set_workspace", json!({ "tab": tab, "worktree": null, "cols": 80, "rows": 24 })),
+        ];
+        for (cmd, mut args) in asks {
+            args["cmd"] = json!(cmd);
+            assert_eq!(m.call(Call::ActFor { caller: captain.clone(), call: args }), Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker")), "{cmd}");
+        }
+        assert!(!m.view(tab).unwrap().running, "a refused restart starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_open_run_reopens_a_conversation_in_a_tab_that_is_not_started() {
+        let (m, dir, _) = limited_captain("open-run", TastePatch::default());
+        let folder = dir.join("app").display().to_string();
+        let run = RunSpec { folder: folder.clone(), repo: None, args: vec!["--resume".into(), "conv-1".into()], env: vec![], token: None, account: None, budget_usd: None };
+        let tab: String = serde_json::from_value(m.call(Call::OpenRun { run }).unwrap()).unwrap();
+        assert!(!m.view(&tab).unwrap().running, "nothing runs until start_claude");
+        assert_eq!(m.tab(&tab, |t| (t.cwd.display().to_string(), t.launch.clone(), t.claude_session.clone())).unwrap(), (folder, vec!["--resume".to_owned(), "conv-1".to_owned()], Some("conv-1".to_owned())));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]

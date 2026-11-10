@@ -249,6 +249,9 @@ pub enum Call {
     SearchThreads { query: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
+    /// The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation
+    /// for an agent this way, which then starts it with `start_claude`, under the limits.
+    OpenRun { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
     /// The absolute path the file was saved under, in a private folder of the machine, for a
