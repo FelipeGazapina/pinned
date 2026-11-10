@@ -7202,12 +7202,6 @@
                   "null"
                 ]
               },
-              "task": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "project": {
                 "description": "The project's repo (`host/owner/name`), else its folder.",
                 "type": [
@@ -7240,11 +7234,6 @@
                 "description": "A thread with no role: the user's own session.",
                 "type": "string",
                 "const": "session"
-              },
-              {
-                "description": "A headless child that delegated in turn.",
-                "type": "string",
-                "const": "task"
               }
             ]
           },
@@ -7253,7 +7242,6 @@
             "type": "string",
             "enum": [
               "local",
-              "machine",
               "box"
             ]
           },
@@ -14413,12 +14401,6 @@
                   "null"
                 ]
               },
-              "task": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "project": {
                 "description": "The project's repo (`host/owner/name`), else its folder.",
                 "type": [
@@ -14451,11 +14433,6 @@
                 "description": "A thread with no role: the user's own session.",
                 "type": "string",
                 "const": "session"
-              },
-              {
-                "description": "A headless child that delegated in turn.",
-                "type": "string",
-                "const": "task"
               }
             ]
           },
@@ -14464,7 +14441,6 @@
             "type": "string",
             "enum": [
               "local",
-              "machine",
               "box"
             ]
           },
@@ -18974,12 +18950,6 @@
                   "null"
                 ]
               },
-              "task": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "project": {
                 "description": "The project's repo (`host/owner/name`), else its folder.",
                 "type": [
@@ -19012,11 +18982,6 @@
                 "description": "A thread with no role: the user's own session.",
                 "type": "string",
                 "const": "session"
-              },
-              {
-                "description": "A headless child that delegated in turn.",
-                "type": "string",
-                "const": "task"
               }
             ]
           },
@@ -19034,7 +18999,6 @@
             "type": "string",
             "enum": [
               "local",
-              "machine",
               "box"
             ]
           },
@@ -23283,12 +23247,6 @@
                   "null"
                 ]
               },
-              "task": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "project": {
                 "description": "The project's repo (`host/owner/name`), else its folder.",
                 "type": [
@@ -23321,11 +23279,6 @@
                 "description": "A thread with no role: the user's own session.",
                 "type": "string",
                 "const": "session"
-              },
-              {
-                "description": "A headless child that delegated in turn.",
-                "type": "string",
-                "const": "task"
               }
             ]
           },
@@ -23343,7 +23296,6 @@
             "type": "string",
             "enum": [
               "local",
-              "machine",
               "box"
             ]
           },
