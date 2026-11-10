@@ -62,8 +62,10 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
         Access::ReadOnly => args.extend(["--permission-mode".into(), "plan".into()]),
     }
-    if let Some(config) = spec.mcp_config {
-        args.extend(["--mcp-config".into(), config.display().to_string()]);
+    let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();
+    if !configs.is_empty() {
+        args.push("--mcp-config".into());
+        args.extend(configs);
     }
     args
 }
@@ -92,6 +94,9 @@ fn codex_args(spec: &SpawnSpec) -> Vec<String> {
         Some(spec.task_id),
         spec.reminders,
     ));
+    if let Some(files) = spec.session_mcp {
+        args.extend(files.codex_flags(spec.exe));
+    }
     args.push(prompt_arg(spec.task));
     args
 }
@@ -169,7 +174,7 @@ pub fn codex_mcp_flags(
     args
 }
 
-fn toml_str(value: &str) -> String {
+pub fn toml_str(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {

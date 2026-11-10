@@ -187,6 +187,7 @@ pub const ACTIONS: &[Action] = &[
     n("skills", Read, "Every skill folder on the machine: personal, project and plugin skills, and where each copy lives.").wired(),
     n("read_skill", Read, "The text of file (SKILL.md when left out) in the skill folder dir that skills lists.").wired(),
     n("mcp_servers", Read, "The MCP servers Claude Code sessions on the machine load under agent account account (the project at path's account, else the default one): user and local scope from that account's .claude.json, project scope from path's .mcp.json. Each gives its name, scope, transport, and only its program or its URL's scheme and host, never its arguments, environment or headers. MCP servers that plugins bring are not listed.").wired(),
+    n("mcp_importable", Excluded, "the app's import form, which reads each server's arguments and URL in full: mcp_servers lists them, and import_mcp_server asks to add one"),
     n("save_skill", Write, "Writes a skill file to each listed copy unchanged since its read, then reloads the sessions that load it.").wired(),
     n("branches", Excluded, GIT),
     n("checkout", Excluded, GIT),
@@ -313,6 +314,12 @@ pub const ACTIONS: &[Action] = &[
     h("decide_confirmation", Excluded, "only the user decides, in the app"),
     h("unlock", Excluded, "the user's own password, which only the app sends"),
     h("agent_audit", Read, "The audit trail of agents' acts on this account, newest first: limit rows (50, at most 200) from unix second before and earlier.").wired(),
+    h("list_mcp_servers", Read, "The account's own MCP servers, which every session pinned starts loads while enabled (Claude Code by --mcp-config, Codex by -c), alongside the servers its agent account configures itself, which keep a name they share: id, name, project (a repository, or every project), enabled, and transport (stdio command, args and env names, or http or sse url and header names). Never a secret's value.").wired(),
+    h("save_mcp_server", Confirm, "Adds an MCP server to the account's list, enabled, or with id changes that one. transport is {type: stdio, command, args, env: [names]} or {type: http or sse, url, headers: [names]}; project is a repository like github.com/owner/repo, or left out for every project. The user types each env and header value in the app; an agent never sends one, and keys never go in the command, arguments or URL.").wired().asks(&["secrets"]),
+    h("enable_mcp_server", Write, "Turns a server of the account's MCP list on (enabled: true) or off for the sessions started from now on.").wired(),
+    h("remove_mcp_server", Confirm, "Removes a server and its secrets from the account's MCP list.").wired(),
+    h("import_mcp_server", Confirm, "Adds the MCP server name that Claude Code account account on machine configures (as mcp_servers lists it, path for its local and project scope) to the account's list, for every project or for project. The user types each of its env and header values in the app.").wired().asks(&["secrets"]),
+    h("load_mcp_servers", Excluded, "a machine's way to load the account's MCP servers, secrets and all, into the sessions it starts"),
 ];
 
 /// A signed-in client's answer to a call only the account's owner makes, until it unlocks.
@@ -378,12 +385,14 @@ pub fn without_asked(action: &Action, args: &Value) -> Value {
     }
 }
 
-/// `args` with each asked field the agent left out blank, so `parse` checks the rest of them.
+/// `args` with each asked text field the agent left out blank, so `parse` checks the rest of
+/// them. An asked object, like `save_mcp_server`'s `secrets`, defaults to empty by itself.
 pub fn with_blank_asks(action: &Action, args: &Value) -> Value {
     match args {
         Value::Null | Value::Object(_) if !action.asks.is_empty() => {
             let mut fields = args.as_object().cloned().unwrap_or_default();
-            for field in action.asks {
+            let schema = args_schema(action);
+            for field in action.asks.iter().filter(|field| schema["properties"][**field]["type"] != "object") {
                 fields.entry(*field).or_insert_with(|| Value::String(String::new()));
             }
             Value::Object(fields)
@@ -393,17 +402,29 @@ pub fn with_blank_asks(action: &Action, args: &Value) -> Value {
 }
 
 /// The stored arguments of a confirmation with what the user typed in the app for its asked
-/// fields: only those, and every one the call needs, not blank.
+/// fields: only those, and every one the call needs, not blank. A field of an asked object is
+/// named by its path, as `secrets.env.API_KEY`.
 pub fn with_entered(action: &Action, args: &Value, entered: &BTreeMap<String, String>) -> Result<Value, String> {
     let name = action.name;
     if action.asks.is_empty() && !entered.is_empty() {
         return Err(format!("{name} takes nothing typed in the app"));
     }
-    if let Some(field) = entered.keys().find(|field| !action.asks.contains(&field.as_str())) {
+    if let Some(field) = entered.keys().find(|field| !action.asks.contains(&field.split('.').next().unwrap_or_default())) {
         return Err(format!("{name} does not take {field}"));
     }
     let mut fields = args.as_object().cloned().unwrap_or_default();
-    fields.extend(entered.iter().map(|(field, value)| (field.clone(), Value::String(value.clone()))));
+    for (path, value) in entered {
+        let (last, parents) = path.rsplit_once('.').map_or((path.as_str(), None), |(parents, last)| (last, Some(parents)));
+        let mut at = &mut fields;
+        for part in parents.into_iter().flat_map(|p| p.split('.')) {
+            let slot = at.entry(part).or_insert_with(|| Value::Object(Map::new()));
+            if !slot.is_object() {
+                *slot = Value::Object(Map::new());
+            }
+            at = slot.as_object_mut().expect("made an object");
+        }
+        at.insert(last.to_owned(), Value::String(value.clone()));
+    }
     let schema = args_schema(action);
     let required = schema["required"].as_array().map(Vec::as_slice).unwrap_or_default();
     let blank = |field: &str| fields.get(field).and_then(Value::as_str).is_none_or(|value| value.trim().is_empty());
@@ -757,13 +778,14 @@ pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
 
 fn secret_name(name: &str, sending: bool) -> bool {
     let name = name.to_ascii_lowercase();
-    ["token", "password", "secret", "api_key", "claude_token"].contains(&name.as_str())
+    ["token", "password", "secret", "secrets", "api_key", "claude_token"].contains(&name.as_str())
         || ["_token", "_secret", "_password"].iter().any(|end| name.ends_with(end))
         || (sending && (name == "key" || name.ends_with("_key")))
 }
 
 /// The first field of `args`, at any depth, that holds a password, key or token, which an agent
-/// never sends. `plain` lists the dotted paths an action's arguments may carry under such a name.
+/// never sends: text in a field with a secret's name, or anywhere inside one, as `secrets`. `plain`
+/// lists the dotted paths an action's arguments may carry under such a name.
 pub fn secret_arg(args: &Value, plain: &[&str]) -> Option<String> {
     find_secret(args, plain, "")
 }
@@ -774,11 +796,21 @@ fn find_secret(args: &Value, plain: &[&str], at: &str) -> Option<String> {
             let path = if at.is_empty() { name.clone() } else { format!("{at}.{name}") };
             match value {
                 Value::String(text) if secret_name(name, true) && !text.trim().is_empty() && !plain.contains(&path.as_str()) => Some(path),
+                Value::Object(_) | Value::Array(_) if secret_name(name, true) && holds_text(value) && !plain.contains(&path.as_str()) => Some(path),
                 value => find_secret(value, plain, &path),
             }
         }),
         Value::Array(items) => items.iter().find_map(|item| find_secret(item, plain, at)),
         _ => None,
+    }
+}
+
+fn holds_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Object(fields) => fields.values().any(holds_text),
+        Value::Array(items) => items.iter().any(holds_text),
+        _ => false,
     }
 }
 
@@ -963,6 +995,7 @@ mod tests {
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
+                "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
             ]
         );
         for name in ["set_taste", "reset_taste_field", "delete_connector"] {
@@ -985,6 +1018,8 @@ mod tests {
                 "connect_vercel: key",
                 "connect_upstash: key claude_token",
                 "set_box_claude_token: token",
+                "save_mcp_server: secrets",
+                "import_mcp_server: secrets",
             ]
         );
         for action in ACTIONS.iter().filter(|a| !a.asks.is_empty()) {
@@ -1016,7 +1051,7 @@ mod tests {
     mod p3b {
         use super::*;
 
-        fn wired(name: &str, class: Class, on: &str, starts_work: bool, args: Value) {
+        pub(super) fn wired(name: &str, class: Class, on: &str, starts_work: bool, args: Value) {
             let action = find(name).unwrap_or_else(|| panic!("no action {name}"));
             assert_eq!((action.class, action.wired, action.on(), action.starts_work), (class, true, on, starts_work), "{name}");
             assert_eq!(secret_arg(&args, action.sends), None, "{name}: an agent sends no secret");
@@ -1101,6 +1136,82 @@ mod tests {
         fn connect_upstash_without_its_blanks_does_not_parse() {
             let bare = parse(find("connect_upstash").unwrap(), &json!({})).err().unwrap_or_default();
             assert!(bare.starts_with("connect_upstash: missing field `key`"), "without the blanks the call does not parse: {bare}");
+        }
+    }
+
+    /// One test per action P3c wires: the account's own MCP servers. An agent names a server's
+    /// secrets and never sends their values, which the user types in the app at the approval.
+    mod p3c {
+        use super::p3b::wired;
+        use super::*;
+
+        const SERVER: &str = r#"{ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["-y", "@acme/ctx"], "env": ["API_KEY"] } }"#;
+
+        fn server() -> Value {
+            serde_json::from_str(SERVER).unwrap()
+        }
+
+        #[test]
+        fn list_mcp_servers() {
+            wired("list_mcp_servers", Read, "hub", false, json!({}));
+        }
+
+        #[test]
+        fn save_mcp_server() {
+            wired("save_mcp_server", Confirm, "hub", false, json!({ "server": server() }));
+            wired("save_mcp_server", Confirm, "hub", false, json!({ "id": "s1", "server": server() }));
+        }
+
+        #[test]
+        fn enable_mcp_server() {
+            wired("enable_mcp_server", Write, "hub", false, json!({ "id": "s1", "enabled": false }));
+        }
+
+        #[test]
+        fn remove_mcp_server() {
+            wired("remove_mcp_server", Confirm, "hub", false, json!({ "id": "s1" }));
+        }
+
+        #[test]
+        fn import_mcp_server() {
+            wired("import_mcp_server", Confirm, "hub", false, json!({ "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/acme/site" }));
+        }
+
+        #[test]
+        fn the_machines_load_and_the_apps_import_reader_are_closed_to_agents() {
+            for name in ["load_mcp_servers", "mcp_importable"] {
+                let action = find(name).unwrap();
+                assert_eq!((action.class, action.wired), (Excluded, false), "{name}");
+            }
+        }
+
+        #[test]
+        fn a_value_an_agent_puts_under_secrets_is_refused_and_never_reaches_the_trail() {
+            for sent in [json!({ "env": { "REGION": "eu-west-9" } }), json!({ "headers": { "X-Org": "eu-west-9" } }), json!("eu-west-9")] {
+                let args = json!({ "server": server(), "secrets": sent });
+                assert_eq!(secret_arg(&args, &[]).as_deref(), Some("secrets"), "{args}");
+                assert!(!summary(&args).contains("eu-west-9"), "{}", summary(&args));
+                assert_eq!(without_asked(find("save_mcp_server").unwrap(), &args), json!({ "server": server() }));
+            }
+            assert_eq!(secret_arg(&json!({ "server": server(), "secrets": { "env": {} } }), &[]), None, "no value, nothing sent");
+            assert!(!redact(json!({ "secrets": { "env": { "API_KEY": "abc" } } }), &[]).to_string().contains("abc"), "an answer never shows a secrets object");
+        }
+
+        #[test]
+        fn the_values_typed_at_the_approval_land_in_the_secrets_the_call_takes() {
+            let typed = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+            let save = find("save_mcp_server").unwrap();
+            let stored = json!({ "server": server() });
+            let args = with_entered(save, &stored, &typed(&[("secrets.env.API_KEY", "ctx-key-1")])).unwrap();
+            assert_eq!(args, json!({ "server": server(), "secrets": { "env": { "API_KEY": "ctx-key-1" } } }));
+            let Ok(Parsed::Hub(HubCall::SaveMcpServer { secrets, .. })) = parse(save, &args) else { panic!("save_mcp_server") };
+            assert_eq!(secrets.env.get("API_KEY").map(String::as_str), Some("ctx-key-1"));
+            let both = with_entered(save, &stored, &typed(&[("secrets.env.A", "1"), ("secrets.headers.B", "2")])).unwrap();
+            assert_eq!(both["secrets"], json!({ "env": { "A": "1" }, "headers": { "B": "2" } }));
+            assert_eq!(with_entered(save, &stored, &typed(&[("server.name", "x")])), Err("save_mcp_server does not take server.name".into()), "the user's form changes only the secrets");
+            assert_eq!(with_entered(save, &stored, &BTreeMap::new()), Ok(stored.clone()), "no secret typed: the server says which it needs");
+            assert_eq!(with_blank_asks(save, &stored), stored, "an asked object is left to its default");
+            assert!(hide_entered("bad ctx-key-1 here", &typed(&[("secrets.env.API_KEY", "ctx-key-1")])) == format!("bad {HIDDEN} here"));
         }
     }
 

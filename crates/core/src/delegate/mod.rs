@@ -480,6 +480,8 @@ pub struct SpawnSpec<'a> {
     pub effort: Option<&'a str>,
     pub access: Access,
     pub mcp_config: Option<&'a Path>,
+    /// The account's own MCP servers for this child, beside pinned's.
+    pub session_mcp: Option<&'a crate::mcp::SessionFiles>,
     pub exe: &'a Path,
     pub sock: &'a Path,
     pub task_id: &'a str,
@@ -536,6 +538,7 @@ mod tests {
             effort: None,
             access,
             mcp_config: None,
+            session_mcp: None,
             exe: Path::new("/bin/pinned"),
             sock: Path::new("/tmp/pinned.sock"),
             task_id: "task-1",
@@ -553,6 +556,27 @@ mod tests {
             let args = driver_args(provider, &spec("--force", Access::Auto));
             assert_eq!(args.last().map(String::as_str), Some("\n--force"), "{provider:?}");
             assert!(!args.iter().any(|arg| arg == "--force"), "{provider:?} {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_headless_child_loads_the_accounts_mcp_servers_beside_pinneds() {
+        let load: crate::mcp::Load = serde_json::from_value(serde_json::json!({ "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "env": ["API_KEY"] } }, "secrets": { "env": { "API_KEY": "ctx-secret-1" } } })).unwrap();
+        let files = crate::mcp::SessionFiles::write(&[&load]).unwrap().unwrap();
+        let file = files.file.display().to_string();
+        let mut claude = spec("do the thing", Access::Auto);
+        claude.mcp_config = Some(Path::new("/tmp/mcp.json"));
+        claude.session_mcp = Some(&files);
+        let args = driver_args(Provider::Claude, &claude);
+        assert_eq!(args[args.len() - 3..], ["--mcp-config".to_owned(), "/tmp/mcp.json".to_owned(), file.clone()]);
+        let codex = driver_args(Provider::Codex, &SpawnSpec { session_mcp: Some(&files), ..spec("do the thing", Access::Auto) });
+        let at = codex.iter().position(|a| a == "mcp_servers.ctx.command=\"/bin/pinned\"").unwrap_or_else(|| panic!("{codex:?}"));
+        assert_eq!(codex[at + 2], format!("mcp_servers.ctx.args=[\"mcp-run\",{},\"ctx\"]", toml_str(&file)));
+        assert_eq!(codex.last().map(String::as_str), Some("do the thing"), "the prompt stays last");
+        let cursor = driver_args(Provider::Cursor, &SpawnSpec { session_mcp: Some(&files), ..spec("do the thing", Access::Auto) });
+        assert!(!cursor.concat().contains("mcp"), "cursor-agent takes no MCP flag: {cursor:?}");
+        for args in [args, codex] {
+            assert!(!args.concat().contains("ctx-secret-1"), "{args:?}");
         }
     }
 

@@ -560,6 +560,68 @@ The desktop app keeps its login in `account.json`, and the web app keeps its log
 
 A login read off a disk still runs every other client call: it reads sessions, types into tabs and starts sessions on the account's machines. After this change, the machine that runs the desktop app is the only one that keeps a login.
 
+## 14. The account's MCP servers (0.17.22)
+
+Unit P3c, branch `parity/mcp`. The hub keeps a list of MCP servers per account, with an optional project scope. Every session pinned starts loads the enabled ones beside pinned's own server. The user manages the list in Settings › MCP servers, and agents manage it through `act`.
+
+### 14.1 Data
+
+`crates/core/src/mcp.rs`. A server follows the shape of Claude Code's own config, with the names of its secrets and never their values:
+
+```json
+{"id":"mcp-19a…","enabled":true,"server":{"name":"ctx","project":"github.com/acme/site","transport":{"type":"stdio","command":"npx","args":["-y","@acme/ctx"],"env":["API_KEY"]}}}
+{"id":"mcp-19b…","enabled":true,"server":{"name":"linear","transport":{"type":"http","url":"https://mcp.linear.app/mcp","headers":[]}}}
+```
+
+- `mcp::Entry { id, enabled, server: Spec }`, `Spec { name, project?, transport: Reach }`, `Reach` tagged by `type`: `stdio { command, args, env }`, `http { url, headers }`, `sse { url, headers }`. `env` and `headers` are names.
+- `project` is a repository as `repo_key` writes it (`github.com/owner/repo`), as tastes key projects. Absent means every project.
+- `mcp::Secrets { env: {name: value}, headers: {name: value} }` carries the values on a save, and only there.
+- `Spec::check` refuses a name outside `[A-Za-z0-9_-]{1,64}`, the name `pinned`, a URL that is not http or https, a bad env or header name, a name listed twice, and a command, argument or URL that holds a key-shaped string (`surface::mask_secrets`).
+
+Why this shape. The transport is a tagged union, so a stdio server with a URL can't exist. It reads like `.mcp.json`, which agents know. Adding a transport is a new variant, and a new field on a variant takes `serde(default)`. Both are additive. The answer types are contract roots (`McpServer`, `McpLoad`).
+
+### 14.2 Storage
+
+On the hub, in the connector store, as the box Claude tokens are. The list is `Store.mcp_servers` (the `accounts.store` document), and each value is a sealed key `mcp:<id>:env:<NAME>` or `mcp:<id>:headers:<NAME>` (the `accounts.secrets` document, sealed by `Sealer`). Every write goes through `Storage::write_key`, so it never races the connectors' own key writes. A signed-out app's first import keeps the list.
+
+### 14.3 Wire (`HubCall`, all additive)
+
+| Call | From | Answer |
+|---|---|---|
+| `list_mcp_servers` | client, agent (read) | `Vec<mcp::Entry>` |
+| `save_mcp_server { id?, server, secrets? }` | client, agent (confirm, asks `secrets`) | `mcp::Entry`. With `id` it changes that server and keeps its enabled state. A secret left out or blank keeps its value. A new name needs one: `<name> needs a value for <NAME>, which the user types in the app`. A name the server loses loses its value. |
+| `enable_mcp_server { id, enabled }` | client, agent (write) | `mcp::Entry` |
+| `remove_mcp_server { id }` | client, agent (confirm) | `null`. Its keys go too. |
+| `import_mcp_server { machine, account, name, path?, project?, secrets? }` | client, agent (confirm, asks `secrets`) | `mcp::Entry`. The hub reads the server from that machine with `Call::McpImportable` and saves it. |
+| `load_mcp_servers` | a machine only. A client gets `only a machine loads the account's MCP servers into the sessions it starts`. Excluded for agents. | `Vec<mcp::Load>`: the enabled servers with their secrets. |
+
+`Call::McpImportable { account?, path? }` (excluded for agents) answers `Vec<mcp::Found { scope, server }>`: the servers a Claude Code account's `.claude.json` (and `path`'s `.mcp.json`) define, with command, arguments and URL in full and only the names of their env and headers. `mcp_servers` (P3b) stays the agents' read of those.
+
+### 14.4 Agents
+
+`save_mcp_server` and `import_mcp_server` ask for `secrets`. The user types each value in the app's form, which sends them in `decide_confirmation`'s `entered` by path: `{"secrets.env.API_KEY": "…"}`. `surface::with_entered` places a dotted path inside its asked object. `with_blank_asks` leaves an asked object to its default.
+
+Approving needs the app unlocked (13.11), as every decision does. The user's own `save_mcp_server`, `import_mcp_server` and `remove_mcp_server` need it too on a locked login, since `surface::owner_only` reads their `confirm` class; `list_mcp_servers` and `enable_mcp_server` don't.
+
+`secrets` is a secret name (13.7). An agent that sends any text inside it is refused (`an agent never sends a password, key or token: secrets`), and summaries and answers show it as `[hidden]`.
+
+### 14.5 Sessions
+
+At each session's start (`launch_tab` and a headless child's spawn) the machine asks the hub `load_mcp_servers`, waiting `MCP_WAIT` (3 s), and keeps the answer in memory only. When the hub does not answer, the session gets the list the hub last handed this process. The first session with no list waits that long for a link that is still coming up, as a node's restored sessions start before the link connects. Later ones never wait.
+
+`mcp::for_session` picks the servers for every project and those for the session's repository; a project's server replaces an account-wide one of its name. A name the session's own account already configures is left out, so it stays the account's own: Claude reads user, local and project scope with P3b's reader, and Codex reads its `config.toml`'s `mcp_servers` tables.
+
+`mcp::SessionFiles::write` writes `servers.json`, in Claude Code's `mcpServers` shape with the secrets in place, at mode 0600 in a 0700 folder `$TMPDIR/pinned-mcp-<pid>-XXXX`. The tab keeps the folder until its session ends or is replaced, and a headless child keeps it until its output ends. Dropping it deletes it. A folder whose pid no longer runs is swept at the next write.
+
+- Claude Code: `--mcp-config <pinned's> <servers.json>`.
+- Codex: `-c mcp_servers.<name>.command=<pinned>` with `args=["mcp-run", <file>, <name>]` for a program, and `url` with `http_headers_helper="<pinned> mcp-headers <file> <name>"` for http. `pinned mcp-run` execs the program with its env from the file, and `pinned mcp-headers` prints its headers as JSON. No secret reaches Codex's argv or the environment its shell commands inherit. Codex speaks streamable HTTP only, so an sse server stays out of Codex sessions.
+- Cursor: `cursor-agent` takes no MCP flag. It reads only `~/.cursor/mcp.json` and the project's `.cursor/mcp.json`, which are the user's own files, so Cursor sessions get none of the list.
+- Box workers run a pinned node linked to the hub, so their sessions load the list the same way.
+
+### 14.6 OAuth
+
+Claude Code keeps an MCP server's OAuth login in the same secure store as the Claude login. The store is one per config dir: the keychain item `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>` (plain `Claude Code-credentials` for `~/.claude`), or `<dir>/.credentials.json`. Each login sits under `mcpOAuth["<name>|<sha256({type,url,headers})[:16]>"]` (seen in 2.1.322). Copying a login between accounts would edit Claude Code's private store and hand one rotating refresh token to several refreshers. So the page marks an http or sse server that sends no header with "If it signs in with OAuth, log in once per Claude account: run /mcp in a session of each account."
+
 ## PR
 
 https://github.com/FelipeGazapina/pinned/pull/84

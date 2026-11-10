@@ -5937,6 +5937,126 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     drop(vps_raw);
 }
 
+/// Every string a server's secrets were typed as, which no answer, list, audit row, error or notice
+/// may hold.
+const MCP_SECRETS: [&str; 4] = ["ana-ctx-secret", "ana-linear-secret", "ana-files-secret", "agent-guessed-region"];
+
+fn holds_no_mcp_secret(what: &str, text: &str) {
+    for secret in MCP_SECRETS {
+        assert!(!text.contains(secret), "{what} shows {secret}: {text}");
+    }
+}
+
+#[test]
+fn an_accounts_mcp_servers_reach_its_own_sessions_and_agents_never_see_or_send_a_secret() {
+    let hub = TestHub::start_with("agent_mcp", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let ana_machine_token = Credentials::load(&ana.dir).unwrap().machine_token;
+    let ctx_server = json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } });
+
+    let (locked_token, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut locked = Client::app(&url, &locked_token);
+    let locked_save = json!({ "cmd": "save_mcp_server", "server": ctx_server, "secrets": { "env": { "API_KEY": "ana-ctx-secret" } } });
+    assert_eq!(locked.hub(locked_save.clone()), Err(pinned_core::surface::LOCKED.into()), "a locked app adds a server only once it unlocks");
+    assert_eq!(locked.hub(json!({ "cmd": "list_mcp_servers" })).unwrap(), json!([]), "listing needs no unlock");
+    locked.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let ctx = locked.hub(locked_save).unwrap();
+    holds_no_mcp_secret("the app's save", &ctx.to_string());
+    let ctx_id = ctx["id"].as_str().unwrap().to_owned();
+    let listed = act(&ana.dir, &ana.tab, "list_mcp_servers", json!({})).unwrap();
+    assert_eq!(listed, json!({ "outcome": "done", "result": [{ "id": ctx_id, "enabled": true, "server": ctx_server }] }));
+
+    let sneaked = json!({ "server": { "name": "geo", "transport": { "type": "stdio", "command": "geo", "env": ["REGION"] } }, "secrets": { "env": { "REGION": "agent-guessed-region" } } });
+    assert_eq!(act(&ana.dir, &ana.tab, "save_mcp_server", sneaked), Err("an agent never sends a password, key or token: secrets. The user enters it in the app.".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "load_mcp_servers", json!({})), Err("load_mcp_servers is not open to agents: a machine's way to load the account's MCP servers, secrets and all, into the sessions it starts".into()));
+    assert_eq!(ana.client.hub(json!({ "cmd": "load_mcp_servers" })), Err("only a machine loads the account's MCP servers into the sessions it starts".into()), "the app never gets the values either");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let linear_server = json!({ "name": "linear", "transport": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": ["Authorization"] } });
+    let add = act(&ana.dir, &ana.tab, "save_mcp_server", json!({ "server": linear_server })).unwrap();
+    assert_eq!(add["outcome"], "pending", "{add}");
+    let waiting = ana.client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    assert_eq!(waiting[0]["args"], json!({ "server": linear_server }), "the approval shows what the agent asked for");
+    assert_eq!(approve(&mut ana.client, &add["id"], json!({})), Err("linear needs a value for Authorization, which the user types in the app".into()));
+    assert_eq!(waiting_actions(&mut ana.client), ["save_mcp_server"], "a missing secret leaves it waiting for the user's form");
+    let added = approve(&mut ana.client, &add["id"], json!({ "secrets.headers.Authorization": "Bearer ana-linear-secret" })).unwrap();
+    assert_eq!((&added["outcome"], &added["result"]["server"]), (&json!("done"), &linear_server));
+    let told = notice_of(&ana, &add["id"]);
+    assert!(told.contains("The user approved your save_mcp_server request"), "{told}");
+    holds_no_mcp_secret("the agent's notice", &told);
+    let linear_id = added["result"]["id"].as_str().unwrap().to_owned();
+
+    assert_eq!(act(&ana.dir, &ana.tab, "enable_mcp_server", json!({ "id": ctx_id, "enabled": false })).unwrap()["result"]["enabled"], false);
+
+    ana.node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    std::fs::write(ana.dir.join("accounts/work/.claude.json"), r#"{"mcpServers":{"files":{"command":"files-mcp","args":["--root","/data"],"env":{"API_TOKEN":"from-the-file"}}}}"#).unwrap();
+    let import = act(&ana.dir, &ana.tab, "import_mcp_server", json!({ "machine": "ana-mac", "account": "work", "name": "files", "project": "github.com/acme/site" })).unwrap();
+    let imported = approve(&mut ana.client, &import["id"], json!({ "secrets.env.API_TOKEN": "ana-files-secret" })).unwrap();
+    assert_eq!(
+        imported["result"]["server"],
+        json!({ "name": "files", "project": "github.com/acme/site", "transport": { "type": "stdio", "command": "files-mcp", "args": ["--root", "/data"], "env": ["API_TOKEN"] } })
+    );
+    let files_id = imported["result"]["id"].as_str().unwrap().to_owned();
+
+    let loads = machine_result(&url, &ana_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap();
+    assert_eq!(
+        loads,
+        json!([
+            { "server": linear_server, "secrets": { "headers": { "Authorization": "Bearer ana-linear-secret" } } },
+            { "server": imported["result"]["server"], "secrets": { "env": { "API_TOKEN": "ana-files-secret" } } },
+        ]),
+        "a machine of the account gets the enabled servers with their secrets"
+    );
+
+    std::fs::write(ana.dir.join("claude"), format!("#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nprintf '%s\\n' \"$@\" > '{}'\nfor a in \"$@\"; do case \"$a\" in */servers.json) cp \"$a\" '{}';; esac; done\nexec cat\n", ana.dir.join("args.txt").display(), ana.dir.join("seen-servers.json").display())).unwrap();
+    wait_for("ana's node back on its link, which the raw machine calls above took over", || ana.node.online());
+    ana.node.machine.start_claude(&ana.tab, 80, 24).unwrap();
+    wait_for("claude's arguments", || ana.dir.join("args.txt").exists());
+    wait_for("the session's MCP config", || ana.dir.join("seen-servers.json").exists());
+    let seen: Value = serde_json::from_str(&std::fs::read_to_string(ana.dir.join("seen-servers.json")).unwrap()).unwrap();
+    assert_eq!(seen, json!({ "mcpServers": { "linear": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": { "Authorization": "Bearer ana-linear-secret" } } } }), "the session in site, which has no remote, loads the account-wide enabled server");
+
+    let remove = act(&ana.dir, &ana.tab, "remove_mcp_server", json!({ "id": files_id })).unwrap();
+    assert_eq!(approve(&mut ana.client, &remove["id"], json!({})).unwrap()["outcome"], "done");
+    let left: Vec<String> = ana.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(left, [ctx_id.clone(), linear_id.clone()]);
+
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let bob_machine_token = Credentials::load(&bob.dir).unwrap().machine_token;
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(act(&bob.dir, &bob.tab, "list_mcp_servers", json!({})).unwrap()["result"], json!([]), "bob's agent lists none of ana's");
+    assert_eq!(bob.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap(), json!([]), "nor does bob's app");
+    assert_eq!(machine_result(&url, &bob_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap(), json!([]), "bob's machine loads none of ana's secrets");
+    wait_for("bob's node back on its link", || bob.node.online());
+    assert_eq!(act(&bob.dir, &bob.tab, "enable_mcp_server", json!({ "id": ctx_id, "enabled": true })), Err(format!("the account has no MCP server {ctx_id}")));
+    assert_eq!(bob.client.hub(json!({ "cmd": "save_mcp_server", "id": linear_id, "server": linear_server })), Err(format!("the account has no MCP server {linear_id}")), "bob's app can't edit ana's");
+    assert_eq!(bob.client.hub(json!({ "cmd": "remove_mcp_server", "id": linear_id })), Err(format!("the account has no MCP server {linear_id}")));
+    let bobs_import = act(&bob.dir, &bob.tab, "import_mcp_server", json!({ "machine": "ana-mac", "account": "work", "name": "files" })).unwrap();
+    assert_eq!(approve(&mut bob.client, &bobs_import["id"], json!({ "secrets.env.API_TOKEN": "x" })), Err("this account has no machine ana-mac".into()), "bob can't read ana's machine's config");
+    let bobs_remove = act(&bob.dir, &bob.tab, "remove_mcp_server", json!({ "id": linear_id })).unwrap();
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_remove["id"], "approve": true })), Err(format!("no confirmation {} waits", bobs_remove["id"].as_str().unwrap())), "ana's app can't decide bob's");
+    assert_eq!(approve(&mut bob.client, &bobs_remove["id"], json!({})).unwrap()["outcome"], format!("failed: the account has no MCP server {linear_id}"));
+    assert_eq!(ana.client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().as_array().unwrap().len(), 2, "ana's servers are all still there");
+    assert_eq!(machine_result(&url, &ana_machine_token, json!({ "cmd": "load_mcp_servers" })).unwrap()[0]["secrets"]["headers"]["Authorization"], "Bearer ana-linear-secret");
+
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        let trail = trail_of(client);
+        holds_no_mcp_secret(&format!("{who}'s audit trail"), &format!("{trail:?}"));
+        holds_no_mcp_secret(&format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_no_mcp_secret(&format!("{who}'s list"), &client.hub(json!({ "cmd": "list_mcp_servers" })).unwrap().to_string());
+    }
+    let anas = trail_of(&mut ana.client);
+    let refused = anas.iter().find(|r| r.0 == "save_mcp_server" && r.1 == "refused").unwrap();
+    assert_eq!(refused.2, r#"{"server":{"name":"geo","transport":{"type":"stdio","command":"geo","env":["REGION"]}},"secrets":"[hidden]"}"#);
+    let failed = anas.iter().find(|r| r.0 == "save_mcp_server" && r.1 == "failed").unwrap();
+    assert_eq!(failed.3, "linear needs a value for Authorization, which the user types in the app");
+    let bobs: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
+    assert_eq!(bobs.into_iter().collect::<Vec<_>>(), ["enable_mcp_server", "import_mcp_server", "list_mcp_servers", "remove_mcp_server"], "bob's trail holds his acts only");
+}
+
 #[test]
 fn an_agents_box_is_held_to_the_box_budget_and_cap_and_counts_as_its_task_once_it_ends() {
     let hub = TestHub::start_with_boxes("agent_box", Signup::Open, Policy { max_open: 1, ..fast() });

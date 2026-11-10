@@ -308,3 +308,19 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
+
+/* MCP servers: one card per server, its command or URL in mono, its secrets as set badges; the form lays its fields out two to a row. */
+#settings .mcp-server .card-head { display: flex; align-items: center; justify-content: space-between; }
+#settings .mcp-server .mcp-name { min-width: 0; }
+#settings .mcp-reach { display: block; overflow-wrap: anywhere; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04); font: 12px/1.5 var(--g-mono); }
+#settings .mcp-secrets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#settings .mcp-secrets .badge { margin-left: 0; }
+#settings .mcp-server .confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid; }
+#settings .mcp-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#settings .mcp-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--g-muted); font-size: 13px; }
+#settings .mcp-field :is(input, select, textarea) { width: 100%; }
+#settings .mcp-field input[readonly], #settings .mcp-field textarea[readonly], #settings .mcp-field select:disabled { opacity: 0.75; }
+#settings .mcp-fields :is(.wide, .hint.wide) { grid-column: 1 / -1; }
+#settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }

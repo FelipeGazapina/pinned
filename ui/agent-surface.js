@@ -35,7 +35,12 @@ const AGENT_FORMS = {
   set_box_claude_token: { page: "integrations", focus: "box-token", entered: ["token"], noun: "token" },
   add_account: { page: "accounts", entered: ["key"], noun: "key" },
   set_account_key: { page: "accounts", entered: ["key"], noun: "key", same: ["account"] },
+  save_mcp_server: { page: "mcp-servers", entered: ["secrets"], noun: "secrets", how: (c) => agentMcpHow(c.args.server) },
+  import_mcp_server: { page: "mcp-servers", entered: ["secrets"], noun: "secrets", how: () => agentMcpHow(typeof mcpUi === "undefined" ? null : mcpUi.form?.server) },
 };
+/** How the MCP form approves an agent's request: with the secrets typed there, or by saving it. */
+const agentMcpHow = (server) =>
+  server && !(server.transport?.env ?? server.transport?.headers ?? []).length ? "Saving it here approves it." : "Entering its secrets here approves it.";
 /** The confirmation whose Approve opened its form, until that form approves it, Cancel, sign-out, or
  * the hub no longer lists it as waiting. */
 let agentApproving = null;
@@ -47,7 +52,15 @@ const AGENT_AUDIT_PAGE = 50;
 const AGENT_OUTCOME_TONES = { done: "success", approved: "success", pending: "primary", failed: "error", refused: "warning", denied: "muted" };
 
 /** Actions whose words alone read wrong. */
-const AGENT_LABELS = { update_self: "Update pinned", pair_code: "Pair a machine", set_box_claude_token: "Keep box Claude token", remove_box_claude_token: "Forget box Claude token" };
+const AGENT_LABELS = { update_self: "Update pinned", pair_code: "Pair a machine", set_box_claude_token: "Keep box Claude token", remove_box_claude_token: "Forget box Claude token", list_mcp_servers: "List MCP servers" };
+/** What each MCP server action does, in words, with the server named as the MCP page lists it. */
+const AGENT_MCP_COPY = {
+  save_mcp_server: (a) => `${a.id ? "Change" : "Add"} MCP server ${a.server?.name ?? ""}`.trim(),
+  import_mcp_server: (a) => `Import MCP server ${a.name} from ${a.account}`,
+  enable_mcp_server: (a) => `Turn ${a.enabled ? "on" : "off"} MCP server ${agentMcpName(a.id)}`,
+  remove_mcp_server: (a) => `Remove MCP server ${agentMcpName(a.id)}`,
+};
+const agentMcpName = (id) => (typeof mcpUi !== "undefined" && mcpUi.list.find((entry) => entry.id === id)?.server.name) || id;
 const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash" };
 /** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
 function agentWords(name) {
@@ -127,7 +140,7 @@ function agentActionTitle(action, args, machine) {
       args = null;
     }
   }
-  const said = agentSessionCopy(action, args ?? {}, machine);
+  const said = AGENT_MCP_COPY[action]?.(args ?? {}) ?? agentSessionCopy(action, args ?? {}, machine);
   if (said) return said;
   const named = Object.values(args ?? {}).map(agentMachineName).find(Boolean);
   return named ? `${agentWords(action)} ${named}` : agentWords(action);
@@ -178,7 +191,8 @@ function agentAskingHtml(action) {
   const c = agentAsking(action);
   if (!c) return "";
   const keyless = action === "add_account" && c.args.auth !== "opencode-go";
-  const how = keyless ? "Adding the account here approves it." : `Entering the ${AGENT_FORMS[action].noun} here approves it.`;
+  const form = AGENT_FORMS[action];
+  const how = form.how ? form.how(c) : keyless ? "Adding the account here approves it." : `Entering the ${form.noun} here approves it.`;
   return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${agentQuoted(c)} on ${c.machine_name || "a removed machine"}. ${how}`)}
     <button type="button" class="secondary" data-action="cancel-agent-approval">Cancel</button></p>`;
 }
@@ -189,6 +203,7 @@ async function openAgentForm(c) {
   agentApproving = c;
   const form = AGENT_FORMS[c.action];
   if (form.page === "accounts") accountsUi = { machine: localIdOf(c.target ?? c.machine), removing: null, replacing: c.args.account ?? null, error: "" };
+  if (form.page === "mcp-servers") openMcpApproval(c);
   await openSettings(form.page);
   if (c.action === "set_box_claude_token" && !settings.upstash) {
     agentApproving = null;
@@ -204,9 +219,14 @@ function agentApproval(call) {
   if (c?.action !== call.cmd) return null;
   const form = AGENT_FORMS[c.action];
   if (form.same?.some((arg) => call[arg] !== c.args[arg])) return null;
-  const entered = Object.fromEntries(form.entered.filter((field) => call[field] !== undefined).map((field) => [field, call[field]]));
+  const entered = Object.fromEntries(form.entered.filter((field) => call[field] !== undefined).flatMap((field) => agentEnteredPaths(field, call[field])));
   return decideAgentConfirmation(c.id, true, entered).then((decided) => decided.result);
 }
+
+/** What the user typed for an asked field as the hub takes it: text by its name, and each text in an
+ * object by its path, as `secrets.env.API_KEY`. */
+const agentEnteredPaths = (path, value) =>
+  value !== null && typeof value === "object" ? Object.entries(value).flatMap(([name, inner]) => agentEnteredPaths(`${path}.${name}`, inner)) : [[path, value]];
 
 function forgetAgentApproval() {
   agentApproving = null;
