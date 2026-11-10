@@ -166,6 +166,15 @@ pub fn check(changes: &[MarkChange]) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses what only the app's own Archive and Delete write: with them an agent could forget an
+/// archived conversation for good, which `delete_session` holds for the user's approval.
+pub fn agent_check(changes: &[MarkChange]) -> Result<(), String> {
+    if changes.iter().any(|change| matches!(change.mark, Mark::Clear | Mark::Archived(_))) {
+        return Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".into());
+    }
+    check(changes)
+}
+
 /// Applies `changes` in order to `rows`, the current marks of the sessions they name, and answers
 /// every session they touched as it is now, in the order each was first named.
 pub fn apply(rows: &mut BTreeMap<String, SessionMarks>, changes: Vec<MarkChange>) -> Vec<SessionMarks> {
@@ -241,6 +250,15 @@ mod tests {
         apply(&mut rows, row.rebuild());
         apply(&mut rows, vec![change("s1", Mark::Clear), change("s1", Mark::Order(Some(1)))]);
         assert_eq!(apply(&mut rows, row.rebuild()), vec![row]);
+    }
+
+    #[test]
+    fn an_agent_may_not_archive_or_clear_through_marks() {
+        let refused = Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".to_string());
+        assert_eq!(agent_check(&[change("s1", Mark::Title(Some("Fix login".into()))), change("s1", Mark::Clear)]), refused);
+        assert_eq!(agent_check(&[change("s1", Mark::Archived(None))]), refused);
+        assert_eq!(agent_check(&[change("s1", Mark::Seen(None)), change("s1", Mark::Pin(Some(0)))]), Ok(()));
+        assert_eq!(agent_check(&[change("", Mark::Seen(None))]), Err("a mark needs a session id".into()));
     }
 
     #[test]

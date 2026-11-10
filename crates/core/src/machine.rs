@@ -2601,6 +2601,11 @@ impl Machine {
         if let Call::StartClaude { tab, cols, rows } = call {
             return json(self.start_for(caller, &tab, cols, rows)?);
         }
+        if let Call::SetModel { tab, model, .. } = &call {
+            // An agent moves a session only to a model its project allows, as it starts a worker.
+            let cwd = self.tab(tab, |t| t.cwd.clone())?;
+            self.limits_in(&cwd, caller)?.admit(Some(model), None, &self.claude_models())?;
+        }
         let cmd = surface::cmd_of(&call);
         if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
             return Err(format!("{cmd} starts work, and nothing holds it to the limits yet"));
@@ -8963,6 +8968,16 @@ Have another model review a risky change before it goes ahead.";
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
         (m, dir, captain)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_set_model_is_held_to_its_projects_tier() {
+        let (m, dir, captain) = limited_captain("set-model-tier", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let set = |model: &str| m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "set_model", "tab": captain, "model": model, "cols": 80, "rows": 24 }) });
+        assert_eq!(set("claude-opus-5-5"), Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(set("claude-sonnet-5-5"), Ok(json!(dir.join("app").display().to_string())));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
