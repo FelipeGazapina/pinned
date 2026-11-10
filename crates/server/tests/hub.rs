@@ -3884,6 +3884,108 @@ fn synced_files_skills_and_shared_projects_stay_in_their_account() {
     assert_eq!(bob.hub(json!({ "cmd": "sync_list", "project": project })).unwrap()[0]["sha"], sha256_hex(b"bob's plans"));
 }
 
+fn mark(changes: Value) -> Value {
+    json!({ "cmd": "mark_sessions", "changes": changes })
+}
+
+/// Every `session_marks` push the client got, after it read all that came.
+fn marks_pushed(client: &mut Client) -> Vec<Value> {
+    settle(client);
+    client.frames.iter().filter(|f| f["type"] == "session_marks").cloned().collect()
+}
+
+#[test]
+fn a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it() {
+    let hub = TestHub::start("marks_live");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let archived = json!({ "machine": "m-1", "cwd": "/w/site", "name": "Fix login", "project": "site", "at": 1700000100.5, "title": "Fix login", "pinned": true });
+    let filed = laptop.hub(mark(json!([
+        { "session": "s1", "mark": { "title": "Fix login" } },
+        { "session": "s1", "mark": { "pin": 0 } },
+        { "session": "s1", "mark": { "archived": archived } },
+    ])));
+    let row = json!({ "session": "s1", "title": "Fix login", "pin": 0, "archived": archived });
+    assert_eq!(filed, Ok(json!([row])));
+    let filed_push = json!({ "type": "session_marks", "marks": [row] });
+    assert_eq!(phone.wait("the phone hears the laptop's marks", |f| f["type"] == "session_marks"), filed_push, "the push carries the row as the hub keeps it");
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+
+    assert_eq!(laptop.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    let cleared_push = json!({ "type": "session_marks", "marks": [{ "session": "s1" }] });
+    for client in [&mut laptop, &mut phone] {
+        client.wait("the clear's push", |f| *f == cleared_push);
+        assert_eq!(marks_pushed(client), [filed_push.clone(), cleared_push.clone()], "each device hears each change once, in order");
+    }
+    assert_eq!(phone.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a session with no mark left has no row");
+}
+
+#[test]
+fn every_device_ends_on_the_marks_the_hub_kept_after_a_burst_of_changes() {
+    let hub = TestHub::start("marks_burst");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    // Sent without waiting, so the hub runs them at once and they race for the session's row.
+    for seen in 0..20 {
+        laptop.send(json!({ "type": "hub", "id": 100 + seen, "call": mark(json!([{ "session": "s1", "mark": { "seen": seen as f64 } }])) }));
+    }
+    for id in 100..120 {
+        let reply = laptop.wait(&format!("reply {id}"), |f| f["type"] == "reply" && f["id"] == id);
+        assert!(reply.get("err").is_none(), "{reply}");
+    }
+    let kept = laptop.hub(json!({ "cmd": "session_marks" })).unwrap();
+    for client in [&mut laptop, &mut phone] {
+        let pushed = marks_pushed(client);
+        assert_eq!(pushed.len(), 20, "one push per change");
+        assert_eq!(pushed.last().unwrap()["marks"], kept, "the last push a device heard is the row the hub kept");
+    }
+}
+
+#[test]
+fn another_accounts_marks_stay_its_own_even_on_the_same_session_id() {
+    let hub = TestHub::start("iso_marks");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let anas = json!({ "session": "s1", "title": "Ana's plan", "pin": 2 });
+    assert_eq!(ana.hub(mark(json!([{ "session": "s1", "mark": { "title": "Ana's plan" } }, { "session": "s1", "mark": { "pin": 2 } }]))), Ok(json!([anas])));
+
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob reads none of ana's marks");
+    let bobs = json!({ "session": "s1", "title": "Bob's notes" });
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": { "title": "Bob's notes" } }]))), Ok(json!([bobs])), "bob's change on ana's session id starts from no marks");
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([bobs])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's change left ana's row alone");
+    assert_eq!(bob.hub(mark(json!([{ "session": "s1", "mark": "clear" }]))), Ok(json!([{ "session": "s1" }])));
+    assert_eq!(bob.hub(json!({ "cmd": "session_marks" })), Ok(json!([])));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([anas])), "bob's clear left ana's row alone");
+
+    assert_eq!(marks_pushed(&mut ana), [json!({ "type": "session_marks", "marks": [anas] })], "ana heard only her own change");
+    assert_eq!(mentioning(&mut bob, "Ana's plan"), Vec::<Value>::new(), "bob's socket carried none of ana's marks");
+}
+
+#[test]
+fn a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark() {
+    let hub = TestHub::start("marks_refused");
+    let url = hub.url.clone();
+    let (token, _, mut laptop) = signed_in(&url, "ana@acme.dev");
+    let mut phone = signed_in_client(&url, &token);
+    let unnamed = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }, { "session": "", "mark": { "pin": 0 } }])));
+    assert_eq!(unnamed, Err("a mark needs a session id".into()));
+    let long = laptop.hub(mark(json!([{ "session": "s1", "mark": { "title": "x".repeat(pinned_core::marks::MAX_TEXT + 1) } }])));
+    assert_eq!(long, Err("a mark's text may be at most 2000 bytes".into()));
+
+    let (_, machine_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let refused = Err("a machine may only forward a workflow session's callbacks".to_owned());
+    assert_eq!(machine_result(&url, &machine_token, mark(json!([{ "session": "s1", "mark": { "title": "Fix login" } }]))), refused);
+    assert_eq!(machine_result(&url, &machine_token, json!({ "cmd": "session_marks" })), refused);
+
+    assert_eq!(laptop.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "not even a refused call's good change was kept");
+    assert_eq!(marks_pushed(&mut laptop), Vec::<Value>::new());
+    assert_eq!(marks_pushed(&mut phone), Vec::<Value>::new());
+}
+
 #[test]
 fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
     let hub = TestHub::start("iso_pair");
