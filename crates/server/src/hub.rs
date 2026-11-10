@@ -116,6 +116,8 @@ pub struct Hub {
     /// The unlocks apps hold in memory, by the sha256 of the token. A hub restart forgets them, and
     /// the app asks for the password again.
     unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
+    /// Turns true when the hub is about to stop, so every socket sends its close frame.
+    going_away: tokio::sync::watch::Sender<bool>,
 }
 
 struct Unlock {
@@ -206,7 +208,17 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
+    }
+
+    /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
+    pub fn going_away(&self) {
+        self.going_away.send_replace(true);
+    }
+
+    /// Turns true once `going_away` ran.
+    pub fn watch_going_away(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.going_away.subscribe()
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub

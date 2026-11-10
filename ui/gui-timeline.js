@@ -28,73 +28,139 @@ const PUBLISHED = /^Published (.+?) at (https:\/\/claude\.ai\/(?:code\/)?artifac
 const published = (step) => (step.kind === "tool" && step.name === "Artifact" && !step.result?.error && step.result?.text.match(PUBLISHED)) || null;
 const interruption = (step) => /^\[Request interrupted/.test(step.result?.text ?? "");
 
-/** Claude writes a manual compaction just before the `/compact` prompt that asked for it, which T3 Code
- * shows after that prompt. */
-function compactionsAfterTheirPrompt(items) {
-  const out = [];
-  let held = null;
-  for (const item of items) {
-    if (item.kind === "compaction") {
-      if (held) out.push(held);
-      held = item;
-      continue;
-    }
-    if (held && (item.kind === "user" || item.kind === "text" || item.kind === "tool")) {
-      out.push(...(item.kind === "user" && /^\/compact\b/.test(item.text) ? [item, held] : [held, item]));
-      held = null;
-      continue;
-    }
-    out.push(item);
-  }
-  return held ? [...out, held] : out;
-}
-
 /** Rules across the lane that mark the conversation itself: a compaction, or the fork it came from. */
 const DIVIDERS = new Set(["compaction", "fork"]);
 
-function turnsOf(items) {
-  const turns = [];
-  const results = new Map(items.filter((i) => i.kind === "result").map((r) => [r.tool, r]));
-  let turn = null;
-  for (const item of compactionsAfterTheirPrompt(items)) {
-    if (item.kind === "result" || item.kind === "model") continue;
-    if (item.kind === "user" || item.kind === "steer" || !turn) {
-      const user = item.kind === "user" ? item : item.kind === "steer" ? { ...item, kind: "user", images: 0, steer: true } : null;
-      turn = { id: item.id ?? `t${turns.length}`, user, steps: [], prs: [], notes: [], dividers: [] };
-      turns.push(turn);
-      if (user) continue;
-    }
-    if (item.kind === "pr") turn.prs.some((p) => p.url === item.url) || turn.prs.push(item);
-    else if (item.kind === "note") turn.notes.push(item);
-    else if (DIVIDERS.has(item.kind)) turn.dividers.push(item);
-    else turn.steps.push(item.kind === "tool" ? { ...item, result: results.get(item.id) } : item);
+/** The turns of a transcript, built one item at a time so that a thread which grows only reads the items
+ * it hasn't seen: `turnState` holds what the build has so far and `extendTurns` reads the items after it. */
+function turnState(items) {
+  return { items, first: undefined, last: undefined, consumed: 0, turns: [], index: new Map(), turn: null, held: null, results: new Map(), toolSteps: new Map() };
+}
+
+/** Puts one item, already in its final order, into the turn it belongs to. */
+function addToTurn(b, item, dirty) {
+  if (item.kind === "result" || item.kind === "model") return;
+  if (item.kind === "user" || item.kind === "steer" || !b.turn) {
+    const user = item.kind === "user" ? item : item.kind === "steer" ? { ...item, kind: "user", images: 0, steer: true } : null;
+    b.turn = { id: item.id ?? `t${b.turns.length}`, user, steps: [], prs: [], notes: [], dividers: [] };
+    b.index.set(b.turn, b.turns.push(b.turn) - 1);
+    dirty.add(b.turn);
+    if (user) return;
   }
-  for (const t of turns) {
-    // The output of /compact repeats what its divider says.
-    if (t.dividers.some((d) => d.kind === "compaction")) t.notes = t.notes.filter((n) => !/^Compacted\b/.test(n.text));
-    const texts = t.steps.filter((s) => s.kind === "text");
-    t.answer = t.steps.at(-1)?.kind === "text" ? t.steps.at(-1) : null;
-    t.lead = texts[0] && texts[0] !== t.answer ? texts[0] : null;
-    const lastText = t.steps.lastIndexOf(texts.at(-1));
-    // Errors, answered questions and plans stay in sight, and once the turn settles so does a tool that
-    // failed after the last thing claude said.
-    const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result) || !!published(s)));
-    t.failed = new Set(t.steps.filter((s, i) => i > lastText && s.kind === "tool" && s.result?.error && !shown(s) && !interruption(s)));
-    t.shown = t.steps.filter(shown);
-    t.work = t.steps.filter((s) => !shown(s));
-    t.interrupted = t.notes.some((n) => n.text === "Interrupted.");
-    const times = [t.user?.at, ...t.steps.flatMap((s) => [s.at, s.result?.at])].filter(Boolean).map(Date.parse).filter(Number.isFinite);
-    t.start = times.length ? Math.min(...times) : 0;
-    t.end = times.length ? Math.max(...times) : 0;
+  const turn = b.turn;
+  dirty.add(turn);
+  if (item.kind === "pr") turn.prs.some((p) => p.url === item.url) || turn.prs.push(item);
+  else if (item.kind === "note") turn.notes.push(item);
+  else if (DIVIDERS.has(item.kind)) turn.dividers.push(item);
+  else if (item.kind === "tool") {
+    const step = { ...item, result: b.results.get(item.id) };
+    turn.steps.push(step);
+    b.toolSteps.set(item.id, [...(b.toolSteps.get(item.id) ?? []), { step, turn }]);
+  } else turn.steps.push(item);
+}
+
+/** What a turn shows, from the steps and notes it has now. */
+function settleTurn(t) {
+  // The output of /compact repeats what its divider says.
+  if (t.dividers.some((d) => d.kind === "compaction")) t.notes = t.notes.filter((n) => !/^Compacted\b/.test(n.text));
+  const texts = t.steps.filter((s) => s.kind === "text");
+  t.answer = t.steps.at(-1)?.kind === "text" ? t.steps.at(-1) : null;
+  t.lead = texts[0] && texts[0] !== t.answer ? texts[0] : null;
+  const lastText = t.steps.lastIndexOf(texts.at(-1));
+  // Errors, answered questions and plans stay in sight, and once the turn settles so does a tool that
+  // failed after the last thing claude said.
+  const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result) || !!published(s)));
+  t.failed = new Set(t.steps.filter((s, i) => i > lastText && s.kind === "tool" && s.result?.error && !shown(s) && !interruption(s)));
+  t.shown = t.steps.filter(shown);
+  t.work = t.steps.filter((s) => !shown(s));
+  t.interrupted = t.notes.some((n) => n.text === "Interrupted.");
+  let start = Infinity;
+  let end = -Infinity;
+  for (const at of [t.user?.at, ...t.steps.flatMap((s) => [s.at, s.result?.at])]) {
+    const time = at ? Date.parse(at) : NaN;
+    if (!Number.isFinite(time)) continue;
+    if (time < start) start = time;
+    if (time > end) end = time;
   }
-  // A turn's own fold counts the work its steers continued, as T3 Code's top row does.
+  t.start = start === Infinity ? 0 : start;
+  t.end = end === -Infinity ? 0 : end;
+}
+
+/** Settles the turns an update touched, then the runs of steers that end in or run through them. */
+function settleTurns(b, dirty) {
+  if (!dirty.size) return;
+  let lowest = Infinity;
+  for (const t of dirty) {
+    settleTurn(t);
+    lowest = Math.min(lowest, b.index.get(t));
+  }
+  // A turn's own fold counts the work its steers continued, as T3 Code's top row does. A turn that
+  // isn't a steer ends the run before it, so the walk stops at the one at or before the lowest change.
+  let from = lowest;
+  while (from > 0 && b.turns[from].user?.steer) from--;
   let runEnd = 0;
-  for (const t of [...turns].reverse()) {
+  for (let i = b.turns.length - 1; i >= from; i--) {
+    const t = b.turns[i];
     runEnd = Math.max(runEnd, t.end);
     t.runEnd = runEnd;
     if (!t.user?.steer) runEnd = 0;
   }
-  return turns;
+}
+
+/** Reads the items past `b.consumed`. A late result for a tool that has its turn already reaches back to it. */
+function extendTurns(b, items) {
+  const dirty = new Set();
+  for (let i = b.consumed; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "result") continue;
+    b.results.set(item.tool, item);
+    for (const { step, turn } of b.toolSteps.get(item.tool) ?? []) {
+      step.result = item;
+      dirty.add(turn);
+    }
+  }
+  // Claude writes a manual compaction just before the `/compact` prompt that asked for it, which T3 Code
+  // shows after that prompt, so a compaction waits in `held` for the item that follows it.
+  for (let i = b.consumed; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === "compaction") {
+      if (b.held) addToTurn(b, b.held, dirty);
+      b.held = item;
+    } else if (b.held && (item.kind === "user" || item.kind === "text" || item.kind === "tool")) {
+      const [before, after] = item.kind === "user" && /^\/compact\b/.test(item.text) ? [item, b.held] : [b.held, item];
+      addToTurn(b, before, dirty);
+      addToTurn(b, after, dirty);
+      b.held = null;
+    } else addToTurn(b, item, dirty);
+  }
+  b.consumed = items.length;
+  b.first = items[0];
+  b.last = items[items.length - 1];
+  settleTurns(b, dirty);
+}
+
+/** The turns of `items`, which come from the whole transcript. */
+function turnsOf(items) {
+  const b = turnState(items);
+  extendTurns(b, items);
+  // A compaction nothing came after still has its turn.
+  if (b.held) {
+    const dirty = new Set();
+    addToTurn(b, b.held, dirty);
+    settleTurns(b, dirty);
+  }
+  return b.turns;
+}
+
+/** The turns of a thread, kept on it and extended as its items arrive. They are built over when the
+ * items are a new array (a reset or another session), shrank, or no longer start and end as they did. */
+function turnsFor(t) {
+  const items = t.items;
+  let b = t.turnCache;
+  if (!b || b.items !== items || items.length < b.consumed || (b.consumed && (items[0] !== b.first || items[b.consumed - 1] !== b.last))) b = t.turnCache = turnState(items);
+  extendTurns(b, items);
+  // A compaction held for the item after it belongs to the turns, and to the cache only once that item comes.
+  return b.held ? turnsOf(items) : b.turns;
 }
 
 function duration(ms) {
@@ -908,7 +974,7 @@ const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isG
 function globalReportsHtml(user, t, tab, first, by, reports) {
   const mine = user.text.slice(0, reports[0].start).trim();
   const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
-  const rows = reports.map((report) => reportRowHtml(report, user.at)).join("");
+  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`)).join("");
   if (globalSettings.group_reports !== false && reports.length > 1) {
     const key = `reports:${user.id}`;
     const open = t.open.has(key);
@@ -917,17 +983,25 @@ function globalReportsHtml(user, t, tab, first, by, reports) {
   return `${lead}<div class="reports">${rows}</div>`;
 }
 
-/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread. */
-function reportRowHtml(report, at) {
-  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
+/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread.
+ * A long report folds to a few lines under "Show more", which `key` in `t.open` opens. */
+function reportRowHtml(report, at, t, key) {
+  const none = report.text.trim() === "(no reply)";
+  const long = !none && isLongText(report.text);
+  const clamped = long && !t?.open.has(key);
+  const body = none ? "<p>Captain didn't write a reply. Open its thread.</p>" : markdown(report.text);
+  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md${clamped ? " clamped" : ""}">${body}</div>${long ? `<button type="button" class="show-full" data-toggle="${esc(key)}" aria-expanded="${!clamped}">${clamped ? "Show more" : "Show less"}</button>` : ""}</div>`;
 }
+
+/** Whether a message is long enough to fold: past 600 characters or 8 lines. */
+const isLongText = (text) => text.length > 600 || text.split("\n").length > 8;
 
 /** The prompt bubble as every other thread draws it. */
 function userBubbleHtml(user, t, tab, first, by) {
   const cited = citationsIn(user.text);
   if (cited) user = { ...user, text: cited.text, citations: cited.citations };
   const key = `full:${user.id}`;
-  const long = user.text.length > 600 || user.text.split("\n").length > 8;
+  const long = isLongText(user.text);
   const clamped = long && !t.open.has(key);
   const pictures = user.pictures ?? [];
   const uploads = imagePathsIn(user.text);
@@ -1101,7 +1175,7 @@ function renderThread() {
   const resume = !sub && resumeOffered(tab);
   const box = !sub && boxSoon(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
-  const turns = turnsOf(t.items);
+  const turns = turnsFor(t);
   if (globalLane(tab) && !sub) speakGlobalTexts(tab, turns);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
@@ -1263,7 +1337,7 @@ threadView.addEventListener("scroll", () => {
   });
 }, { passive: true });
 
-setInterval(() => {
+visibleInterval(() => {
   for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(Date.now() - Number(ticker.dataset.since));
 }, 1000);
 
@@ -1296,7 +1370,7 @@ function closeSubagent() {
   rerender();
 }
 document.querySelector("#chat-head .crumb").addEventListener("click", (e) => e.target.closest("[data-subagent-back]") && closeSubagent());
-setInterval(() => guiOn() && !document.hidden && subagentShown() && loadSubagent(), POLL_MS);
+visibleInterval(() => guiOn() && subagentShown() && loadSubagent(), POLL_MS);
 
 /** T3 Code's minimap: a strip on the lane's left with a tick per prompt, which previews the prompt and
  * its answer on hover and scrolls to it on click. Only with a fine pointer and two prompts or more. */
@@ -2425,7 +2499,7 @@ window.addEventListener("keydown", (e) => {
 
 async function goToCitation(c) {
   const t = threadOf(active);
-  const turn = turnsOf(t.items).find((x) => x.steps.some((s) => s.id === c.messageId));
+  const turn = turnsFor(t).find((x) => x.steps.some((s) => s.id === c.messageId));
   if (turn) scrollToTurn(turn.id);
   const find = () => threadView.querySelector(`[data-cite-source="${CSS.escape(c.messageId)}"]`);
   if (!find()) return flash("The quoted reply isn't in this thread anymore");

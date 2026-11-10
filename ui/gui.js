@@ -107,7 +107,7 @@ function setHtml(el, html) {
   el.innerHTML = html;
 }
 const middle = (text, over = 14) => (text.length > over ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
-const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
+const prOf = (tab) => threadOf(tab).items.findLast((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
 function hookPhase(tab) {
@@ -313,13 +313,13 @@ function forgetThreadWatch() {
   watchGeneration++;
 }
 
-setInterval(() => {
+visibleInterval(() => {
   publishThreadWatch();
-  if (!guiOn() || document.hidden) return;
+  if (!guiOn()) return;
   for (const tab of tabs) if (followed(tab)) fetchThread(tab);
 }, POLL_MS);
-setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
-setInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
+visibleInterval(() => guiOn() && renderSidebar(), 60 * 1000);
+visibleInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   markThreadSeen(active);
   publishThreadWatch();

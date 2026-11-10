@@ -2727,18 +2727,32 @@ impl Machine {
         serde_json::from_value(handoff).map_err(|e| format!("the hub's answer did not read: {e}"))
     }
 
-    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. The
-    /// orchestrator's messages that started the turn are answered by it, and under
-    /// `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator with their ids.
+    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains.
+    /// Under `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator and answers
+    /// the messages in flight, but only once the Capitão is idle with none of its own tasks still at
+    /// work and has something to say: a turn that ends on a tool call, or one that waits for a worker,
+    /// leaves them in flight for the turn that ends the work. A task at work holds the report only
+    /// while the oldest message in flight is under `CAPTAIN_HOLD` old, so a Capitão that always has a
+    /// worker running still answers. A turn that failed reports at once.
     fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent) {
-        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
-        if answers.is_empty() || self.global_settings().reports != global::ReportPolicy::Auto {
+        if self.global_settings().reports != global::ReportPolicy::Auto {
+            self.sent.lock().unwrap().answer(project);
             return;
         }
+        let Some(oldest) = self.sent.lock().unwrap().in_flight(project).iter().map(|sent| sent.at).min() else { return };
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
-            _ => truncate(&self.reply_of(captain, event).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
+            _ => {
+                let Some(reply) = self.reply_of(captain, event).filter(|reply| !reply.trim().is_empty()) else { return };
+                let waited = unix_now().saturating_sub(oldest);
+                if waited < CAPTAIN_HOLD.as_secs() && self.delegates.working_for(&format!("tab:{captain}")) > 0 {
+                    return;
+                }
+                let machine = self.hub_id.lock().unwrap().clone();
+                captain_report_text(&reply, captain, &machine)
+            }
         };
+        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
         // Up to the hub it may wait a minute, which the hook that ended the turn must not.
         let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
         std::thread::spawn(move || {
@@ -5363,9 +5377,37 @@ fn canonical(path: &str) -> PathBuf {
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
 
-/// Most of a worker's last message an orchestrator is sent, or of a Capitão's last message the
-/// global orchestrator is sent; the rest stays in the thread.
+/// Most of a worker's last message an orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
+
+/// Most of a Capitão's last message the global orchestrator is sent whole. Above it the report
+/// keeps its first `REPORT_HEAD` and last `REPORT_TAIL` characters, since a summary or a table of
+/// results usually closes a message.
+const CAPTAIN_REPORT_CHARS: usize = 16_000;
+
+/// How long a Capitão's task at work holds its report back, counted from the oldest message in
+/// flight; after it the next reply goes up even with tasks still working.
+const CAPTAIN_HOLD: Duration = Duration::from_secs(600);
+const REPORT_HEAD: usize = 10_000;
+const REPORT_TAIL: usize = 5_000;
+
+/// What a Capitão's reply says to the global orchestrator: the reply, or its head and tail with the
+/// way to read the whole of it. `machine` is the hub's id for this machine, empty when not linked.
+fn captain_report_text(reply: &str, captain: &str, machine: &str) -> String {
+    let total = reply.chars().count();
+    if total <= CAPTAIN_REPORT_CHARS {
+        return reply.to_owned();
+    }
+    let head_end = reply.char_indices().nth(REPORT_HEAD).map_or(reply.len(), |(at, _)| at);
+    let tail_start = reply.char_indices().nth(total - REPORT_TAIL).map_or(reply.len(), |(at, _)| at);
+    let on = if machine.is_empty() { String::new() } else { format!(", machine \"{machine}\"") };
+    format!(
+        "{}\n\n[{} of {total} characters left out of the middle. The whole message is the Capitão's latest one: read_session with id \"{captain}\"{on} and items 1 returns it whole. Once it has said more, ask for more items.]\n\n{}",
+        &reply[..head_end],
+        total - REPORT_HEAD - REPORT_TAIL,
+        &reply[tail_start..],
+    )
+}
 
 /// `text` cut to `max` characters, with a note that says where the rest is.
 fn truncate(text: &str, max: usize, rest: &str) -> String {
@@ -9020,7 +9062,7 @@ while True:
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
-        m.record_event(hook(&tab, AgentStatus::Done));
+        m.record_event(AgentEvent { reply: Some("Shipped.".into()), ..hook(&tab, AgentStatus::Done) });
         let both = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r\x1b[200~[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
@@ -9495,10 +9537,10 @@ while True:
         global_idle();
         turn(None, Some("Reply two."));
         turn(Some("r-3"), None);
-        wait_for("the second report", || reports().len() == 2);
-        global_idle();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reports().len(), 1, "a turn with no text reports nothing, and keeps r-3 in flight");
         turn(Some("r-4"), Some("Reply four."));
-        wait_for("the third report", || reports().len() == 3);
+        wait_for("the second report", || reports().len() == 2);
         global_idle();
 
         let delivered = m.sent.lock().unwrap().in_flight(&m.global_folder());
@@ -9506,11 +9548,138 @@ while True:
         let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
         assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(reports(), ["Reply one.", "(no reply)", "Reply four."], "each turn's own reply, each once");
-        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        assert_eq!(reports(), ["Reply one.", "Reply four."], "each report once, and none for a turn with no text");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 2);
+        assert_eq!(m.sent.lock().unwrap().find("r-3").map(|s| s.progress), Some(Progress::Answered), "r-3 is answered by the report that ends its work");
         let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
         assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A host machine with a Capitão that has finished a turn and a global orchestrator whose typed
+    /// input lands in a file. Returns the machine, its folder, the project path, the Capitão's tab,
+    /// and a function that lists the reports the orchestrator was typed.
+    #[cfg(unix)]
+    fn report_stack(name: &str) -> (Arc<Machine>, PathBuf, String, String, impl Fn() -> Vec<String>) {
+        let dir = temp(name);
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (thread_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+        let reports = move || -> Vec<String> {
+            read_pty(&inbox).split("\x1b[200~").skip(1).map(|pasted| pasted.split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r").to_owned()).collect()
+        };
+        (m, dir, path, capitao, reports)
+    }
+
+    /// One turn of the Capitão for the orchestrator's message `request_id`, ending on `reply`.
+    #[cfg(unix)]
+    fn captain_turn(m: &Machine, dir: &Path, path: &str, capitao: &str, n: u32, request_id: &str, reply: Option<&str>) {
+        assert_eq!(enqueue(m, path, request_id, request_id).unwrap()["outcome"], "entregue");
+        m.record_event(hook(capitao, AgentStatus::Working));
+        append_transcript(dir, "s1", &turn_lines(n, &format!("[Orquestrador] {request_id}"), reply));
+        m.record_event(hook(capitao, AgentStatus::Done));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_waiting_on_its_task_reports_when_the_task_has_ended_not_at_its_first_turn() {
+        let (m, dir, path, capitao, reports) = report_stack("report-waits");
+        let started = delegate_task(&m, &capitao, json!({
+            "task": "Fix the form.",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" },
+        }));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some("I'll report when the worker ends."));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new(), "its task is still working");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::InFlight), "the message stays unanswered");
+
+        m.delegates.fail(&task, "stopped for the test".into(), None);
+        append_transcript(&dir, "s1", &turn_lines(2, "[worker] the task ended", Some("The form ships: PR #7.")));
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || reports().len() == 1);
+        assert_eq!(reports(), ["The form ships: PR #7."]);
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_report_goes_up_once_the_message_has_waited_ten_minutes_though_a_task_still_works() {
+        let (m, dir, path, capitao, reports) = report_stack("report-hold-ends");
+        let started = delegate_task(&m, &capitao, json!({
+            "task": "Run the pipeline.",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" },
+        }));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some("Started the pipeline."));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new(), "a fresh message is held while its task works");
+
+        m.sent.lock().unwrap().backdate("r-1", CAPTAIN_HOLD.as_secs() + 1);
+        append_transcript(&dir, "s1", &turn_lines(2, "[Orquestrador] reply now with the plan", Some("The plan: ship the form, then the report.")));
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || reports().len() == 1);
+        assert_eq!(reports(), ["The plan: ship the form, then the report."]);
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        assert!(m.delegates.working_for(&format!("tab:{capitao}")) > 0, "the task is still working");
+        m.delegates.fail(&task, "stopped for the test".into(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_with_no_text_sends_no_report_and_no_empty_one() {
+        let (m, dir, path, capitao, reports) = report_stack("report-no-text");
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", None);
+        captain_turn(&m, &dir, &path, &capitao, 2, "r-2", Some("   "));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new());
+        assert_eq!(m.sent.lock().unwrap().in_flight(&PathBuf::from(&path)).len(), 2, "both messages still wait for a reply");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_20k_report_arrives_as_head_and_tail_with_a_pointer_that_read_session_resolves_to_the_whole_text() {
+        let (m, dir, path, capitao, reports) = report_stack("report-long");
+        let whole: String = (0..4000).map(|i| format!("{i:04} ")).collect();
+        assert_eq!(whole.chars().count(), 20_000);
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some(&whole));
+        wait_for("the report", || reports().len() == 1);
+        let sent = reports().remove(0);
+        assert!(sent.starts_with(&whole[..10_000]), "the head is there");
+        assert!(sent.ends_with(&whole[15_000..]), "the tail is there");
+        assert!(sent.contains("5000 of 20000 characters left out") && sent.contains(&format!("read_session with id \"{capitao}\"")), "the pointer names the session: {}", &sent[10_000..10_400]);
+        let read: Value = serde_json::from_str(&m.read_session(&capitao, None, Some(1)).unwrap()).unwrap();
+        assert_eq!(read["conversation"]["items"][0]["text"], whole.as_str(), "read_session returns the whole message");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_report_up_to_16k_is_sent_whole_and_a_longer_one_keeps_its_ends() {
+        let whole = "x".repeat(16_000);
+        assert_eq!(captain_report_text(&whole, "tab-1", "m1"), whole);
+        let long = format!("{}{}{}", "a".repeat(10_000), "é".repeat(3_000), "z".repeat(5_000));
+        let cut = captain_report_text(&long, "tab-1", "m1");
+        assert!(cut.starts_with(&"a".repeat(10_000)) && cut.ends_with(&"z".repeat(5_000)));
+        assert!(cut.contains("3000 of 18000 characters left out") && cut.contains("id \"tab-1\", machine \"m1\" and items 1"), "{cut}");
     }
 
     /// The Stop hook's payload for session s1, as Claude Code 2.1.322 sends it, with the turn's last

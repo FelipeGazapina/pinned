@@ -32,6 +32,9 @@ pub struct Config {
     pub learning_db: Option<String>,
 }
 
+/// How long the hub gives sockets to close once it is told to stop, before it drops them.
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct Running {
     pub hub: Arc<hub::Hub>,
     pub addr: SocketAddr,
@@ -60,9 +63,21 @@ pub async fn start(config: Config) -> Result<Running, String> {
     });
     hub.watch_all().await?;
     let app = http::router(hub.clone(), config.ui, config.downloads, learning).into_make_service_with_connect_info::<SocketAddr>();
+    // `going_away` closes every socket with a close frame, which lets the graceful stop finish. A
+    // socket that doesn't answer is dropped after the grace period.
+    let (mut stopping, mut forced) = (hub.watch_going_away(), hub.watch_going_away());
+    let serving = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = stopping.wait_for(|away| *away).await;
+    });
     let server = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("pinned-server: the hub stopped: {e}");
+        tokio::select! {
+            served = serving => if let Err(e) = served {
+                eprintln!("pinned-server: the hub stopped: {e}");
+            },
+            _ = async {
+                let _ = forced.wait_for(|away| *away).await;
+                tokio::time::sleep(SHUTDOWN_GRACE).await;
+            } => eprintln!("pinned-server: dropped the connections that did not close within {}s", SHUTDOWN_GRACE.as_secs()),
         }
     });
     eprintln!("pinned-server: hub listening on {addr} as {}", hub.public_url);

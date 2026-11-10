@@ -727,7 +727,7 @@ panelBody.addEventListener("submit", (e) => {
 });
 
 /** A Device tab that closes ends its screen's stream. */
-setInterval(() => {
+visibleInterval(() => {
   const keep = new Set([...panelStates.values()].flatMap((p) => p.surfaces.map((s) => s.id)));
   for (const id of deviceScreens.keys()) if (!keep.has(id)) closeDeviceScreen(id);
 }, 1000);
