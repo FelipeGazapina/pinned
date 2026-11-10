@@ -269,7 +269,7 @@ function tastePreviewHtml(t) {
   const dots = [0, 1, 2].map((i) => `<span${i < speed ? ' class="on"' : ""}></span>`).join("");
   return `<aside class="taste-preview"><h2>${tasteUi.scope.kind === "orchestrator" ? `What the ${esc(globalSettings.name)} receives` : "What the Captain receives"}</h2>
     <div class="taste-box"><div class="taste-lines">${lines}</div>
-      <div class="taste-meters"><div><span>Cost per task</span><span title="A rough estimate from each model's cost tier">${tasteCost(t)}</span></div>
+      <div class="taste-meters"><div><span>Cost per task</span><span title="A rough estimate from each model's cost tier">${tasteCost(t, (id) => tasteModelTier(id, claudeModels()))}</span></div>
       <div><span>Speed</span><span class="taste-speed" role="img" aria-label="Speed ${speed} of 3">${dots}</span></div></div></div>
     <p class="taste-hint">Changes with the fields on the left.</p></aside>`;
 }

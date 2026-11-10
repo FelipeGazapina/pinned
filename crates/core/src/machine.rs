@@ -2604,7 +2604,8 @@ impl Machine {
     }
 
     /// Runs an agent's act for the session in `caller`, as the hub passes it on. A call that starts
-    /// a session holds it to the delegation limits; one with no such path yet is refused.
+    /// a session holds it to the delegation limits; one with no such path yet is refused. `caller`
+    /// names no tab here when the act runs on another machine than the session's.
     fn act_for(&self, caller: &str, call: Value) -> Result<Value, String> {
         let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
         if let Call::StartClaude { tab, cols, rows } = call {
@@ -2613,6 +2614,16 @@ impl Machine {
         if let Call::SetModel { model, .. } = &call {
             // An agent moves a session only to a model its own project allows, as it starts a worker.
             self.caller_limits(caller)?.admit(Some(model), None, &self.claude_models())?;
+        }
+        if let Call::Enqueue { path, text, request_id, busy, .. } = call {
+            return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
+        }
+        if let Call::Prompt { tab, text } = &call {
+            self.may_prompt(caller, tab)?;
+            return json(self.type_prompt(tab, text)?);
+        }
+        if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
+            return Err("open_global_orchestrator is for the global orchestrator's own session".into());
         }
         let cmd = surface::cmd_of(&call);
         if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
@@ -2628,6 +2639,56 @@ impl Machine {
             return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
         }
         self.call(call)
+    }
+
+    /// Whether the session in `caller` may type a prompt into `tab`: a session of another kind than
+    /// itself, a Captain or the global orchestrator. Those take a message through their queue, so
+    /// it never lands in the middle of their turn: `enqueue`, or `tell_orchestrator`.
+    fn may_prompt(&self, caller: &str, tab: &str) -> Result<(), String> {
+        if caller == tab {
+            return Err("prompt types into another session; your own session is the one reading this".into());
+        }
+        let (captain, global, chat) = self.tab(tab, |t| (matches!(role_of(&t.env), Some((Role::Orchestrator, _))), global::is_global(&t.env), taste::is_chat(&t.env)))?;
+        match (global, captain, chat) {
+            (true, _, _) => Err(format!("{tab} is the global orchestrator: a Captain reports to it with tell_orchestrator")),
+            (_, true, _) => Err(format!("{tab} is a Captain: enqueue hands it a message when it is idle")),
+            (_, _, true) => Err(format!("{tab} is a taste chat, which only the user talks to")),
+            _ => Ok(()),
+        }
+    }
+
+    /// Hands `text` to the Captain of `path` for the agent in `caller`, labelled with the caller's
+    /// own role, never the orchestrator's name; the `sender` it sent is ignored. A Captain that is not running starts on it, which is
+    /// a session start: it must pass the project's tier and effort limits, and the project must run
+    /// fewer than its workers-at-once. A Captain that runs takes the message with no new session.
+    fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+        let project = canonical(path);
+        let tab = self.open_orchestrator(path)?;
+        if tab == caller {
+            return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
+        }
+        let (running, model) = self.tab(&tab, |t| (t.session.is_some() || t.starting, t.model.clone()))?;
+        if !running {
+            let limits = self.limits_in(caller, &project);
+            limits.admit(model.as_deref(), None, &self.claude_models())?;
+            let working = self.delegates.working_in(&project);
+            if working >= limits.parallel as usize {
+                return Err(workers_full(working));
+            }
+        }
+        let sender = self.tab(caller, |t| (global::is_global(&t.env), role_of(&t.env).map(|(role, _)| role), t.title.clone())).map_or_else(
+            |_| "Session".to_owned(),
+            |(global, role, title)| {
+                let kind = match (global, role) {
+                    (true, _) => return self.global_settings().name,
+                    (_, Some(Role::Orchestrator)) => "Captain",
+                    (_, Some(Role::Worker)) => "Worker",
+                    _ => "Session",
+                };
+                title.map_or_else(|| kind.to_owned(), |title| format!("{kind} {title}"))
+            },
+        );
+        self.enqueue_to_captain(path, text, request_id, &sender, busy)
     }
 
     /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
@@ -2777,10 +2838,17 @@ impl Machine {
     /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
     /// is a worker.
     fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
-        let (cwd, own_task) = self.tab(tab, |t| (t.cwd.clone(), t.task.clone()))?;
-        let limits = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        Ok(self.limits_in(tab, &history::project_of(&cwd)))
+    }
+
+    /// The limits for starting a session in `project` on behalf of `tab`: the project's, narrowed by
+    /// the limits of the task `tab` itself runs, when it is a worker here.
+    fn limits_in(&self, tab: &str, project: &Path) -> taste::Limits {
+        let own_task = self.tab(tab, |t| t.task.clone()).ok().flatten();
+        let limits = self.tastes().resolve(&captain_scope(project)).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
-        Ok(outer.map_or(limits, |outer| limits.narrow(outer)))
+        outer.map_or(limits, |outer| limits.narrow(outer))
     }
 
     /// Prices what each working worker thread's transcripts gained, its subagents' included,
@@ -9216,7 +9284,7 @@ Have another model review a risky change before it goes ahead.";
         drop(m.tab(&first, |t| t.session.take()).unwrap());
         assert_eq!(start(&first), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()), "a tab whose task ended claims a new one");
 
-        assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue starts work, and nothing holds it to the limits yet".into()));
+        assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue hands a message to a Captain; your own session is the one reading this".into()));
         assert_eq!(act(json!({ "cmd": "start_claude", "tab": captain, "cols": 80, "rows": 24 })), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker")));
         let listed = act(json!({ "cmd": "tabs" })).unwrap();
         assert_eq!(listed.as_array().map(Vec::len), Some(3), "a read runs as Machine::call runs it: {listed}");
@@ -9234,6 +9302,146 @@ Have another model review a risky change before it goes ahead.";
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(m.call(Call::ActFor { caller: global, call: json!({ "cmd": "start_claude", "tab": plain, "cols": 80, "rows": 24 }) }), Err(NO_PROJECT_WORK.into()));
         assert!(!m.view(&outside).unwrap().running && !m.view(&wide).unwrap().running && !m.view(&plain).unwrap().running, "a refused start starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent's act as the hub runs it on a machine: the manifest's wiring, the arguments parsed
+    /// into the call, and `act_for` for the session in `caller`.
+    fn act_as(m: &Machine, caller: &str, action: &str, args: Value) -> Result<Value, String> {
+        let action = surface::find(action).unwrap_or_else(|| panic!("no action {action}"));
+        assert!(action.wired && action.class != surface::Class::Excluded, "{} is not open to agents", action.name);
+        let surface::Parsed::Node(call) = surface::parse(action, &args)? else { panic!("{} is a hub call", action.name) };
+        m.call(Call::ActFor { caller: caller.into(), call: serde_json::to_value(&call).unwrap() })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_enqueue_starts_a_stopped_captain_only_under_the_projects_limits_and_signs_as_the_caller() {
+        let (m, dir, captain) = limited_captain("act-enqueue", TastePatch { tier: Some(taste::Tier::Mid), parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        m.tab(&session, |t| t.title = Some("Fix login".into())).unwrap();
+        let enqueue = |from: &str, request: &str| act_as(&m, from, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": request, "sender": "Orchestrator" }));
+
+        assert_eq!(
+            enqueue(&session, "r-1"),
+            Err("name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working".into())
+        );
+        m.tab(&captain, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        assert_eq!(enqueue(&session, "r-1"), Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        m.tab(&captain, |t| t.model = Some("claude-sonnet-5-5".into())).unwrap();
+        assert!(!m.view(&captain).unwrap().running, "a refused message starts nothing");
+
+        let worker = m.open_tab(Some(path.clone()), false).unwrap();
+        m.tab(&worker, |t| t.model = Some("claude-sonnet-5-5".into())).unwrap();
+        act_as(&m, &captain, "start_claude", json!({ "tab": worker, "cols": 80, "rows": 24 })).unwrap();
+        let task = m.tab(&worker, |t| t.task.clone()).unwrap().expect("the worker runs a task");
+        assert_eq!(
+            enqueue(&session, "r-1"),
+            Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into())
+        );
+        assert!(!m.view(&captain).unwrap().running, "a project at its workers-at-once starts no Captain");
+        m.task_cancel(Some(captain.clone()), None, &task, "not needed").unwrap();
+
+        assert!(enqueue(&session, "r-1").is_ok());
+        assert!(m.view(&captain).unwrap().running, "a stopped Captain starts on the message");
+        let args = started(&dir.join("claude"), &captain);
+        assert!(args.iter().any(|a| a == "[Session Fix login] Ship it."), "the message names its sender, not the orchestrator: {args:?}");
+
+        let again = enqueue(&session, "r-1").unwrap();
+        let first = m.sent.lock().unwrap().find("r-1").map(|sent| sent.handoff.clone()).expect("the ledger kept the message");
+        assert_eq!(again, serde_json::to_value(first).unwrap(), "a repeat of its request_id answers the first outcome");
+        assert_eq!(enqueue(&captain, "r-2"), Err("enqueue hands a message to a Captain; your own session is the one reading this".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
+        let (m, dir, captain) = limited_captain("act-prompt", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let (me, other) = (m.open_tab(Some(path.clone()), false).unwrap(), m.open_tab(Some(path.clone()), false).unwrap());
+        let prompt = |tab: &str| act_as(&m, &me, "prompt", json!({ "tab": tab, "text": "Rebase on main." }));
+        assert_eq!(prompt(&other), Err(format!("tab {other} has no running session")));
+        m.start_claude(&other, 80, 24).unwrap();
+        assert_eq!(prompt(&other), Ok(Value::Null));
+        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), ["Rebase on main."], "the prompt reached the session, held until its screen draws");
+        assert_eq!(prompt(&me), Err("prompt types into another session; your own session is the one reading this".into()));
+        assert_eq!(prompt(&captain), Err(format!("{captain} is a Captain: enqueue hands it a message when it is idle")));
+        let global = m.open_global_orchestrator().unwrap();
+        assert_eq!(prompt(&global), Err(format!("{global} is the global orchestrator: a Captain reports to it with tell_orchestrator")));
+        assert_eq!(prompt("tab-gone-9"), Err("no tab tab-gone-9".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_opens_scratch_and_captain_tabs_and_only_the_global_orchestrator_opens_its_own() {
+        let (m, dir, captain) = limited_captain("act-open", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let scratch = act_as(&m, &session, "open_scratch", json!({ "bypass": false })).unwrap();
+        let scratch = scratch.as_str().unwrap().to_owned();
+        let view = m.view(&scratch).unwrap();
+        assert!(!view.running && !view.bypass && !view.cwd.starts_with(&path), "a scratch tab opens unstarted, outside every project: {view:?}");
+        assert_eq!(act_as(&m, &session, "open_orchestrator", json!({ "path": path })), Ok(json!(captain)), "the project's Captain tab is the one that is open");
+        assert_eq!(act_as(&m, &session, "open_orchestrator", json!({ "path": "/no/such/folder" })), Err("/no/such/folder is not a folder on this machine".into()));
+        assert_eq!(act_as(&m, &session, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+        assert_eq!(act_as(&m, &captain, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+        let global = m.open_global_orchestrator().unwrap();
+        assert_eq!(act_as(&m, &global, "open_global_orchestrator", json!({})), Ok(json!(global)));
+        assert!(!m.view(&session).unwrap().running && !m.view(&captain).unwrap().running, "opening a tab starts no session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_makes_and_lists_projects_sets_their_account_and_keeps_their_scripts() {
+        let (m, dir, captain) = limited_captain("act-projects", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let act = |action: &str, args: Value| act_as(&m, &session, action, args);
+
+        let made = dir.join("made/deeper");
+        assert_eq!(act("make_folder", json!({ "path": made })), Ok(json!(made)));
+        assert!(made.is_dir());
+        assert_eq!(act("create_project", json!({ "name": "  " })), Err("Name the project.".into()), "it reaches the same scaffold the app's New project does");
+        assert!(act("publish_project", json!({ "path": made })).is_err(), "a folder with no git history is not published");
+
+        assert_eq!(act("set_project_account", json!({ "path": path, "account": "work" })), Ok(json!({ "path": path, "name": "app", "account": "work" })));
+        assert_eq!(act("set_project_account", json!({ "path": path, "account": "home" })), Err("no account home on this machine".into()));
+        let listed = act("list_projects", json!({})).unwrap();
+        assert_eq!(listed[0], json!({ "path": path, "name": "app", "account": "work" }), "{listed}");
+
+        let script = json!({ "id": "dev", "name": "Dev", "command": "npm run dev" });
+        assert_eq!(act("save_project_scripts", json!({ "tab": session, "scripts": [script] })), Ok(Value::Null));
+        assert_eq!(act("project_scripts", json!({ "tab": session })).unwrap()["scripts"][0]["command"], "npm run dev");
+        assert_eq!(act("search_threads", json!({ "query": "no conversation says this" })), Ok(json!([])));
+        assert_eq!(act("project_history", json!({ "path": path })).unwrap().as_array().map(Vec::len), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_changes_the_machines_orchestrator_settings_prices_and_skills_through_the_surface() {
+        let (m, dir, captain) = limited_captain("act-settings", TastePatch::default());
+        let act = |action: &str, args: Value| act_as(&m, &captain, action, args);
+
+        let saved = act("set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true, "busy": "queue" } })).unwrap();
+        assert_eq!((saved["name"].as_str(), saved["host"].as_bool()), (Some("Almirante"), Some(true)), "{saved}");
+        assert_eq!(act("global_orchestrator_settings", json!({})).unwrap(), saved, "the read sees what the write saved");
+
+        let book = act("set_usage_prices", json!({ "prices": { "claude-sonnet-5-5": { "input": 3.0, "output": 15.0 } }, "aliases": { "claude-sonnet-5-5-x": "claude-sonnet-5-5" } })).unwrap();
+        assert_eq!(book["aliases"]["claude-sonnet-5-5-x"], "claude-sonnet-5-5", "{book}");
+        assert_eq!(act("usage_prices", json!({})).unwrap(), book);
+        let cleared = act("set_usage_prices", json!({ "prices": { "claude-sonnet-5-5": null }, "aliases": {} })).unwrap();
+        assert_eq!(cleared["prices"], json!({}), "{cleared}");
+
+        let skills = act("skills", json!({})).unwrap();
+        assert!(skills["copies"].is_array(), "{skills}");
+        let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
+        assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
+        assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
