@@ -243,7 +243,7 @@ const hubUp = () => {
     await waitFor("both nodes back after the hub", () => page.evaluate(() => machineOnline("sweep-node") && machineOnline("sweep-node-2")), 90000);
     await settle();
     check(!(await page.evaluate(barShows)), `${size}: the bar clears when the hub is back`);
-    check((await since()) !== held, `${size}: the timer runs again (${held} -> ${await since()})`);
+    check(await page.evaluate(() => linkDownAt === null), `${size}: the timer runs again (it shows minutes, so it still reads ${await since()})`);
     await shot("reconnected");
     await context.close();
 
