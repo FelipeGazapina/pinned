@@ -49,8 +49,19 @@ const TASTE_WAIT: Duration = Duration::from_millis(500);
 const MCP_WAIT: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const MCP_WAIT: Duration = Duration::from_millis(500);
+/// What a remote worker waits on the user for, as its machine told the one that delegated it.
+struct SentAsk {
+    ask: Option<crate::delegate::RemoteAsk>,
+    at: Instant,
+    sent: bool,
+}
+
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
+/// How often, and how many times, a blocked session's transcript is read again for the call it
+/// waits on; and how long a remote ask waits for that detail before it is told without.
+const ASK_DETAIL_TRIES: u32 = 8;
+const ASK_DETAIL_WAIT: u64 = 5;
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
 /// How long a start the hub did not answer waits before it asks again, when the hub was not
 /// there to answer (a timeout already waited).
@@ -376,6 +387,8 @@ struct Tab {
     message: Option<String>,
     /// What the last finished turn asked the user, until the next turn starts or fails.
     question: Option<String>,
+    /// The tool call or question the session waits on while a turn is blocked on the user.
+    ask_detail: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
@@ -463,6 +476,7 @@ impl Tab {
             queued: queued.get(id).copied().unwrap_or_default(),
             work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
+            ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
         }
     }
 
@@ -577,6 +591,9 @@ pub struct Machine {
     /// When the end of each task run here for another machine's tab was last sent, by task, so
     /// an end the hub could not pass on is sent again at most every `REMOTE_LOOK`.
     remote_ends: Mutex<HashMap<String, Instant>>,
+    /// What each task running here for another machine last told that machine its worker waits on,
+    /// by task id, and whether the hub passed it on.
+    remote_asks: Mutex<HashMap<String, SentAsk>>,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
@@ -767,6 +784,7 @@ impl Machine {
             agents: Mutex::default(),
             delegates,
             remote_ends: Mutex::default(),
+            remote_asks: Mutex::default(),
             memories,
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
@@ -1046,6 +1064,7 @@ impl Machine {
             Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
             Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
             Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
+            Call::RemoteAsked { from, tab, task, ask } => json(self.remote_asked(&from, &tab, &task, ask)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
@@ -2799,6 +2818,9 @@ impl Machine {
                 since: u64::try_from(confirmation.at).ok(),
                 project: None,
                 kind: global::WaitingKind::Confirm,
+                ask: None,
+                tool: None,
+                detail: None,
                 machine: confirmation.machine,
                 machine_name: confirmation.machine_name,
                 tab: confirmation.tab,
@@ -4212,7 +4234,7 @@ impl Machine {
         self.delegates.hold_to(&task.id, held);
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
-        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
+        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
         let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         let begun = Instant::now();
         match self.call_hub(asked.clone()) {
@@ -4245,7 +4267,7 @@ impl Machine {
         if let Some(placed) = self.delegates.get(id).and_then(|task| task.placement) {
             self.delegates.set_placement(id, crate::placement::Placed { machine: machine.clone(), machine_name: name.clone(), ..placed });
         }
-        self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+        self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()), waiting: None });
         self.arm_delegate_pass();
     }
 
@@ -4266,7 +4288,7 @@ impl Machine {
                 match me.call_hub(asked.clone()) {
                     Ok(answer) => {
                         if me.delegates.get(&id).is_none_or(|task| task.state.terminal()) {
-                            let remote = crate::delegate::RemoteTarget { machine: answer["machine"].as_str().unwrap_or_default().to_owned(), name: String::new(), tab: None, looked: None };
+                            let remote = crate::delegate::RemoteTarget { machine: answer["machine"].as_str().unwrap_or_default().to_owned(), name: String::new(), tab: None, looked: None, waiting: None };
                             me.cancel_remote(&tab, &id, &remote, "it was cancelled while it started");
                         } else {
                             me.remote_answered(&id, &answer);
@@ -4311,6 +4333,11 @@ impl Machine {
 
     /// Ends the remote task when `answer`, the status its machine gave, says it ended.
     fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
+        // A machine that keeps count of what its worker waits on says so in every status, `null`
+        // included; one that predates it sends no key, which leaves what a notice told.
+        if answer.get("waiting").is_some() {
+            self.apply_remote_ask(tab, id, &remote.machine, serde_json::from_value(answer["waiting"].clone()).ok());
+        }
         let state = answer["workState"].as_str().unwrap_or_default();
         let usage = serde_json::from_value::<crate::usage::TaskUsage>(answer["usage"].clone()).ok();
         if !matches!(state, "result_available" | "failed" | "cancelled") {
@@ -4337,6 +4364,103 @@ impl Machine {
         self.maybe_deliver(&parent);
         self.emit_tabs();
         true
+    }
+
+    /// `Call::RemoteAsked`: the machine `from` runs this machine's task `task` for `tab`, and its
+    /// worker waits on the user for `ask`, or waits on nothing now.
+    fn remote_asked(&self, from: &str, tab: &str, task: &str, ask: Option<crate::delegate::RemoteAsk>) -> bool {
+        self.apply_remote_ask(tab, task, from, ask)
+    }
+
+    /// Keeps what a remote task's worker waits on the user for, and tells `tab` once when it starts
+    /// to wait. False when `tab` has no such working task on `from`.
+    fn apply_remote_ask(&self, tab: &str, id: &str, from: &str, ask: Option<crate::delegate::RemoteAsk>) -> bool {
+        let Some((tab, changed)) = self.delegates.set_remote_waiting(id, tab, from, ask.clone()) else { return false };
+        match (changed, &ask) {
+            (true, Some(ask)) => self.tell_asked(&tab, id, ask),
+            (true, None) => self.delegates.withdraw_ask(id),
+            _ => {}
+        }
+        if changed {
+            self.emit_tabs();
+        }
+        true
+    }
+
+    /// Queues the news that a remote worker waits on the user for `ask` into `tab`, which types it
+    /// once idle, the way a task's end arrives. Each ask is told once, though the machine that runs
+    /// the worker may report it again.
+    fn tell_asked(&self, tab: &str, id: &str, ask: &crate::delegate::RemoteAsk) {
+        let Some(task) = self.delegates.get(id) else { return };
+        let place = task.remote.as_ref().map_or("another machine", |remote| remote.name.as_str());
+        let what = match (ask.kind, ask.tool.as_deref()) {
+            (global::AskKind::Approval, Some(tool)) => format!("approval to use {tool}"),
+            (kind, _) => kind.word().to_owned(),
+        };
+        let line = format!(
+            "[pinned] Worker \"{}\" on {place}{}{what}: {}. The user answers in its thread on {place}; it keeps its place, so do not cancel it for that.",
+            task.title,
+            crate::delegate::ASK_NOTICE,
+            ask.ask
+        );
+        let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
+        if self.delegates.queue_ask(&format!("ask:{id}:{}", ask.since), tab, session, line, id) {
+            self.arm_delegate_pass();
+        }
+    }
+
+    /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
+    fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
+        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?;
+        if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
+            return None;
+        }
+        if view.ask_detail.is_none() && unix_now().saturating_sub(view.updated.unwrap_or_default()) < ASK_DETAIL_WAIT {
+            return None;
+        }
+        let (kind, tool) = global::ask_of(view.message.as_deref());
+        Some(crate::delegate::RemoteAsk { kind, tool, ask: view.ask_detail.or(view.message).unwrap_or_default(), since: view.updated.unwrap_or_default() })
+    }
+
+    /// The tool call or question the session of `tab` is blocked on: the latest call of its
+    /// transcript that has no result yet.
+    fn pending_ask(&self, tab: &str) -> Option<String> {
+        let file = self.transcript(tab).ok()?;
+        let page = thread::read(&file, thread::last_page(&file)).ok()?;
+        let (_, summary) = thread::pending_tool(&page.items)?;
+        Some(summary.to_owned()).filter(|summary| !summary.is_empty())
+    }
+
+    /// Tells the machine that delegated each task running here for another machine what its
+    /// worker waits on the user for, and that it waits on nothing once answered. Each change is
+    /// sent until the hub passes it on, at most every `REMOTE_LOOK`.
+    fn send_remote_asks(&self, now: Instant) {
+        let threads = self.delegates.remote_threads();
+        let asks: Vec<_> = threads.into_iter().map(|(id, machine, tab, task, thread)| (id, machine, tab, task, self.thread_ask(&thread))).collect();
+        let due: Vec<_> = {
+            let mut sent = self.remote_asks.lock().unwrap();
+            sent.retain(|id, _| asks.iter().any(|(task, ..)| task == id));
+            asks.into_iter()
+                .filter(|(id, _, _, _, ask)| match sent.get(id) {
+                    None => ask.is_some(),
+                    Some(was) => was.ask != *ask || (!was.sent && now.saturating_duration_since(was.at) >= REMOTE_LOOK),
+                })
+                .collect()
+        };
+        for (id, machine, tab, task, ask) in due {
+            self.remote_asks.lock().unwrap().insert(id.clone(), SentAsk { ask: ask.clone(), at: now, sent: false });
+            match self.call_hub(HubCall::RemoteAsked { to: machine.clone(), tab, task, ask: ask.clone() }) {
+                Ok(_) if ask.is_none() => {
+                    self.remote_asks.lock().unwrap().remove(&id);
+                }
+                Ok(_) => {
+                    if let Some(entry) = self.remote_asks.lock().unwrap().get_mut(&id) {
+                        entry.sent = true;
+                    }
+                }
+                Err(e) => eprintln!("pinned: could not tell {machine} what {id} waits on: {e}"),
+            }
+        }
     }
 
     /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
@@ -4407,6 +4531,7 @@ impl Machine {
         let mut status = self.delegates.status(&caller, &id)?;
         if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+            status["waiting"] = serde_json::json!(self.thread_ask(&thread.tab));
         }
         Ok(status)
     }
@@ -5073,6 +5198,7 @@ impl Machine {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
+                machine.send_remote_asks(Instant::now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
@@ -5369,6 +5495,7 @@ impl Machine {
             title: None,
             message: None,
             question: None,
+            ask_detail: None,
             held: vec![],
             turn_pending: None,
             background_wait: None,
@@ -5511,6 +5638,9 @@ impl Machine {
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
+        // Claude says it waits for input a while after every finished turn too, which asks nothing.
+        let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
+        let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at, t.held_at_limit);
             match event.status {
@@ -5539,6 +5669,7 @@ impl Machine {
             if event.status != AgentStatus::NeedsInput {
                 t.question = None;
             }
+            t.ask_detail = detail;
             t.status = Some(event.status);
             if event.title.is_some() {
                 t.title = event.title.clone();
@@ -5554,6 +5685,29 @@ impl Machine {
         if changed == Ok(true) {
             self.save_sessions();
         }
+        if event.status == AgentStatus::NeedsInput && !was_done && self.tab(tab, |t| t.ask_detail.is_none()).unwrap_or(false) {
+            self.find_ask_detail_later(tab);
+        }
+    }
+
+    /// Claude Code can fire its permission notice before it writes the call to the transcript, so
+    /// a detail not found at the event is looked for again for a few seconds.
+    fn find_ask_detail_later(&self, tab: &str) {
+        let (me, tab) = (self.me.clone(), tab.to_owned());
+        std::thread::spawn(move || {
+            for _ in 0..ASK_DETAIL_TRIES {
+                std::thread::sleep(Duration::from_millis(500));
+                let Some(machine) = me.upgrade() else { return };
+                if machine.tab(&tab, |t| t.status != Some(AgentStatus::NeedsInput) || t.ask_detail.is_some()).unwrap_or(true) {
+                    return;
+                }
+                if let Some(detail) = machine.pending_ask(&tab) {
+                    let _ = machine.tab(&tab, |t| t.ask_detail = Some(detail).filter(|_| t.status == Some(AgentStatus::NeedsInput)));
+                    machine.emit_tabs();
+                    return;
+                }
+            }
+        });
     }
 
     /// Starts a turn on a prompt, or on its end saves what the session changed since.
@@ -6337,11 +6491,11 @@ pub(crate) mod tests {
         let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
         m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
         let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
-        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None });
+        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None, waiting: None });
         let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
         assert!(m.delegates.settle_remote(&remote, &captain, "m-mini", &end(usage(Some(0.30), (2000, 800), None))).is_some());
         let boxed = start(Parent::Tab(captain.clone()), "Box suite", Provider::Claude, "claude-sonnet-5-5");
-        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None });
+        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None, waiting: None });
         assert!(m.delegates.settle_remote(&boxed, &captain, "m-box", &end(usage(Some(0.10), (500, 250), Some(0.05)))).is_some());
         let cursor = start(Parent::Tab(captain.clone()), "Cursor review", Provider::Cursor, "composer-2.5");
 
@@ -11338,7 +11492,7 @@ Have another model review a risky change before it goes ahead.";
             client_request_id: None,
             role: None,
         });
-        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()) });
+        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()), waiting: None });
         task.id
     }
 
@@ -11415,7 +11569,7 @@ Have another model review a risky change before it goes ahead.";
         let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
         let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some("s-parent".into()));
         let task = delegated_elsewhere(&before, &tab, "m-mini", "mini");
-        before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()) });
+        before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()), waiting: None });
         before.record_event(reports(&tab, "s-parent", AgentStatus::Working, None));
         before.quit();
         drop(before);
@@ -11644,6 +11798,201 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(state_of(&m, &gone), ("failed".into(), Some("mini is gone from this account (a box that ended, or a machine someone removed), so its worker can't finish".into())));
         assert_eq!(state_of(&m, &done).0, "result_available", "an end that never arrived lands on the look");
         assert_eq!(m.delegates.get(&done).unwrap().summary.as_deref(), Some("Green."));
+    }
+
+    fn bash_ask(command: &str) -> crate::delegate::RemoteAsk {
+        crate::delegate::RemoteAsk { kind: global::AskKind::Approval, tool: Some("Bash".into()), ask: command.into(), since: 1794239000 }
+    }
+
+    #[test]
+    fn a_remote_workers_approval_shows_on_its_task_tells_the_thread_once_and_clears_when_answered() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let status = || m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &id).unwrap();
+        let asked = |from: &str, ask: Option<crate::delegate::RemoteAsk>| m.call(Call::RemoteAsked { from: from.into(), tab: "tab-1".into(), task: id.clone(), ask }).unwrap();
+        assert_eq!(status()["waiting"], Value::Null, "nothing waits at its start");
+
+        assert_eq!(asked("m-mini", Some(bash_ask("git push origin main"))), json!(true));
+        assert_eq!(status()["waiting"], json!({ "kind": "approval", "tool": "Bash", "ask": "git push origin main", "since": 1794239000, "machine": "mini", "tab": null }));
+        assert!(status()["next"].as_str().unwrap().contains("its worker waits on the user (approval: git push origin main); the user answers in its thread on mini"), "{}", status()["next"]);
+        let (notice, _) = m.delegates.claim_notice("tab-1").expect("the thread that delegated it is told");
+        assert_eq!(
+            notice,
+            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use Bash: git push origin main. The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
+        );
+        asked("m-mini", Some(bash_ask("git push origin main")));
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "an ask the machine reports again is told once");
+        assert_eq!(asked("m-other", Some(bash_ask("rm -rf /"))), json!(false), "only the machine that runs the task says what it waits on");
+
+        assert_eq!(asked("m-mini", None), json!(true));
+        assert_eq!(status()["waiting"], Value::Null, "answered");
+    }
+
+    #[test]
+    fn an_ask_the_thread_has_not_heard_yet_is_taken_back_when_it_is_answered_first() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let asked = |ask: Option<crate::delegate::RemoteAsk>| m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask }).unwrap();
+        asked(Some(bash_ask("git push origin main")));
+        asked(None);
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "the thread is busy, and by the time it is idle the worker was answered");
+    }
+
+    #[test]
+    fn a_look_at_a_remote_task_learns_what_its_worker_waits_on_when_the_notice_was_lost() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let waiting = Arc::new(Mutex::new(json!({ "kind": "question", "ask": "Which one should open the PR?", "since": 1794239100 })));
+        let answers = waiting.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "working", "waiting": answers.lock().unwrap().clone() })),
+            _ => Err("not this test's".into()),
+        }));
+        let now = Instant::now();
+        m.check_remotes(now + Duration::from_secs(61));
+        let status = |m: &Machine| m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &id).unwrap();
+        assert_eq!(status(&m)["waiting"]["kind"], json!("question"));
+        assert_eq!(status(&m)["waiting"]["ask"], json!("Which one should open the PR?"));
+        *waiting.lock().unwrap() = Value::Null;
+        m.check_remotes(now + Duration::from_secs(130));
+        assert_eq!(status(&m)["waiting"], Value::Null, "a `null` from a machine that keeps count says it waits on nothing");
+    }
+
+    #[test]
+    fn a_remote_task_that_ends_waiting_on_nothing_clears_what_it_waited_on() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask: Some(bash_ask("ls")) }).unwrap();
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None, usage: None };
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), end }).unwrap(), json!(true));
+        assert_eq!(m.delegates.get(&id).unwrap().remote.unwrap().waiting, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_blocked_on_a_permission_prompt_tells_the_machine_that_delegated_it_the_command_then_that_it_goes_on() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent, Thread};
+        let root = temp("remote-ask");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Push the fix."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","message":{"content":[{"type":"tool_use","id":"t0","name":"Bash","input":{"command":"git status"}}]}}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"2026-10-29T10:01:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"t0","content":"clean"}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-29T10:02:00Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let (sent, told) = std::sync::mpsc::channel();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteAsked { to, tab, task, ask } = call {
+                let _ = sent.send((to, tab, task, ask));
+            }
+            Ok(json!(true))
+        }));
+        let app = Path::new("/work/app");
+        let work = m.accounts.get("work").unwrap();
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work, vec![], role_env(Role::Worker, app), false, Some("s1".into()));
+        m.spawn(&worker, sh("exec cat > /dev/null"), pty::size(80, 24)).unwrap();
+        let key = Origin::key("m-mac", "tab-1");
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Push the fix".into(),
+            account: "work".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        let event = |status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(worker.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+
+        m.record_event(event(AgentStatus::Working, None));
+        m.send_remote_asks(Instant::now());
+        assert!(told.try_recv().is_err(), "a worker that works asks nothing");
+
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));
+        let now = Instant::now();
+        m.send_remote_asks(now);
+        let (to, tab, origin_task, ask) = told.try_recv().expect("the machine that delegated it is told");
+        assert_eq!((to.as_str(), tab.as_str(), origin_task.as_str()), ("m-mac", "tab-1", "task-mac"));
+        let ask = ask.unwrap();
+        assert_eq!((ask.kind, ask.tool.as_deref(), ask.ask.as_str()), (global::AskKind::Approval, Some("Bash"), "git push origin main"), "the call the prompt waits on, not the one that ran before it");
+        m.send_remote_asks(now + Duration::from_secs(10));
+        assert!(told.try_recv().is_err(), "told once, though the pass runs every second");
+        let status = m.remote_task("m-mac", "tab-1", "task-mac", None).unwrap();
+        assert_eq!((status["waiting"]["kind"].as_str(), status["waiting"]["ask"].as_str()), (Some("approval"), Some("git push origin main")), "a look at the task says it too: {status}");
+
+        m.record_event(event(AgentStatus::Working, None));
+        m.send_remote_asks(now + Duration::from_secs(20));
+        let (_, _, _, cleared) = told.try_recv().expect("answered: the machine that delegated it is told it goes on");
+        assert_eq!(cleared, None);
+        m.send_remote_asks(now + Duration::from_secs(30));
+        assert!(told.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_ask_the_hub_did_not_take_is_sent_again_and_the_generic_idle_notice_is_no_ask() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent, Thread};
+        let m = machine();
+        let (sent, told) = std::sync::mpsc::channel();
+        let up = Arc::new(AtomicBool::new(false));
+        let reach = up.clone();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteAsked { ask, .. } = call {
+                if !reach.load(Ordering::SeqCst) {
+                    return Err("ana-mac is offline".into());
+                }
+                let _ = sent.send(ask);
+            }
+            Ok(json!(true))
+        }));
+        let worker = running(&m, role_env(Role::Worker, Path::new("/work/app")), "exec cat > /dev/null");
+        let key = Origin::key("m-mac", "tab-1");
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Push the fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        let event = |status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(worker.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        m.record_event(event(AgentStatus::Working, None));
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude needs your input")));
+        m.send_remote_asks(Instant::now());
+        assert!(told.try_recv().is_err(), "it waits a moment for the transcript to name the call");
+        m.tab(&worker, |t| t.updated = Some(unix_now() - 60)).unwrap();
+        let now = Instant::now();
+        m.send_remote_asks(now);
+        assert!(told.try_recv().is_err(), "the hub is down");
+        m.send_remote_asks(now + Duration::from_secs(1));
+        assert!(told.try_recv().is_err(), "not sent again before REMOTE_LOOK passed");
+        up.store(true, Ordering::SeqCst);
+        m.send_remote_asks(now + REMOTE_LOOK);
+        let ask = told.try_recv().expect("sent again once the hub can pass it on").unwrap();
+        assert_eq!((ask.kind, ask.ask.as_str()), (global::AskKind::Question, "Claude needs your input"));
+        m.record_event(event(AgentStatus::Done, None));
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude is waiting for your input")));
+        m.send_remote_asks(now + REMOTE_LOOK * 2);
+        assert_eq!(told.try_recv().expect("the turn ended"), None, "the idle notice after a finished turn asks nothing");
     }
 
     #[test]

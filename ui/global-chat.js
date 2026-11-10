@@ -66,6 +66,17 @@ function waitingKindOf(view) {
   return null;
 }
 
+/** What a thread blocked on the user asks of them, as the orchestrator's `waiting()` says it
+ * (`global_orchestrator::ask_of`): an `approval`, with the tool it is for, when Claude Code's notice
+ * says it needs permission to use one, else a `question`. `waiting_cases.json` lists the cases. */
+function askOf(view) {
+  const message = view?.message ?? "";
+  if (!/permission/i.test(message)) return { kind: "question", tool: null };
+  const at = message.indexOf(" to use ");
+  const tool = at < 0 ? "" : message.slice(at + " to use ".length).trim().replace(/\.$/, "");
+  return { kind: "approval", tool: tool || null };
+}
+
 /** How long a finished turn's question stays an offer, in seconds (`global_orchestrator::OFFER_SECS`). */
 const OFFER_SECS = 24 * 60 * 60;
 

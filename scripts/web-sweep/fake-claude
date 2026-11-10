@@ -317,6 +317,8 @@ function submit() {
     line = "";
     return prompt();
   }
+  // A brief marked [ask] opens with the permission prompt, as a worker that needs a tool it was not given.
+  if (line.includes("[ask]")) line = "/ask";
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
     hook("Notification", { message: "Claude needs your permission to use Bash" });

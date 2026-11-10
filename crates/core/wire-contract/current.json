@@ -1115,6 +1115,41 @@
                 ]
               },
               {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -3912,6 +3947,52 @@
               "wall_ms"
             ]
           },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -6099,6 +6180,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -10227,6 +10343,41 @@
                 ]
               },
               {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -12986,6 +13137,52 @@
               "wall_ms"
             ]
           },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -15134,6 +15331,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -18782,6 +19014,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -20609,6 +20848,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -23555,6 +23829,52 @@
               "wall_ms"
             ]
           },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "TaskRecord": {
             "description": "One finished delegated task, as the hub keeps it for the account.",
             "type": "object",
@@ -24728,6 +25048,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -26523,6 +26850,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "From a machine: `true` once machine `to` took what the worker of the task its tab `tab`\ndelegated here as `task` waits on the user for. No `ask` says it waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -29375,6 +29737,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "TaskRecord": {
@@ -36367,6 +36775,31 @@
               "kind": {
                 "$ref": "#/$defs/WaitingKind"
               },
+              "ask": {
+                "description": "Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that\npredates it, and from any other kind.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AskKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tool": {
+                "description": "The tool an `approval` is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "description": "What the tool call or the question is, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "project": {
                 "description": "The project folder the tab works in, when it has one.",
                 "type": [
@@ -36417,6 +36850,21 @@
                 "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
                 "type": "string",
                 "const": "confirm"
+              }
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
               }
             ]
           },
@@ -36943,6 +37391,31 @@
               "kind": {
                 "$ref": "#/$defs/WaitingKind"
               },
+              "ask": {
+                "description": "Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that\npredates it, and from any other kind.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AskKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tool": {
+                "description": "The tool an `approval` is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "description": "What the tool call or the question is, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "project": {
                 "description": "The project folder the tab works in, when it has one.",
                 "type": [
@@ -36993,6 +37466,21 @@
                 "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
                 "type": "string",
                 "const": "confirm"
+              }
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
               }
             ]
           },
@@ -42792,6 +43280,13 @@
               "string",
               "null"
             ]
+          },
+          "ask_detail": {
+            "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -43168,6 +43663,13 @@
           },
           "question": {
             "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ask_detail": {
+            "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
             "type": [
               "string",
               "null"
@@ -44901,6 +45403,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -47967,6 +48476,13 @@
               },
               "question": {
                 "description": "What the session's last finished turn asked the user, read from its last reply. Cleared when\nthe next turn starts or fails.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask_detail": {
+                "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
                 "type": [
                   "string",
                   "null"
@@ -51682,6 +52198,41 @@
                 ]
               },
               {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
                 "description": "`global_orchestrator::Settings` of this machine.",
                 "type": "object",
                 "properties": {
@@ -54479,6 +55030,52 @@
               "wall_ms"
             ]
           },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
+            ]
+          },
           "GlobalOrchestratorSettings": {
             "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
             "type": "object",
@@ -56869,6 +57466,41 @@
                   "tab",
                   "task",
                   "end"
+                ]
+              },
+              {
+                "description": "`null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits\non the user for `ask`, or, with none, waits on nothing now.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remote_asked"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "ask": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RemoteAsk"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "from",
+                  "tab",
+                  "task"
                 ]
               },
               {
@@ -59629,6 +60261,52 @@
               "tokens_in",
               "tokens_out",
               "wall_ms"
+            ]
+          },
+          "RemoteAsk": {
+            "description": "What a task that runs on another machine waits on the user for: its thread there is blocked on\nan approval or a question. The machine that runs it reports it as it starts and again, as `None`,\nonce it is answered, and the thread that delegated the task keeps it until then.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/AskKind"
+              },
+              "tool": {
+                "description": "The tool an approval is for, such as `Bash`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ask": {
+                "description": "What the thread asks, as its session said it.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Unix seconds the thread started to wait.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "ask",
+              "since"
+            ]
+          },
+          "AskKind": {
+            "description": "What a session that cannot go on without the user asks of them.",
+            "oneOf": [
+              {
+                "description": "A tool waits on a permission prompt.",
+                "type": "string",
+                "const": "approval"
+              },
+              {
+                "description": "The session asked a question (`AskUserQuestion`).",
+                "type": "string",
+                "const": "question"
+              }
             ]
           },
           "GlobalOrchestratorSettings": {

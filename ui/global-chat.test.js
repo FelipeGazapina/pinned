@@ -16,6 +16,7 @@ const quickReplyOf = call("quickReplyOf");
 const speechTextOf = call("speechTextOf");
 const waitingKindOf = call("waitingKindOf");
 const offerOf = call("offerOf");
+const askOf = call("askOf");
 // A top-level const stays in the vm's script scope, so it is read back through the vm itself.
 const globalSettings = vm.runInContext("globalSettings", context);
 
@@ -77,6 +78,11 @@ test("a thread waits on the user, or holds an offer, in exactly the cases the or
     waitingCases.cases.map((c) => [c.case, offerOf(view(c), waitingCases.now) !== null]),
     waitingCases.cases.map((c) => [c.case, c.offer === true]),
   );
+  assert.deepEqual(
+    waitingCases.cases.filter((c) => c.waits === "needs_input").map((c) => [c.case, askOf(view(c)).kind]),
+    waitingCases.cases.filter((c) => c.waits === "needs_input").map((c) => [c.case, c.ask]),
+    "an approval and a question tell apart as the orchestrator's waiting() tells them",
+  );
   assert.equal(waitingKindOf(null), null);
   assert.equal(offerOf(null, waitingCases.now), null);
 });
@@ -121,4 +127,12 @@ test("the global orchestrator's tab shows its name where an ordinary tab shows i
   const projectName = vm.runInContext(`${line}; projectName`, context);
   assert.equal(projectName({ view: { cwd: "/home/felipe/.pinned/orquestrador", orchestrator_global: true } }), "Orchestrator");
   assert.equal(projectName({ view: { cwd: "/home/felipe/work/site" } }), "site");
+});
+
+test("an approval names its tool and a question names none", () => {
+  assert.deepEqual(askOf({ message: "Claude needs your permission to use Bash" }), { kind: "approval", tool: "Bash" });
+  assert.deepEqual(askOf({ message: "Claude needs your permission to use mcp__pinned__act" }), { kind: "approval", tool: "mcp__pinned__act" });
+  assert.deepEqual(askOf({ message: "Claude needs your permission" }), { kind: "approval", tool: null });
+  assert.deepEqual(askOf({ message: "Claude needs your input" }), { kind: "question", tool: null });
+  assert.deepEqual(askOf(null), { kind: "question", tool: null });
 });
