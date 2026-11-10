@@ -579,3 +579,5 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 .replace-key .error { flex-basis: 100%; margin: 0; }
 #login .retry, .sign-in .retry { align-self: flex-start; padding: 0; color: inherit; text-decoration: underline; }
 .sign-in .retry[hidden], #login .retry[hidden] { display: none; }
+#settings .machine-row button:disabled { opacity: 0.45; cursor: default; }
+#settings .machine-row .hint[data-standing="behind"] { color: var(--g-warning-fg, #d9822b); }

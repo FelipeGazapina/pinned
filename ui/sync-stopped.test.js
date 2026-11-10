@@ -143,6 +143,9 @@ function entry(syncStopped) {
     machinesUi: { renaming: null, removing: null },
     machines: new Map([["box", { view: { id: "box", name: "box" }, syncStopped }]]),
     rowUpdate: () => "",
+    updateStanding: () => ({ standing: "unknown", text: "", button: { label: "Update", disabled: false, title: "", primary: false } }),
+    updateButtonHtml: () => "",
+    machineWork: () => ({ running: 0, waiting: 0 }),
     lastSeen: () => "",
     machineStateHtml: () => "",
   }).machineEntryHtml("box", { id: "box", name: "box", os: "linux", online: true });
