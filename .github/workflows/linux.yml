@@ -18,5 +18,6 @@ jobs:
       - run: bash scripts/test-assemble-latest-json.sh scripts/fixtures/v0.16.0
       - run: python3 scripts/test-release-rerun.py
       - run: python3 scripts/test-release-tags.py
+      - run: bash scripts/test-apple-signing-env.sh
       - run: npm ci
       - run: cargo test -p pinned-server --lib

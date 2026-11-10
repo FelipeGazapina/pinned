@@ -1,6 +1,7 @@
 use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
+use pinned_core::login_store::{self, LoginStore};
 use pinned_core::machine::{Event, Listener, Machine};
 use pinned_core::process;
 use pinned_core::wire::HubCall;
@@ -12,6 +13,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct Account {
     dir: PathBuf,
+    /// Holds the login where this system has a credential store; `account.json` keeps the rest.
+    store: Option<Box<dyn LoginStore>>,
     /// A connector callback holds a read lock while the hub answers, so signing out waits for it.
     signed_in: RwLock<Option<SignedIn>>,
     watcher: Mutex<Option<JoinHandle<()>>>,
@@ -34,9 +37,19 @@ pub struct View {
 
 impl Account {
     pub fn start(app: &AppHandle, dir: PathBuf, machine: Arc<Machine>) -> Account {
-        let signed_in = Credentials::load(&dir).map(|creds| SignedIn { link: connect(&creds, machine.clone()), creds });
+        let store = login_store::system();
+        let signed_in = Credentials::load_app(&dir, store.as_deref()).map(|creds| SignedIn { link: connect(&creds, machine.clone()), creds });
         let watcher = signed_in.is_none().then(|| watch_connectors(app.clone(), machine));
-        Account { dir, signed_in: RwLock::new(signed_in), watcher: Mutex::new(watcher) }
+        Account { dir, store, signed_in: RwLock::new(signed_in), watcher: Mutex::new(watcher) }
+    }
+
+    /// Stops the link and ends its login: on disk, in the store, then at the hub.
+    fn forget(&self, SignedIn { creds, link }: SignedIn) {
+        link.stop();
+        creds.remove_app(&self.dir, self.store.as_deref());
+        if let Err(e) = account::logout(&creds.hub, &creds.user_token) {
+            eprintln!("pinned: sign out: {e}");
+        }
     }
 
     pub fn is_signed_in(&self) -> bool {
@@ -168,7 +181,11 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
         let (machine, machine_token) = account::register_machine(&hub, &user_token, &computer_name(), std::env::consts::OS)?;
         let creds = Credentials { hub, email: view.email, user_token, machine_id: machine.id, machine_token };
         let state = app.state::<Account>();
-        creds.save(&state.dir)?;
+        let previous = state.signed_in.write().unwrap().take();
+        if let Some(previous) = previous {
+            state.forget(previous);
+        }
+        creds.save_app(&state.dir, state.store.as_deref())?;
         if let Some(watcher) = state.watcher.lock().unwrap().take() {
             watcher.abort();
         }
@@ -208,12 +225,8 @@ pub async fn dictation_feedback(app: AppHandle, feedback: account::DictationFeed
 pub async fn sign_out(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Account>();
-        let Some(SignedIn { creds, link }) = state.signed_in.write().unwrap().take() else { return Ok(()) };
-        link.stop();
-        account::Credentials::remove(&state.dir);
-        if let Err(e) = account::logout(&creds.hub, &creds.user_token) {
-            eprintln!("pinned: sign out: {e}");
-        }
+        let Some(signed_in) = state.signed_in.write().unwrap().take() else { return Ok(()) };
+        state.forget(signed_in);
         let machine = app.state::<Arc<Machine>>().inner().clone();
         *state.watcher.lock().unwrap() = Some(watch_connectors(app.clone(), machine));
         Ok(())
