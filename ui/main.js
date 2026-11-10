@@ -1420,6 +1420,7 @@ function connectHub(signedIn) {
     locked: (error) => askOwnerPassword(error),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";
+      noteHubLink(on);
       if (on) retryUploadImages();
       if (settingsOpen() && page === "account") showAccount();
     },
@@ -1464,6 +1465,7 @@ function disconnectHub() {
   hub = null;
   account = null;
   delete document.body.dataset.hub;
+  noteHubLink(true);
   for (const id of [...machines.keys()]) {
     if (id === LOCAL) continue;
     setTabs(id, [], { forget: false });
