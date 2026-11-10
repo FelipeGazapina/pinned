@@ -95,8 +95,8 @@ const send = (page, key, text) =>
     const ids = await page.evaluate(() => Object.fromEntries([...machines].filter(([, m]) => m.view.online).map(([k, m]) => [m.view.name, k])));
     const node = ids["sweep-node"];
 
-    // The Captain on sweep-node starts a worker on sweep-mini, which stays at work.
-    fs.writeFileSync(path.join(DIR, "home", "delegate-calls.jsonl"), JSON.stringify({ task: "Apply the orders migration. [hold]", title: "Apply the orders migration", target: { machine: "sweep-mini" } }));
+    // The Captain on sweep-node starts a worker on sweep-mini, whose first step is a permission prompt.
+    fs.writeFileSync(path.join(DIR, "home", "delegate-calls.jsonl"), JSON.stringify({ task: "/ask", title: "Apply the orders migration", target: { machine: "sweep-mini" } }));
     const captain = await page.evaluate(async ({ machine, alpha }) => {
       const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path: alpha }));
       activate(tab);
@@ -106,7 +106,6 @@ const send = (page, key, text) =>
     await waitFor("the Captain's session", () => page.evaluate((k) => tabByKey(k)?.view.running === true, captain.key));
     await send(page, captain.key, "Ship the orders migration on the mini.");
     const worker = await waitFor("the worker on sweep-mini", () => page.evaluate((id) => tabs.find((t) => t.view.spawned_by === id && t.view.role === "worker")?.key ?? null, captain.id), 60000);
-    await waitFor("the worker at work", () => page.evaluate((k) => statusOf(tabByKey(k)) === "working", worker), 60000);
     check(await page.evaluate((k) => machines.get(tabByKey(k).machine).view.name, worker) === "sweep-mini", "the worker runs on sweep-mini");
 
     // Two loose threads on sweep-node: one asks a question, one hits a usage limit.
@@ -120,8 +119,7 @@ const send = (page, key, text) =>
     await loose("Pick who opens the PR", "/questions");
     await loose("Fix the flaky checkout test", "limited");
 
-    // The worker hits its permission prompt: type /ask into its thread, on its own machine.
-    await send(page, worker, "/ask");
+    // The worker's brief is `/ask`, which the fake claude answers with a Bash permission prompt.
     await waitFor("three rows in Waiting on you", () => page.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 40000).catch(async (e) => {
       console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => ({ title: t.view.title, machine: machines.get(t.machine)?.view.name, status: t.view.status, running: t.view.running, interrupted: t.view.interrupted, message: t.view.message, detail: t.view.ask_detail, menu: !!t.menu }))), null, 1));
       throw e;
