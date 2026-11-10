@@ -398,7 +398,7 @@ impl Delegates {
     /// (id, title).
     pub fn waited_children(&self, tab: &str, task: Option<&str>) -> Vec<(String, String)> {
         let tasks = self.tasks.lock().unwrap();
-        tasks.iter().filter(|child| child_of(child, tab, task) && (!child.state.terminal() || !child.delivered)).map(|child| (child.id.clone(), child.title.clone())).collect()
+        tasks.iter().filter(|child| Some(child.id.as_str()) != task && child_of(child, tab, task) && (!child.state.terminal() || !child.delivered)).map(|child| (child.id.clone(), child.title.clone())).collect()
     }
 
     /// Pauses the time limit of each working task whose worker waits on the user: the local
@@ -559,6 +559,13 @@ impl Delegates {
     pub(crate) fn backdate(&self, id: &str, by: Duration) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.started -= by.as_millis() as u64;
+        }
+    }
+
+    /// Moves the task's start back by `by` on the clock its time limit reads, as if it had worked that long.
+    #[cfg(test)]
+    pub(crate) fn backdate_run(&self, id: &str, by: Duration) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.run.begun = task.run.begun.checked_sub(by).unwrap_or(task.run.begun);
         }
     }
@@ -2291,7 +2298,7 @@ fn held_children(tasks: &[Task], id: &str) -> Vec<Value> {
     let Some(thread) = &task.thread else { return vec![] };
     tasks
         .iter()
-        .filter(|child| child_of(child, &thread.tab, Some(id)) && (!child.state.terminal() || !child.delivered))
+        .filter(|child| child.id != id && child_of(child, &thread.tab, Some(id)) && (!child.state.terminal() || !child.delivered))
         .map(|child| json!({ "taskId": child.id, "title": child.title, "workState": child.state.as_str() }))
         .collect()
 }

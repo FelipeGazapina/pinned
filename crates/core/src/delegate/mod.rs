@@ -1529,6 +1529,7 @@ grok-4.7-high - Grok 4.7  High
         let task = new_on(&first, Provider::Claude);
         first.link_thread(&task.id, Thread { tab: "tab-1".into(), runs: true });
         first.backdate(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.backdate_run(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
         first.set_worker_session(&task.id, "s-worker");
         drop(first);
 
@@ -2882,6 +2883,7 @@ exec '{real}' "$@"
         let first = Delegates::load(Some(file.clone()));
         let task = thread_task(&first, Duration::from_secs(3600));
         first.backdate(&task.id, Duration::from_secs(1800));
+        first.backdate_run(&task.id, Duration::from_secs(1800));
         first.set_worker_session(&task.id, "s-worker");
         drop(first);
         // pinned stays down for two hours: the wall clock moves, the counted half hour does not.

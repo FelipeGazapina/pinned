@@ -5139,9 +5139,9 @@ impl Machine {
                 continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.clear_answered_asks(Instant::now());
                 machine.note_user_waits(Instant::now());
-                let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.send_remote_asks(Instant::now());
