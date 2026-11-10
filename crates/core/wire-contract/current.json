@@ -3071,6 +3071,31 @@
                   "text",
                   "id"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the\naccount of the project at `path`, else the default one. User and local scope come from that\naccount's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or\nits URL's origin only, never its arguments, environment or headers.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_servers"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -6019,7 +6044,7 @@
                 ]
               },
               {
-                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice. `entered` holds what the user typed in the app\nfor a credential action's asked fields (`surface::Action::asks`); a credential action whose\nrun fails waits again, so the user can type another.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -6031,6 +6056,12 @@
                   },
                   "approve": {
                     "type": "boolean"
+                  },
+                  "entered": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -11576,6 +11607,31 @@
                   "text",
                   "id"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the\naccount of the project at `path`, else the default one. User and local scope come from that\naccount's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or\nits URL's origin only, never its arguments, environment or headers.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_servers"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -14471,7 +14527,7 @@
                 ]
               },
               {
-                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice. `entered` holds what the user typed in the app\nfor a credential action's asked fields (`surface::Action::asks`); a credential action whose\nrun fails waits again, so the user can type another.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14483,6 +14539,12 @@
                   },
                   "approve": {
                     "type": "boolean"
+                  },
+                  "entered": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -19410,7 +19472,7 @@
                 ]
               },
               {
-                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice. `entered` holds what the user typed in the app\nfor a credential action's asked fields (`surface::Action::asks`); a credential action whose\nrun fails waits again, so the user can type another.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -19422,6 +19484,12 @@
                   },
                   "approve": {
                     "type": "boolean"
+                  },
+                  "entered": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -24734,7 +24802,7 @@
                 ]
               },
               {
-                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice. `entered` holds what the user typed in the app\nfor a credential action's asked fields (`surface::Action::asks`); a credential action whose\nrun fails waits again, so the user can type another.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -24746,6 +24814,12 @@
                   },
                   "approve": {
                     "type": "boolean"
+                  },
+                  "entered": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -48706,6 +48780,31 @@
                   "text",
                   "id"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the\naccount of the project at `path`, else the default one. User and local scope come from that\naccount's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or\nits URL's origin only, never its arguments, environment or headers.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_servers"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -53487,6 +53586,31 @@
                   "tab",
                   "text",
                   "id"
+                ]
+              },
+              {
+                "description": "`Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the\naccount of the project at `path`, else the default one. User and local scope come from that\naccount's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or\nits URL's origin only, never its arguments, environment or headers.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_servers"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
