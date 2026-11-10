@@ -157,21 +157,25 @@ async function signIn(page) {
     await page.evaluate(`globalThis.machineOnline = ${machineOnline}`);
     await waitFor("the hub and both nodes", () => page.evaluate(() => document.body.dataset.hub === "online" && machineOnline("sweep-node") && machineOnline("sweep-node-2")));
     await page.evaluate(() => setMode("gui"));
-    for (const n of NODES) {
-      const dir = fs.realpathSync(path.join(n.home, "work", n.project));
-      await page.evaluate(async ([machineName, dir, want]) => {
-        const id = [...machines.entries()].find(([, m]) => m.view.name === machineName)[0];
-        const have = () => tabs.filter((t) => t.machine === id && t.view.cwd === dir).length;
-        while (have() < want) {
-          const before = have();
-          await callOn(id, { cmd: "open_tab", path: dir, bypass: false });
-          const start = Date.now();
-          while (have() === before && Date.now() - start < 5000) await new Promise((r) => setTimeout(r, 100));
-          if (have() === before) break;
-        }
-      }, [n.name, dir, n === NODES[0] ? 2 : 1]);
-    }
-    await page.evaluate(`(${seed})(${JSON.stringify({ rows: ROWS })})`);
+    // Tabs on both machines, and the seed on them. A node that restarted has none, so this runs again.
+    const populate = async () => {
+      for (const n of NODES) {
+        const dir = fs.realpathSync(path.join(n.home, "work", n.project));
+        await page.evaluate(async ([machineName, dir, want]) => {
+          const id = [...machines.entries()].find(([, m]) => m.view.name === machineName)[0];
+          const have = () => tabs.filter((t) => t.machine === id && t.view.cwd === dir).length;
+          while (have() < want) {
+            const before = have();
+            await callOn(id, { cmd: "open_tab", path: dir, bypass: false });
+            const start = Date.now();
+            while (have() === before && Date.now() - start < 5000) await new Promise((r) => setTimeout(r, 100));
+            if (have() === before) break;
+          }
+        }, [n.name, dir, n === NODES[0] ? 2 : 1]);
+      }
+      await page.evaluate(`(${seed})(${JSON.stringify({ rows: ROWS })})`);
+    };
+    await populate();
     if (phone) await page.evaluate(() => toggleSidebar(true));
     await settle();
 
@@ -202,6 +206,7 @@ async function signIn(page) {
     for (const n of NODES) startNode(n);
     await waitFor("both nodes back", () => page.evaluate(() => machineOnline("sweep-node") && machineOnline("sweep-node-2")));
     await page.waitForTimeout(1500);
+    await populate();
     await settle();
     check(await page.evaluate(() => !document.querySelector(".machine-note") && !document.querySelector(".global-row.disabled")), `${size}: the notes and the disabled row clear when the machines are back`);
 
