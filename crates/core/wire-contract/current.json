@@ -1235,6 +1235,27 @@
                 ]
               },
               {
+                "description": "`repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,\nwith secrets left out. The global orchestrator's repo tools, sent by the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "look"
+                ]
+              },
+              {
                 "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
@@ -4080,6 +4101,106 @@
               "sessions"
             ]
           },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "regex",
+                  "case"
+                ]
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -5201,6 +5322,23 @@
                 ]
               },
               {
+                "description": "`connectors::RepoInsight`: whether the global orchestrator may read the account's repos.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_repo_insight"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/RepoInsight"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "Allows or refuses the pending box question `id`.",
                 "type": "object",
                 "properties": {
@@ -6038,6 +6176,37 @@
                 ]
               },
               {
+                "description": "From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of\n`project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a\nCapitão runs in, the asking machine's own, or the first online one; with `machine`,\n`machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past\n30 calls a minute or 300 an hour. Each call writes an audit row.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "project",
+                  "look"
+                ]
+              },
+              {
                 "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
                 "type": "object",
                 "properties": {
@@ -6774,6 +6943,19 @@
                   "mode"
                 ]
               }
+            ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "on"
             ]
           },
           "Project": {
@@ -10463,6 +10645,27 @@
                 ]
               },
               {
+                "description": "`repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,\nwith secrets left out. The global orchestrator's repo tools, sent by the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "look"
+                ]
+              },
+              {
                 "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
@@ -13258,6 +13461,104 @@
               }
             }
           },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -14360,6 +14661,23 @@
                 ]
               },
               {
+                "description": "`connectors::RepoInsight`: whether the global orchestrator may read the account's repos.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_repo_insight"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/RepoInsight"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "Allows or refuses the pending box question `id`.",
                 "type": "object",
                 "properties": {
@@ -15191,6 +15509,37 @@
                 ]
               },
               {
+                "description": "From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of\n`project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a\nCapitão runs in, the asking machine's own, or the first online one; with `machine`,\n`machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past\n30 calls a minute or 300 an hour. Each call writes an audit row.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "project",
+                  "look"
+                ]
+              },
+              {
                 "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
                 "type": "object",
                 "properties": {
@@ -15920,6 +16269,16 @@
                 ]
               }
             ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            }
           },
           "Project": {
             "description": "A project of the account, offered on machines that don't have it yet.",
@@ -19869,6 +20228,23 @@
                 ]
               },
               {
+                "description": "`connectors::RepoInsight`: whether the global orchestrator may read the account's repos.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_repo_insight"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/RepoInsight"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "Allows or refuses the pending box question `id`.",
                 "type": "object",
                 "properties": {
@@ -20706,6 +21082,37 @@
                 ]
               },
               {
+                "description": "From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of\n`project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a\nCapitão runs in, the asking machine's own, or the first online one; with `machine`,\n`machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past\n30 calls a minute or 300 an hour. Each call writes an audit row.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "project",
+                  "look"
+                ]
+              },
+              {
                 "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
                 "type": "object",
                 "properties": {
@@ -21442,6 +21849,19 @@
                   "mode"
                 ]
               }
+            ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "on"
             ]
           },
           "Project": {
@@ -23437,6 +23857,106 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents"
+            ]
+          },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "regex",
+                  "case"
+                ]
+              }
             ]
           },
           "Request": {
@@ -25879,6 +26399,23 @@
                 ]
               },
               {
+                "description": "`connectors::RepoInsight`: whether the global orchestrator may read the account's repos.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_repo_insight"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/RepoInsight"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "Allows or refuses the pending box question `id`.",
                 "type": "object",
                 "properties": {
@@ -26710,6 +27247,37 @@
                 ]
               },
               {
+                "description": "From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of\n`project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a\nCapitão runs in, the asking machine's own, or the first online one; with `machine`,\n`machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past\n30 calls a minute or 300 an hour. Each call writes an audit row.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "project",
+                  "look"
+                ]
+              },
+              {
                 "description": "From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on\nthe online machine that has that tab, with `id`, `machine` and `machine_name` set.",
                 "type": "object",
                 "properties": {
@@ -27439,6 +28007,16 @@
                 ]
               }
             ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            }
           },
           "Project": {
             "description": "A project of the account, offered on machines that don't have it yet.",
@@ -29359,6 +29937,104 @@
                 "default": 0
               }
             }
+          },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              }
+            ]
           },
           "Request": {
             "description": "The delegation request, after the MCP arguments have been read once.",
@@ -39711,6 +40387,10 @@
             "items": {
               "$ref": "#/$defs/BoxAsk"
             }
+          },
+          "repo_insight": {
+            "description": "Absent on the wire while it is off.",
+            "$ref": "#/$defs/RepoInsight"
           }
         },
         "required": [
@@ -41167,6 +41847,19 @@
                 ]
               }
             ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "on"
+            ]
           }
         }
       },
@@ -41260,6 +41953,10 @@
             "items": {
               "$ref": "#/$defs/BoxAsk"
             }
+          },
+          "repo_insight": {
+            "description": "Absent on the wire while it is off.",
+            "$ref": "#/$defs/RepoInsight"
           }
         },
         "required": [
@@ -42657,6 +43354,16 @@
                 ]
               }
             ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            }
           }
         }
       }
@@ -46106,6 +46813,10 @@
                 "items": {
                   "$ref": "#/$defs/BoxAsk"
                 }
+              },
+              "repo_insight": {
+                "description": "Absent on the wire while it is off.",
+                "$ref": "#/$defs/RepoInsight"
               }
             },
             "required": [
@@ -47526,6 +48237,19 @@
               "id",
               "connector",
               "subject"
+            ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "on"
             ]
           },
           "SessionMarks": {
@@ -49160,6 +49884,10 @@
                 "items": {
                   "$ref": "#/$defs/BoxAsk"
                 }
+              },
+              "repo_insight": {
+                "description": "Absent on the wire while it is off.",
+                "$ref": "#/$defs/RepoInsight"
               }
             },
             "required": [
@@ -50522,6 +51250,16 @@
               "connector",
               "subject"
             ]
+          },
+          "RepoInsight": {
+            "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
+            "type": "object",
+            "properties": {
+              "on": {
+                "type": "boolean",
+                "default": false
+              }
+            }
           },
           "SessionMarks": {
             "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
@@ -52315,6 +53053,27 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,\nwith secrets left out. The global orchestrator's repo tools, sent by the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "look"
                 ]
               },
               {
@@ -55163,6 +55922,106 @@
               "sessions"
             ]
           },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "regex",
+                  "case"
+                ]
+              }
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -57586,6 +58445,27 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,\nwith secrets left out. The global orchestrator's repo tools, sent by the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "repo_look"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "look": {
+                    "$ref": "#/$defs/RepoLook"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "look"
                 ]
               },
               {
@@ -60383,6 +61263,104 @@
                 "default": null
               }
             }
+          },
+          "RepoLook": {
+            "description": "What the global orchestrator asks of a checkout.",
+            "oneOf": [
+              {
+                "description": "Its shape: HEAD, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the\nstart of the README, and the latest commits.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "overview"
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              },
+              {
+                "description": "`lines` lines of `file` from `from_line` (1 when not given), at `rev` when given.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "read"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "rev": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "from_line": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look",
+                  "file"
+                ]
+              },
+              {
+                "description": "Lines that hold `query`, in files that match `glob` when given; with `glob` alone, the\ntracked paths that match it.",
+                "type": "object",
+                "properties": {
+                  "look": {
+                    "type": "string",
+                    "const": "search"
+                  },
+                  "query": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "glob": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "regex": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "case": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "max": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "look"
+                ]
+              }
+            ]
           },
           "PrAction": {
             "oneOf": [

@@ -739,7 +739,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
+    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) {
         let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");

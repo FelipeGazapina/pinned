@@ -144,6 +144,8 @@ pub struct Account {
     /// Held while task records are billed and saved, so two sends from one box never bill the
     /// same box time twice.
     task_records: tokio::sync::Mutex<()>,
+    /// When the global orchestrator's last repo reads came, for their per-minute and per-hour limit.
+    pub repo_reads: Mutex<crate::relay::ReadRate>,
 }
 
 #[derive(Default)]
@@ -284,7 +286,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -611,6 +613,7 @@ impl Hub {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
+            HubCall::SetRepoInsight { settings } => (json(c().await?.set_repo_insight(settings)?), true),
             HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
@@ -640,7 +643,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
+            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
             HubCall::GetTastes => return json(self.db.tastes(account.id).await?.unwrap_or_default()),
             HubCall::SetTaste { scope, patch } => return self.change_tastes(account, |tastes| tastes.set(&scope, patch)).await,
             HubCall::ResetTasteField { scope, field } => {
@@ -1434,7 +1437,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
@@ -1455,7 +1458,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
