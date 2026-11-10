@@ -2433,22 +2433,14 @@ impl Machine {
             if keeps(&Facts { tab: &view, idle, tasks: &tasks, children, now }, &settings).is_some() {
                 continue;
             }
-            let kept = match unpushed(Path::new(&view.cwd), self.launch.path_env.as_deref()) {
-                Some(keeps) => Some(keeps.to_string()),
-                None => match self.call_hub(HubCall::AutoArchive { tab: view.id.clone() }) {
-                    Ok(_) => None,
-                    Err(e) => Some(e),
-                },
-            };
-            match kept {
-                None => {
-                    eprintln!("pinned: auto-archived {} ({})", view.id, view.title.as_deref().or(view.prompt_title.as_deref()).unwrap_or("untitled"));
-                    archived.push(view.id);
-                }
-                Some(_) => {
-                    self.auto_archive_kept.lock().unwrap().insert(view.id, looked);
-                }
+            // Git first, so a folder with work nobody has never reaches the hub.
+            let kept = unpushed(Path::new(&view.cwd), self.launch.path_env.as_deref()).map(|keeps| keeps.to_string()).or_else(|| self.call_hub(HubCall::AutoArchive { tab: view.id.clone() }).err());
+            if kept.is_some() {
+                self.auto_archive_kept.lock().unwrap().insert(view.id, looked);
+                continue;
             }
+            eprintln!("pinned: auto-archived {} ({})", view.id, view.title.as_deref().or(view.prompt_title.as_deref()).unwrap_or("untitled"));
+            archived.push(view.id);
         }
         if !archived.is_empty() {
             self.emit_tabs();
