@@ -170,7 +170,7 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// machine, where the origin machine hears which session asked.
 async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
-        Parsed::Hub(call) => hub.hub_call(account, call).await,
+        Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
             let call = if on_origin { Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? } } else { call };
             hub.call_machine(account, target, call, ACT_WAIT).await.map_err(String::from)
