@@ -261,7 +261,7 @@ impl Profile {
                 strategy: Strategy::StrongestFirst,
                 ladder: ladder(&[OPUS]),
                 hard_model: Some(ModelRef::named(OPUS)),
-                parallel: 6,
+                parallel: 8,
                 autonomy: Autonomy::ReportAtEnd,
                 review_diffs: false,
                 second_opinion: true,
@@ -281,7 +281,7 @@ fn balanced() -> Taste {
         strategy: Strategy::EscalateOnFailure,
         ladder: ladder(&["glm-5.3", "claude-sonnet-5-5", OPUS]),
         hard_model: Some(ModelRef::named(OPUS)),
-        parallel: 3,
+        parallel: 5,
         autonomy: Autonomy::DecideAndTell,
         review_diffs: true,
         second_opinion: false,
@@ -302,6 +302,11 @@ impl Default for Taste {
     }
 }
 
+/// The workers at once each preset had before the defaults rose. Economical kept its 2, so it is
+/// not here. A taste stored with exactly one of these presets' knobs was that preset rather than a
+/// choice, so it reads as the preset again instead of turning Custom.
+const OLD_PRESET_PARALLEL: [(Profile, u32); 2] = [(Profile::Balanced, 3), (Profile::Aggressive, 6)];
+
 impl Taste {
     /// The preset whose knobs these are. Skills, context and the limits other than `parallel`
     /// belong to no preset.
@@ -320,6 +325,18 @@ impl Taste {
     /// This taste's style knobs over the default's everything else.
     fn style(&self) -> Taste {
         Taste { strategy: self.strategy, ladder: self.ladder.clone(), hard_model: self.hard_model.clone(), autonomy: self.autonomy, review_diffs: self.review_diffs, second_opinion: self.second_opinion, ..Taste::default() }
+    }
+
+    /// Takes the preset's new workers at once when this taste was stored as that preset on the
+    /// old defaults. Skills, context and the limits other than `parallel` belong to no preset, so
+    /// they never count, and a knob the account really chose leaves the taste Custom.
+    fn raise_parallel(&mut self) {
+        for (profile, old) in OLD_PRESET_PARALLEL {
+            let preset = profile.preset().unwrap();
+            if Taste { parallel: self.parallel, ..self.style() } == Taste { parallel: old, ..preset } {
+                self.parallel = preset.parallel;
+            }
+        }
     }
 
     pub fn limits(&self) -> Limits {
@@ -599,6 +616,14 @@ impl TastePatch {
         *self == TastePatch::default()
     }
 
+    /// Whether this patch sets only `parallel`, to the value `base`'s preset had before the
+    /// defaults rose. Such a patch was the old default, not a choice, so its project inherits the
+    /// base's new value again.
+    fn sets_only_old_parallel(&self, base: Profile) -> bool {
+        TastePatch { parallel: self.parallel, ..TastePatch::default() } == *self
+            && OLD_PRESET_PARALLEL.iter().any(|(profile, old)| *profile == base && self.parallel == Some(*old))
+    }
+
     fn clear(&mut self, field: TasteField) {
         match field {
             TasteField::Strategy => self.strategy = None,
@@ -621,6 +646,17 @@ impl TastePatch {
 }
 
 impl Tastes {
+    /// Reads tastes stored before the parallel defaults rose as what they were saved as: each
+    /// whole taste that was exactly a preset takes that preset's new workers at once, and a
+    /// project patch that set only the old default over its preset's base inherits the base
+    /// again. A knob the account really chose stays as it is.
+    pub fn take_raised_defaults(&mut self) {
+        self.orchestrator.raise_parallel();
+        self.captains.raise_parallel();
+        let base = self.captains.profile();
+        self.projects.retain(|_, patch| !patch.sets_only_old_parallel(base));
+    }
+
     pub fn resolve(&self, scope: &TasteScope) -> Taste {
         match scope {
             TasteScope::Orchestrator => self.orchestrator.clone(),
@@ -784,16 +820,20 @@ Start with taste_get(\"{name}\"). Then interview me: one short question at a tim
     )
 }
 
-/// The tastes in `dir`'s `taste.json`. Without one, an `orchestration.json` from before tastes
-/// existed seeds the Capitães with its cost style's preset, written to `taste.json` so the seed
-/// outlives the style. None when neither is there, or when `taste.json` can't be read, which
-/// the seed must not overwrite.
+/// The tastes in `dir`'s `taste.json`, read as what they were saved as on the current parallel
+/// defaults. Without one, an `orchestration.json` from before tastes existed seeds the Capitães
+/// with its cost style's preset, written to `taste.json` so the seed outlives the style. None when
+/// neither is there, or when `taste.json` can't be read, which the seed must not overwrite.
 pub fn load(dir: Option<&Path>) -> Option<Tastes> {
     let dir = dir?;
     match std::fs::read(dir.join(FILE)) {
         Ok(bytes) => {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| eprintln!("pinned: {} is unreadable, so the default taste applies: {e}", dir.join(FILE).display()))
+                .map(|mut tastes| {
+                    tastes.take_raised_defaults();
+                    tastes
+                })
                 .ok();
         }
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -894,7 +934,7 @@ mod tests {
         let mut taste = Taste { skills: skills.clone(), context: context.clone(), ..Taste::default() };
         taste.apply(Profile::Aggressive);
         assert_eq!(taste.profile(), Profile::Aggressive);
-        assert_eq!((taste.parallel, taste.autonomy, &taste.skills, &taste.context), (6, Autonomy::ReportAtEnd, &skills, &context));
+        assert_eq!((taste.parallel, taste.autonomy, &taste.skills, &taste.context), (8, Autonomy::ReportAtEnd, &skills, &context));
         let before = taste.clone();
         taste.apply(Profile::Custom);
         assert_eq!(taste, before, "Custom changed a knob");
@@ -911,13 +951,13 @@ mod tests {
 
     #[test]
     fn a_project_resolves_as_the_captains_with_its_patch_on_top() {
-        let patch = TastePatch { parallel: Some(5), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
+        let patch = TastePatch { parallel: Some(4), autonomy: Some(Autonomy::ReportAtEnd), ..TastePatch::default() };
         let tastes = Tastes { captains: preset(Profile::Economical), projects: BTreeMap::from([(SITE.to_owned(), patch)]), ..Tastes::default() };
         let expected = Taste {
             strategy: Strategy::CheapWithGuidance,
             ladder: vec![ModelRef::named("deepseek-v4.1-flash"), ModelRef::named("glm-5.3"), ModelRef::named("claude-opus-5-5")],
             hard_model: Some(ModelRef::named("claude-opus-5-5")),
-            parallel: 5,
+            parallel: 4,
             autonomy: Autonomy::ReportAtEnd,
             review_diffs: true,
             second_opinion: false,
@@ -932,17 +972,17 @@ mod tests {
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");
-        assert_eq!(tastes.resolve(&TasteScope::Orchestrator).parallel, 3);
+        assert_eq!(tastes.resolve(&TasteScope::Orchestrator).parallel, 5);
     }
 
     #[test]
     fn a_project_field_set_to_the_inherited_value_is_dropped_and_an_empty_patch_goes() {
         let mut tastes = Tastes::default();
-        tastes.set(&site(), TastePatch { parallel: Some(5), autonomy: Some(Autonomy::DecideAndTell), ..TastePatch::default() }).unwrap();
-        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5 } }));
+        tastes.set(&site(), TastePatch { parallel: Some(4), autonomy: Some(Autonomy::DecideAndTell), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4 } }));
         tastes.set(&site(), TastePatch { second_opinion: Some(true), ..TastePatch::default() }).unwrap();
-        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 5, "second_opinion": true } }), "a later set merges");
-        tastes.set(&site(), TastePatch { parallel: Some(3), second_opinion: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4, "second_opinion": true } }), "a later set merges");
+        tastes.set(&site(), TastePatch { parallel: Some(5), second_opinion: Some(false), ..TastePatch::default() }).unwrap();
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({}));
     }
 
@@ -966,7 +1006,7 @@ mod tests {
     #[test]
     fn a_reset_makes_a_project_inherit_and_gives_the_captains_the_default() {
         let mut tastes = Tastes::default();
-        tastes.set(&site(), TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { parallel: Some(4), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
         tastes.reset(&site(), TasteField::Parallel);
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "review_diffs": false } }));
         tastes.reset(&site(), TasteField::ReviewDiffs);
@@ -989,7 +1029,7 @@ Review each worker's diff before you accept its work."
         );
         assert_eq!(
             preset(Profile::Balanced).brief(),
-            "Run up to 3 workers at once.
+            "Run up to 5 workers at once.
 Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Decide on your own and tell the user what you decided.
@@ -997,7 +1037,7 @@ Review each worker's diff before you accept its work."
         );
         assert_eq!(
             preset(Profile::Aggressive).brief(),
-            "Run up to 6 workers at once.
+            "Run up to 8 workers at once.
 Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
@@ -1033,21 +1073,21 @@ Deploys go through the VPS."
 
     #[test]
     fn tastes_travel_as_json_with_a_project_naming_only_its_own_fields() {
-        let patch = TastePatch { parallel: Some(5), hard_model: Some(ModelRef { provider: Some("cursor".into()), model: "grok-4.7".into() }), ..TastePatch::default() };
+        let patch = TastePatch { parallel: Some(4), hard_model: Some(ModelRef { provider: Some("cursor".into()), model: "grok-4.7".into() }), ..TastePatch::default() };
         let tastes = Tastes { orchestrator: preset(Profile::Aggressive), projects: BTreeMap::from([(SITE.to_owned(), patch)]), ..Tastes::default() };
         let opus = json!({ "model": "claude-opus-5-5" });
         let json = json!({
             "orchestrator": {
-                "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+                "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 8, "autonomy": "report_at_end",
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
-                "parallel": 3, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
+                "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
             },
-            "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 5 } },
+            "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
         assert_eq!(serde_json::from_value::<Tastes>(json).unwrap(), tastes);
@@ -1105,11 +1145,68 @@ Deploys go through the VPS."
     }
 
     #[test]
+    fn a_taste_stored_on_the_old_parallel_defaults_loads_as_its_preset_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = Tastes {
+            orchestrator: Taste { parallel: 6, ..preset(Profile::Aggressive) },
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            ..Tastes::default()
+        };
+        save(&stored, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!((loaded.orchestrator.profile(), loaded.orchestrator.parallel), (Profile::Aggressive, 8));
+        assert_eq!((loaded.captains.profile(), loaded.captains.parallel), (Profile::Balanced, 5));
+        let written: Tastes = serde_json::from_slice(&std::fs::read(dir.path().join("taste.json")).unwrap()).unwrap();
+        assert_eq!(written, stored, "the upgrade reads, it does not rewrite");
+
+        let chosen = Taste { parallel: 4, ..preset(Profile::Balanced) };
+        save(&Tastes { captains: chosen.clone(), ..Tastes::default() }, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!((loaded.captains.profile(), loaded.captains.parallel), (Profile::Custom, 4), "a value the account really chose stays");
+    }
+
+    #[test]
+    fn a_project_patch_that_set_only_the_old_default_inherits_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = Tastes {
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&stored, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(serde_json::to_value(&loaded.projects).unwrap(), json!({}), "the patch was the old default, so the project inherits again");
+        assert_eq!(loaded.resolve(&site()).parallel, 5);
+
+        let with_more = Tastes {
+            captains: Taste { parallel: 3, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), review_diffs: Some(false), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&with_more, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(loaded.resolve(&site()).parallel, 3, "a patch that sets more than the old default is a choice and stays");
+
+        let over_a_choice = Tastes {
+            captains: Taste { parallel: 4, ..preset(Profile::Balanced) },
+            projects: BTreeMap::from([(SITE.to_owned(), TastePatch { parallel: Some(3), ..TastePatch::default() })]),
+            ..Tastes::default()
+        };
+        save(&over_a_choice, Some(dir.path())).unwrap();
+        let loaded = load(Some(dir.path())).unwrap();
+        assert_eq!(
+            (loaded.captains.profile(), loaded.resolve(&site()).parallel),
+            (Profile::Custom, 3),
+            "a patch over a base that is no preset was chosen, so it stays"
+        );
+    }
+
+    #[test]
     fn a_change_to_the_file_lands_and_a_refused_one_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let changed = change(Some(dir.path()), |tastes| tastes.set(&site(), TastePatch { parallel: Some(5), ..TastePatch::default() })).unwrap();
+        let changed = change(Some(dir.path()), |tastes| tastes.set(&site(), TastePatch { parallel: Some(4), ..TastePatch::default() })).unwrap();
         let written: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join("taste.json")).unwrap()).unwrap();
-        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }));
+        assert_eq!(written["projects"], json!({ "github.com/acme/site": { "parallel": 4 } }));
         assert_eq!(serde_json::from_value::<Tastes>(written).unwrap(), changed);
         let refused = change(Some(dir.path()), |tastes| tastes.set(&TasteScope::Captains, TastePatch { parallel: Some(0), ..TastePatch::default() }));
         assert_eq!(refused, Err("parallel workers go from 1 to 100".into()));
@@ -1123,7 +1220,7 @@ Deploys go through the VPS."
         tastes.set(&site(), TastePatch { tier: Some(Tier::Low), time_limit_min: Some(60), default_effort: Some(Effort::Medium), ..TastePatch::default() }).unwrap();
         assert_eq!(
             tastes.resolve(&site()).limits(),
-            Limits { parallel: 3, tier: Tier::Low, default_effort: Some(Effort::Medium), max_effort: Effort::Max, budget_cents: 500, time_limit_min: 60, box_budget_cents: 0 }
+            Limits { parallel: 5, tier: Tier::Low, default_effort: Some(Effort::Medium), max_effort: Effort::Max, budget_cents: 500, time_limit_min: 60, box_budget_cents: 0 }
         );
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).limits().tier, Tier::Mid, "a project with no patch has the Captains' limits");
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "tier": "low", "default_effort": "medium", "time_limit_min": 60 } }));
@@ -1133,7 +1230,7 @@ Deploys go through the VPS."
         let mut captains = tastes.captains.clone();
         assert_eq!(captains.profile(), Profile::Balanced, "limits other than workers at once make no preset Custom");
         captains.apply(Profile::Aggressive);
-        assert_eq!((captains.parallel, captains.tier, captains.budget_cents), (6, Tier::Mid, 500), "a preset sets workers at once and keeps the other limits");
+        assert_eq!((captains.parallel, captains.tier, captains.budget_cents), (8, Tier::Mid, 500), "a preset sets workers at once and keeps the other limits");
     }
 
     #[test]
@@ -1186,7 +1283,7 @@ Deploys go through the VPS."
     fn a_session_is_told_each_limit_pinned_enforces() {
         assert_eq!(
             Limits::default().hint(),
-            "pinned enforces these delegation limits on delegate_task: at most 3 workers at once, models up to the high tier, effort up to max, 480 minutes per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
+            "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the high tier, effort up to max, 480 minutes per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
         );
         let tight = Limits { parallel: 1, tier: Tier::Low, default_effort: Some(Effort::Low), max_effort: Effort::Medium, budget_cents: 150, time_limit_min: 45, box_budget_cents: 1000 };
         assert_eq!(
@@ -1216,7 +1313,7 @@ Deploys go through the VPS."
         let fresh = tempfile::tempdir().unwrap();
         std::fs::write(fresh.path().join("orchestration.json"), r#"{"style":"quality","max_workers":100}"#).unwrap();
         migrate_worker_cap(Some(fresh.path()));
-        assert_eq!(load(Some(fresh.path())).map(|t| (t.captains.profile(), t.captains.parallel)), Some((Profile::Aggressive, 6)), "the default cap lowers nothing, and the style still seeds");
+        assert_eq!(load(Some(fresh.path())).map(|t| (t.captains.profile(), t.captains.parallel)), Some((Profile::Aggressive, 8)), "the default cap lowers nothing, and the style still seeds");
         assert!(!fresh.path().join("orchestration.json").exists());
     }
 }

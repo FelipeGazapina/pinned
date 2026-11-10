@@ -922,12 +922,12 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
     assert_eq!(bob_node.link.as_ref().unwrap().call_hub(bobs_set), Err("only a machine with a Chat to adjust thread open may change the way of working".into()), "ana's open chat lets no machine of bob's change a taste");
     let bob_chat = open_chat(&bob_node, &mut bob);
     let bobs = session_tool(&bob_dir, &bob_chat, read.clone()).unwrap();
-    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(3)), "bob's session reads none of ana's taste");
+    assert_eq!((&bobs["own"], &bobs["effective"]["parallel"]), (&json!({}), &json!(5)), "bob's session reads none of ana's taste");
     session_tool(&bob_dir, &bob_chat, set(7)).unwrap();
     assert_eq!(bob.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 7 } }));
     assert_eq!(session_tool(&ana_dir, &chat, read.clone()), Ok(after.clone()), "bob's set changed ana's taste");
     let reset = session_tool(&bob_dir, &bob_chat, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "parallel" })).unwrap();
-    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+    assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(5)));
     assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
@@ -4016,8 +4016,8 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     let defaults = bob.hub(json!({ "cmd": "get_tastes" })).unwrap();
     let site = |parallel: u32| json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": parallel } });
 
-    let anas = ana.hub(site(5)).unwrap();
-    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 5);
+    let anas = ana.hub(site(6)).unwrap();
+    assert_eq!(anas["projects"]["github.com/acme/site"]["parallel"], 6);
     assert_eq!(bob.hub(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "bob's client reads none of ana's tastes");
     assert_eq!(bob_raw.ask(json!({ "cmd": "get_tastes" })), Ok(defaults.clone()), "nor does bob's machine");
 
@@ -4365,13 +4365,13 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
     assert_eq!(fleet.mac.machine.tabs().len(), 1, "mac opened no thread of its own for it");
     wait_for("projects() to count the worker on mini", || workers_on(&mut fleet.client, &mini) == 1);
     assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
-    let more: Vec<Value> = ["Deps", "Docs"]
+    let more: Vec<Value> = ["Deps", "Docs", "Bins", "Tags"]
         .iter()
         .map(|title| delegate_from(&mac_dir, &captain, json!({ "task": format!("Update the {title}."), "title": title, "target": { "machine": mini, "providerInstanceId": "work" } })).unwrap())
         .collect();
     assert_eq!(
         delegate_from(&mac_dir, &captain, json!({ "task": "One too many.", "target": { "machine": "mini" } })),
-        Err("3 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()),
+        Err("5 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()),
         "workers on another machine count against the caller's Workers at once"
     );
 
@@ -4395,11 +4395,11 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
         assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
     }
     let mut stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
-    wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 3);
+    wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 5);
     std::thread::sleep(Duration::from_millis(1500));
     let stats = stats();
     let ran: Vec<(&str, &str)> = stats["slowest"].as_array().unwrap().iter().map(|t| (t["machine"].as_str().unwrap(), t["delegator"].as_str().unwrap())).collect();
-    assert_eq!((stats["totals"]["runs"].as_u64(), ran), (Some(3), vec![(mini.as_str(), "Captain site"); 3]), "one record per worker, from mini that ran it, under mac's Captain: {stats}");
+    assert_eq!((stats["totals"]["runs"].as_u64(), ran), (Some(5), vec![(mini.as_str(), "Captain site"); 5]), "one record per worker, from mini that ran it, under mac's Captain: {stats}");
 
     let refused = |target: Value| delegate_from(&mac_dir, &captain, json!({ "task": "Anything.", "target": target }));
     assert_eq!(refused(json!({ "machine": "nowhere" })), Err("this account has no machine nowhere".into()));
@@ -4407,7 +4407,7 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
     pair(&fleet.hub.url, &mut fleet.client, "laptop", &temp("remote_machine-laptop"));
     assert_eq!(refused(json!({ "machine": "laptop" })), Err("laptop is offline, so it can't take the worker; nothing ran elsewhere".into()));
     assert_eq!(refused(json!({ "box": true })), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
-    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 3, "no refusal started a worker anywhere");
+    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 5, "no refusal started a worker anywhere");
 }
 
 #[test]

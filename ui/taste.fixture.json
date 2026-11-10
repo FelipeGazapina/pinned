@@ -39,7 +39,7 @@
       "hard_model": {
         "model": "claude-opus-5-5"
       },
-      "parallel": 3,
+      "parallel": 5,
       "autonomy": "decide_and_tell",
       "review_diffs": true,
       "second_opinion": false,
@@ -56,7 +56,7 @@
       "hard_model": {
         "model": "claude-opus-5-5"
       },
-      "parallel": 6,
+      "parallel": 8,
       "autonomy": "report_at_end",
       "review_diffs": false,
       "second_opinion": true,
@@ -108,14 +108,14 @@
         "hard_model": {
           "model": "claude-opus-5-5"
         },
-        "parallel": 3,
+        "parallel": 5,
         "autonomy": "decide_and_tell",
         "review_diffs": true,
         "second_opinion": false,
         "skills": [],
         "context": []
       },
-      "brief": "Run up to 3 workers at once.\nStart each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nDecide on your own and tell the user what you decided.\nReview each worker's diff before you accept its work."
+      "brief": "Run up to 5 workers at once.\nStart each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nDecide on your own and tell the user what you decided.\nReview each worker's diff before you accept its work."
     },
     {
       "taste": {
@@ -128,14 +128,14 @@
         "hard_model": {
           "model": "claude-opus-5-5"
         },
-        "parallel": 6,
+        "parallel": 8,
         "autonomy": "report_at_end",
         "review_diffs": false,
         "second_opinion": true,
         "skills": [],
         "context": []
       },
-      "brief": "Run up to 6 workers at once.\nStart each worker on claude-opus-5-5 directly, without trying a cheaper model first.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nTell the user only at the end, with the result.\nHave another model review a risky change before it goes ahead."
+      "brief": "Run up to 8 workers at once.\nStart each worker on claude-opus-5-5 directly, without trying a cheaper model first.\nSend hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.\nTell the user only at the end, with the result.\nHave another model review a risky change before it goes ahead."
     },
     {
       "taste": {

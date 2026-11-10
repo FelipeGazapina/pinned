@@ -814,7 +814,13 @@ impl Db {
     pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {
         let row = self.client().await?.query_one("select tastes from accounts where id = $1", &[&account]).await.map_err(err)?;
         let stored: Option<Value> = row.get(0);
-        stored.map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))).transpose()
+        stored
+            .map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}")))
+            .map(|mut tastes| {
+                tastes.take_raised_defaults();
+                tastes
+            })
+            .transpose()
     }
 
     pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
