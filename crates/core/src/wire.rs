@@ -1214,7 +1214,8 @@ pub struct PairCode {
 pub struct NewInvite {
     pub id: String,
     pub code: String,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
 
@@ -1225,9 +1226,15 @@ pub struct InviteView {
     pub hint: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Unix seconds.
+    /// Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older
+    /// app shows as a date far away.
     pub expires_at: i64,
 }
+
+/// The `expires_at` of a code that never expires: the last second of the year 9999. Apps older than
+/// 0.17.22 still read `expires_at` and show it as a date, so the hub keeps sending this instead of
+/// nothing.
+pub const NEVER_EXPIRES: i64 = 253402300799;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Invites {

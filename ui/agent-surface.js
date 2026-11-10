@@ -56,7 +56,7 @@ function agentConfirmationHtml(c) {
 function agentInviteHtml() {
   return `<div class="agent-invite">
     <b>Invite code</b>
-    <span class="hint">Send it to the person you invite. It works once until ${esc(inviteDate(agentInviteCode.expires_at))} and shows only until you press Done.</span>
+    <span class="hint">Send it to the person you invite. It works once and doesn't expire, and shows only until you press Done.</span>
     <div class="row"><code>${esc(agentInviteCode.code)}</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div>
   </div>`;
 }

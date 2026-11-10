@@ -163,7 +163,7 @@ test("an approved create_invite shows its code to copy until Done", async () => 
   const [asks] = context.agentWaitingRows();
   assert.equal(
     tight(asks.innerHTML),
-    `<div class="agent-invite"><b>Invite code</b><span class="hint">Send it to the person you invite. It works once until Nov 16 and shows only until you press Done.</span>` +
+    `<div class="agent-invite"><b>Invite code</b><span class="hint">Send it to the person you invite. It works once and doesn't expire, and shows only until you press Done.</span>` +
       `<div class="row"><code>K7Q2-9XPL</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
   );
   click(context, "dismiss-code");
