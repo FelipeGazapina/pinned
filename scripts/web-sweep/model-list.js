@@ -2,13 +2,15 @@
 // Proves the Claude model list on the real page: the picker shows the current models with the
 // legacy ones under "Legacy models", and alpha's Captain, through pinned's MCP server as Claude
 // Code calls it, finds the newest model in orchestrator_capabilities and starts a delegate_task on
-// it, then reads its task_status.
+// it, then reads its task_status. With NEXT ("Fable 5.3"), the fake claude's /model menu lists that
+// model as a newer Claude Code would: once the picker goes through that menu, the model is on top
+// of the picker and in orchestrator_capabilities, and a delegate_task starts on it.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
-//   SWEEP_DIR=... MODEL=claude-fable-5-2 NAME="Claude Fable 5.2" LEGACY="Claude Fable 5.1" node scripts/web-sweep/model-list.js
+//   SWEEP_DIR=... MODEL=claude-fable-5-2 NAME="Claude Fable 5.2" LEGACY="Claude Fable 5.1" [NEXT="Fable 5.3"] node scripts/web-sweep/model-list.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
-// Writes model-list.png (1440x900) into scripts/web-sweep/screens/.
+// Writes model-list.png, and model-list-next.png with NEXT, (1440x900) into scripts/web-sweep/screens/.
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -22,6 +24,8 @@ const MODEL = process.env.MODEL || "claude-fable-5-2";
 const NAME = process.env.NAME || "Claude Fable 5.2";
 const LEGACY = process.env.LEGACY || "Claude Fable 5.1";
 const SHOT = process.env.SHOT || "model-list.png";
+const NEXT = process.env.NEXT;
+const SHOT_NEXT = process.env.SHOT_NEXT || "model-list-next.png";
 
 const check = (ok, what) => {
   if (!ok) throw new Error(what);
@@ -132,6 +136,8 @@ async function callThrough(page, calls) {
 (async () => {
   const errors = [];
   const { proc, profile, page } = await launch(errors);
+  const rows = path.join(HOME, "model-rows.json");
+  if (NEXT) fs.writeFileSync(rows, JSON.stringify([["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], [NEXT.split(" ")[0], NEXT], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]]));
   try {
     await page.goto(HUB);
     await page.evaluate(() => {
@@ -154,36 +160,55 @@ async function callThrough(page, calls) {
     }, { machine: node, alpha });
     await waitFor("the Captain's session", () => page.evaluate((k) => tabByKey(k)?.view.running === true, captain));
 
-    const [caps, started] = await callThrough(page, [
-      { name: "orchestrator_capabilities", input: {} },
-      { name: "delegate_task", input: { task: "Reply OK.", title: `${NAME} check`, target: { providerInstanceId: "claude", model: MODEL } } },
-    ]);
-    const claude = caps.providers.find((p) => p.providerInstanceId === "claude");
-    const ids = claude.models.map((m) => `${m.id} (${m.label})`);
-    console.log("orchestrator_capabilities claude models:", ids.join(", "));
-    check(claude.models.some((m) => m.id === MODEL), `${MODEL} is not in orchestrator_capabilities`);
-    console.log("delegate_task:", JSON.stringify(started));
-    check(started.taskId && started.model === MODEL, `delegate_task did not start on ${MODEL}`);
-    await new Promise((r) => setTimeout(r, 1500));
-    const [status] = await callThrough(page, [{ name: "task_status", input: { taskId: started.taskId } }]);
-    console.log("task_status:", JSON.stringify(status));
-    check(status.model === MODEL, `task_status names ${status.model}`);
-    const child = await page.evaluate((id) => tabs.find((t) => t.view.id === id)?.view, started.tabId);
-    console.log("child thread:", JSON.stringify({ title: child?.title, model: child?.model, account: child?.account, running: child?.running }));
+    // The Captain finds `model` in orchestrator_capabilities, starts a delegate_task on it and reads its task_status.
+    const delegates = async (model, name) => {
+      const [caps, started] = await callThrough(page, [
+        { name: "orchestrator_capabilities", input: {} },
+        { name: "delegate_task", input: { task: "Reply OK.", title: `${name} check`, target: { providerInstanceId: "claude", model } } },
+      ]);
+      const claude = caps.providers.find((p) => p.providerInstanceId === "claude");
+      console.log("orchestrator_capabilities claude models:", claude.models.map((m) => `${m.id} (${m.label})`).join(", "));
+      check(claude.models.some((m) => m.id === model), `${model} is not in orchestrator_capabilities`);
+      console.log("delegate_task:", JSON.stringify(started));
+      check(started.taskId && started.model === model, `delegate_task did not start on ${model}`);
+      await new Promise((r) => setTimeout(r, 1500));
+      const [status] = await callThrough(page, [{ name: "task_status", input: { taskId: started.taskId } }]);
+      console.log("task_status:", JSON.stringify(status));
+      check(status.model === model, `task_status names ${status.model}`);
+    };
+    // The picker with the legacy models open: `name` on top and `legacy` under Legacy models.
+    const picker = async (name, legacy, shot) => {
+      await page.evaluate((k) => activate(tabByKey(k)), captain);
+      await page.evaluate(() => document.getElementById("model-button").click());
+      await waitFor("the model picker", () => page.evaluate(() => !!document.querySelector('#composer-menu[data-kind="models"] .model')));
+      if (await page.evaluate(() => document.querySelector('#composer-menu [data-row="legacy"]').getAttribute("aria-expanded") !== "true")) {
+        await page.evaluate(() => document.querySelector('#composer-menu [data-row="legacy"]').click());
+      }
+      await waitFor("the legacy models", () => page.evaluate((n) => [...document.querySelectorAll("#composer-menu .model .name")].some((e) => e.textContent === n), legacy));
+      const names = await page.evaluate(() => [...document.querySelectorAll("#composer-menu .model .name")].map((e) => e.textContent));
+      console.log("picker:", names.join(" | "));
+      check(names[0].startsWith(name), `the picker's first model is ${names[0]}`);
+      check(names.indexOf(legacy) > names.indexOf("Legacy models"), `${legacy} is not under Legacy models`);
+      await page.screenshot(path.join(SCREENS, shot));
+    };
 
-    await page.evaluate((k) => activate(tabByKey(k)), captain);
-    await page.evaluate(() => document.getElementById("model-button").click());
-    await waitFor("the model picker", () => page.evaluate(() => !!document.querySelector('#composer-menu[data-kind="models"] .model')));
-    await page.evaluate(() => document.querySelector('#composer-menu [data-row="legacy"]').click());
-    await waitFor("the legacy models", () => page.evaluate((n) => [...document.querySelectorAll("#composer-menu .model .name")].some((e) => e.textContent === n), LEGACY));
-    const names = await page.evaluate(() => [...document.querySelectorAll("#composer-menu .model .name")].map((e) => e.textContent));
-    console.log("picker:", names.join(" | "));
-    check(names[0].startsWith(NAME), `the picker's first model is ${names[0]}`);
-    check(names.indexOf(LEGACY) > names.indexOf("Legacy models"), `${LEGACY} is not under Legacy models`);
-    await page.screenshot(path.join(SCREENS, SHOT));
+    await delegates(MODEL, NAME);
+    await picker(NAME, LEGACY, SHOT);
+
+    if (NEXT) {
+      // Picking Opus goes through claude's /model menu, which now lists NEXT.
+      await page.evaluate(() => document.querySelector('#composer-menu .model[data-row="claude-opus-5-5"]').click());
+      await waitFor("Opus picked through claude's menu", () => page.evaluate(() => document.getElementById("model-button").textContent.trim() === "Opus 5.5"), 15000);
+      const next = `claude-${NEXT.toLowerCase().replace(/[ .]/g, "-")}`;
+      await waitFor(`${next} in the machine's list`, () => page.evaluate((slug) => claudeModels()[0]?.slug === slug, next), 10000);
+      await picker(`Claude ${NEXT}`, NAME, SHOT_NEXT);
+      await page.evaluate(() => document.getElementById("model-button").click());
+      await delegates(next, `Claude ${NEXT}`);
+    }
     check(!errors.length, `page errors:\n${errors.slice(0, 5).join("\n")}`);
     console.log("model list: every check passed");
   } finally {
+    fs.rmSync(rows, { force: true });
     const exited = new Promise((resolve) => proc.once("exit", resolve));
     proc.kill("SIGTERM");
     await exited;

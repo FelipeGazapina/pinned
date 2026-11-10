@@ -36,6 +36,11 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             return Err(format!("{effort:?} is not an effort"));
         }
     }
+    let machine = optional_str(&target["machine"]);
+    let boxed = box_from(&target["box"])?;
+    if machine.is_some() && boxed.is_some() {
+        return Err("pass target.machine or target.box, not both".into());
+    }
     let isolation = match args["isolation"].as_str() {
         None | Some("shared") => Isolation::Shared,
         Some("worktree") => Isolation::Worktree,
@@ -103,6 +108,8 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             model,
             effort,
             driver_kind,
+            machine,
+            boxed,
         },
         isolation,
         mode,
@@ -163,6 +170,21 @@ fn driver_provider(kind: &str) -> Result<Provider, String> {
         "codex" => Ok(Provider::Codex),
         "cursor" => Ok(Provider::Cursor),
         other => Err(format!("driverKind must be claude, codex, or cursor, not {other:?}")),
+    }
+}
+
+/// A `box` field that reads `true` or `{ size?, repo? }`, as `send_to_captain` takes it.
+pub fn box_or_true<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<BoxTarget>, D::Error> {
+    box_from(&Value::deserialize(de)?).map_err(serde::de::Error::custom)
+}
+
+/// `target.box`: `true`, or `{ size?, repo? }`.
+fn box_from(value: &Value) -> Result<Option<BoxTarget>, String> {
+    match value {
+        Value::Null | Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(BoxTarget::default())),
+        Value::Object(_) => serde_json::from_value(value.clone()).map(Some).map_err(|e| format!("target.box: {e}")),
+        other => Err(format!("target.box must be true or {{ size, repo }}, not {other}")),
     }
 }
 

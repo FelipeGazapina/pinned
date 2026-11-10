@@ -273,6 +273,8 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .go-name { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 #settings-page #global-orchestrator-settings .go-name input { width: 176px; }
 #settings-page #global-orchestrator-settings .side-setting .chips { justify-content: flex-end; margin: 0; }
+#settings-page #global-orchestrator-settings .chip { white-space: nowrap; }
+@media (min-width: 640px) { #settings-page #global-orchestrator-settings .go-name .chips { flex-wrap: nowrap; } }
 #settings-page #global-orchestrator-settings .side-setting select { width: 232px; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {

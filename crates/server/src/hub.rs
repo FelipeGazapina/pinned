@@ -480,6 +480,11 @@ impl Hub {
                 self.boxes.end_all(self, account).await?;
                 (json(c().await?.disconnect_upstash()?), true)
             }
+            HubCall::SetBoxClaudeToken { name, token } => (json(c().await?.set_box_claude_token(&name, &token)?), true),
+            HubCall::RemoveBoxClaudeToken { name } => (json(c().await?.remove_box_claude_token(&name)?), true),
+            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
+                return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
+            }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
             HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
@@ -848,6 +853,16 @@ impl Account {
             None => Seen::NoTab,
             // Claude reports a finished turn as waiting for input a minute later, so only Working holds a box.
             Some(t) => Seen::Tab { running: t.running, quiet: t.status != Some(AgentStatus::Working) },
+        }
+    }
+
+    /// What a worker's or a Captain's box shows: any of its tabs, working or not.
+    pub fn seen_any(&self, machine: &str) -> Seen {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        match m.tabs() {
+            [] => Seen::NoTab,
+            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(|t| t.status == Some(AgentStatus::Working)) },
         }
     }
 

@@ -26,6 +26,15 @@ pub struct Account {
     pub claude_hint: String,
 }
 
+/// `token` trimmed, once it reads as a `claude setup-token` token.
+pub fn claude_token(token: &str) -> Result<String, String> {
+    let token = token.trim();
+    if !token.starts_with(CLAUDE_TOKEN_PREFIX) {
+        return Err(format!("a Claude token from `claude setup-token` starts with {CLAUDE_TOKEN_PREFIX}"));
+    }
+    Ok(token.to_owned())
+}
+
 /// What the hub creates and boots boxes with. Never serialized.
 #[derive(Clone)]
 pub struct Keys {
@@ -41,10 +50,7 @@ impl Keys {
         if !api_key.starts_with(KEY_PREFIX) {
             return Err(format!("an Upstash Box key starts with {KEY_PREFIX}: create one in the Box tab of console.upstash.com"));
         }
-        if !claude_token.starts_with(CLAUDE_TOKEN_PREFIX) {
-            return Err(format!("a Claude token from `claude setup-token` starts with {CLAUDE_TOKEN_PREFIX}"));
-        }
-        Ok(Keys { api_key: api_key.to_owned(), claude_token: claude_token.to_owned() })
+        Ok(Keys { api_key: api_key.to_owned(), claude_token: self::claude_token(claude_token)? })
     }
 
     pub fn account(&self) -> Account {

@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+const MODEL_MENU_FILE: &str = "claude-model-menu.json";
+
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
@@ -37,6 +39,9 @@ const NOT_LINKED: &str = "this machine is not linked to a hub";
 const TASTE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TASTE_WAIT: Duration = Duration::from_millis(500);
+/// How often a remote task's status asks the machine running it, and an end that did not get
+/// through is sent again.
+const REMOTE_LOOK: Duration = Duration::from_secs(3);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -242,8 +247,37 @@ impl Screen {
 }
 
 /// A child `delegate_task` starts from the tab `from`, as the worker thread that shows it.
+/// Who a new child is for: a tab or a task here, or a tab on another machine (`origin`), with
+/// what it inherits.
+struct ChildParent {
+    parent: crate::delegate::Parent,
+    caller_key: String,
+    client_request_id: Option<String>,
+    /// The tab here that asked, which must stay open.
+    tab: Option<TabId>,
+    origin: Option<crate::delegate::Origin>,
+    account: Option<accounts::AccountId>,
+    inherited_model: Option<String>,
+    provider: Provider,
+    auth: Auth,
+    cwd: PathBuf,
+    ceiling: crate::delegate::Access,
+    limits: taste::Limits,
+    /// Workers at once in the project, when this machine counts them.
+    parallel: Option<u32>,
+    delegator: crate::delegate::Delegator,
+}
+
+/// `delegate_task`'s answer when the project already runs as many workers as it allows.
+fn workers_full(working: usize) -> String {
+    let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+    format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.")
+}
+
 struct ThreadChild<'a> {
     from: &'a str,
+    /// The tab on another machine the thread is for. `from` then names no tab here.
+    origin: Option<crate::delegate::Origin>,
     task: &'a str,
     title: &'a str,
     cwd: &'a Path,
@@ -291,6 +325,9 @@ struct Tab {
     /// reopened. A worker's news comes back here first, and goes to the project's orchestrator
     /// once this tab is closed.
     spawned_by: Option<TabId>,
+    /// The tab on another machine that delegated this worker here. Its end goes back through the
+    /// hub, and its tab id is never looked up among this machine's tabs.
+    origin: Option<crate::delegate::Origin>,
     /// The `delegate_task` task this worker thread shows. Its first finished turn ends the task
     /// when the tab runs it; a headless child's thread follows the task instead.
     task: Option<String>,
@@ -382,7 +419,8 @@ impl Tab {
             prompt_title: self.tally.prompt_title.clone(),
             orchestrator_turn: role.as_ref().is_some_and(|(role, project)| *role == Role::Orchestrator && turns.contains(project)),
             role: role.map(|(role, _)| role),
-            spawned_by: self.spawned_by.clone(),
+            spawned_by: self.origin.as_ref().map(|o| o.tab.clone()).or_else(|| self.spawned_by.clone()),
+            spawned_on: self.origin.as_ref().map(|o| o.machine.clone()),
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
@@ -445,6 +483,9 @@ pub struct Machine {
     uploads: Option<PathBuf>,
     /// LiteLLM's price list, downloaded at most daily for the usage page.
     rates_file: Option<PathBuf>,
+    /// The model rows claude's /model menu showed last on this machine, kept in `model_menu_file`.
+    model_menu: Mutex<Vec<crate::claude_models::MenuRow>>,
+    model_menu_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
     shells: Shells,
@@ -466,6 +507,8 @@ pub struct Machine {
     usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
+    /// Ends of tasks run here for another machine's tabs that the hub could not pass on yet.
+    remote_ends: Mutex<Vec<(Instant, HubCall)>>,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
@@ -614,6 +657,8 @@ impl Machine {
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
+            model_menu: Mutex::new(dir.as_ref().and_then(|d| std::fs::read(d.join(MODEL_MENU_FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
+            model_menu_file: dir.as_ref().map(|d| d.join(MODEL_MENU_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
             device_hub: DeviceHub::default(),
@@ -631,6 +676,7 @@ impl Machine {
             usage_refreshed: Mutex::default(),
             agents: Mutex::default(),
             delegates,
+            remote_ends: Mutex::default(),
             memories,
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
@@ -820,6 +866,7 @@ impl Machine {
             }
             Call::ReadImage { path } => json(uploads::named(&path, &home())?),
             Call::ListAccounts => json(self.list_accounts()),
+            Call::LearnModelMenu { lines } => json(self.learn_model_menu(&lines)?),
             Call::AddAccount { provider, name, auth, key } => {
                 let auth = auth.unwrap_or(Auth::Login);
                 if auth == Auth::OpenCodeGo {
@@ -873,6 +920,9 @@ impl Machine {
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
             Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
+            Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
+            Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
+            Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
@@ -1312,7 +1362,31 @@ impl Machine {
 
     fn view_account(&self, account: Account) -> accounts::View {
         let status = self.status(&account);
-        accounts::View::new(account, status)
+        let mut view = accounts::View::new(account, status);
+        if view.account.provider == Provider::Claude && view.account.auth != Auth::OpenCodeGo {
+            view.models = self.claude_models();
+        }
+        view
+    }
+
+    /// Claude's models on this machine: pinned's table as this machine's claude last showed its
+    /// /model menu.
+    pub fn claude_models(&self) -> Vec<crate::claude_models::ClaudeModel> {
+        crate::claude_models::merged(crate::claude_models::known(), &self.model_menu.lock().unwrap())
+    }
+
+    /// Keeps the model rows of claude's /model menu when `lines`, a screen, shows it, and answers
+    /// Claude's models as they are now.
+    fn learn_model_menu(&self, lines: &[String]) -> Result<Vec<crate::claude_models::ClaudeModel>, String> {
+        let rows = crate::claude_models::menu_rows(lines).ok_or("claude's /model menu is not on that screen")?;
+        if !rows.is_empty() && *self.model_menu.lock().unwrap() != rows {
+            if let Some(file) = &self.model_menu_file {
+                let body = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;
+                crate::fsx::replace(file, &body, None, None)?;
+            }
+            *self.model_menu.lock().unwrap() = rows;
+        }
+        Ok(self.claude_models())
     }
 
     fn status(&self, account: &Account) -> accounts::Status {
@@ -2168,6 +2242,32 @@ impl Machine {
         }
     }
 
+    /// `send_to_captain` with `box`: the hub opens the Capitão of `project`'s repository in an
+    /// Upstash Box, with the account's connection, or hands the message to the box that runs it.
+    fn send_to_captain_box(&self, project: &str, machine: Option<&str>, boxed: crate::delegate::BoxTarget, message: &str, request_id: &str) -> Result<Value, String> {
+        let repo = match boxed.repo {
+            Some(repo) => repo,
+            None => self.project_origin(project, machine)?,
+        };
+        let settings = self.global_settings();
+        let to = global::RelayTo::CaptainBox { repo, size: boxed.size, text: message.to_owned(), sender: settings.name, busy: Some(settings.busy) };
+        self.call_hub(HubCall::Relay { request_id: request_id.to_owned(), to }).map_err(needs_update)
+    }
+
+    /// The git origin of `project`: its checkout here, else the repo the hub's overview lists for it.
+    fn project_origin(&self, project: &str, machine: Option<&str>) -> Result<String, String> {
+        if let Some(remote) = self.local_project(project, machine).as_deref().and_then(git_remote) {
+            return Ok(remote);
+        }
+        let overview = self.projects_overview()?;
+        let listed = overview.projects.iter().find(|p| p.key == project || p.repo.as_deref() == Some(project) || p.checkouts.iter().any(|c| c.path == project));
+        match listed {
+            Some(p) => p.repo.clone().ok_or_else(|| format!("{project} has no git origin, so no box can clone it")),
+            None if project.contains('/') && !is_absolute_anywhere(project) => Ok(project.to_owned()),
+            None => Err(format!("{project} is not a project of this account")),
+        }
+    }
+
     /// The folder on this machine that `project` names, as a key `projects` lists (`repo`, or
     /// `<machine>:<path>`) or as a folder, unless `machine` names another machine.
     fn local_project(&self, project: &str, machine: Option<&str>) -> Option<PathBuf> {
@@ -2402,7 +2502,11 @@ impl Machine {
                 only_global()?;
                 self.read_session(&id, machine.as_deref(), items)
             }
-            ProjectTool::SendToCaptain { project, message, request_id, machine } => {
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
+                only_global()?;
+                text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
+            }
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
                 text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
             }
@@ -2598,6 +2702,10 @@ impl Machine {
     /// that tab is closed: that it finished, with its last message, that it needs input, or that
     /// its turn failed. Dropped when neither is open.
     fn report_worker(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+        // A worker for another machine's tab reports only its task's end, through the hub.
+        if self.tab(worker, |t| t.origin.is_some()).unwrap_or(false) {
+            return;
+        }
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
             AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
@@ -3142,6 +3250,17 @@ impl Machine {
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let mut status = self.delegates.status(&caller, id)?;
+        if let Some(remote) = self.delegates.get(id).and_then(|t| t.remote) {
+            let steps = match (caller.tab.as_deref(), self.delegates.remote_due(id, Instant::now(), REMOTE_LOOK)) {
+                (Some(tab), Some(due)) => self.look_remote(tab, id, &due),
+                _ => None,
+            };
+            status = self.delegates.status(&caller, id)?;
+            if let Some(steps) = steps {
+                status["recentSteps"] = steps;
+            }
+            return Ok(with_remote(status, &remote).to_string());
+        }
         // A thread's own session runs the child, so its steps are in the thread's transcript.
         if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
@@ -3197,22 +3316,27 @@ impl Machine {
         let me = self.me.clone();
         std::thread::spawn(move || {
             let Some(machine) = me.upgrade() else { return };
-            loop {
-                let records = machine.delegates.unrecorded(RECORDS_PER_SEND);
-                if records.is_empty() {
-                    break;
-                }
-                match machine.call_hub(HubCall::RecordTasks { records: records.clone() }) {
-                    Ok(_) => machine.delegates.mark_recorded(&records),
-                    Err(e) => {
-                        eprintln!("pinned: the hub did not take {} task records: {e}", records.len());
-                        *machine.records_retry.lock().unwrap() = Some(Instant::now() + RECORDS_RETRY);
-                        break;
-                    }
-                }
-            }
+            machine.record_now();
             machine.sending_records.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Sends the hub the records it lacks, on this thread, until it holds them all or refuses.
+    fn record_now(&self) {
+        loop {
+            let records = self.delegates.unrecorded(RECORDS_PER_SEND);
+            if records.is_empty() {
+                return;
+            }
+            match self.call_hub(HubCall::RecordTasks { records: records.clone() }) {
+                Ok(_) => self.delegates.mark_recorded(&records),
+                Err(e) => {
+                    eprintln!("pinned: the hub did not take {} task records: {e}", records.len());
+                    *self.records_retry.lock().unwrap() = Some(Instant::now() + RECORDS_RETRY);
+                    return;
+                }
+            }
+        }
     }
 
     fn task_review(&self, tab: Option<String>, task: Option<String>, id: &str, verdict: &str, note: Option<String>) -> Result<String, String> {
@@ -3252,7 +3376,160 @@ impl Machine {
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
+        let remote = self.delegates.get(id).filter(|t| !t.state.terminal()).and_then(|t| t.remote);
+        if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
+            self.delegates.status(&caller, id)?;
+            if !remote.machine.is_empty() {
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                let answer = self.call_hub(cancel).map_err(|e| format!("{} did not take the cancel: {}", remote.name, needs_update(e)))?;
+                self.settle_from(tab, id, &remote, &answer);
+            }
+        }
         self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+    }
+
+    /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
+    /// machine keeps the task, under its own id, for the caller's `task_status` and notice.
+    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+        use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
+        let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
+        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
+        let access = resolve_access(ceiling, &request)?;
+        let repo = request.target.boxed.as_ref().and_then(|b| b.repo.clone()).or_else(|| git_remote(&cwd));
+        if repo.is_none() {
+            return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
+        }
+        let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
+        let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
+        let place = request.target.machine.clone().unwrap_or_else(|| "an Upstash Box".into());
+        // Held here to the caller's limits, and sent with them, so the worker there is held too.
+        let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
+        (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
+        let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
+        let delegator = self.delegator(caller);
+        let task = match self.delegates.claim(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool,
+            title: request.title.clone(),
+            account,
+            provider,
+            model: request.target.model.clone(),
+            cwd,
+            mode: request.mode,
+            access,
+            isolated: false,
+            caller_key: caller.key(),
+            client_request_id: request.client_request_id.clone(),
+            role: request.role.clone(),
+        }, Some(limits.parallel)) {
+            Claim::Existing(id) => return self.remote_started(&id),
+            Claim::Full(working) => return Err(workers_full(working)),
+            Claim::Fresh(task) => *task,
+        };
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, held);
+        self.delegates.describe(&task.id, delegator.clone(), effort);
+        self.delegates.note_parent(&task.id, session);
+        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
+        let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
+        match self.call_hub(asked) {
+            Ok(answer) => {
+                let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
+                let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
+                let tab = answer["tabId"].as_str().map(str::to_owned);
+                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+                self.arm_delegate_pass();
+                self.remote_started(&task.id)
+            }
+            Err(error) => {
+                let error = needs_update(error);
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                Err(error)
+            }
+        }
+    }
+
+    fn remote_started(&self, id: &str) -> Result<String, String> {
+        let body = self.delegates.started_json(id)?;
+        Ok(match self.delegates.get(id).and_then(|t| t.remote) {
+            Some(remote) => with_remote(body, &remote),
+            None => body,
+        }
+        .to_string())
+    }
+
+    /// Asks the machine that runs a remote task how it goes. A finished task ends here too; a
+    /// working one gives its latest steps. None while that machine can't answer, as while its box boots.
+    fn look_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget) -> Option<Value> {
+        if remote.machine.is_empty() {
+            return None;
+        }
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let answer = self.call_hub(asked).ok()?;
+        self.settle_from(tab, id, remote, &answer);
+        Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
+    }
+
+    /// Ends the remote task when `answer`, the status its machine gave, says it ended.
+    fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
+        let state = answer["workState"].as_str().unwrap_or_default();
+        if !matches!(state, "result_available" | "failed" | "cancelled") {
+            return;
+        }
+        let end = crate::delegate::RemoteEnd {
+            state: state.to_owned(),
+            summary: answer["summary"].as_str().map(str::to_owned),
+            error: answer["error"].as_str().map(str::to_owned),
+        };
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+            self.emit_tabs();
+        }
+    }
+
+    /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
+    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
+        if !self.delegates.settle_remote(task, tab, from, end) {
+            return false;
+        }
+        self.maybe_deliver(tab);
+        self.emit_tabs();
+        true
+    }
+
+    /// `Call::RemoteTask`: the status of the task started here for `task` of `tab` on `origin`, or
+    /// its state once cancelled.
+    fn remote_task(&self, origin: &str, tab: &str, task: &str, cancel: Option<&str>) -> Result<Value, String> {
+        let key = crate::delegate::Origin::key(origin, tab);
+        let id = self.delegates.for_origin(&key, task).ok_or_else(|| format!("no task {task} of that thread runs here"))?;
+        let caller = crate::delegate::Caller { tab: Some(key), task: None };
+        if let Some(reason) = cancel {
+            return self.delegates.cancel(&caller, &id, reason, self.launch.path_env.as_deref());
+        }
+        let mut status = self.delegates.status(&caller, &id)?;
+        if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
+            status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+        }
+        Ok(status)
+    }
+
+    /// Sends the end of each task that a tab on another machine delegated here back through the
+    /// hub. An end the hub could not pass on waits for the next pass, at most every `REMOTE_LOOK`.
+    fn send_remote_ends(&self, now: Instant) {
+        let fresh: Vec<_> = self.delegates.claim_remote_ends().into_iter().map(|(_, machine, tab, task, end)| HubCall::RemoteEnded { to: machine, tab, task, end }).collect();
+        // A worker box goes once its end got through, so the tasks' records go first.
+        if !fresh.is_empty() && self.hub.lock().unwrap().is_some() {
+            self.record_now();
+        }
+        let held = std::mem::take(&mut *self.remote_ends.lock().unwrap());
+        let (again, mut waiting): (Vec<_>, Vec<_>) = held.into_iter().partition(|(at, _)| now.saturating_duration_since(*at) >= REMOTE_LOOK);
+        for call in fresh.into_iter().chain(again.into_iter().map(|(_, call)| call)) {
+            if let Err(e) = self.call_hub(call.clone()) {
+                eprintln!("pinned: could not send a delegated task's end back: {e}");
+                waiting.push((now, call));
+            }
+        }
+        self.remote_ends.lock().unwrap().extend(waiting);
     }
 
     /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
@@ -3287,7 +3564,7 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        use crate::delegate::Parent;
         let caller = Self::require_caller(tab, parent_task)?;
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
@@ -3298,22 +3575,64 @@ impl Machine {
             return Err(error.to_owned());
         }
         if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
-            return self.delegates.started_json(&id).map(|value| value.to_string());
+            return self.remote_started(&id);
         }
         let limits = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
-        let parent = if let Some(tab) = caller.tab.clone() {
-            Parent::Tab(tab)
+        if request.target.machine.is_some() || request.target.boxed.is_some() {
+            return self.delegate_elsewhere(&caller, tool, request, limits);
+        }
+        let delegator = self.delegator(&caller);
+        let parallel = Some(limits.parallel);
+        let side = if let Some(tab) = caller.tab.clone() {
+            let (account, model, provider, auth, cwd, ceiling) = self.tab(&tab, |t| (t.account.id.clone(), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?;
+            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator }
         } else {
-            Parent::Task(caller.task.clone().unwrap_or_default())
+            let id = caller.task.clone().unwrap_or_default();
+            let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
+            let auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
+            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator }
         };
-        let (account_id, inherited_model, parent_provider, parent_auth, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?
-        } else {
-            let id = caller.task.as_deref().unwrap_or_default();
-            let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
-            let parent_auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
-            (Some(task.account), task.model, task.provider, parent_auth, task.cwd, task.access)
+        self.launch_child(side, tool, request)
+    }
+
+    /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
+    /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
+    /// the project's account unless the request names one.
+    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+        let key = origin.parent_key();
+        if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
+            return self.delegates.started_json(&id).map(|value| value.to_string());
+        }
+        let repo = repo.ok_or("the thread that asked works in a folder with no git origin, so this machine can't find its project")?;
+        let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
+        let account = self.account_for(None, &cwd)?;
+        // The caller's limits, held no looser than this machine's own for the project.
+        let limits = origin.limits.narrow(self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits());
+        (request.target.machine, request.target.boxed) = (None, None);
+        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let side = ChildParent {
+            parent: crate::delegate::Parent::Tab(key),
+            caller_key,
+            client_request_id: Some(origin.task.clone()),
+            tab: None,
+            account: Some(account.id),
+            inherited_model: None,
+            provider: account.provider,
+            auth: account.auth,
+            cwd,
+            ceiling: origin.access,
+            limits,
+            // The caller's machine counted it against Workers at once.
+            parallel: None,
+            delegator: origin.delegator.clone(),
+            origin: Some(origin),
         };
+        self.launch_child(side, None, request)
+    }
+
+    fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
+        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator } = side;
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
         } else if let Some(id) = account_id {
@@ -3335,9 +3654,9 @@ impl Machine {
         // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
-        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref())?;
+        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
-        self.ensure_parent(caller.tab.as_deref(), None)?;
+        self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
             parent,
@@ -3350,25 +3669,22 @@ impl Machine {
             mode: request.mode,
             access,
             isolated: false,
-            caller_key: caller.key(),
-            client_request_id: request.client_request_id.clone(),
+            caller_key,
+            client_request_id,
             role: request.role.clone(),
-        }, Some(limits.parallel)) {
+        }, parallel) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
-            Claim::Full(working) => {
-                let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
-                return Err(format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working."));
-            }
+            Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
-        self.delegates.describe(&task.id, self.delegator(&caller), effort.clone());
-        if let Some(tab) = caller.tab.as_deref() {
+        self.delegates.describe(&task.id, delegator, effort.clone());
+        if let Some(tab) = parent_tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         if account.provider == Provider::Cursor {
             if let Some(name) = model.clone() {
                 let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
@@ -3377,11 +3693,11 @@ impl Machine {
             }
             effort = None;
         }
-        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        self.ensure_parent(parent_tab.as_deref(), Some(&task.id))?;
         // A child called from a tab is a worker thread under it. Claude Code runs in that thread's
         // own session; Cursor and Codex report no turns to pinned, so they run headless and the
-        // thread shows their steps.
-        let from = caller.tab.clone();
+        // thread shows their steps. A child for a tab on another machine is a thread here.
+        let from = parent_tab.clone().or_else(|| origin.as_ref().map(crate::delegate::Origin::parent_key));
         let runs_in_thread = from.is_some() && account.provider == Provider::Claude;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
@@ -3403,7 +3719,7 @@ impl Machine {
         }
         let brief = crate::delegate::granted_brief(&request.task, &request.tools);
         if let Some(from) = from.as_deref() {
-            let child = ThreadChild { from, task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
+            let child = ThreadChild { from, origin: origin.clone(), task: &task.id, title: &request.title, cwd: &cwd, made: (isolated && runs_in_thread).then(|| cwd.clone()), model: model.clone() };
             if runs_in_thread {
                 return self.run_in_thread(child, account, effort.as_deref(), access, &brief);
             }
@@ -3511,10 +3827,14 @@ impl Machine {
     }
 
     fn add_child_tab(&self, child: &ThreadChild, account: Account, launch: Vec<String>, bypass: bool) -> TabId {
-        let project = self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd));
+        let project = match child.origin {
+            Some(_) => history::project_of(child.cwd),
+            None => self.orchestrated(child.from).unwrap_or_else(|_| history::project_of(child.cwd)),
+        };
         let id = self.add_tab(child.cwd.to_owned(), account, launch, role_env(Role::Worker, &project), bypass, None);
         let _ = self.tab(&id, |t| {
-            t.spawned_by = Some(child.from.to_owned());
+            t.spawned_by = child.origin.is_none().then(|| child.from.to_owned());
+            t.origin = child.origin.clone();
             t.task = Some(child.task.to_owned());
             t.title = Some(child.title.to_owned());
             t.model = child.model.clone();
@@ -3541,6 +3861,11 @@ impl Machine {
         // The meter reads a working task only; this reads the turn that just ended before it settles.
         self.meter_workers();
         let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // A thread for another machine's tab sends its end back through the hub on the next pass.
+        if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
+            self.arm_delegate_pass();
+            return true;
+        }
         // The notice waits for a spawner that is still open; a closed one leaves it to the worker's report.
         match parent {
             Some(parent) if self.tabs.lock().unwrap().contains_key(&parent) => {
@@ -3696,6 +4021,7 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.send_remote_ends(Instant::now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
@@ -3713,7 +4039,7 @@ impl Machine {
     }
 
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
+        use crate::delegate::{capabilities, codex_constraints, cursor_models, Access, Inherited, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -3735,7 +4061,7 @@ impl Machine {
                     Provider::Claude if account.auth == Auth::OpenCodeGo => {
                         (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()])
                     }
-                    Provider::Claude => (provider_models(Provider::Claude), vec![]),
+                    Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
                     Provider::Codex => (vec![], codex_constraints()),
                     Provider::Cursor => {
                         let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
@@ -3857,6 +4183,7 @@ impl Machine {
             model: None,
             made: None,
             spawned_by: None,
+            origin: None,
             task: None,
             turn: None,
             status: None,
@@ -4228,6 +4555,13 @@ fn is_absolute_anywhere(path: &str) -> bool {
 }
 
 /// The hub's error, or which side needs an update when it is an older hub's or machine's refusal.
+/// A remote task's status or start, naming the machine that runs it and its thread there.
+fn with_remote(mut body: Value, remote: &crate::delegate::RemoteTarget) -> Value {
+    body["machine"] = json!(remote.name);
+    body["tabId"] = json!(remote.tab);
+    body
+}
+
 fn needs_update(e: String) -> String {
     if crate::link::is_unknown_command(&e) {
         "o hub ou a máquina precisa atualizar o pinned".to_owned()
@@ -6180,10 +6514,23 @@ pub(crate) mod tests {
             "id": "work", "provider": "claude", "name": "Work", "auth": "login", "provider_name": "Claude Code", "builtin": false,
             "signed_in": false, "email": null, "org": null, "plan": null,
         });
-        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }), Ok(work.clone()));
+        // Claude Code logins carry the picker's models; the rest of each account reads as before.
+        let without_models = |mut value: Value| {
+            let first = |account: &mut Value| account.as_object_mut().unwrap().remove("models").map(|models| models[0]["slug"].clone());
+            let firsts = match value.as_array_mut() {
+                Some(list) => list.iter_mut().map(first).collect(),
+                None => vec![first(&mut value)],
+            };
+            (value, firsts)
+        };
+        let (added, firsts) = without_models(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap());
+        assert_eq!((added, firsts), (work.clone(), vec![Some(json!("claude-fable-5-2"))]));
         assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into(), auth: None, key: None }), Err("an account work already exists".into()));
+        let (listed, firsts) = without_models(m.call(Call::ListAccounts).unwrap());
+        let fable = Some(json!("claude-fable-5-2"));
+        assert_eq!(firsts, [fable.clone(), None, None, fable]);
         assert_eq!(
-            m.call(Call::ListAccounts),
+            Ok::<_, String>(listed),
             Ok(json!([
                 {
                     "id": "claude", "provider": "claude", "name": "Claude Code", "auth": "login", "provider_name": "Claude Code", "builtin": true,
@@ -6937,6 +7284,38 @@ exec sleep 30
             assert!(err.contains("PINNED_TAB") && err.contains("PINNED_TASK"), "{err}");
         }
         assert!(m.capabilities(None, None, "").is_ok());
+    }
+
+    #[test]
+    fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
+        let picker = |m: &Machine| -> Vec<String> {
+            let accounts = m.call(Call::ListAccounts).unwrap();
+            let claude = accounts.as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap().clone();
+            claude["models"].as_array().unwrap().iter().take(5).map(|model| format!("{} {}", model["name"].as_str().unwrap(), model["legacy"])).collect()
+        };
+        let catalog = |m: &Machine| -> Vec<String> {
+            let value: Value = serde_json::from_str(&m.capabilities(None, None, "fable").unwrap()).unwrap();
+            value["providers"][0]["models"].as_array().unwrap().iter().map(|model| model["id"].as_str().unwrap().to_owned()).collect()
+        };
+
+        let m = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&m)[0], "Claude Fable 5.2 false");
+        assert_eq!(m.call(Call::LearnModelMenu { lines: vec!["$ ls".into()] }).unwrap_err(), "claude's /model menu is not on that screen");
+        let learned = m.call(Call::LearnModelMenu { lines }).unwrap();
+        assert_eq!(learned[0]["slug"], "claude-fable-5-3");
+        let expected = ["Claude Fable 5.3 false", "Claude Opus 5.5 false", "Claude Sonnet 5.5 false", "Claude Haiku 5.5 false", "Claude Fable 5.2 true"];
+        assert_eq!(picker(&m), expected);
+        assert_eq!(catalog(&m), ["claude-fable-5-3", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]);
+        drop(m);
+
+        let again = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        assert_eq!(picker(&again), expected, "a restarted machine keeps what its claude showed");
+        assert_eq!(catalog(&again)[0], "claude-fable-5-3");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -8478,6 +8857,23 @@ Have another model review a risky change before it goes ahead.";
         let child = delegate_task(&m, &captain, work(Some("claude-haiku-5-5"), Some("high")))["tabId"].as_str().unwrap().to_owned();
         let args = started(&dir.join("claude"), &child);
         assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]), "the effort asked for, at the most: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
+        let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
+        m.call(Call::LearnModelMenu { lines }).unwrap();
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-fable-5-3"), None)),
+            "claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working"
+        );
+        let child = delegate_task(&m, &captain, work(Some("claude-haiku-6"), None))["tabId"].as_str().unwrap().to_owned();
+        let args = started(&dir.join("claude"), &child);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "claude-haiku-6"]), "a learned Haiku runs under a low cap: {args:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

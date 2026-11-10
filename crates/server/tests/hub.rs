@@ -1,7 +1,7 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating, Signup};
 use pinned_core::accounts::Provider;
-use pinned_core::agent::{self, Stage, Subject};
+use pinned_core::agent::{self, Role, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
@@ -2005,6 +2005,9 @@ struct FakeState {
     failing: Option<Exec>,
     /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
+    /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
+    /// the repo a worker or a Captain needs without cloning from the network.
+    checkout: Option<(String, String)>,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2044,7 +2047,7 @@ impl FakeBoxes {
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
-        let (dir, creds) = {
+        let (dir, creds, checkout) = {
             let mut state = self.state.lock().unwrap();
             if let Some(failing) = state.failing.take() {
                 return Ok(failing);
@@ -2052,13 +2055,17 @@ impl FakeBoxes {
             let fake = state.boxes.get(&id.0).ok_or("no such box")?;
             let creds: Credentials = serde_json::from_str(&fake.files[&format!("{BOX_DIR}/account.json")]).unwrap();
             assert!(fake.files[&format!("{BOX_DIR}/start.sh")].contains("pinned-server\" node --config-dir"));
-            (self.root.join(&id.0), creds)
+            (self.root.join(&id.0), creds, state.checkout.clone())
         };
         std::fs::create_dir_all(&dir).unwrap();
         let node = tokio::task::spawn_blocking(move || {
             let node = Node::start(&dir, creds);
             // A delivery is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
-            std::fs::write(dir.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
+            std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo; exec cat\n").unwrap();
+            if let Some((name, remote)) = checkout {
+                origin(&dir.join(&name), &remote);
+                node.machine.open_project(dir.join(&name));
+            }
             node
         })
         .await
@@ -4442,6 +4449,260 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
     assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
     let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
     assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
+}
+
+// delegate_task on another machine or in an Upstash Box.
+
+const SITE: &str = "https://github.com/acme/site.git";
+
+/// One line on a node's session socket, answered as the text it returns read as JSON.
+fn on_sock(dir: &Path, line: Value) -> Result<Value, String> {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{line}").unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    let reply: Result<String, String> = serde_json::from_str(&reply).unwrap();
+    reply.map(|text| serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+fn request(args: Value) -> Value {
+    serde_json::to_value(pinned_core::delegate::parse_request(&args).unwrap()).unwrap()
+}
+
+/// What `delegate_task` answers the session in `tab`.
+fn delegate_from(dir: &Path, tab: &str, args: Value) -> Result<Value, String> {
+    on_sock(dir, json!({ "kind": "delegate", "tab": tab, "request": request(args) }))
+}
+
+fn task_status(dir: &Path, tab: &str, task: &str) -> Value {
+    on_sock(dir, json!({ "kind": "task-status", "tab": tab, "id": task })).unwrap()
+}
+
+/// How many workers `projects()` counts on `machine`.
+fn workers_on(client: &mut Client, machine: &str) -> u64 {
+    let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
+    let checkouts = overview["projects"].as_array().unwrap().iter().flat_map(|p| p["checkouts"].as_array().cloned().unwrap_or_default());
+    checkouts.filter(|c| c["machine"] == machine).map(|c| c["workers"].as_u64().unwrap_or(0)).sum()
+}
+
+/// The tabs of the node a box runs, none while no box has booted.
+fn box_tabs(boxes: &FakeBoxes) -> Vec<pinned_core::wire::TabView> {
+    let node = boxes.state.lock().unwrap().boxes.values().find_map(|b| b.node.clone());
+    node.map(|node| node.machine.tabs()).unwrap_or_default()
+}
+
+#[test]
+fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
+    let mut fleet = Fleet::start("remote_machine");
+    origin(Path::new(&fleet.site), SITE);
+    origin(&fleet.mini_dir.join("site"), SITE);
+    let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
+
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Fix the footer.", "title": "Footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
+    let (task, child) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+    assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("mini")));
+    let view = fleet.mini.machine.view(&child).unwrap();
+    assert_eq!(
+        (view.role, view.spawned_by.as_deref(), view.spawned_on.as_deref(), view.account.as_str(), view.title.as_deref(), view.cwd.as_str(), view.running),
+        (Some(Role::Worker), Some(captain.as_str()), Some(mac.as_str()), "work", Some("Footer"), there.as_str(), true),
+        "a running worker thread on mini, under mac's Captain, on mini's account and checkout"
+    );
+    wait_launch(&mini_dir, &child, "Fix the footer.");
+    assert_eq!(fleet.mac.machine.tabs().len(), 1, "mac opened no thread of its own for it");
+    wait_for("projects() to count the worker on mini", || workers_on(&mut fleet.client, &mini) == 1);
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+    let more: Vec<Value> = ["Deps", "Docs"]
+        .iter()
+        .map(|title| delegate_from(&mac_dir, &captain, json!({ "task": format!("Update the {title}."), "title": title, "target": { "machine": mini, "providerInstanceId": "work" } })).unwrap())
+        .collect();
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, json!({ "task": "One too many.", "target": { "machine": "mini" } })),
+        Err("3 workers already run in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()),
+        "workers on another machine count against the caller's Workers at once"
+    );
+
+    let transcripts = mini_dir.join("accounts/work/projects/site");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(transcripts.join("s-footer.jsonl"), assistant_line("Footer fixed; tests pass.")).unwrap();
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child, "session": "s-footer", "cwd": there }));
+    hook(&mini_dir, json!({ "kind": "agent", "status": "done", "tab": child, "session": "s-footer" }));
+    wait_for("mac to hear how the worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["summary"].as_str(), status["error"].as_str(), status["machine"].as_str(), status["tabId"].as_str()),
+        (Some("Footer fixed; tests pass."), None, Some("mini"), Some(child.as_str())),
+        "task_status on mac reports the end and the child's last reply"
+    );
+
+    for second in &more {
+        let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": second["taskId"], "reason": "not now" })).unwrap();
+        assert_eq!((cancel["workState"].as_str(), cancel["error"].as_str()), (Some("cancelled"), Some("not now")));
+        let remote = fleet.mini.machine.view(second["tabId"].as_str().unwrap()).unwrap();
+        assert_eq!(remote.spawned_on.as_deref(), Some(mac.as_str()));
+    }
+    let mut stats = || fleet.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    wait_for("mini to record the workers it ran", || stats()["totals"]["runs"] == 3);
+    std::thread::sleep(Duration::from_millis(1500));
+    let stats = stats();
+    let ran: Vec<(&str, &str)> = stats["slowest"].as_array().unwrap().iter().map(|t| (t["machine"].as_str().unwrap(), t["delegator"].as_str().unwrap())).collect();
+    assert_eq!((stats["totals"]["runs"].as_u64(), ran), (Some(3), vec![(mini.as_str(), "Captain site"); 3]), "one record per worker, from mini that ran it, under mac's Captain: {stats}");
+
+    let refused = |target: Value| delegate_from(&mac_dir, &captain, json!({ "task": "Anything.", "target": target }));
+    assert_eq!(refused(json!({ "machine": "nowhere" })), Err("this account has no machine nowhere".into()));
+    assert_eq!(refused(json!({ "machine": "@mac" })), Err("mac is this machine: leave target.machine out to run the worker here".into()));
+    pair(&fleet.hub.url, &mut fleet.client, "laptop", &temp("remote_machine-laptop"));
+    assert_eq!(refused(json!({ "machine": "laptop" })), Err("laptop is offline, so it can't take the worker; nothing ran elsewhere".into()));
+    assert_eq!(refused(json!({ "box": true })), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count(), 3, "no refusal started a worker anywhere");
+}
+
+#[test]
+fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends() {
+    let hub = TestHub::start_with_boxes("rbox", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let mac_dir = temp("rbox-mac");
+    let creds = pair(&hub.url, &mut ana.client, "mac", &mac_dir);
+    let mac_id = creds.machine_id.clone();
+    let mac = Node::start(&mac_dir, creds);
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&mac_dir.join("site"), SITE);
+    let site = mac.machine.open_project(mac_dir.join("site")).display().to_string();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let to_box = json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": { "size": "small" }, "providerInstanceId": "bloom" } });
+
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, to_box.clone()),
+        Err("Upstash Box is off for Workers: choose a box permission for Workers in Connectors settings".into())
+    );
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    assert_eq!(
+        delegate_from(&mac_dir, &captain, to_box.clone()),
+        Err("no Claude token is kept for bloom: add one on the Upstash card in Connectors, or leave providerInstanceId out to use the default token".into())
+    );
+    assert_eq!(ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": " sk-ant-oat01-bloomtoken " })), Ok(json!({ "bloom": "…oken" })));
+    let settings = ana.client.wait("settings with bloom's token", |f| f["type"] == "settings" && f["settings"]["box_claude_tokens"]["bloom"] == "…oken");
+    assert!(!settings.to_string().contains("bloomtoken"), "clients see only the hint");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no refusal opened a box");
+
+    let started = delegate_from(&mac_dir, &captain, to_box).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("Box · Slow suite")), "{started}");
+    assert_eq!(started["tabId"], Value::Null, "the box has not booted yet");
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\n".into()), "bloom's token, and no GitHub token without GitHub");
+    assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+    assert_eq!(
+        (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
+        (Some(captain.as_str()), Some(mac_id.as_str()), Some("Slow suite"), true),
+        "the box's worker thread nests under mac's Captain"
+    );
+    assert!(child.cwd.ends_with("/site"), "it works in the box's checkout of the repo: {}", child.cwd);
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let machine = ana.box_machine();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id }));
+    wait_for("the box to go once its task ended", || hub.boxes.live().is_empty());
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "result_available");
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    ana.client.wait_machines(&[("mac", true)]);
+    let stats = ana.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ran = &stats["slowest"][0];
+    assert_eq!(
+        (stats["totals"]["runs"].as_u64(), ran["machine"].as_str(), ran["delegator"].as_str(), ran["title"].as_str()),
+        (Some(1), Some(machine.as_str()), Some("Captain site"), Some("Slow suite")),
+        "the box recorded its worker before it went: {stats}"
+    );
+    assert!(stats["totals"]["box_ms"].as_u64().unwrap() > 0, "and was billed its box time: {stats}");
+
+    let again = delegate_from(&mac_dir, &captain, json!({ "task": "Run it again.", "title": "Again", "target": { "box": true } })).unwrap();
+    let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": again["taskId"], "reason": "not now" })).unwrap();
+    assert_eq!(cancel["workState"], "cancelled");
+    wait_for("a cancelled task's box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+
+    for needle in [machine.as_str(), "Slow suite", "Box · "] {
+        assert_eq!(mentioning(&mut bob, needle), Vec::<Value>::new(), "bob's lists never show ana's box worker: {needle}");
+    }
+}
+
+#[test]
+fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection() {
+    let hub = TestHub::start_with_boxes("box_captain", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mini_dir = temp("rcap-mini");
+    let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
+    let mini_id = creds.machine_id.clone();
+    let mini = Node::start(&mini_dir, creds);
+    mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mini", true)]);
+    ana.client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+    let global = ana.client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+    let send = |request_id: &str, text: &str| session_tool(&mini_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": text, "request_id": request_id, "box": true }));
+
+    assert_eq!(send("r-0", "Ship the form."), Err("Upstash Box is off for Captains: choose a box permission for Captains in Connectors settings".into()));
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "off" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    let sent = send("r-1", "Ship the form.").unwrap();
+    assert_eq!((sent["outcome"].as_str(), sent["machineName"].as_str()), (Some("iniciado"), Some("Box · Captain site")), "{sent}");
+    wait_for("a Captain on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Orchestrator) && t.running));
+    let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
+    assert!(captain.cwd.ends_with("/site"), "{}", captain.cwd);
+    ana.client.wait_machines(&[("mini", true), ("Box · Captain site", true)]);
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")));
+
+    let again = send("r-2", "Also the footer.").unwrap();
+    assert_eq!((again["box"].as_str(), again["tab"].as_str()), (sent["box"].as_str(), Some(captain.id.as_str())), "the box that runs the Captain takes the next message: {again}");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1, "one box for the project");
+}
+
+#[test]
+fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
+    let hub = TestHub::start_with_boxes("iso_delegate", Signup::Open, fast());
+    let url = hub.url.clone();
+    let mut ana = BoxAccount::new(&hub);
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let ana_creds = account::pair(&url, code["code"].as_str().unwrap(), "ana-mini", "linux").unwrap();
+    let ana_raw = RawMachine::start(&url, &ana_creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-a", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
+        "remote_ended" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (bob_machine, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&url, &bob_machine_token, |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("ana-mini", true)]);
+    bob.wait_machines(&[("bob-mac", true)]);
+    let ana_m = ana_creds.machine_id.clone();
+    let none = Err(format!("this account has no machine {ana_m}"));
+    let delegate = |target: Value| json!({ "cmd": "delegate", "tab": "tab-1", "task": "task-b", "request": request(json!({ "task": "Read the secrets.", "target": target })), "repo": SITE, "access": "full" });
+
+    assert_eq!(bob_raw.ask(delegate(json!({ "machine": ana_m }))), none, "bob can't target ana's machine by id");
+    assert_eq!(bob_raw.ask(delegate(json!({ "machine": "ana-mini" }))), Err("this account has no machine ana-mini".into()), "nor by name");
+    assert_eq!(bob_raw.ask(delegate(json!({ "box": true }))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()), "bob's box can't use ana's connection");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a" })), none, "bob can't read ana's remote task");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a", "cancel": "mine now" })), none, "nor cancel it");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_ended", "to": ana_m, "tab": "tab-1", "task": "task-a", "end": { "state": "failed", "error": "forged" } })), none, "nor end it");
+    assert_eq!(bob.hub(delegate(json!({ "machine": bob_machine.id }))), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client delegates only through a thread");
+    assert_eq!(bob.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-x" })), Err("connect Upstash Box first".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
 }
 
 fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {

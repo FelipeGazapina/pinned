@@ -6,6 +6,9 @@ import vm from "node:vm";
 const src = readFileSync(new URL("./gui-sidebar.js", import.meta.url), "utf8");
 const context = {};
 vm.createContext(context);
+const agents = readFileSync(new URL("./gui-agents.js", import.meta.url), "utf8");
+context.localIdOf = (id) => (id === "hub-m" ? "m" : id);
+vm.runInContext(agents.slice(agents.indexOf("function spawnerKey"), agents.indexOf("/** The worker threads")), context);
 vm.runInContext(`${src.slice(src.indexOf("function spawnTree"), src.indexOf("function toggleFold"))}\nthis.spawnTree = spawnTree; this.spawnRows = spawnRows;`, context);
 
 const tab = (machine, id, opened, spawned_by) => ({ key: `${machine}:${id}`, machine, view: { id, opened, ...(spawned_by ? { spawned_by } : {}) } });
@@ -33,6 +36,12 @@ test("a folded thread hides everything under it and still counts it", () => {
 
 test("a worker whose parent is not listed, or lives on another machine, stands on its own", () => {
   assert.deepEqual(lines([worker, nested, elsewhere]), ["tab-3 (1)", "  tab-4", "tab-7"]);
+});
+
+test("a worker another machine's thread delegated nests under that thread, with the local ones", () => {
+  const remote = { ...tab("mini", "tab-9", 9, "tab-1"), view: { id: "tab-9", opened: 9, spawned_by: "tab-1", spawned_on: "hub-m" } };
+  const boxed = { ...tab("box", "tab-1", 10, "tab-1"), view: { id: "tab-1", opened: 10, spawned_by: "tab-1", spawned_on: "hub-m" } };
+  assert.deepEqual(lines([plain, worker, remote, boxed]), ["tab-1 (3)", "  tab-3", "  tab-9", "  tab-1"]);
 });
 
 test("a thread that names itself as its spawner, or two that name each other, still show once", () => {
