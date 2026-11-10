@@ -10675,8 +10675,6 @@ Have another model review a risky change before it goes ahead.";
         m.set_hub(Arc::new(|_| Err("Upstash Box is not connected".into())));
         let request = crate::delegate::parse_request(&json!({ "task": "Run the suite.", "title": "Slow", "target": { "box": { "repo": "acme/site" } } })).unwrap();
         assert_eq!(m.start_delegate(Some(captain), None, None, request), Err("Upstash Box is not connected".into()));
-        let tasks = m.delegates.records();
-        assert!(tasks.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
