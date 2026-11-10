@@ -206,6 +206,9 @@ pub enum Call {
     ResizePty { tab: TabId, cols: u16, rows: u16 },
     /// `null`.
     CloseTab { tab: TabId },
+    /// `null`, once the tab's turn is stopped as the app's Stop button stops it: claude's background
+    /// agents and workflows first, then the turn, then the turn their "stopped" notices wake.
+    StopTurn { tab: TabId },
     /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
     /// the client then sends `StartClaude`.
     SetFolder { tab: TabId, path: String },
@@ -355,7 +358,7 @@ pub enum Call {
     /// `Option<String>`: the icon of the tab's project, where T3 Code looks for one, as a data URL.
     Favicon { tab: TabId },
     /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
-    /// messages, and the `previous` title.
+    /// messages, and the `previous` title. An empty `thread` reads the tab's own conversation.
     RegenerateTitle { tab: TabId, previous: String, thread: String },
     /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
     PrList { tab: TabId },
@@ -660,6 +663,7 @@ impl Call {
                 | Call::PrStatus { .. }
                 | Call::Favicon { .. }
                 | Call::RegenerateTitle { .. }
+                | Call::StopTurn { .. }
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }

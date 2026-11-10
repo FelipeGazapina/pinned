@@ -775,6 +775,7 @@ impl Machine {
                 self.close_tab(&tab);
                 Ok(Value::Null)
             }
+            Call::StopTurn { tab } => json(self.stop_turn(&tab)?),
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
@@ -894,6 +895,7 @@ impl Machine {
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
             }
             Call::RegenerateTitle { tab, previous, thread } => {
+                let thread = if thread.is_empty() { titles::thread_text(&self.thread(&tab, 0)?.items) } else { thread };
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 let env = self.headless_env(&tab)?;
                 let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
@@ -1822,6 +1824,19 @@ impl Machine {
         if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
             screen.lock().unwrap().detach(viewer);
         }
+    }
+
+    /// What the app's Stop types. Esc alone ends the turn but leaves background agents and workflows
+    /// running, so claude's ctrl+x ctrl+k stops them first; their "stopped by the user" notices then
+    /// wake claude for a turn of its own, which the last Esc ends.
+    pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
+        const KILL_AGENTS: &[u8] = b"\x18\x0b";
+        for keys in [KILL_AGENTS, KILL_AGENTS, b"\x1b"] {
+            self.write_input(tab, keys)?;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        self.write_input(tab, b"\x1b")
     }
 
     pub fn write_input(&self, tab: &str, data: &[u8]) -> Result<(), String> {
@@ -4883,6 +4898,20 @@ pub(crate) mod tests {
         screen.attach("late".into(), sink);
         assert_eq!(seen.lock().unwrap().len(), 256 * 1024);
         assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_turn_types_what_the_apps_stop_button_does() {
+        let m = machine();
+        let typed = temp("stop-turn").join("typed");
+        let tab = running(&m, vec![], &format!("stty raw -echo; dd bs=1 count=6 2>/dev/null | od -An -tx1 > {}; sleep 30", typed.display()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(m.call(Call::StopTurn { tab: tab.clone() }), Ok(Value::Null));
+        wait_for("the keys", || std::fs::read_to_string(&typed).is_ok_and(|t| !t.trim().is_empty()));
+        assert_eq!(std::fs::read_to_string(&typed).unwrap().split_whitespace().collect::<Vec<_>>(), ["18", "0b", "18", "0b", "1b", "1b"]);
+        assert_eq!(m.call(Call::StopTurn { tab: "tab-none".into() }), Err("no tab tab-none".into()));
+        m.close_tab(&tab);
     }
 
     #[cfg(unix)]
