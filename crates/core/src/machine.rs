@@ -9469,7 +9469,7 @@ while True:
 
     #[test]
     #[cfg(unix)]
-    fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
+    fn a_turn_that_ends_asking_the_user_offers_until_the_next_turn_and_blocks_nobody() {
         let dir = temp("waits-question");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
@@ -9479,20 +9479,23 @@ while True:
         m.set_project_account(&path, Some("work".into())).unwrap();
         let tab = m.open_tab(Some(path.clone()), false).unwrap();
         let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
-        let asks = |question: &str| vec![(global::WaitingKind::NeedsInput, Some(question.to_owned()))];
+        let offers = |m: &Machine| m.local_overview().sessions.unwrap().into_iter().filter_map(|s| s.message).collect::<Vec<_>>();
+        let asks = |question: &str| vec![question.to_owned()];
 
         m.record_event(hook(&tab, AgentStatus::Working));
         append_transcript(&dir, "s1", &turn_lines(1, "Merge the fix.", Some("Merged. Quer que eu faça a release?")));
         m.record_event(hook(&tab, AgentStatus::Done));
-        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"));
+        assert_eq!(waiting(&m), [], "a finished turn that asked blocks nobody");
+        assert_eq!(offers(&m), asks("Quer que eu faça a release?"));
         m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook(&tab, AgentStatus::NeedsInput) });
-        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"), "Claude Code's idle notice a minute later");
+        assert_eq!(waiting(&m), [], "Claude Code's idle notice a minute later");
+        assert_eq!(offers(&m), asks("Quer que eu faça a release?"));
 
         m.record_event(hook(&tab, AgentStatus::Working));
-        assert_eq!(waiting(&m), [], "the user answered");
+        assert_eq!(offers(&m), Vec::<String>::new(), "the user answered");
         append_transcript(&dir, "s1", &turn_lines(2, "Sim.", Some("Released v0.17.21.")));
         m.record_event(hook(&tab, AgentStatus::Done));
-        assert_eq!(waiting(&m), [], "a turn that asked nothing");
+        assert_eq!(offers(&m), Vec::<String>::new(), "a turn that asked nothing");
 
         m.record_event(hook(&tab, AgentStatus::Working));
         append_transcript(&dir, "s1", &turn_lines(3, "And #89?", Some("O #89 conflita com o main. Fecho o #89?")));
@@ -9500,7 +9503,8 @@ while True:
         drop(m);
         let restarted = work_machine(&dir, &claude, &sock);
         assert_eq!(restarted.restore_tabs().len(), 1);
-        assert_eq!(waiting(&restarted), asks("Fecho o #89?"), "the question outlives a restart");
+        assert_eq!(waiting(&restarted), [], "nothing blocks after a restart");
+        assert_eq!(offers(&restarted), Vec::<String>::new(), "a stopped thread keeps no offer");
         let _ = std::fs::remove_dir_all(dir);
     }
 
