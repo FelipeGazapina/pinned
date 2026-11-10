@@ -129,6 +129,21 @@ pub enum ProjectTool {
     TasteSet { scope: String, patch: crate::taste::TastePatch },
     /// A taste chat's: `Tastes::reset` on the account's tastes, then `TasteGet`.
     TasteReset { scope: String, field: crate::taste::TasteField },
+    /// Everyone's: `surface::listing`, the actions `Act` runs for this session.
+    Actions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search: Option<String>,
+    },
+    /// Everyone's: one action of `surface::ACTIONS`, run by the hub as the user's account and audited.
+    Act {
+        action: String,
+        #[serde(default)]
+        args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";

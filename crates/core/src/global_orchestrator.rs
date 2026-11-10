@@ -421,6 +421,9 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+    /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
+    /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
+    Confirm,
 }
 
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
@@ -612,7 +615,7 @@ impl SessionState {
     pub fn of(tab: &TabView) -> SessionState {
         match waiting_kind(tab) {
             Some(WaitingKind::Failed) => SessionState::Error,
-            Some(WaitingKind::NeedsInput) => SessionState::WaitingOnInput,
+            Some(WaitingKind::NeedsInput | WaitingKind::Confirm) => SessionState::WaitingOnInput,
             None if !tab.running => SessionState::Settled,
             None if tab.status == Some(AgentStatus::Working) || tab.orchestrator_turn => SessionState::Running,
             None => SessionState::Idle,

@@ -5,7 +5,7 @@ use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, Ta
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -831,6 +831,8 @@ impl Machine {
                 }
                 Ok(Value::Null)
             }
+            Call::ActFor { caller, call } => self.act_for(&caller, call),
+            Call::Notice { tab, session, text, id } => json(self.notice(&tab, session, text, &id)),
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
@@ -2360,7 +2362,29 @@ impl Machine {
 
     /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
-        Ok(self.projects_overview()?.waiting)
+        let mut waiting = self.projects_overview()?.waiting;
+        waiting.extend(self.confirmations_waiting());
+        Ok(waiting)
+    }
+
+    /// The agents' actions that wait on the user's approval, as the `waiting` tool lists them. None
+    /// without a hub, or with one too old to keep them.
+    fn confirmations_waiting(&self) -> Vec<global::Waiting> {
+        let Ok(items) = self.call_hub(HubCall::Confirmations).and_then(|value| serde_json::from_value::<Vec<surface::Confirmation>>(value).map_err(|e| e.to_string())) else { return vec![] };
+        items
+            .into_iter()
+            .filter(|confirmation| confirmation.decision.is_none())
+            .map(|confirmation| global::Waiting {
+                message: Some(surface::summary(&confirmation.args)),
+                title: Some(format!("Approve {}?", confirmation.action)),
+                since: u64::try_from(confirmation.at).ok(),
+                project: None,
+                kind: global::WaitingKind::Confirm,
+                machine: confirmation.machine,
+                machine_name: confirmation.machine_name,
+                tab: confirmation.tab,
+            })
+            .collect()
     }
 
     /// The latest replies of `project`'s Capitão, for the `read_captain` tool, as the hub's MCP
@@ -2559,7 +2583,139 @@ impl Machine {
                 })
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
+            ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
+            ProjectTool::Act { action, args, request_id, machine } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+                match self.call_hub(HubCall::Act { act }) {
+                    Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
+                    answer => text_json(answer?),
+                }
+            }
         }
+    }
+
+    /// Runs an agent's act for the session in `caller`, as the hub passes it on. A call that starts
+    /// a session holds it to the delegation limits; one with no such path yet is refused.
+    fn act_for(&self, caller: &str, call: Value) -> Result<Value, String> {
+        let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
+        if let Call::StartClaude { tab, cols, rows } = call {
+            return json(self.start_for(caller, &tab, cols, rows)?);
+        }
+        let cmd = surface::cmd_of(&call);
+        if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
+            return Err(format!("{cmd} starts work, and nothing holds it to the limits yet"));
+        }
+        // These start a stopped tab as well as restart a running one, outside the limits.
+        if let Call::RestartClaude { tab, .. } | Call::SetModel { tab, .. } | Call::SetBypass { tab, .. } | Call::Rewind { tab, .. } | Call::SwitchAccount { tab, .. } | Call::SetWorkspace { tab, .. } = &call {
+            if !self.tab(tab, |t| t.session.is_some())? {
+                return Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker"));
+            }
+        }
+        if matches!(call, Call::SetBypass { on: true, .. }) && self.tab(caller, |t| t.child_access())? != crate::delegate::Access::Full {
+            return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
+        }
+        self.call(call)
+    }
+
+    /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
+    /// a worker thread: in the caller's project, no wider than the caller's access, a task under the
+    /// project's workers-at-once limit and held to its tier, time limit and budget, whose first
+    /// finished turn ends it with a notice to the caller and a record in the delegation metrics. A
+    /// tab already running, or the thread of a task still working, just starts.
+    fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
+        let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
+        let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+            let plan = t.permission_mode.as_deref() == Some("plan");
+            (t.session.is_some() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+        })?;
+        if running || self.thread_task(tab, false).is_some() {
+            return self.start_claude(tab, cols, rows);
+        }
+        if ruled {
+            return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker"));
+        }
+        if global {
+            return Err(NO_PROJECT_WORK.into());
+        }
+        if history::project_of(&cwd) != home {
+            return Err(format!("{tab} works in {}, outside your project {}: start_claude starts workers only in your own project", cwd.display(), home.display()));
+        }
+        if crate::delegate::tighten(ceiling, access) != access {
+            return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
+        }
+        let limits = self.caller_limits(caller)?;
+        let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
+        let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
+        let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
+        let new = NewTask {
+            parent: Parent::Tab(caller.to_owned()),
+            tool: None,
+            title,
+            account: account.id.clone(),
+            provider: account.provider,
+            model,
+            cwd: cwd.clone(),
+            mode: Mode::Async,
+            access,
+            isolated: false,
+            caller_key: caller_ref.key(),
+            client_request_id: None,
+            role: None,
+        };
+        let task = match self.delegates.claim(new, Some(limits.parallel)) {
+            Claim::Fresh(task) => *task,
+            Claim::Full(working) => return Err(workers_full(working)),
+            Claim::Existing(id) => return Err(format!("task {id} already runs for this request")),
+        };
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        self.delegates.describe(&task.id, self.delegator(&caller_ref), effort.clone());
+        self.delegates.note_parent(&task.id, self.tab(caller, |t| t.claude_session.clone()).ok().flatten());
+        let project = history::project_of(&cwd);
+        let _ = self.tab(tab, |t| {
+            t.task = Some(task.id.clone());
+            t.spawned_by.get_or_insert_with(|| caller.to_owned());
+            t.env.extend(role_env(Role::Worker, &project));
+            if let Some(effort) = &effort {
+                t.launch.extend(["--effort".to_owned(), effort.clone()]);
+            }
+        });
+        self.delegates.link_thread(&task.id, Thread { tab: tab.to_owned(), runs: true });
+        let folder = match self.start_claude(tab, cols, rows) {
+            Ok(folder) => folder,
+            Err(error) => {
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                let _ = self.tab(tab, |t| t.task = None);
+                return Err(error);
+            }
+        };
+        if let Some(pid) = self.tab(tab, |t| t.session.as_ref().and_then(pty::Session::pid)).ok().flatten() {
+            self.delegates.remember_pid(&task.id, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+        Ok(folder)
+    }
+
+    /// Queues `text` for the session in `tab`, or in the tab that now runs Claude session
+    /// `session`, as worker reports are queued: typed once it is idle. False when no tab has it.
+    fn notice(&self, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        let found = {
+            let tabs = self.tabs.lock().unwrap();
+            match tabs.get(tab) {
+                Some(t) => Some((tab.to_owned(), t.claude_session.clone())),
+                None => session.as_deref().and_then(|session| tabs.iter().find(|(_, t)| t.claude_session.as_deref() == Some(session)).map(|(id, t)| (id.clone(), t.claude_session.clone()))),
+            }
+        };
+        let Some((tab, running)) = found else { return false };
+        if !self.delegates.holds_report(&tab, id) {
+            self.delegates.queue_report(&tab, running.or(session), text);
+            self.emit_tabs();
+        }
+        self.arm_delegate_pass();
+        true
     }
 
     /// The memories of the tab's project that bear on the prompt starting a turn, for the hook to
@@ -8890,6 +9046,69 @@ Have another model review a risky change before it goes ahead.";
         m.task_cancel(Some(captain.clone()), None, first["taskId"].as_str().unwrap(), "not needed").unwrap();
         assert_eq!(delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["workState"], "working", "an ended worker frees its place");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_start_claude_makes_the_tab_its_worker_under_the_projects_limits() {
+        let (m, dir, captain) = limited_captain("act-start", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let start = |tab: &str| act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 }));
+        let first = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&first), Ok(json!(path)));
+        let view = m.view(&first).unwrap();
+        assert_eq!((view.role, view.spawned_by.as_deref(), view.running), (Some(Role::Worker), Some(captain.as_str()), true));
+        let task = m.tab(&first, |t| t.task.clone()).unwrap().expect("the started tab runs a task");
+
+        let second = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&second), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()));
+        assert!(!m.view(&second).unwrap().running, "a refused start starts nothing");
+
+        m.task_cancel(Some(captain.clone()), None, &task, "not needed").unwrap();
+        let records = m.delegates.records();
+        let record = records.iter().find(|r| r.id == task).expect("the ended task's record for the metrics");
+        assert_eq!((record.delegator.kind, record.delegator.tab.as_deref(), record.outcome), (crate::delegate::DelegatorKind::Captain, Some(captain.as_str()), crate::delegate::TaskOutcome::Cancelled));
+        assert_eq!(start(&second), Ok(json!(path)), "an ended worker frees its place");
+        drop(m.tab(&first, |t| t.session.take()).unwrap());
+        assert_eq!(start(&first), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()), "a tab whose task ended claims a new one");
+
+        assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue starts work, and nothing holds it to the limits yet".into()));
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": captain, "cols": 80, "rows": 24 })), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker")));
+        let listed = act(json!({ "cmd": "tabs" })).unwrap();
+        assert_eq!(listed.as_array().map(Vec::len), Some(3), "a read runs as Machine::call runs it: {listed}");
+
+        let docs = Path::new(&path).join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let outside = m.open_tab(Some(docs.display().to_string()), false).unwrap();
+        assert_eq!(start(&outside), Err(format!("{outside} works in {}, outside your project {path}: start_claude starts workers only in your own project", docs.display())));
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        let wide = m.open_tab(Some(path.clone()), true).unwrap();
+        assert_eq!(start(&wide), Err(format!("{wide} runs with full access, wider than your session's auto")));
+        assert_eq!(act(json!({ "cmd": "restart_claude", "tab": wide, "cols": 80, "rows": 24 })), Err(format!("restart_claude restarts a running session, and {wide} runs none: start_claude starts it as your worker")));
+        assert_eq!(act(json!({ "cmd": "set_bypass", "tab": second, "on": true, "cols": 80, "rows": 24 })), Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into()));
+        let global = m.open_global_orchestrator().unwrap();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(m.call(Call::ActFor { caller: global, call: json!({ "cmd": "start_claude", "tab": plain, "cols": 80, "rows": 24 }) }), Err(NO_PROJECT_WORK.into()));
+        assert!(!m.view(&outside).unwrap().running && !m.view(&wide).unwrap().running && !m.view(&plain).unwrap().running, "a refused start starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_is_queued_once_for_the_tab_or_the_tab_that_took_its_session() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
+        let notice = |tab: &str, session: Option<&str>, id: &str| m.call(Call::Notice { tab: tab.into(), session: session.map(Into::into), text: format!("[pinned] The user approved your remove_machine request ({id}): done."), id: id.into() });
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(m.view(&tab).unwrap().queued, 1, "a repeat queues nothing");
+        assert_eq!(notice("tab-gone-9", Some("s-1"), "c-2"), Ok(json!(true)), "a restart's new tab id is found by the session");
+        assert_eq!(m.view(&tab).unwrap().queued, 2);
+        assert_eq!(notice("tab-gone-9", Some("s-other"), "c-3"), Ok(json!(false)));
+        let done = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: Some("s-1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true };
+        let (context, _) = m.take_notices(&done);
+        assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.\n[pinned] The user approved your remove_machine request (c-2): done.");
     }
 
     #[test]

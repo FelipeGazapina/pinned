@@ -550,6 +550,13 @@ impl Hub {
                 self.delete_session(account, &machine, &tab).await?;
                 return Ok(Value::Null);
             }
+            HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
+            HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
+            HubCall::DecideConfirmation { id, approve } => return crate::surface::decide(self, account, &id, approve).await,
+            HubCall::AgentAudit { before, limit } => {
+                let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
+                return json(self.db.audit_rows(account.id, before, limit).await?);
+            }
         };
         if changed {
             self.watch(account).await?;

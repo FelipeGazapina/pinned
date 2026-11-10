@@ -71,6 +71,9 @@ class Hub {
       case "session_marks":
         this.on.marks?.(frame.marks);
         break;
+      case "confirmations":
+        this.on.confirmations?.(frame.items);
+        break;
     }
   }
 

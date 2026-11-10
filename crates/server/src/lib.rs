@@ -7,6 +7,7 @@ pub mod oauth;
 pub mod relay;
 pub mod remote;
 pub mod self_update;
+pub mod surface;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

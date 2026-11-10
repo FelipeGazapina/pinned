@@ -1386,6 +1386,7 @@ function connectHub(signedIn) {
     // This Mac's own events come over Tauri, not back through the hub.
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
+    confirmations: (items) => onAgentConfirmations(items),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";
       if (on) retryUploadImages();
@@ -1439,6 +1440,7 @@ function disconnectHub() {
   }
   delete machines.get(LOCAL)?.hubView;
   delete machines.get(LOCAL)?.syncStopped;
+  resetAgentSurface();
   render();
 }
 
