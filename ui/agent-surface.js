@@ -5,8 +5,23 @@
 let agentConfirmations = [];
 /** Confirmation ids whose Approve or Deny is on its way to the hub. */
 const agentDeciding = new Set();
-/** The `NewInvite` an approved `create_invite` made. Its code shows nowhere else, so it stays until the user closes it. */
-let agentInviteCode = null;
+/** What an approved action handed the user to see once, `{ action, result }`, as `create_invite`'s
+ * `NewInvite` or `pair_code`'s `PairCode`. It shows nowhere else, so it stays until the user closes it. */
+let agentShown = null;
+/** The actions whose answer the agent never sees, and how the app shows it: a heading, the line
+ * under it, and the field of the result to show and copy. */
+const AGENT_SHOWN_ONCE = {
+  create_invite: {
+    title: "Invite code",
+    show: "code",
+    hint: (r) => `Send it to the person you invite. It works once until ${inviteDate(r.expires_at)} and shows only until you press Done.`,
+  },
+  pair_code: {
+    title: "Pairing command",
+    show: "command",
+    hint: (r) => `Run it yourself on the new machine. Its code works once, until ${clockTime(r.expires_at)}, and shows only until you press Done.`,
+  },
+};
 /** The Agent activity page: the audit rows loaded so far, newest first, and the page's last word. */
 const agentActivityStart = () => ({ rows: [], more: false, loading: false, notice: null });
 let agentActivity = agentActivityStart();
@@ -14,8 +29,15 @@ const AGENT_AUDIT_PAGE = 50;
 /** Each audit outcome's badge tone. */
 const AGENT_OUTCOME_TONES = { done: "success", approved: "success", pending: "primary", failed: "error", refused: "warning", denied: "muted" };
 
-/** `remove_machine` as "Remove machine". */
-const agentWords = (name) => `${name.charAt(0).toUpperCase()}${name.slice(1).replace(/_/g, " ")}`;
+/** Actions whose words alone read wrong. */
+const AGENT_LABELS = { update_self: "Update pinned", pair_code: "Pair a machine", set_box_claude_token: "Keep box Claude token", remove_box_claude_token: "Forget box Claude token" };
+const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash" };
+/** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
+function agentWords(name) {
+  if (AGENT_LABELS[name]) return AGENT_LABELS[name];
+  const words = name.split("_").map((word) => AGENT_NAMES[word] ?? word);
+  return `${words[0].charAt(0).toUpperCase()}${words.join(" ").slice(1)}`;
+}
 const agentSince = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
 
 /** The name the app knows for the account's machine `id`, or "". */
@@ -46,28 +68,30 @@ function agentConfirmationHtml(c) {
     <span class="dot"></span>
     <div class="texts">
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
-      <pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>
+      ${Object.keys(c.args ?? {}).length ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
       <span class="who">${esc(who)}</span>
       <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
     </div>
   </div>`;
 }
 
-function agentInviteHtml() {
-  return `<div class="agent-invite">
-    <b>Invite code</b>
-    <span class="hint">Send it to the person you invite. It works once until ${esc(inviteDate(agentInviteCode.expires_at))} and shows only until you press Done.</span>
-    <div class="row"><code>${esc(agentInviteCode.code)}</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div>
+function agentShownHtml() {
+  if (!agentShown) return "";
+  const { title, show, hint } = AGENT_SHOWN_ONCE[agentShown.action];
+  return `<div class="agent-once">
+    <b>${esc(title)}</b>
+    <span class="hint">${esc(hint(agentShown.result))}</span>
+    <div class="row"><code>${esc(agentShown.result[show])}</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div>
   </div>`;
 }
 
-/** Waiting on you's agent items, above its threads: the invite code an approval made, then each
- * waiting confirmation, in one block, or nothing. */
+/** Waiting on you's agent items, above its threads: what an approval handed the user to see once,
+ * then each waiting confirmation, in one block, or nothing. */
 function agentWaitingRows() {
-  if (!agentInviteCode && !agentConfirmations.length) return [];
+  if (!agentShown && !agentConfirmations.length) return [];
   const asks = document.createElement("div");
   asks.className = "agent-asks";
-  asks.innerHTML = `${agentInviteCode ? agentInviteHtml() : ""}${agentConfirmations.map(agentConfirmationHtml).join("")}`;
+  asks.innerHTML = `${agentShownHtml()}${agentConfirmations.map(agentConfirmationHtml).join("")}`;
   return [asks];
 }
 
@@ -96,7 +120,7 @@ function onAgentConfirmations(items) {
 
 function resetAgentSurface() {
   agentConfirmations = [];
-  agentInviteCode = null;
+  agentShown = null;
   agentActivity = agentActivityStart();
 }
 
@@ -114,7 +138,7 @@ async function decideAgentConfirmation(id, approve) {
   try {
     const decided = await hub.hub({ cmd: "decide_confirmation", id, approve });
     agentConfirmations = agentConfirmations.filter((c) => c.id !== id);
-    if (decided.decision === "approved" && asked.action === "create_invite" && decided.result?.code) agentInviteCode = decided.result;
+    if (decided.decision === "approved" && AGENT_SHOWN_ONCE[asked.action] && decided.result) agentShown = { action: asked.action, result: decided.result };
     agentSay(decided.decision === "approved" ? `Approved ${asked.action}: ${decided.outcome}` : `Denied ${asked.action}`);
   } catch (e) {
     agentSay(`Couldn't ${approve ? "approve" : "deny"} ${asked.action}: ${e}`, true);
@@ -153,12 +177,12 @@ const AGENT_CLICKS = {
   deny: (button) => decideAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation, false),
   more: () => loadAgentAudit(agentActivity.rows.at(-1)?.at),
   "copy-code": (button) =>
-    navigator.clipboard.writeText(agentInviteCode.code).then(
+    navigator.clipboard.writeText(agentShown.result[AGENT_SHOWN_ONCE[agentShown.action].show]).then(
       () => (button.textContent = "Copied"),
       () => getSelection().selectAllChildren(button.previousElementSibling),
     ),
   "dismiss-code": () => {
-    agentInviteCode = null;
+    agentShown = null;
     agentSurfaceChanged();
   },
 };
@@ -187,7 +211,7 @@ function drawAgentActivity() {
   settingsPage.innerHTML = `<h2>Agent activity</h2><section id="agent-activity">
     <p class="hint">Every action an agent took as you, newest first. Actions that need your approval wait in Waiting on you.</p>
     ${notice ? `<p class="${notice.error ? "error" : "hint"}" role="status">${esc(notice.text)}</p>` : ""}
-    ${agentInviteCode ? agentInviteHtml() : ""}
+    ${agentShownHtml()}
     ${agentConfirmations.length ? `<h3 class="agent-heading">Waiting on you</h3><div class="agent-confirms">${agentConfirmations.map(agentConfirmationHtml).join("")}</div>` : ""}
     <h3 class="agent-heading">Actions</h3>
     ${trail}
