@@ -6556,6 +6556,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_held_tool_call_of_an_agent_session_reaches_the_hub_as_one_row() {
+        let m = machine();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(serde_json::to_value(&call).unwrap());
+            Ok(Value::Null)
+        }));
+        let worker = m.add_tab("/repo/.claude/worktrees/w1".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), true, None);
+        let user = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let force = || json!({ "command": "git push --force origin main", "why": "git push --force" });
+        m.tool_held(&worker, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, true, Some("toolu_1".into()));
+        m.tool_held(&worker, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        m.tool_held(&user, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        m.tool_held("no-such-tab", "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                json!({ "cmd": "tool_held", "tab": worker, "tool": "Bash", "args": force(), "detail": "would hold (log only): force-push", "request_id": "toolu_1" }),
+                json!({ "cmd": "tool_held", "tab": worker, "tool": "Bash", "args": force(), "detail": "held for Felipe: force-push" }),
+            ],
+            "a user's own tab and an unknown tab send nothing"
+        );
+    }
+
+    #[test]
     fn call_hub_reaches_the_installed_hub_and_refuses_while_unlinked() {
         let machine = machine();
         assert_eq!(machine.call_hub(HubCall::Overview).unwrap_err(), "this machine is not linked to a hub");
