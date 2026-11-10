@@ -13113,4 +13113,174 @@ Have another model review a risky change before it goes ahead.";
         assert!(machines[0]["providers"].as_array().unwrap().iter().any(|p| p["providerInstanceId"] == "work" && p["driverKind"] == "claude"), "{caps}");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
+    /// `m-mini` for heavy work.
+    #[cfg(unix)]
+    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+        let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
+        let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
+        m.set_hub_id("m-book".into(), "MacBook".into());
+        (m, dir, captain)
+    }
+
+    /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
+    /// machine but those in `refuse`. Returns every call it saw.
+    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(call.clone());
+            match call {
+                HubCall::Place { .. } => answers.lock().unwrap().next().unwrap_or_else(|| Err("asked to place once too often".into())),
+                HubCall::Delegate { request, .. } => {
+                    let machine = request.target.machine.unwrap_or_default();
+                    let name = match machine.as_str() {
+                        "m-mini" => "mac-mini",
+                        "m-vps" => "vps",
+                        other => other,
+                    };
+                    match refuse.contains(&machine.as_str()) {
+                        true => Err(format!("{name} is full")),
+                        false => Ok(json!({ "machine": machine, "machineName": name, "workState": "working", "tabId": "tab-there" })),
+                    }
+                }
+                _ => Err("not this test's".into()),
+            }
+        }));
+        calls
+    }
+
+    fn placed_on(machine: &str, name: &str, by: &str, reason: &str, skipped: Value) -> Value {
+        json!({ "machine": machine, "machineName": name, "by": by, "reason": reason, "skipped": skipped })
+    }
+
+    /// The `Place` and `Delegate` calls a hub saw, as `place [excluded]` and `delegate machine`.
+    fn placing_calls(calls: &Mutex<Vec<HubCall>>) -> Vec<String> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call {
+                HubCall::Place { exclude, .. } => Some(format!("place {exclude:?}")),
+                HubCall::Delegate { request, .. } => Some(format!("delegate {}", request.target.machine.as_deref().unwrap_or("-"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn with(args: Value, extra: Value) -> Value {
+        let mut args = args;
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    }
+
+    const PREFERRED: &str = "first preferred machine that fits";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_light_worker_never_asks_the_hub_to_place_it() {
+        let (m, dir, captain) = placing_captain("place-light");
+        let calls = placing_hub(&m, vec![], &[]);
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        assert_eq!(placing_calls(&calls), Vec::<String>::new());
+        assert_eq!(
+            started["placement"],
+            json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "light work stays on the machine that asked; pass heavy: true or target.machine \"auto\" to place it" })
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_heavy_worker_runs_where_the_hub_places_it_and_task_status_says_so() {
+        let (m, dir, captain) = placing_captain("place-heavy");
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([])))], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini"]);
+        let place = calls.lock().unwrap().iter().find_map(|call| match call {
+            HubCall::Place { repo, need, .. } => Some((repo.clone(), need.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            place,
+            Some((Some("https://github.com/acme/app.git".into()), crate::placement::Need { account: Some("work".into()), driver_kind: None, model: Some("claude-sonnet-5-5".into()) }))
+        );
+        assert_eq!((&started["machine"], &started["placement"]), (&json!("mac-mini"), &json!({ "machine": "m-mini", "machineName": "mac-mini", "by": "policy", "reason": PREFERRED })));
+        let status: Value = serde_json::from_str(&m.task_status(Some(captain), None, started["taskId"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(status["placement"], started["placement"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hub_that_cannot_place_it_leaves_the_worker_here_with_the_reason() {
+        let (m, dir, captain) = placing_captain("place-unreachable");
+        let calls = placing_hub(&m, vec![Err(crate::link::HUB_TIMEOUT.into())], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true })));
+        assert_eq!(placing_calls(&calls), vec!["place []"]);
+        assert_eq!(started["workState"], "working", "{started}");
+        assert_eq!(started["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "fallback", "reason": "the hub could not be reached to place it" }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_explicit_machine_and_here_skip_the_policy() {
+        let (m, dir, captain) = placing_captain("place-explicit");
+        let calls = placing_hub(&m, vec![], &[]);
+        let there = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree", "target": { "providerInstanceId": "work", "machine": "vps" } })));
+        assert_eq!(placing_calls(&calls), vec!["delegate vps"]);
+        assert_eq!(there["placement"], json!({ "machine": "vps", "machineName": "vps", "by": "explicit", "reason": "the request names it" }));
+        let here = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true, "target": { "providerInstanceId": "work", "machine": "here" } })));
+        assert_eq!(placing_calls(&calls), vec!["delegate vps"], "here asks the hub nothing");
+        assert_eq!(here["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "target.machine is \"here\"" }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_refused_start_is_placed_once_more_without_that_machine() {
+        let (m, dir, captain) = placing_captain("place-refused");
+        let refused = json!([{ "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini refused it" }]);
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([]))), Ok(placed_on("m-vps", "vps", "policy", PREFERRED, refused))], &["m-mini"]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini", "place [\"m-mini\"]", "delegate m-vps"]);
+        assert_eq!(
+            started["placement"],
+            placed_on("m-vps", "vps", "policy", PREFERRED, json!([{ "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini is full" }])),
+            "the refusal names why"
+        );
+        assert_eq!(m.delegates.running(), vec![started["taskId"].as_str().unwrap().to_owned()], "the refused start left no task");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_second_refusal_runs_the_worker_here_and_never_asks_a_third_time() {
+        let (m, dir, captain) = placing_captain("place-refused-twice");
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([]))), Ok(placed_on("m-vps", "vps", "policy", PREFERRED, json!([])))], &["m-mini", "m-vps"]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini", "place [\"m-mini\"]", "delegate m-vps"]);
+        assert_eq!(started["workState"], "working", "{started}");
+        assert_eq!(
+            started["placement"],
+            placed_on(
+                "m-book",
+                "MacBook",
+                "fallback",
+                "mac-mini and vps refused it, so it runs on the machine that asked",
+                json!([
+                    { "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini is full" },
+                    { "machine": "m-vps", "machineName": "vps", "why": "refused", "detail": "vps is full" },
+                ])
+            )
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
