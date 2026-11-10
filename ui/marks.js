@@ -145,12 +145,32 @@ function withSessionMarks(current, sessions) {
   return { sideMarks, seenAt: { ...unsessioned(current.seenAt), ...sessions.seenAt }, archived: [...current.archived.filter((entry) => !entry.session), ...sessions.archived] };
 }
 
-/** Keeps the page's marks on the account's hub once it answers `session_marks`, and in this browser's
- * storage before that, with a hub too old to answer, and signed out. `io` reads and writes the page's
- * marks (`read`, `write`), its storage (`stored`, `persist`, `unstore`), calls the hub (`call`), and
- * redraws (`changed`). */
+/** Thread keys whose marks outlive a reload: a session's, and a tab's whose id names the run that
+ * opened it (machine.rs `add_tab`). A node before 0.17.0 numbered tabs from 1 each run, so marks under
+ * such an id would land on whichever thread took the number next. */
+const keptKey = (key) => key.startsWith("session:") || /:tab-[0-9a-f]+-\d+$/.test(key);
+
+/** The sidebar's marks as this browser stored them in `gui-marks`. */
+function storedSideMarks(saved) {
+  const sideMarks = {};
+  for (const kept of Object.values(LISTED_MARKS)) sideMarks[kept] = (saved?.[kept] ?? []).filter(keptKey);
+  for (const kept of Object.values(KEYED_MARKS)) sideMarks[kept] = Object.fromEntries(Object.entries(saved?.[kept] ?? {}).filter(([key]) => keptKey(key)));
+  return sideMarks;
+}
+
+/** The hub's rows as this browser last heard them, and from which account. */
+const MARKS_HEARD = "gui-marks-heard";
+/** The account this browser's marks from before the hub kept them went up to. */
+const MARKS_MIGRATED = "gui-marks-migrated";
+
+/** Keeps the page's marks on the account's hub once it answers `session_marks`. The page's own copy
+ * stays in this browser's storage, which the caller writes on every change and `io.persist` writes for
+ * a change from the hub, so marks of threads with no session yet, and changes the hub has not heard,
+ * survive a reload. `io` reads and writes the page's marks (`read`, `write`, `persist`), reads and
+ * writes storage (`load`, `save`), calls the hub (`call`), and redraws (`changed`). */
 function marksSync(io) {
   let onHub = false;
+  let account = null;
   /** The hub's rows as last heard. */
   let known = new Map();
   /** The changes on their way to the hub. */
@@ -162,9 +182,24 @@ function marksSync(io) {
   let joining = null;
   const mine = () => markRows(io.read());
 
+  /** Stores what the hub was last heard to hold. The page's marks are stored first: a field that
+   * differs between the two then counts as unsent, and resending a change the hub has is harmless,
+   * while a mark the hub dropped must not come back from a copy stored after the rows. */
+  const remember = () => io.save(MARKS_HEARD, JSON.stringify({ account, rows: [...known.values()] }));
+  /** The rows `remember` stored for `id`, or null when it stored none for that account. */
+  function heard(id) {
+    try {
+      const last = JSON.parse(io.load(MARKS_HEARD));
+      return last?.account === id ? new Map(last.rows.map((row) => [row.session, row])) : null;
+    } catch {
+      return null;
+    }
+  }
+
   function show(next, before) {
     if (!markChanges(before, next).length) return;
     io.write(withSessionMarks(io.read(), markState(next)));
+    io.persist();
     io.changed();
   }
   function adopt(rows) {
@@ -172,6 +207,7 @@ function marksSync(io) {
     const held = heldMarks(known, before, flight);
     for (const row of rows) hasMarks(row) ? known.set(row.session, row) : known.delete(row.session);
     show(mergedMarks(before, new Map(rows.map((row) => [row.session, row])), held), before);
+    remember();
   }
   async function drain() {
     try {
@@ -193,22 +229,29 @@ function marksSync(io) {
   /** Sends what the hub lacks; true once it has everything. A failed send waits for the next connect. */
   const sync = () => (onHub ? (draining ??= drain()) : Promise.resolve(false));
 
-  /** Back to storage, on sign-out and when the hub cannot keep marks. `keep` writes the hub's marks
-   * there; otherwise the page forgets them. */
+  /** Off the hub, on sign-out and when the hub cannot keep marks. Without `keep` the page and its
+   * storage forget the session marks, so a shared browser keeps no thread titles. */
   function leave(keep) {
-    if (onHub) keep ? io.persist() : io.write(withSessionMarks(io.read(), markState(new Map())));
+    if (onHub && !keep) {
+      io.write(withSessionMarks(io.read(), markState(new Map())));
+      io.persist();
+      io.save(MARKS_HEARD, null);
+    }
     onHub = false;
+    account = null;
     known = new Map();
     joining = null;
     epoch++;
   }
 
-  /** On every connect: sends what waited, takes the hub's rows, and the first time brings this
-   * browser's stored marks up, forgetting them once the hub has them. */
-  async function hello() {
+  /** On every connect to account `id`: sends what waited, and takes the hub's rows but for the fields
+   * changed here since the hub was last heard, which then go up. The first connect ever also brings
+   * up the marks this browser kept before the hub did. */
+  async function hello(id) {
     const at = ++epoch;
     const wasOnHub = onHub;
     const start = mine();
+    const last = wasOnHub ? null : heard(id);
     joining = [];
     if (wasOnHub) await sync();
     let rows;
@@ -222,15 +265,19 @@ function marksSync(io) {
     }
     if (at !== epoch) return;
     const now = mine();
-    const held = heldMarks(wasOnHub ? known : start, now, flight);
+    const held = heldMarks(wasOnHub ? known : (last ?? start), now, flight);
+    account = id;
     known = new Map(rows.filter(hasMarks).map((row) => [row.session, row]));
     let next = mergedMarks(now, known, held, true);
-    if (io.stored()) next = applyMarkChanges(next, marksMigration(now, known));
+    const migrating = io.load(MARKS_MIGRATED) == null;
+    if (migrating) next = applyMarkChanges(next, marksMigration(now, known));
     onHub = true;
     show(next, now);
+    remember();
+    if (migrating) io.save(MARKS_MIGRATED, id);
     for (const pushed of joining) adopt(pushed);
     joining = null;
-    if ((await sync()) && at === epoch && io.stored()) io.unstore();
+    await sync();
   }
 
   function push(rows) {
@@ -241,7 +288,7 @@ function marksSync(io) {
     }
   }
 
-  /** In hub mode, sends the page's marks on and answers truthy; otherwise the caller stores them. */
+  /** Sends the page's marks on once the hub keeps them, answering whether the hub took them all. */
   const saved = () => onHub && sync();
   return { hello, push, leave, saved };
 }
