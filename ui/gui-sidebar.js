@@ -156,18 +156,77 @@ function sidebarSettingsHtml() {
     ${toggle("confirmArchive", sideSettings.confirmArchive, "Archive confirmation", "Ask before archiving a thread.")}
     ${toggle("confirmDelete", sideSettings.confirmDelete, "Delete confirmation", "Ask before deleting a thread.")}</section>`;
 }
+/** The last read of the machines' auto-archive settings: `{ machines, view }`. */
+let autoArchive = null;
+/** Reads `auto_archive_settings` from every online machine that is not a box. A machine that is
+ * too old to answer is marked `update`, and one that failed carries its `error`. */
+async function readAutoArchive() {
+  const list = await Promise.all(
+    [...machines.entries()]
+      .filter(([, m]) => !m.view.upstash_box)
+      .map(async ([id, m]) => {
+        const machine = { id, name: machineName(id), online: m.view.online === true, settings: null, update: false, error: null };
+        if (!machine.online) return machine;
+        try {
+          machine.settings = await callOn(id, { cmd: "auto_archive_settings" });
+        } catch (e) {
+          if (isOlderPinned(e)) machine.update = true;
+          else machine.error = String(e?.message ?? e);
+        }
+        return machine;
+      }),
+  );
+  return { machines: list, view: mergeAutoArchive(list) };
+}
+/** The Archive page's Auto-archive section: how long a finished thread idles before it archives,
+ * for worker threads and for the threads the user opened. */
+function autoArchiveHtml() {
+  const { view } = autoArchive;
+  const row = (key, title, about) => `<div class="side-setting" data-setting="${key}"><div><label for="aa-${key}">${title}</label><p class="meta">${about}</p></div>
+    <select id="aa-${key}" aria-label="${title}">${autoArchiveOptions(view[key])}</select></div>`;
+  return `<section id="auto-archive-settings"><h2 class="looks-title">Auto-archive</h2>
+    ${row("workers", "Worker threads", "Archive a thread a delegated task ran in, this long after its work ended and its report was delivered.")}
+    ${row("sessions", "Threads you open", "The same rule for threads you started yourself.")}
+    <p class="meta aa-keeps">A thread stays when it has a pending question, a running worker, uncommitted or unpushed work, or a star. Captains never archive. Archived threads come back with Unarchive.</p>
+    <p class="error" id="aa-error"></p></section>`;
+}
+function bindAutoArchive() {
+  const section = document.getElementById("auto-archive-settings");
+  if (!section) return;
+  const error = document.getElementById("aa-error");
+  const change = async () => {
+    const view = { workers: autoArchiveMinutes(document.getElementById("aa-workers").value), sessions: autoArchiveMinutes(document.getElementById("aa-sessions").value) };
+    const live = autoArchive.machines.map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
+    const writes = autoArchiveWrites(view, live);
+    const results = await Promise.allSettled(writes.map((w) => callOn(w.machine, { cmd: "set_auto_archive_settings", settings: w.settings })));
+    const failed = results.filter((r) => r.status === "rejected");
+    error.textContent = !writes.length ? "No machine is online to take this." : failed.length ? `Couldn't save on ${failed.length} of ${writes.length} machines: ${failed[0].reason?.message ?? failed[0].reason}` : "";
+    if (writes.length > failed.length) autoArchive.view = view;
+  };
+  for (const key of ["workers", "sessions"]) document.getElementById(`aa-${key}`).onchange = change;
+}
 /** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
  * with Unarchive, or from its context menu, which also deletes. */
 function showArchive() {
+  autoArchive ??= { machines: [], view: { ...AA_DEFAULT_SETTINGS } };
   const since = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
   const machinesShown = new Set(archived.map((a) => a.machine)).size > 1;
   const order = archived.map((a, i) => [a, i]).sort(([a], [b]) => b.at - a.at);
   const projects = [...new Set(order.map(([a]) => a.project))];
-  settingsPage.innerHTML = `<h2>Archive</h2><section id="archive-settings">${!archived.length
+  settingsPage.innerHTML = `<h2>Archive</h2>${autoArchiveHtml()}<section id="archive-settings">${!archived.length
     ? `<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`
     : projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${order.filter(([a]) => a.project === project).map(([a, i]) => `
       <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${machinesShown ? `${esc(machineName(a.machine))} · ` : ""}Archived ${since(a.at)}${a.created ? ` · Created ${since(a.created)}` : ""}</p></div>
         <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`).join("")}`).join("")}</section>`;
+  bindAutoArchive();
+  // The machines answer after the page is up, and what they hold replaces the defaults it showed.
+  readAutoArchive().then((read) => {
+    autoArchive = read;
+    const section = document.getElementById("auto-archive-settings");
+    if (!section || !settingsOpen() || page !== "archive") return;
+    section.outerHTML = autoArchiveHtml();
+    bindAutoArchive();
+  }, () => {});
   const root = document.getElementById("archive-settings");
   const unarchive = (i) => resumeThread(archived[i], () => {
     archived.splice(i, 1);
