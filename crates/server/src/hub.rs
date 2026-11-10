@@ -5,6 +5,7 @@ use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::delegate::{RunTarget, TaskRecord};
+use pinned_core::marks;
 use pinned_core::taste::Tastes;
 use pinned_core::wire::BOX_USD_PER_HOUR;
 use pinned_core::upstash;
@@ -99,6 +100,9 @@ pub struct Account {
     projects: Mutex<HashMap<MachineId, Vec<ProjectView>>>,
     /// Held across a taste's read, change and write, so two changes at once both land.
     tastes: tokio::sync::Mutex<()>,
+    /// Held across a marks write and its push, so every client hears the changes in the order they
+    /// were kept.
+    marks: tokio::sync::Mutex<()>,
     /// Held while task records are billed and saved, so two sends from one box never bill the
     /// same box time twice.
     task_records: tokio::sync::Mutex<()>,
@@ -195,7 +199,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -528,6 +532,14 @@ impl Hub {
                 let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
                 let records = self.db.task_records(account.id, since).await?;
                 return json(pinned_core::delegate::aggregate(&records, now, days));
+            }
+            HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
+            HubCall::MarkSessions { changes } => {
+                marks::check(&changes)?;
+                let _held = account.marks.lock().await;
+                let touched = self.db.mark_sessions(account.id, changes).await?;
+                account.broadcast(&ToClient::SessionMarks { marks: touched.clone() });
+                return json(touched);
             }
         };
         if changed {
@@ -1095,7 +1107,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], Outbox::new().0, vec![]);
         }
@@ -1116,7 +1128,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();

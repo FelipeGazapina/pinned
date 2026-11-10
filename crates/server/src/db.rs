@@ -11,6 +11,7 @@ use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::delegate::TaskRecord;
+use pinned_core::marks::{self, MarkChange, SessionMarks};
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
@@ -80,6 +81,10 @@ create table if not exists delegation_tasks (account uuid not null references ac
   machine uuid not null, id text not null, ended bigint not null, record jsonb not null,
   primary key (account, machine, id));
 create index if not exists delegation_tasks_ended on delegation_tasks (account, ended);
+-- One conversation's marks per row, as the `marks::SessionMarks` it holds. A session with no mark has no row.
+create table if not exists session_marks (account uuid not null references accounts on delete cascade,
+  session text not null, marks jsonb not null, updated timestamptz not null default now(),
+  primary key (account, session));
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -101,6 +106,9 @@ const LOGIN_IDLE_DAYS: i32 = 90;
 pub struct Db {
     sealer: Sealer,
     connection: Connection,
+    /// Opened on first use. The shared connection pipelines every caller's statements, so a
+    /// transaction there would take in other callers' statements too.
+    transactions: Arc<tokio::sync::Mutex<Option<Client>>>,
 }
 
 /// The learning database. It holds no accounts, so its rows name the account only by id.
@@ -269,6 +277,10 @@ fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
     row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
 }
 
+fn stored_marks(account: Uuid, value: Value) -> Result<SessionMarks, String> {
+    serde_json::from_value(value).map_err(|e| format!("account {account} has unreadable session marks: {e}"))
+}
+
 impl Learning {
     pub async fn connect(url: &str) -> Result<Learning, String> {
         Connection::open(url, LEARNING_SCHEMA).await.map(Learning).map_err(|e| format!("learning database: {e}"))
@@ -312,7 +324,7 @@ impl Learning {
 
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await? })
+        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
@@ -820,6 +832,44 @@ impl Db {
         let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
         let updated = self.client().await?.execute("update accounts set tastes = $2 where id = $1 and tastes is null", &[&account, &tastes]).await.map_err(err)?;
         Ok(updated == 1)
+    }
+
+    pub async fn session_marks(&self, account: Uuid) -> Result<Vec<SessionMarks>, String> {
+        let rows = self.client().await?.query("select marks from session_marks where account = $1 order by session", &[&account]).await.map_err(err)?;
+        rows.iter().map(|r| stored_marks(account, r.get(0))).collect()
+    }
+
+    /// Lands `changes` in order and answers the sessions they named as they are now. A session left
+    /// with no mark loses its row.
+    pub async fn mark_sessions(&self, account: Uuid, changes: Vec<MarkChange>) -> Result<Vec<SessionMarks>, String> {
+        let named: Vec<String> = changes.iter().map(|change| change.session.clone()).collect();
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        let rows = tx
+            .query("select session, marks from session_marks where account = $1 and session = any($2) for update", &[&account, &named])
+            .await
+            .map_err(err)?;
+        let mut current: BTreeMap<String, SessionMarks> = BTreeMap::new();
+        for row in rows {
+            current.insert(row.get(0), stored_marks(account, row.get(1))?);
+        }
+        let touched = marks::apply(&mut current, changes);
+        let (gone, kept): (Vec<&SessionMarks>, Vec<&SessionMarks>) = touched.iter().partition(|row| row.is_empty());
+        let gone: Vec<&str> = gone.iter().map(|row| row.session.as_str()).collect();
+        tx.execute("delete from session_marks where account = $1 and session = any($2)", &[&account, &gone]).await.map_err(err)?;
+        let kept = serde_json::to_value(kept).map_err(|e| e.to_string())?;
+        tx.execute(
+            "insert into session_marks (account, session, marks) select $1::uuid, given->>'session', given from jsonb_array_elements($2::jsonb) given \
+             on conflict (account, session) do update set marks = excluded.marks, updated = now()",
+            &[&account, &kept],
+        )
+        .await
+        .map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(touched)
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {
