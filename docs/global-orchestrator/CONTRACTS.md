@@ -454,13 +454,14 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 {"id":"<uuid>","at":1794249424,"machine":"<id>","machine_name":"MacBook","tab":"tab-2b-7","title":"Clean up old machines","role":"worker","action":"remove_machine","about":"Removes a machine from the account…","args":{"id":"<machine id>"},"request_id":"r-9","decision":"approved","decided_at":1794249500,"outcome":"done"}
 ```
 
-`decision`, `decided_at` and `outcome` are absent while it waits.
+`decision`, `decided_at` and `outcome` are absent while it waits. `target` (an id or a name) is present when `act` named a `machine` for an action on a machine; approving runs it there. The table also keeps the redacted result for the notice.
 
 | Wire | From | Answer |
 |---|---|---|
 | `HubCall::Confirmations` | a client or a machine | `Vec<Confirmation>`: every waiting one, oldest first, then the last 20 decided, newest first. |
 | `HubCall::DecideConfirmation { id, approve }` | a signed-in client only. A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
 | `ToClient::Confirmations { items }` | hub to client | The waiting ones, after `Hello` and after every change. An older app ignores the frame. |
+| `HubCall::AgentAudit { before?, limit? }` | a client, or an agent through `act` | `Vec<AuditEntry>` as 13.8 says. |
 
 Deciding:
 
@@ -474,7 +475,7 @@ Deciding:
 
 `HubCall::CreateInvite`'s `hides` is `["code"]`: the agent learns the invite's id and expiry, and the user sees the code in the app's answer to Approve.
 
-The global orchestrator's `waiting` tool lists the waiting confirmations too, as `Waiting { kind: "confirm", machine, machine_name, tab, project: "", title: "Approve <action>?", message: <args summary>, since }`. They come from `HubCall::Confirmations` on the node, never from `Overview`, so an older node never reads `WaitingKind::Confirm`.
+The global orchestrator's `waiting` tool lists the waiting confirmations too, as `Waiting { kind: "confirm", machine, machine_name, tab, title: "Approve <action>?", message: <args summary>, since }` with no `project`. They come from `HubCall::Confirmations` on the node, never from `Overview`, so an older node never reads `WaitingKind::Confirm`.
 
 ### 13.6 Limits on work an action starts
 
@@ -491,7 +492,7 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
 
 ### 13.8 What P1 wires
 
-Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only) and `confirmations`.
+Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
 
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
 
