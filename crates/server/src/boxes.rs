@@ -362,6 +362,11 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
     }
 }
 
+/// A worker box's answer to the `delegate_task` that made it, and to every repeat of it.
+fn started_box(row: &BoxRow) -> serde_json::Value {
+    serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" })
+}
+
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
 fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
@@ -733,6 +738,12 @@ impl Boxes {
     pub async fn open_delegate(&self, hub: &Arc<Hub>, account: &Arc<Account>, origin: Origin, mut request: Request, repo: Option<String>, boxed: BoxTarget) -> Result<serde_json::Value, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
+        // The row's subject names the origin task, so a repeat of a start finds the box that start
+        // made, with no box key, cap or account checks to pass a second time.
+        let subject = Subject::LinearIssue { issue: format!("task {}/{}", origin.machine, origin.task) };
+        if let Some(row) = hub.db.box_row_for(account.id, DELEGATE_CONNECTOR, &subject).await? {
+            return Ok(started_box(&row));
+        }
         let asked = Subject::LinearIssue { issue: format!("workers of {} {}", origin.machine_name, origin.tab) };
         allowed(&connectors, connectors.box_access().worker, "Workers", DELEGATE_CONNECTOR, &asked).await?;
         if request.target.driver_kind.as_deref().is_some_and(|kind| kind != "claude") {
@@ -757,10 +768,9 @@ impl Boxes {
         (request.target.machine, request.target.boxed, request.target.driver_kind) = (None, None, None);
         let budget_usd = box_budget(hub, account, Some(&repo), None).await?;
         let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), request.title.clone()], env: vec![], token: None, account: None, budget_usd };
-        let subject = Subject::LinearIssue { issue: format!("task {}/{}", origin.machine, origin.task) };
         let work = BoxWork::Delegate { origin, request: Box::new(request), claude: Some(claude) };
         let row = self.reserve_work(hub, account, DELEGATE_CONNECTOR, subject, spec, boxed.size, work, &keys).await?;
-        Ok(serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" }))
+        Ok(started_box(&row))
     }
 
     /// The global orchestrator's `send_to_captain` with `box`: the Captain of `repo` in a box
@@ -1212,11 +1222,49 @@ impl Boxes {
             End::Failed(e) => format!("Upstash Box: {e}"),
             why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
         };
-        let end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error) };
+        let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
+        self.add_end_box_usage(hub, account, row, &mut end).await;
         let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
         }
+    }
+
+    /// The box time a worker box's task has used, in ms: once it ended, what the box's task
+    /// records were billed, which `Hub::record_tasks` bills at the box rate; before that, or when no
+    /// record came, the box's life so far.
+    async fn box_time(&self, hub: &Hub, account: &Account, row: &BoxRow, ended: bool) -> u64 {
+        let age = u64::try_from(row.age.as_millis()).unwrap_or(u64::MAX);
+        if !ended {
+            return age;
+        }
+        match hub.db.billed_box_ms(account.id, row.machine, "").await {
+            Ok(billed) if billed > 0 => billed,
+            _ => age,
+        }
+    }
+
+    fn with_box_time(usage: Option<TaskUsage>, ms: u64) -> TaskUsage {
+        let mut usage = usage.unwrap_or_default();
+        usage.wall_ms = usage.wall_ms.max(ms);
+        usage.box_ms = Some(ms);
+        usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+        usage
+    }
+
+    /// Adds the box's cost to the `usage` of a worker's status answer, as `delegate_task`'s
+    /// caller shows it.
+    pub async fn add_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, answer: &mut serde_json::Value) {
+        let ended = matches!(answer["workState"].as_str(), Some("result_available" | "failed" | "cancelled"));
+        let ms = self.box_time(hub, account, row, ended).await;
+        let usage = Self::with_box_time(serde_json::from_value(answer["usage"].clone()).ok(), ms);
+        answer["usage"] = serde_json::to_value(usage).unwrap_or_default();
+    }
+
+    /// Adds the box's cost to the usage of an end the worker's machine reports.
+    pub async fn add_end_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, end: &mut RemoteEnd) {
+        let ms = self.box_time(hub, account, row, true).await;
+        end.usage = Some(Self::with_box_time(end.usage, ms));
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.

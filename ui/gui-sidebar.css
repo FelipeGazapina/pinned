@@ -340,3 +340,23 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .project-head :is(.state, .where) { flex: none; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--g-side-muted); white-space: nowrap; }
 .project-head .state.running { color: var(--g-success); }
 .project-head .where { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* A machine that dropped: one line per machine at the top of the list, and the orchestrator's row
+ * kept but unavailable when its machine is the one that is gone. */
+.machine-note { flex: none; display: flex; align-items: center; gap: 8px; margin: 0 0 4px; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: var(--g-side-muted);
+  background: rgb(var(--g-warning-rgb) / 0.1); }
+.machine-note .dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--g-warning); }
+.machine-note .text { min-width: 0; overflow-wrap: anywhere; }
+.machine-note b { font-weight: 600; color: var(--g-side-fg); }
+.global-row.disabled { opacity: 0.5; cursor: default; }
+.global-row.disabled:hover { background: transparent; }
+
+/* The app's own link to the hub is down: a thin bar over everything, and the live states held still and dimmed. */
+#reconnect-bar { display: none; flex: none; align-items: center; justify-content: center; gap: 8px; height: 24px; padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap;
+  color: var(--g-warning-fg, #ffb900); background: rgb(var(--g-warning-rgb, 254 154 0) / 0.14); border-bottom: 1px solid rgb(var(--g-warning-rgb, 254 154 0) / 0.3); }
+body[data-hub="offline"] #reconnect-bar { display: flex; }
+#reconnect-bar .spin { width: 10px; height: 10px; flex: none; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { #reconnect-bar .spin { animation: none; } }
+body[data-hub="offline"] :is(.thread-row .stamp.status.info, .project-head .state.running, .thread-row .term-run) { opacity: 0.45; }
+body[data-hub="offline"] :is(.thread-row .stamp.status.info .i, .thread-row .term-run .i, #thread .shimmer) { animation-play-state: paused; }
+body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }

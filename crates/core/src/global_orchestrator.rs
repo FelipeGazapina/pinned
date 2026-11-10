@@ -251,6 +251,14 @@ impl Ledger {
         answered
     }
 
+    /// Makes the message look sent `secs` earlier, to test what age changes.
+    #[cfg(test)]
+    pub fn backdate(&mut self, request_id: &str, secs: u64) {
+        if let Some(sent) = self.sent.iter_mut().find(|s| s.request_id == request_id) {
+            sent.at = sent.at.saturating_sub(secs);
+        }
+    }
+
     fn count_turns(&self) {
         *self.turns.lock().unwrap() = self.sent.iter().filter(|s| s.progress == Progress::InFlight).map(|s| s.project.clone()).collect();
     }

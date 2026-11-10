@@ -103,6 +103,10 @@ pub struct State {
     #[serde(skip)]
     #[schemars(skip)]
     loaded_from: Option<PathBuf>,
+    /// Set when `hashes`, `agreed` or `claude_homes` differ from what the file holds.
+    #[serde(skip)]
+    #[schemars(skip)]
+    dirty: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
@@ -141,18 +145,33 @@ impl State {
             if key.starts_with(PLUGINS_KEY) {
                 continue;
             }
-            state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
+            if !state.claude_homes.contains_key(key) {
+                state.claude_homes.insert(key.clone(), legacy_claude_home.to_owned());
+                state.dirty = true;
+            }
         }
         state.loaded_from = Some(file.to_owned());
+        state.dirty |= !file.exists();
         Ok(state)
     }
 
+    /// Writes the state to `file` now, changed or not.
     pub fn save(&mut self, file: &Path) -> Result<(), String> {
         self.loaded_from = Some(file.to_owned());
-        self.persist()
+        self.write()
     }
 
-    fn persist(&self) -> Result<(), String> {
+    /// Writes the state only when something changed since the last write. A cycle that found
+    /// nothing to do writes nothing, so an idle machine doesn't rewrite a file of megabytes.
+    pub fn flush(&mut self) -> Result<(), String> {
+        if self.dirty {
+            self.write()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn write(&mut self) -> Result<(), String> {
         let Some(file) = &self.loaded_from else { return Ok(()) };
         #[cfg(test)]
         SAVES.with(|saves| saves.set(saves.get() + 1));
@@ -164,7 +183,15 @@ impl State {
         temp.persist(file).map_err(|e| failed(e.error))?;
         #[cfg(unix)]
         std::fs::File::open(dir).and_then(|dir| dir.sync_all()).map_err(failed)?;
+        self.dirty = false;
         Ok(())
+    }
+
+    fn keep_agreed(&mut self, key: String, agreed: BTreeMap<String, String>) {
+        if self.agreed.get(&key) != Some(&agreed) {
+            self.agreed.insert(key, agreed);
+            self.dirty = true;
+        }
     }
 
     fn changed_since_hashed(&mut self, file: &Path, hashed: Option<&(String, u64)>) -> bool {
@@ -179,6 +206,7 @@ impl State {
         }
         let sha = sha(&std::fs::read(file).ok()?);
         self.hashes.insert(file.to_owned(), Hashed { size: meta.len(), modified, sha: sha.clone() });
+        self.dirty = true;
         Some((sha, modified))
     }
 }
@@ -232,17 +260,18 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
     let agreed_key = format!("{key} {}", checkout.path.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     if let Some(home) = &checkout.claude_home {
-        if state.claude_homes.insert(agreed_key.clone(), home.clone()).is_some_and(|before| &before != home) {
+        let before = state.claude_homes.insert(agreed_key.clone(), home.clone());
+        state.dirty |= before.as_ref() != Some(home);
+        if before.is_some_and(|before| &before != home) {
             agreed.retain(|path, _| !path.starts_with("claude/"));
             if let Some(saved) = state.agreed.get_mut(&agreed_key) {
                 saved.retain(|path, _| !path.starts_with("claude/"));
             }
-            state.persist()?;
+            state.flush()?;
         }
     }
     let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
-    state.agreed.insert(agreed_key, agreed);
-    state.persist()?;
+    state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
 
@@ -516,8 +545,7 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
     let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
-    state.agreed.insert(agreed_key, agreed);
-    state.persist()?;
+    state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
 
@@ -553,7 +581,8 @@ fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<Stri
             }
         }
     }
-    state.persist()
+    state.dirty = true;
+    state.flush()
 }
 
 fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
@@ -2641,7 +2670,58 @@ mod tests {
         mini.state.save(&root.join("sync.json")).unwrap();
         let before = saves();
         let pulled = mini.sync(&hub).pulled.len();
-        assert_eq!((pulled, saves() - before), (50, 2), "one save for the fetch batch and one when the sync ends");
+        assert_eq!((pulled, saves() - before), (50, 1), "one save for the fetch batch, and none when the sync ends with nothing new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_cycles_write_the_state_file_zero_times_and_a_change_once() {
+        let root = root("idle-cycles");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        let file = root.join("sync.json");
+        mac.state.save(&file).unwrap();
+        // A cycle is one sync of every checkout and one flush, as `Syncer::cycle` does.
+        let cycle = |mac: &mut Side| {
+            let before = saves();
+            mac.sync(&hub);
+            mac.state.flush().unwrap();
+            saves() - before
+        };
+        assert_eq!(cycle(&mut mac), 1, "the first cycle hashes the files and pushes them");
+        let written = std::fs::read(&file).unwrap();
+        let inode = std::fs::metadata(&file).unwrap().modified().unwrap();
+        for _ in 0..5 {
+            assert_eq!(cycle(&mut mac), 0, "an idle cycle writes nothing");
+        }
+        assert_eq!((std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap()), (written.clone(), inode));
+        put(&memory, "two two\n");
+        assert_eq!(cycle(&mut mac), 1, "a change writes once");
+        assert_ne!(std::fs::read(&file).unwrap(), written);
+        assert_eq!(cycle(&mut mac), 0);
+        let reloaded = State::load(&file, &root.join("legacy")).unwrap();
+        assert!(!reloaded.dirty, "a state read back from its file has nothing left to write");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_changes_are_written_by_a_flush_and_a_clean_state_by_none() {
+        let root = root("flush");
+        let file = root.join("sync.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state = State::load(&file, &root.join("legacy")).unwrap();
+        let before = saves();
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 1, "a state with no file yet is written once");
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 1);
+        put(&root.join("note"), "x");
+        state.hash(&root.join("note"));
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 2, "a new hash is a change");
+        assert!(std::fs::read_to_string(&file).unwrap().contains("note"));
         let _ = std::fs::remove_dir_all(root);
     }
 
