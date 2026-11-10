@@ -11530,7 +11530,7 @@ Have another model review a risky change before it goes ahead.";
         let m = machine();
         let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
         m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask: Some(bash_ask("ls")) }).unwrap();
-        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None, usage: None };
         assert_eq!(m.call(Call::RemoteEnded { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), end }).unwrap(), json!(true));
         assert_eq!(m.delegates.get(&id).unwrap().remote.unwrap().waiting, None);
     }
