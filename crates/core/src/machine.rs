@@ -5,7 +5,7 @@ use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, Ta
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -833,6 +833,14 @@ impl Machine {
             }
             Call::ActFor { caller, call } => self.act_for(&caller, call),
             Call::Notice { tab, session, text, id } => json(self.notice(&tab, session, text, &id)),
+            Call::McpServers { account, path } => {
+                let path = path.map(PathBuf::from);
+                let account = self.account_for(account.as_deref(), path.as_deref().unwrap_or(Path::new("")))?;
+                if account.provider != Provider::Claude {
+                    return Err(format!("{} runs {}, and mcp_servers reads Claude Code's MCP servers", account.id, account.provider.spec().name));
+                }
+                json(mcp::servers(&self.accounts.home(&account), path.as_deref()))
+            }
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
@@ -5518,6 +5526,19 @@ pub(crate) mod tests {
 
     fn ticked_by_hand(m: &Machine) {
         m.threads_watched.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn mcp_servers_reads_the_named_accounts_own_config_and_refuses_an_account_claude_does_not_run() {
+        let root = temp("mcp-servers");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let config = r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer lin_api_x"}}}}"#;
+        std::fs::write(root.join("config/accounts/work/.claude.json"), config).unwrap();
+        assert_eq!(m.call(Call::McpServers { account: Some("work".into()), path: None }), Ok(json!([{ "name": "linear", "scope": "user", "transport": "http", "origin": "https://mcp.linear.app" }])));
+        assert_eq!(m.call(Call::McpServers { account: Some("codex".into()), path: None }), Err("codex runs Codex, and mcp_servers reads Claude Code's MCP servers".into()));
+        assert_eq!(m.call(Call::McpServers { account: Some("nope".into()), path: None }), Err("no account nope on this machine".into()));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
