@@ -229,7 +229,7 @@ fn skip(policy: &Placement, need: &Need, machine: &Seen, exclude: &[String], now
     if now - state.reported_at > STALE_SECS {
         return Some((Why::Offline, format!("{name} has not reported for {} s", now - state.reported_at)));
     }
-    if let Some(refused) = account_refusal(name, need, state) {
+    if let Some(refused) = lacks_account(name, need, state) {
         return Some((Why::NoAccount, refused));
     }
     if !machine.has_repo {
@@ -250,7 +250,9 @@ fn skip(policy: &Placement, need: &Need, machine: &Seen, exclude: &[String], now
     None
 }
 
-fn account_refusal(name: &str, need: &Need, state: &MachineState) -> Option<String> {
+/// Why the machine named `name` can't run the worker on the account and model it needs, from its
+/// last report.
+pub fn lacks_account(name: &str, need: &Need, state: &MachineState) -> Option<String> {
     let target = Target { account: need.account.clone(), model: need.model.clone(), effort: None, driver_kind: need.driver_kind.clone(), machine: None, boxed: None };
     if let Some(refused) = crate::load::refusal(name, &target, Some(state)) {
         return Some(refused);
