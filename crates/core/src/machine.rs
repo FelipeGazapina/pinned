@@ -8581,7 +8581,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
-            "projects": { "github.com/acme/site": { "parallel": 5, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
+            "projects": { "github.com/acme/site": { "parallel": 4, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
         });
         let asked = Arc::new(AtomicU32::new(0));
         let (answer, count) = (account.clone(), asked.clone());
@@ -8595,13 +8595,13 @@ while True:
         let path = site.display().to_string();
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
-        let site_brief = "Run up to 5 workers at once.
+        let site_brief = "Run up to 4 workers at once.
 Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
 Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
-        let cap = "pinned enforces these delegation limits on delegate_task: at most 5 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
+        let cap = "pinned enforces these delegation limits on delegate_task: at most 4 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
@@ -8614,7 +8614,7 @@ Deploys go through the VPS.";
 
         let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&global_tab, 80, 24).unwrap();
-        let orchestrator_brief = "Run up to 6 workers at once.
+        let orchestrator_brief = "Run up to 8 workers at once.
 Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
@@ -8731,13 +8731,13 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(got, set);
 
         let reset: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"parallel""#).unwrap()).unwrap();
-        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(3)));
+        assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(5)));
         assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":101}"#), Err("parallel workers go from 1 to 100".into()));
         assert_eq!(tool(&chat, r#""name":"taste_get","scope":"site""#), Err("unknown scope \"site\": use orchestrator, captains or project:<repo>, as in project:github.com/acme/site".into()));
 
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(tool(&plain, r#""name":"taste_set","scope":"captains","patch":{"parallel":1}"#), Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into()));
-        assert_eq!(m.local_tastes().captains.parallel, 3, "a plain thread changed the taste");
+        assert_eq!(m.local_tastes().captains.parallel, 5, "a plain thread changed the taste");
 
         let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
         assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");

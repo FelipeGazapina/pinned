@@ -50,7 +50,7 @@ const TASTE_PRESETS = {
     strategy: "escalate_on_failure",
     ladder: [{ model: "glm-5.3" }, { model: "claude-sonnet-5-5" }, { model: "claude-opus-5-5" }],
     hard_model: { model: "claude-opus-5-5" },
-    parallel: 3,
+    parallel: 5,
     autonomy: "decide_and_tell",
     review_diffs: true,
     second_opinion: false,
@@ -61,7 +61,7 @@ const TASTE_PRESETS = {
     strategy: "strongest_first",
     ladder: [{ model: "claude-opus-5-5" }],
     hard_model: { model: "claude-opus-5-5" },
-    parallel: 6,
+    parallel: 8,
     autonomy: "report_at_end",
     review_diffs: false,
     second_opinion: true,
@@ -72,8 +72,8 @@ const TASTE_PRESETS = {
 
 const TASTE_PROFILES = [
   { id: "economical", label: "Economical", about: "A cheap model with a detailed brief, 2 workers. Asks before a pull request." },
-  { id: "balanced", label: "Balanced", about: "Starts cheap and moves up when a worker fails, 3 workers. Reviews each diff." },
-  { id: "aggressive", label: "Aggressive", about: "The strongest model from the start, 6 workers, a second opinion on risky changes." },
+  { id: "balanced", label: "Balanced", about: "Starts cheap and moves up when a worker fails, 5 workers. Reviews each diff." },
+  { id: "aggressive", label: "Aggressive", about: "The strongest model from the start, 8 workers, a second opinion on risky changes." },
 ];
 
 /** Each strategy's words on the page, and its line of the brief given the ladder's first rung, the

@@ -3237,7 +3237,7 @@
                 "description": "The delegation limits the caller runs under, which the worker here is held to.",
                 "$ref": "#/$defs/Limits",
                 "default": {
-                  "parallel": 3,
+                  "parallel": 5,
                   "tier": "high",
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -5673,7 +5673,7 @@
                   "limits": {
                     "$ref": "#/$defs/Limits",
                     "default": {
-                      "parallel": 3,
+                      "parallel": 5,
                       "tier": "high",
                       "max_effort": "max",
                       "budget_cents": 0,
@@ -7672,7 +7672,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -7704,7 +7704,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -7778,7 +7778,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -11557,7 +11557,7 @@
                 "description": "The delegation limits the caller runs under, which the worker here is held to.",
                 "$ref": "#/$defs/Limits",
                 "default": {
-                  "parallel": 3,
+                  "parallel": 5,
                   "tier": "high",
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -13946,7 +13946,7 @@
                   "limits": {
                     "$ref": "#/$defs/Limits",
                     "default": {
-                      "parallel": 3,
+                      "parallel": 5,
                       "tier": "high",
                       "max_effort": "max",
                       "budget_cents": 0,
@@ -15886,7 +15886,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -15918,7 +15918,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -15987,7 +15987,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -18770,7 +18770,7 @@
                   "limits": {
                     "$ref": "#/$defs/Limits",
                     "default": {
-                      "parallel": 3,
+                      "parallel": 5,
                       "tier": "high",
                       "max_effort": "max",
                       "budget_cents": 0,
@@ -20916,7 +20916,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -20948,7 +20948,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -21022,7 +21022,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -23982,7 +23982,7 @@
                   "limits": {
                     "$ref": "#/$defs/Limits",
                     "default": {
-                      "parallel": 3,
+                      "parallel": 5,
                       "tier": "high",
                       "max_effort": "max",
                       "budget_cents": 0,
@@ -26067,7 +26067,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -26099,7 +26099,7 @@
                   "hard_model": {
                     "model": "claude-opus-5-5"
                   },
-                  "parallel": 3,
+                  "parallel": 5,
                   "autonomy": "decide_and_tell",
                   "review_diffs": true,
                   "second_opinion": false,
@@ -26168,7 +26168,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -37757,7 +37757,7 @@
               "hard_model": {
                 "model": "claude-opus-5-5"
               },
-              "parallel": 3,
+              "parallel": 5,
               "autonomy": "decide_and_tell",
               "review_diffs": true,
               "second_opinion": false,
@@ -37789,7 +37789,7 @@
               "hard_model": {
                 "model": "claude-opus-5-5"
               },
-              "parallel": 3,
+              "parallel": 5,
               "autonomy": "decide_and_tell",
               "review_diffs": true,
               "second_opinion": false,
@@ -37863,7 +37863,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -38209,7 +38209,7 @@
               "hard_model": {
                 "model": "claude-opus-5-5"
               },
-              "parallel": 3,
+              "parallel": 5,
               "autonomy": "decide_and_tell",
               "review_diffs": true,
               "second_opinion": false,
@@ -38241,7 +38241,7 @@
               "hard_model": {
                 "model": "claude-opus-5-5"
               },
-              "parallel": 3,
+              "parallel": 5,
               "autonomy": "decide_and_tell",
               "review_diffs": true,
               "second_opinion": false,
@@ -38310,7 +38310,7 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0,
-                "default": 3
+                "default": 5
               },
               "autonomy": {
                 "$ref": "#/$defs/Autonomy",
@@ -47381,7 +47381,7 @@
                 "description": "The delegation limits the caller runs under, which the worker here is held to.",
                 "$ref": "#/$defs/Limits",
                 "default": {
-                  "parallel": 3,
+                  "parallel": 5,
                   "tier": "high",
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -52092,7 +52092,7 @@
                 "description": "The delegation limits the caller runs under, which the worker here is held to.",
                 "$ref": "#/$defs/Limits",
                 "default": {
-                  "parallel": 3,
+                  "parallel": 5,
                   "tier": "high",
                   "max_effort": "max",
                   "budget_cents": 0,

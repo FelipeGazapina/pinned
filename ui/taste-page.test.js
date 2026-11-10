@@ -117,7 +117,7 @@ test("the page opens on the Captains with their brief, cost and speed, and a tab
   assert.match(html, /<button type="button" class="taste-card active" data-act="profile" data-profile="balanced" aria-pressed="true"><b>Balanced<\/b>/);
   assert.match(html, /<h2>What the Captain receives<\/h2>/);
   assert.deepEqual(lines(html), balancedBrief());
-  assert.match(html, /title="A rough estimate from each model's cost tier">\$0\.67–1\.39</);
+  assert.match(html, /title="A rough estimate from each model's cost tier">\$0\.70–1\.46</);
   assert.match(html, /aria-label="Speed 2 of 3"/);
   assert.doesNotMatch(html, /taste-foot/);
   assert.doesNotMatch(html, /inherited|changed here/);
@@ -138,16 +138,16 @@ test("an edit flashes the lines it changed, makes the profile Custom and shows t
   await p.show();
   await p.click(/aria-label="More workers at once"/);
   const html = p.html();
-  assert.deepEqual(lines(html), ["* Run up to 4 workers at once.", ...balancedBrief().slice(1)]);
+  assert.deepEqual(lines(html), ["* Run up to 6 workers at once.", ...balancedBrief().slice(1)]);
   assert.match(html, /<div class="taste-card custom active"><b>Custom<\/b>/);
   assert.match(html, /<span class="taste-unsaved">Unsaved changes<\/span>/);
   await p.click(/data-act="profile" data-profile="balanced"/);
-  assert.deepEqual(lines(p.html()), ["* Run up to 3 workers at once.", ...balancedBrief().slice(1)]);
+  assert.deepEqual(lines(p.html()), ["* Run up to 5 workers at once.", ...balancedBrief().slice(1)]);
   assert.doesNotMatch(p.html(), /taste-foot/, "back to the saved tastes, nothing to save");
 });
 
 test("a project tab marks only the fields changed there, and Reset inherits again", async () => {
-  const p = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 5 } } }) });
+  const p = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 6 } } }) });
   await p.show();
   await p.click(/data-act="scope" data-kind="project"/);
   let html = p.html();
@@ -156,12 +156,12 @@ test("a project tab marks only the fields changed there, and Reset inherits agai
   assert.equal(html.match(/changed here/g).length, 1, "only the project's own field is tagged");
   assert.doesNotMatch(html, /inherited/);
   assert.match(html, /<div class="taste-label"><span>Strategy<\/span><\/div>/);
-  assert.equal(lines(html)[0], "Run up to 5 workers at once.");
+  assert.equal(lines(html)[0], "Run up to 6 workers at once.");
   await p.click(/data-act="reset" data-field="parallel"/);
   html = p.html();
   assert.match(html, /<div class="taste-label"><span>Workers at once<\/span><\/div>/);
   assert.doesNotMatch(html, /changed here/);
-  assert.equal(lines(html)[0], "* Run up to 3 workers at once.");
+  assert.equal(lines(html)[0], "* Run up to 5 workers at once.");
   assert.match(html, /aria-pressed="true"[^>]*>Captain site</, "an offline project's tab stays open once its patch is gone");
   assert.match(html, /Unsaved changes/);
 });
@@ -226,7 +226,7 @@ test("a session's change reaches the open page without a reload", async () => {
   let stored = tastesWith();
   const p = page({ answer: () => stored });
   await p.show();
-  assert.equal(lines(p.html())[0], "Run up to 3 workers at once.");
+  assert.equal(lines(p.html())[0], "Run up to 5 workers at once.");
   stored = tastesWith({ captains: { ...balanced, parallel: 2 } });
   p.context.tastesChanged();
   await p.settle();
@@ -236,8 +236,8 @@ test("a session's change reaches the open page without a reload", async () => {
 
 test("Save sends the changes in order, takes the last answer and shows the toast", async () => {
   const answers = {
-    get_tastes: tastesWith({ projects: { [SITE]: { parallel: 5 } } }),
-    set_taste: tastesWith({ captains: { ...balanced, second_opinion: true }, projects: { [SITE]: { parallel: 5 } } }),
+    get_tastes: tastesWith({ projects: { [SITE]: { parallel: 6 } } }),
+    set_taste: tastesWith({ captains: { ...balanced, second_opinion: true }, projects: { [SITE]: { parallel: 6 } } }),
     reset_taste_field: tastesWith({ orchestrator: { ...balanced, parallel: 1 }, captains: { ...balanced, second_opinion: true } }),
   };
   const p = page({ answer: (cmd) => answers[cmd], projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
@@ -277,22 +277,22 @@ test("a failed save keeps the draft, says why, and the next save sends only what
   await p.click(/data-act="save"/);
   let html = p.html();
   assert.match(html, /<span class="taste-unsaved">Unsaved changes<\/span><span class="taste-error" role="alert">the model ladder needs at least one model<\/span>/);
-  assert.equal(lines(html)[0], "Run up to 2 workers at once.", "the draft stands");
+  assert.equal(lines(html)[0], "Run up to 4 workers at once.", "the draft stands");
   refuse = false;
   await p.click(/data-act="save"/);
   assert.deepEqual(p.calls.slice(1).map(([cmd, args]) => `${cmd} ${args.scope.kind}`), ["set_taste orchestrator", "set_taste captains", "set_taste captains"]);
 });
 
 test("a reload keeps unsaved edits over what another device saved meanwhile, and a save sends only the edits", async () => {
-  let stored = tastesWith({ projects: { [SITE]: { parallel: 5 } } });
+  let stored = tastesWith({ projects: { [SITE]: { parallel: 6 } } });
   const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? stored : stored), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
   await p.show();
   await p.click(/data-act="scope" data-kind="orchestrator"/);
   await p.click(/data-act="set" data-field="autonomy" data-value="ask_first"/);
-  stored = tastesWith({ captains: { ...balanced, parallel: 5 }, projects: { [SITE]: { parallel: 5, context: ["Releases go out on Fridays."] } } });
+  stored = tastesWith({ captains: { ...balanced, parallel: 7 }, projects: { [SITE]: { parallel: 6, context: ["Releases go out on Fridays."] } } });
   await p.show();
   await p.click(/data-act="scope" data-kind="captains"/);
-  assert.equal(lines(p.html())[0], "Run up to 5 workers at once.", "the other device's Captains change shows");
+  assert.equal(lines(p.html())[0], "Run up to 7 workers at once.", "the other device's Captains change shows");
   assert.match(p.html(), /Unsaved changes/, "the orchestrator's edit is still unsaved");
   await p.click(/data-act="save"/);
   assert.deepEqual(p.calls.filter(([cmd]) => cmd !== "get_tastes"), [["set_taste", { scope: { kind: "orchestrator" }, patch: { autonomy: "ask_first" } }]]);
@@ -334,14 +334,14 @@ test("showing the page again keeps a dirty draft over a fresh read, and a failed
   await p.click(/aria-label="More workers at once"/);
   read = () => tastesWith({ captains: { ...balanced, autonomy: "ask_first" } });
   await p.show();
-  assert.equal(lines(p.html())[0], "Run up to 4 workers at once.");
+  assert.equal(lines(p.html())[0], "Run up to 6 workers at once.");
   assert.match(p.html(), /Unsaved changes/);
   await p.click(/data-act="discard"/);
   assert.equal(lines(p.html())[3], "Ask the user before you open a pull request or delete data.", "Discard goes back to the fresh read");
   read = () => Promise.reject(new Error("hub offline"));
   await p.show();
   assert.match(p.html(), /<footer class="taste-foot"><span class="taste-error" role="alert">hub offline<\/span>/);
-  assert.equal(lines(p.html())[0], "Run up to 3 workers at once.", "the last read stays on screen");
+  assert.equal(lines(p.html())[0], "Run up to 5 workers at once.", "the last read stays on screen");
 });
 
 const limits = { tier: "high", default_effort: null, max_effort: "max", budget_cents: 0, time_limit_min: 480, box_budget_cents: 0 };

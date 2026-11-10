@@ -823,10 +823,18 @@ impl Db {
         Ok(row.and_then(|r| u64::try_from(r.get::<_, i64>(0)).ok()))
     }
 
+    /// The account's tastes, read as what they were saved as on the current parallel defaults.
     pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {
         let row = self.client().await?.query_one("select tastes from accounts where id = $1", &[&account]).await.map_err(err)?;
         let stored: Option<Value> = row.get(0);
-        stored.map(|tastes| serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))).transpose()
+        match stored {
+            None => Ok(None),
+            Some(tastes) => {
+                let mut tastes: Tastes = serde_json::from_value(tastes).map_err(|e| format!("account {account} has unreadable tastes: {e}"))?;
+                tastes.take_raised_defaults();
+                Ok(Some(tastes))
+            }
+        }
     }
 
     pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
