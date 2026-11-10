@@ -1057,6 +1057,17 @@ pub enum HubCall {
     /// From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for
     /// `orchestrator_capabilities`.
     MachineStates,
+    /// From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it
+    /// would start, by the account's placement policy. `repo` is the project's origin, `need` the
+    /// account and model the worker runs on, and `exclude` the machines that refused it already.
+    Place {
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default)]
+        need: crate::placement::Need,
+        #[serde(default)]
+        exclude: Vec<MachineId>,
+    },
     RenameMachine { id: MachineId, name: String },
     RemoveMachine { id: MachineId },
     /// `PairCode`.

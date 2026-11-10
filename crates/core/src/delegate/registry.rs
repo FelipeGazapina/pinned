@@ -253,6 +253,19 @@ impl Delegates {
         }
     }
 
+    /// Notes where task `id` runs and who chose that.
+    pub fn set_placement(&self, id: &str, placed: crate::placement::Placed) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.placement = Some(placed);
+        }
+    }
+
+    /// Forgets task `id`, which no machine took: placement sends its worker to another machine.
+    pub fn discard(&self, id: &str) {
+        self.tasks.lock().unwrap().retain(|task| task.id != id);
+        self.persist();
+    }
+
     pub fn get(&self, id: &str) -> Option<Task> {
         self.tasks.lock().unwrap().iter().find(|task| task.id == id).cloned()
     }
@@ -948,6 +961,7 @@ impl Delegates {
                     "next": next_line(task),
                 });
                 with_moved(&mut body, task);
+                with_placement(&mut body, task);
                 body
             }
         };
@@ -1730,6 +1744,7 @@ fn status_json(task: &Task) -> Value {
         body["waiting"] = json!({ "kind": ask.kind, "tool": ask.tool, "ask": ask.ask, "since": ask.since, "machine": remote.name, "tab": remote.tab });
     }
     with_moved(&mut body, task);
+    with_placement(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
@@ -1769,6 +1784,13 @@ fn status_json(task: &Task) -> Value {
 fn with_moved(body: &mut Value, task: &Task) {
     if let Some(moved) = &task.moved {
         body["movedFrom"] = json!({ "providerInstanceId": moved.account, "model": moved.model, "reason": moved.reason });
+    }
+}
+
+/// Names the machine a task runs on and who chose it.
+fn with_placement(body: &mut Value, task: &Task) {
+    if let Some(placed) = &task.placement {
+        body["placement"] = json!(placed);
     }
 }
 
@@ -1986,6 +2008,7 @@ fn fresh(new: NewTask) -> Task {
         review: None,
         thread_tab: None,
         recorded: false,
+        placement: None,
     }
 }
 
@@ -2126,6 +2149,8 @@ struct SavedTask {
     remote: Option<SavedRemote>,
     #[serde(default)]
     remote_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<crate::placement::Placed>,
     /// The milliseconds a working task had counted toward its time limit when this was written.
     /// A restart counts on from there, so the time pinned was down does not count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2221,6 +2246,7 @@ impl SavedTask {
             worker_session: task.worker_session.clone(),
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
             remote_tab: task.remote_tab.clone(),
+            placement: task.placement.clone(),
             counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
     }
@@ -2273,6 +2299,7 @@ impl SavedTask {
             review: self.review,
             thread_tab: self.thread_tab,
             recorded: self.recorded,
+            placement: self.placement,
         }
     }
 }

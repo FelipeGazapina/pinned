@@ -308,6 +308,9 @@ pub struct Request {
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// Whether the account's placement policy places this worker, over its rule for heavy work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heavy: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -441,6 +444,8 @@ pub struct Task {
     pub thread_tab: Option<String>,
     /// The hub holds this task's record as it is now.
     pub recorded: bool,
+    /// Where it runs and who chose that, for a task this machine's caller delegated.
+    pub placement: Option<crate::placement::Placed>,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.
@@ -857,6 +862,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
@@ -916,6 +922,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         assert_eq!(
