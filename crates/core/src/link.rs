@@ -75,7 +75,7 @@ impl Shared {
         self.pending.lock().unwrap().insert(id, answer);
         if !self.send(&MachineFrame::Call { id, call }) {
             self.pending.lock().unwrap().remove(&id);
-            return Err("not connected to the hub".into());
+            return Err(OFFLINE.into());
         }
         match answered.recv_timeout(CALL_WAIT) {
             Ok(result) => result,
@@ -128,6 +128,9 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     });
     Link { shared, stop, thread, syncing }
 }
+
+/// What a hub call answers while the link is down.
+pub const OFFLINE: &str = "not connected to the hub";
 
 impl Link {
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.

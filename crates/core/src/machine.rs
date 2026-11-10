@@ -534,6 +534,8 @@ pub struct Machine {
     /// The account's enabled MCP servers as the hub last handed them, secrets and all, kept in
     /// memory only, for a session that starts while the hub is slow to answer.
     mcp_loaded: Mutex<Option<Vec<mcp::Load>>>,
+    /// A session start already waited for the link to load the MCP servers.
+    mcp_waited: AtomicBool,
     global: Mutex<global::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
@@ -699,6 +701,7 @@ impl Machine {
             meter_rates: Mutex::default(),
             tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
+            mcp_waited: AtomicBool::new(false),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
@@ -3077,23 +3080,35 @@ impl Machine {
     pub(crate) fn set_hub(&self, hub: Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>) {
         *self.hub.lock().unwrap() = Some(hub);
         *self.mcp_loaded.lock().unwrap() = None;
+        self.mcp_waited.store(false, Ordering::SeqCst);
     }
 
     /// The account's enabled MCP servers: the hub's answer within `MCP_WAIT`, else the ones it
-    /// last handed this machine. None while this machine is not linked to a hub.
+    /// last handed this machine. The first session that finds none kept waits that long for the
+    /// link to come up, as sessions restored at launch start before it does; later ones don't, so
+    /// an offline machine starts its sessions at once. None while this machine is not linked.
     fn mcp_loads(&self) -> Option<Vec<mcp::Load>> {
         let hub = self.hub.lock().unwrap().clone()?;
-        let (answer, answered) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let read = hub(HubCall::LoadMcpServers).and_then(|value| serde_json::from_value::<Vec<mcp::Load>>(value).map_err(|e| e.to_string()));
-            let _ = answer.send(read);
-        });
-        match answered.recv_timeout(MCP_WAIT) {
-            Ok(Ok(loads)) => {
-                *self.mcp_loaded.lock().unwrap() = Some(loads.clone());
-                Some(loads)
+        let deadline = Instant::now() + MCP_WAIT;
+        let first = !self.mcp_waited.swap(true, Ordering::SeqCst);
+        loop {
+            let (answer, answered) = std::sync::mpsc::channel();
+            let asking = hub.clone();
+            std::thread::spawn(move || {
+                let read = asking(HubCall::LoadMcpServers).and_then(|value| serde_json::from_value::<Vec<mcp::Load>>(value).map_err(|e| e.to_string()));
+                let _ = answer.send(read);
+            });
+            let kept = || self.mcp_loaded.lock().unwrap().clone();
+            match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(loads)) => {
+                    *self.mcp_loaded.lock().unwrap() = Some(loads.clone());
+                    return Some(loads);
+                }
+                Ok(Err(e)) if first && e == crate::link::OFFLINE && kept().is_none() && Instant::now() + Duration::from_millis(100) < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => return kept(),
             }
-            _ => self.mcp_loaded.lock().unwrap().clone(),
         }
     }
 
@@ -5728,6 +5743,28 @@ pub(crate) mod tests {
         assert!(m.session_mcp(&Account::builtin(Provider::Claude), Path::new("/repo")).is_none(), "an account with no servers writes no config");
         m.set_hub(mcp_hub(mcp_loads(), Arc::default()));
         assert!(m.session_mcp(&Account::builtin(Provider::Cursor), Path::new("/repo")).is_none(), "cursor-agent reads only its own files");
+    }
+
+    #[test]
+    fn the_first_session_waits_for_a_link_still_coming_up_and_later_ones_start_at_once() {
+        let root = temp("mcp-link-up");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        let up = Instant::now() + Duration::from_millis(200);
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::LoadMcpServers if Instant::now() >= up => Ok(mcp_loads()),
+            _ => Err(crate::link::OFFLINE.into()),
+        }));
+        assert!(m.session_mcp(&work, &root).is_some(), "a session restored at launch gets the servers once the link is up");
+        m.set_hub(Arc::new(|_| Err(crate::link::OFFLINE.into())));
+        let started = Instant::now();
+        assert!(m.session_mcp(&work, &root).is_none());
+        assert!(started.elapsed() >= MCP_WAIT - Duration::from_millis(150), "the first start without a list waits for the link: {:?}", started.elapsed());
+        let started = Instant::now();
+        assert!(m.session_mcp(&work, &root).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100), "an offline machine starts the next session at once: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
