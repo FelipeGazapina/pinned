@@ -727,6 +727,52 @@ fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
 }
 
 #[test]
+fn the_web_app_files_are_gzipped_for_a_client_that_accepts_it_and_plain_for_one_that_does_not() {
+    use std::io::Read;
+    let hub = TestHub::start("gzip");
+    let script = "const answer = 42; // pinned\n".repeat(400);
+    std::fs::write(hub.dir.join("ui/app.js"), &script).unwrap();
+    std::fs::write(hub.dir.join("ui/index.html"), format!("<title>pinned</title>{}", "<p>the web app</p>".repeat(400))).unwrap();
+    let client = reqwest::blocking::Client::new();
+    let fetch = |path: &str, encoding: Option<&str>| {
+        let mut request = client.get(format!("{}{path}", hub.url));
+        if let Some(encoding) = encoding {
+            request = request.header("accept-encoding", encoding);
+        }
+        let response = request.send().unwrap();
+        let header = |name: &str| response.headers().get(name).map(|v| v.to_str().unwrap().to_owned());
+        let (status, encoding, kind, vary, cache) = (response.status().as_u16(), header("content-encoding"), header("content-type"), header("vary"), header("cache-control"));
+        (status, encoding, kind, vary, cache, response.bytes().unwrap().to_vec())
+    };
+
+    let (status, encoding, kind, vary, cache, body) = fetch("/app.js", Some("gzip"));
+    assert_eq!((status, encoding.as_deref(), kind.as_deref(), cache.as_deref()), (200, Some("gzip"), Some("text/javascript"), Some("no-cache")));
+    assert!(vary.is_some_and(|v| v.to_lowercase().contains("accept-encoding")));
+    assert!(body.len() < script.len() / 10, "{} bytes for {}", body.len(), script.len());
+    let mut unpacked = String::new();
+    flate2::read::GzDecoder::new(&body[..]).read_to_string(&mut unpacked).unwrap();
+    assert_eq!(unpacked, script);
+
+    let (status, encoding, kind, _, _, body) = fetch("/app.js", None);
+    assert_eq!((status, encoding, kind.as_deref(), body), (200, None, Some("text/javascript"), script.clone().into_bytes()));
+    let (_, encoding, ..) = fetch("/app.js", Some("identity"));
+    assert_eq!(encoding, None);
+
+    // The pages that are the app's index are compressed too, and keep their type.
+    for path in ["/", "/new", "/connect-agent"] {
+        let (status, encoding, kind, _, _, body) = fetch(path, Some("gzip, br"));
+        assert_eq!((status, encoding.as_deref(), kind.as_deref()), (200, Some("gzip"), Some("text/html; charset=utf-8")), "{path}");
+        let mut page = String::new();
+        flate2::read::GzDecoder::new(&body[..]).read_to_string(&mut page).unwrap();
+        assert!(page.starts_with("<title>pinned</title>"), "{path}");
+    }
+
+    // A download is the file as it is, even for a client that accepts gzip.
+    let (status, encoding, _, _, _, body) = fetch("/download/pinned-server-x86_64-unknown-linux-musl", Some("gzip"));
+    assert_eq!((status, encoding, body), (200, None, b"ELF".to_vec()));
+}
+
+#[test]
 fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let hub = TestHub::start("dispatch");
     let url = hub.url.clone();
