@@ -5164,7 +5164,7 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     let prices = ran(act(&ana.dir, &ana.tab, "set_usage_prices", json!({ "prices": { "glm-5.3": { "input": 1.0, "output": 2.0 } }, "aliases": {} })));
     assert_eq!(prices["prices"]["glm-5.3"]["output"], 2.0);
     assert_eq!(ran(act(&bob.dir, &bob.tab, "usage_prices", json!({}))), json!({ "prices": {}, "aliases": {} }));
-    assert!(ran(act(&ana.dir, &ana.tab, "skills", json!({}))).is_array());
+    assert!(ran(act(&ana.dir, &ana.tab, "skills", json!({})))["copies"].is_array());
     let missing = ran(act(&ana.dir, &ana.tab, "save_skill", json!({ "text": "# x", "copies": [{ "dir": ana.dir.join("no-skill").display().to_string(), "since": "abc" }] })));
     assert_eq!(missing["copies"][0]["outcome"], "missing");
     assert!(ran(act(&ana.dir, &ana.tab, "token_usage", json!({ "since": 0 }))).is_object());

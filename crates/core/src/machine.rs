@@ -9190,6 +9190,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(!m.view(&captain).unwrap().running, "a refused message starts nothing");
 
         let worker = m.open_tab(Some(path.clone()), false).unwrap();
+        m.tab(&worker, |t| t.model = Some("claude-sonnet-5-5".into())).unwrap();
         act_as(&m, &captain, "start_claude", json!({ "tab": worker, "cols": 80, "rows": 24 })).unwrap();
         let task = m.tab(&worker, |t| t.task.clone()).unwrap().expect("the worker runs a task");
         assert_eq!(
@@ -9294,7 +9295,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(cleared["prices"], json!({}), "{cleared}");
 
         let skills = act("skills", json!({})).unwrap();
-        assert!(skills.is_array(), "{skills}");
+        assert!(skills["copies"].is_array(), "{skills}");
         let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
         assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
         assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
