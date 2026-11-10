@@ -6,7 +6,7 @@
 // already has, once, and keeps its own copy. An agent session in A renames a thread and archives another
 // through act's mark_sessions and archive_session, as Claude Code calls pinned's MCP server, and
 // both browsers show it at once. Its delete_session waits for the user's approval, and the thread
-// leaves both sidebars only once A approves.
+// leaves both sidebars only once A approves, which asks A for the account's password first.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/session-marks.js
@@ -154,6 +154,18 @@ async function launch(name, errors) {
       fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
     },
   };
+}
+
+/** Answers the password prompt a call only the account's owner makes opens, with the account's password. */
+async function unlock(page) {
+  await waitFor(`the password prompt in ${page.name}`, () => page.evaluate(() => !!document.querySelector("dialog[open] form [name=password]")));
+  check((await page.evaluate(() => document.querySelector("dialog[open] form h3").textContent)) === "Enter your password", `${page.name}'s approval asks for the password`);
+  await page.evaluate((password) => {
+    const form = document.querySelector("dialog[open] form");
+    form.querySelector("[name=password]").value = password;
+    form.querySelector(".primary").click();
+  }, PASSWORD);
+  await waitFor(`the password prompt in ${page.name} to close`, () => page.evaluate(() => !document.querySelector("dialog[open]")));
 }
 
 async function signIn(page) {
@@ -370,7 +382,8 @@ const errors = [];
     const waiting = (await A.evaluate(() => hub.hub({ cmd: "confirmations" }))).find((c) => c.id === asked.id);
     check(waiting && !waiting.decision && waiting.action === "delete_session", `confirmations lists ${JSON.stringify(waiting)}`);
     await B.screenshot(path.join(SCREENS, "session-marks-pending.png"));
-    const decided = await A.evaluate((id) => hub.hub({ cmd: "decide_confirmation", id, approve: true }), asked.id);
+    // The app's login is locked, so its first approval holds until the password prompt is answered.
+    const [decided] = await Promise.all([A.evaluate((id) => hub.hub({ cmd: "decide_confirmation", id, approve: true }), asked.id), unlock(A)]);
     check(decided.outcome === "done", `the approval came to ${JSON.stringify(decided)}`);
     await waitFor("thread 1 to leave A's sidebar", async () => !(await listed(A, t1.key)));
     await waitFor("thread 1 to leave B's sidebar", async () => !(await listed(B, t1.key)));

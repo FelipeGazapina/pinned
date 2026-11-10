@@ -6101,3 +6101,357 @@ fn an_agents_box_is_held_to_the_box_budget_and_cap_and_counts_as_its_task_once_i
     let rows: Vec<(String, String)> = trail_of(&mut ana.client).into_iter().filter(|r| r.0 == "open_box").map(|r| (r.1, r.3)).collect();
     assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["failed", "done", "failed", "failed", "failed"], "every open is audited: {rows:?}");
 }
+
+/// What the hub asked of the outside world since the first call here, each as the `host:port` of a
+/// CONNECT. Every HTTPS call this process makes goes through a proxy that records its target and
+/// answers 502, so a test that makes the hub call Slack, GitHub, Linear or Vercel with a made-up key
+/// reaches no real service. A call that never leaves the hub adds nothing.
+fn outside_world() -> &'static Mutex<Vec<String>> {
+    static ASKED: std::sync::OnceLock<&'static Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(|| {
+        let asked: &'static Mutex<Vec<String>> = Box::leak(Box::default());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || refuse_connect(stream, asked));
+            }
+        });
+        for (name, value) in [("HTTPS_PROXY", proxy.as_str()), ("https_proxy", proxy.as_str()), ("NO_PROXY", "127.0.0.1,localhost"), ("no_proxy", "127.0.0.1,localhost")] {
+            std::env::set_var(name, value);
+        }
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let _ = client.get("https://proxy-check.invalid/").send();
+        assert_eq!(asked.lock().unwrap().as_slice(), ["proxy-check.invalid:443"], "HTTPS calls must go through the refusing proxy, or a test would reach a real service");
+        asked
+    })
+}
+
+fn refuse_connect(mut stream: TcpStream, asked: &Mutex<Vec<String>>) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut head = vec![];
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|n| n == 1) {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    let mut words = head.split_whitespace();
+    if let (Some("CONNECT"), Some(target)) = (words.next(), words.next()) {
+        asked.lock().unwrap().push(target.to_owned());
+    }
+    let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+}
+
+/// How many times the hub tried to reach `host` (as `host:port`).
+fn asked_of(host: &str) -> usize {
+    outside_world().lock().unwrap().iter().filter(|target| target.as_str() == host).count()
+}
+
+/// Two accounts on one hub, each with its machine, its agent session and its unlocked app.
+struct Pair {
+    _hub: TestHub,
+    url: String,
+    ana: Agent,
+    bob: Agent,
+}
+
+fn ana_and_bob(name: &str) -> Pair {
+    let hub = TestHub::start_with(name, Signup::Open);
+    outside_world();
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    for app in [&mut ana.client, &mut bob.client] {
+        app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    }
+    Pair { _hub: hub, url, ana, bob }
+}
+
+/// Moves a connection of each service into `who`'s empty account, with a key only the hub keeps.
+/// Nothing reaches the services. Answers the keys.
+fn seed(client: &mut Client, who: &str) -> Vec<String> {
+    let keys = [format!("lin_api_{who}_hubkey_4f9a"), format!("xoxb-{who}-hubkey-4f9a"), format!("ghp_{who}_hubkey_4f9a"), format!("vck_{who}_hubkey_4f9a")];
+    let store = json!({
+        "connectors": [],
+        "linear": { "name": who, "email": format!("{who}@acme.dev"), "organization": format!("{who} org") },
+        "slack": { "team": format!("{who} team"), "userId": format!("U{who}"), "name": format!("{who}-bot") },
+        "github": { "login": who, "name": format!("{who} github") },
+        "vercel": { "key_hint": format!("…{who}") },
+    });
+    let imported = client.hub(json!({ "cmd": "import", "store": store, "linear_key": keys[0], "slack_key": keys[1], "github_key": keys[2], "vercel_key": keys[3] }));
+    assert_eq!(imported, Ok(json!(true)));
+    keys.to_vec()
+}
+
+/// What the account's app shows of its connections and settings.
+fn connections(client: &mut Client) -> Value {
+    let mut settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    settings.as_object_mut().unwrap().remove("checked");
+    settings
+}
+
+/// Every answer, refusal and notice a test saw, which no secret may appear in.
+struct Seen(Vec<String>);
+
+impl Seen {
+    fn log<T: std::fmt::Debug>(&mut self, value: T) -> T {
+        self.0.push(format!("{value:?}"));
+        value
+    }
+}
+
+fn holds_none_of(secrets: &[String], what: &str, text: &str) {
+    for secret in secrets {
+        assert!(!text.contains(secret.as_str()), "{secret} reached {what}: {text}");
+    }
+}
+
+fn nothing_waits(id: &Value) -> Result<Value, String> {
+    Err(format!("no confirmation {} waits", id.as_str().unwrap()))
+}
+
+struct Service {
+    name: &'static str,
+    connect: &'static str,
+    disconnect: &'static str,
+    /// What the user types in the connect dialog.
+    field: &'static str,
+    /// Where the hub would validate that value, as a CONNECT target.
+    host: &'static str,
+    unreachable: &'static str,
+}
+
+const SERVICES: [Service; 4] = [
+    Service { name: "linear", connect: "connect_linear", disconnect: "disconnect_linear", field: "key", host: "api.linear.app:443", unreachable: "Linear unreachable" },
+    Service { name: "slack", connect: "connect_slack", disconnect: "disconnect_slack", field: "token", host: "slack.com:443", unreachable: "Slack unreachable" },
+    Service { name: "github", connect: "connect_github", disconnect: "disconnect_github", field: "token", host: "api.github.com:443", unreachable: "GitHub unreachable" },
+    Service { name: "vercel", connect: "connect_vercel", disconnect: "disconnect_vercel", field: "key", host: "ai-gateway.vercel.sh:443", unreachable: "Vercel AI Gateway: unreachable" },
+];
+
+#[test]
+fn an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_their_owner_and_leave_another_account_alone() {
+    let Pair { _hub, url, mut ana, mut bob } = ana_and_bob("agent_connect");
+    let mut seen = Seen(vec![]);
+    let mut secrets = seed(&mut ana.client, "ana");
+    secrets.extend(seed(&mut bob.client, "bob"));
+    let mut locked = Client::app(&url, &account::login(&url, "ana@acme.dev", "correct horse").unwrap().0);
+
+    for service in &SERVICES {
+        let Service { name, connect, disconnect, field, host, unreachable } = *service;
+        let (typed, bobs_typed, sent) = (format!("typed_{name}_by_ana_7c1d"), format!("typed_{name}_by_bob_7c1d"), format!("sent_{name}_by_agent_9e2b"));
+        secrets.extend([typed.clone(), bobs_typed.clone(), sent.clone()]);
+        let (anas, bobs) = (connections(&mut ana.client), connections(&mut bob.client));
+        assert!(anas[name].is_object() && bobs[name].is_object() && anas[name] != bobs[name], "{name}: each account starts with its own connection");
+
+        // (a) Ana's agent asks; only her unlocked app decides, and she types the key there.
+        assert_eq!(
+            seen.log(act(&ana.dir, &ana.tab, connect, json!({ (field): sent }))),
+            Err(format!("an agent never sends a password, key or token: {field}. The user enters it in the app.")),
+            "{connect}"
+        );
+        let asked = seen.log(act(&ana.dir, &ana.tab, connect, json!({}))).unwrap();
+        assert_eq!(asked["outcome"], "pending", "{asked}");
+        let id = asked["id"].clone();
+        assert_eq!(waiting_actions(&mut ana.client), [connect]);
+        let held = ana.client.hub(json!({ "cmd": "confirmations" })).unwrap();
+        assert_eq!(held[0]["args"], json!({}), "{connect}: the approval holds no key, the dialog asks for it");
+        assert_eq!(seen.log(approve(&mut locked, &id, json!({ (field): typed }))), Err(LOCKED.into()), "{connect}: a locked app can't decide it");
+        assert_eq!(seen.log(approve(&mut ana.client, &id, json!({}))), Err(format!("{connect} needs {field}, which the user types in the app")));
+        assert_eq!(seen.log(approve(&mut ana.client, &id, json!({ (field): typed, "name": "x" }))), Err(format!("{connect} does not take name")));
+        assert_eq!(waiting_actions(&mut ana.client), [connect], "{connect}: a refused form leaves it waiting");
+        let reached = asked_of(host);
+        let failed = seen.log(approve(&mut ana.client, &id, json!({ (field): typed }))).unwrap_err();
+        assert!(failed.starts_with(unreachable), "{connect}: {failed}");
+        assert_eq!(asked_of(host), reached + 1, "{connect}: the hub asked {host} once, and the proxy refused");
+        assert_eq!(waiting_actions(&mut ana.client), [connect], "{connect}: a key that did not check leaves it waiting");
+
+        // (b) Bob's agent and app can neither see nor decide it.
+        assert_eq!(seen.log(approve(&mut bob.client, &id, json!({ (field): bobs_typed }))), nothing_waits(&id), "{connect}");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": false }))), nothing_waits(&id), "{connect}: nor deny it");
+        let bobs_list = bob.client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string();
+        let bobs_agent_list = seen.log(act(&bob.dir, &bob.tab, "confirmations", json!({}))).unwrap().to_string();
+        assert!(!bobs_list.contains(id.as_str().unwrap()) && !bobs_agent_list.contains(id.as_str().unwrap()), "{connect}: bob's lists show ana's: {bobs_list} {bobs_agent_list}");
+        assert_eq!((waiting_actions(&mut bob.client), waiting_actions(&mut ana.client)), (Vec::<String>::new(), vec![connect.to_owned()]));
+        assert_eq!(asked_of(host), reached + 1, "{connect}: bob's tries never left the hub");
+
+        // (c) Bob's own connect is his: ana's app can't decide it, his key goes to the service, and nobody's connections change.
+        let bobs_ask = seen.log(act(&bob.dir, &bob.tab, connect, json!({}))).unwrap();
+        let bobs_id = bobs_ask["id"].clone();
+        assert_eq!((bobs_ask["outcome"].as_str(), bobs_id != id), (Some("pending"), true));
+        assert_eq!(seen.log(approve(&mut ana.client, &bobs_id, json!({ (field): typed }))), nothing_waits(&bobs_id), "{connect}: ana's app can't decide bob's");
+        let bobs_failed = seen.log(approve(&mut bob.client, &bobs_id, json!({ (field): bobs_typed }))).unwrap_err();
+        assert!(bobs_failed.starts_with(unreachable), "{connect}: {bobs_failed}");
+        assert_eq!(asked_of(host), reached + 2);
+        assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_id, "approve": false })).unwrap()["outcome"], "denied");
+        assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": false })).unwrap()["outcome"], "denied");
+        assert_eq!((connections(&mut ana.client), connections(&mut bob.client)), (anas.clone(), bobs.clone()), "{connect}: a denied connect changes no connection");
+
+        // The disconnect: Ana's waits for her alone, Bob's runs on his account only.
+        let off = seen.log(act(&ana.dir, &ana.tab, disconnect, json!({}))).unwrap();
+        assert_eq!(off["outcome"], "pending", "{off}");
+        let off = off["id"].clone();
+        assert_eq!(seen.log(approve(&mut locked, &off, json!({}))), Err(LOCKED.into()), "{disconnect}: a locked app can't decide it");
+        assert_eq!(seen.log(approve(&mut bob.client, &off, json!({}))), nothing_waits(&off), "{disconnect}");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": off, "approve": false }))), nothing_waits(&off));
+        assert_eq!(connections(&mut ana.client), anas, "{disconnect}: nothing changes before ana approves");
+        let bobs_off = seen.log(act(&bob.dir, &bob.tab, disconnect, json!({}))).unwrap()["id"].clone();
+        assert_eq!(seen.log(approve(&mut ana.client, &bobs_off, json!({}))), nothing_waits(&bobs_off), "{disconnect}: ana's app can't decide bob's");
+        let done = seen.log(approve(&mut bob.client, &bobs_off, json!({}))).unwrap();
+        assert_eq!(done["outcome"], "done", "{done}");
+        let mut bob_after = bobs.clone();
+        bob_after[name] = Value::Null;
+        assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: bob lost {name} and nothing else");
+        assert_eq!(connections(&mut ana.client), anas, "{disconnect}: bob's disconnect left ana's connections and settings as they were");
+        assert_eq!(waiting_actions(&mut ana.client), [disconnect], "ana's still waits for her");
+        let done = seen.log(approve(&mut ana.client, &off, json!({}))).unwrap();
+        assert_eq!(done["outcome"], "done", "{done}");
+        let mut ana_after = anas.clone();
+        ana_after[name] = Value::Null;
+        assert_eq!(connections(&mut ana.client), ana_after, "{disconnect}: ana lost {name} and nothing else");
+        assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: and bob's are as they were");
+
+        // (e) The notices each agent got name its own confirmation only, and hold no key.
+        let (anas_told, bobs_told) = (notice_of(&ana, &off), notice_of(&bob, &bobs_off));
+        assert!(!anas_told.contains(bobs_off.as_str().unwrap()) && !bobs_told.contains(off.as_str().unwrap()), "{anas_told} {bobs_told}");
+        seen.log(&anas_told);
+        seen.log(&bobs_told);
+    }
+
+    // (e) No answer, audit row, confirmation, setting or notice holds a key anyone typed or the hub kept.
+    for text in &seen.0 {
+        holds_none_of(&secrets, "an answer or notice", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        let trail = trail_of(client);
+        holds_none_of(&secrets, &format!("{who}'s audit trail"), &format!("{trail:?}"));
+        holds_none_of(&secrets, &format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_none_of(&secrets, &format!("{who}'s settings"), &connections(client).to_string());
+        let key_rows: Vec<&(String, String, String, String)> = trail.iter().filter(|r| r.0.starts_with("connect_") && r.1 == "refused").collect();
+        if who == "ana" {
+            assert_eq!(key_rows.len(), SERVICES.len(), "{trail:?}");
+            assert!(key_rows.iter().all(|r| r.2.contains(r#"[hidden]"#) && r.3.starts_with("an agent never sends a password, key or token")), "{key_rows:?}");
+        } else {
+            assert!(key_rows.is_empty(), "bob sent no key: {key_rows:?}");
+        }
+    }
+    let reached = outside_world().lock().unwrap().clone();
+    assert!(reached.iter().all(|target| target == "proxy-check.invalid:443" || SERVICES.iter().any(|s| s.host == target)), "the hub asked only the services' own hosts: {reached:?}");
+    assert_eq!(reached.len(), 1 + 2 * SERVICES.len(), "one failed check per typed key: {reached:?}");
+}
+
+#[test]
+fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly() {
+    let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_reads");
+    let mut seen = Seen(vec![]);
+    let secrets = seed(&mut ana.client, "ana");
+    let before = connections(&mut ana.client);
+
+    for (action, host, unreachable, none) in [
+        ("linear_suggestions", "api.linear.app:443", "Linear unreachable", "Linear is not connected"),
+        ("slack_suggestions", "slack.com:443", "Slack unreachable", "Slack is not connected"),
+        ("github_repos", "api.github.com:443", "GitHub unreachable", "GitHub is not connected"),
+    ] {
+        let reached = asked_of(host);
+        let hers = seen.log(act(&ana.dir, &ana.tab, action, json!({}))).unwrap_err();
+        assert!(hers.starts_with(unreachable), "{action}: ana's read goes to her connection: {hers}");
+        assert_eq!(asked_of(host), reached + 1, "{action}");
+        assert_eq!(seen.log(act(&bob.dir, &bob.tab, action, json!({}))), Err(none.into()), "{action}: bob has no connection to read");
+        assert_eq!(seen.log(bob.client.hub(json!({ "cmd": action }))), Err(none.into()), "{action}: nor does his app");
+        assert_eq!(asked_of(host), reached + 1, "{action}: a refused read reaches nobody, and never takes ana's key");
+    }
+
+    let draft = json!({ "model": "openai/gpt-5", "description": "when a bug is filed, fix it" });
+    let gateway = "ai-gateway.vercel.sh:443";
+    let reached = asked_of(gateway);
+    let hers = seen.log(act(&ana.dir, &ana.tab, "generate_workflow", draft.clone())).unwrap_err();
+    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's draft goes to her gateway key: {hers}");
+    assert_eq!(asked_of(gateway), reached + 1);
+    let none = "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings";
+    assert_eq!(seen.log(act(&bob.dir, &bob.tab, "generate_workflow", draft.clone())), Err(none.into()), "bob has no gateway key to draft with");
+    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "generate_workflow", "model": "openai/gpt-5", "description": "x" }))), Err(none.into()));
+    assert_eq!(asked_of(gateway), reached + 1, "bob's refused draft reaches nobody");
+
+    // The model list is the gateway's public one: it reads nothing of an account, so both ask the gateway alike.
+    for agent in [&ana, &bob] {
+        let before = asked_of(gateway);
+        let models = seen.log(act(&agent.dir, &agent.tab, "vercel_models", json!({}))).unwrap_err();
+        assert!(models.starts_with("Vercel AI Gateway: unreachable"), "{models}");
+        assert_eq!(asked_of(gateway), before + 1);
+    }
+
+    // Once bob keeps a connection of his own, his reads use it.
+    let bobs_keys = seed(&mut bob.client, "bob");
+    assert!(seen.log(act(&bob.dir, &bob.tab, "slack_suggestions", json!({}))).unwrap_err().starts_with("Slack unreachable"));
+    assert_eq!(connections(&mut ana.client), before, "bob's reads and connection left ana's alone");
+
+    let all: Vec<String> = secrets.into_iter().chain(bobs_keys).collect();
+    for text in &seen.0 {
+        holds_none_of(&all, "an answer", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
+    }
+    let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["generate_workflow", "github_repos", "linear_suggestions", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+}
+
+#[test]
+fn an_agents_box_token_removal_forgets_only_its_own_accounts_token() {
+    let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_box_token");
+    let mut seen = Seen(vec![]);
+    for app in [&mut ana.client, &mut bob.client] {
+        app.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    }
+    let secrets: Vec<String> = ["sk-ant-oat01-ana-bloom-0a1b", "sk-ant-oat01-bob-bloom-1c2d", "sk-ant-oat01-bob-side-9z8y", CLAUDE_TOKEN, BOX_KEY].map(String::from).to_vec();
+    let keep = |agent: &mut Agent, name: &str, token: &str| {
+        let ask = act(&agent.dir, &agent.tab, "set_box_claude_token", json!({ "name": name })).unwrap()["id"].clone();
+        assert_eq!(approve(&mut agent.client, &ask, json!({ "token": token })).unwrap()["outcome"], "done");
+    };
+    keep(&mut ana, "bloom", &secrets[0]);
+    keep(&mut bob, "bloom", &secrets[1]);
+    keep(&mut bob, "side", &secrets[2]);
+    let tokens = |client: &mut Client| connections(client)["box_claude_tokens"].clone();
+    let anas = json!({ "bloom": "…0a1b" });
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas.clone(), json!({ "bloom": "…1c2d", "side": "…9z8y" })));
+
+    let drop_bloom = |agent: &Agent, seen: &mut Seen| seen.log(act(&agent.dir, &agent.tab, "remove_box_claude_token", json!({ "name": "bloom" }))).unwrap();
+    let anas_ask = drop_bloom(&ana, &mut seen);
+    assert_eq!(anas_ask["outcome"], "pending", "{anas_ask}");
+    let bobs_ask = drop_bloom(&bob, &mut seen);
+    let (anas_id, bobs_id) = (anas_ask["id"].clone(), bobs_ask["id"].clone());
+    assert_eq!(seen.log(approve(&mut bob.client, &anas_id, json!({}))), nothing_waits(&anas_id), "bob's app can't decide ana's");
+    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": anas_id, "approve": false }))), nothing_waits(&anas_id));
+    assert_eq!(seen.log(approve(&mut ana.client, &bobs_id, json!({}))), nothing_waits(&bobs_id), "ana's app can't decide bob's");
+    let bobs_list = bob.client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string();
+    assert!(!bobs_list.contains(anas_id.as_str().unwrap()), "{bobs_list}");
+    assert_eq!(waiting_actions(&mut ana.client), ["remove_box_claude_token"]);
+
+    let done = seen.log(approve(&mut bob.client, &bobs_id, json!({}))).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas.clone(), json!({ "side": "…9z8y" })), "bob forgot his bloom and kept side; ana's bloom is as it was");
+    assert_eq!(waiting_actions(&mut ana.client), ["remove_box_claude_token"], "ana's still waits for her");
+
+    // Bob asks again for a name only ana still keeps: it finds nothing of hers to forget.
+    let again = drop_bloom(&bob, &mut seen)["id"].clone();
+    assert_eq!(seen.log(approve(&mut bob.client, &again, json!({}))).unwrap()["outcome"], "failed: no Claude token is kept for bloom");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (anas, json!({ "side": "…9z8y" })));
+
+    let done = seen.log(approve(&mut ana.client, &anas_id, json!({}))).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!((tokens(&mut ana.client), tokens(&mut bob.client)), (Value::Null, json!({ "side": "…9z8y" })), "ana forgot hers and bob's side stays");
+    let (anas_told, bobs_told) = (notice_of(&ana, &anas_id), notice_of(&bob, &bobs_id));
+    assert!(!anas_told.contains(bobs_id.as_str().unwrap()) && !bobs_told.contains(anas_id.as_str().unwrap()), "{anas_told} {bobs_told}");
+    seen.log(&anas_told);
+    seen.log(&bobs_told);
+
+    for text in &seen.0 {
+        holds_none_of(&secrets, "an answer or notice", text);
+    }
+    for (who, client) in [("ana", &mut ana.client), ("bob", &mut bob.client)] {
+        holds_none_of(&secrets[..3], &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
+        holds_none_of(&secrets[..3], &format!("{who}'s confirmations"), &client.hub(json!({ "cmd": "confirmations" })).unwrap().to_string());
+        holds_none_of(&secrets[..3], &format!("{who}'s settings"), &connections(client).to_string());
+    }
+}
