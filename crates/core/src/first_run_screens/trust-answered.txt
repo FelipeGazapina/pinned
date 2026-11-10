@@ -1,0 +1,39 @@
+7[r8[?25h[?25l[?2004h[?2031h[?1004h
+[38;2;255;193;7m────────────────────────────────────────────────────────────────────────────────[39m
+[2G[38;2;255;193;7m[1mAccessing[12Gworkspace:[22m[39m
+
+[2G[1m/w/repo[22m
+[2G[1m/.claude/worktrees/w1[22m
+
+[2GQuick[8Gsafety[15Gcheck:[22GIs[25Gthis[30Ga[32Gproject[40Gyou[44Gcreated[52Gor[55Gone[59Gyou[63Gtrust?[70G(Like[76Gyour
+[2Gown[6Gcode,[12Ga[14Gwell-known[25Gopen[30Gsource[37Gproject,[46Gor[49Gwork[54Gfrom[59Gyour[64Gteam).[71GIf[74Gnot,
+[2Gtake[7Ga[9Gmoment[16Gto[19Greview[26Gwhat's[33Gin[36Gthis[41Gfolder[48Gfirst.
+
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.
+
+[2G[38;2;153;153;153mSecurity[11Gguide[39m
+
+[2G[38;2;177;185;249m❯[4GNo,[8Gexit[39m
+[4GYes,[9GI[11Gtrust[17Gthis[22Gfolder
+
+[2G[38;2;153;153;153mEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel[39m
+[1C[4A[>0q[?u]7501;?[c[1D[4B[1C[4A [4GNo, exit[1C[1B[38;2;177;185;249m❯[4GYes, I trust this folder[39m
+
+
+[1C[3A[>4m[<u[?1004l[?2031l[?2004l[1D[3B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[19A[?2004h[?2031h[?1004h]0;✳ Claude Code[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[12G[39m[49m[1mClaude[19GCode[24G[22m[38;2;153;153;153mv2.1.322[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[12G[38;2;153;153;153mOpus[17G5.5[21G·[23GAPI[27GUsage[33GBilling[39m
+[38;2;215;119;87m ▝▝[7G▝▝[12G[38;2;153;153;153m/…/w/repo/.claude/worktrees/w1[39m
+
+[38;2;215;119;87m▎[3G[39m[1mAuto[8Gmode[13Gis[16Gnow[20GClaude[27GCode's[34Gdefault[42Gpermission[53Gmode.[22m
+[38;2;215;119;87m▎[3G[38;2;153;153;153mAuto[8Gmode[13Glets[18GClaude[25Ghandle[32Gpermission[43Gprompts[51Gautomatically.[66GClaude[73Gchecks[39m
+[38;2;215;119;87m▎[3G[38;2;153;153;153meach[8Gtool[13Gcall[18Gfor[22Grisky[28Gactions[36Gand[40Gprompt[47Ginjection[57Gbefore[64Gexecuting,[75Gruns[39m
+[38;2;215;119;87m▎[3G[38;2;153;153;153mthe[7Gones[12Git[15Gassesses[24Gas[27Glower-risk,[39Gand[43Gblocks[50Gthe[54Grest.[39m
+[38;2;215;119;87m▎[3G[38;2;153;153;153mhttps://code.claude.com/docs/en/permission-modes[39m
+
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[39m
+❯ [7m [27m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;193;7m⏵⏵[6Gauto[11Gmode[16Gon[38;2;153;153;153m (shift+tab[30Gto[33Gcycle)[40G·[42G←[44Gfor[48Gagents[39m
+[53G[38;2;255;107;128mNot[57Glogged[64Gin[67G·[69GRun[73G/login[39m
+[61G[38;2;153;153;153m◐[63Gmedium[70G·[72G/effort[39m
+[2C[5A[>0q[c

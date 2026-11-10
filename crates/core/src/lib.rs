@@ -12,6 +12,7 @@ pub mod device;
 pub mod evidence;
 pub mod favicon;
 pub mod files;
+pub mod first_run;
 pub mod fsx;
 pub mod github;
 pub mod global_orchestrator;
