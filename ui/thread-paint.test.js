@@ -712,3 +712,35 @@ test("a thread left at its end is at its end when the reader comes back, turns t
     sandbox.threadView = plain;
   }
 });
+
+test("a permission prompt on the open thread is read when another tab's screen trips the reader", async () => {
+  clearScreen();
+  const broken = tabFor("tab-1", "done");
+  const asking = tabFor("tab-2", "needs-input");
+  asking.view.message = "Claude needs your permission to use Bash";
+  const menu = { question: "Bash command\nrm -rf build", options: [{ n: 1, label: "Yes", head: "Yes" }, { n: 2, label: "No", head: "No" }] };
+  const read = sandbox.terminalMenu;
+  const logged = [];
+  sandbox.console = { warn: (...args) => logged.push(args.map(String).join(" ")), error: (...args) => logged.push(args.map(String).join(" ")) };
+  sandbox.terminalMenu = (tab) => {
+    if (tab === broken) throw new TypeError("Cannot read properties of undefined (reading 'length')");
+    return tab === asking ? menu : null;
+  };
+  const net = network({ "tab-1": transcript(), "tab-2": transcript() });
+  sandbox.tabs = [broken, asking];
+  sandbox.active = asking;
+  try {
+    sandbox.renderGui();
+    await net.drain();
+    sandbox.renderGui();
+    assert.equal(asking.menu, menu);
+    assert.equal(sandbox.phaseOf(asking), "asking");
+    assert.equal(broken.menu, null);
+    assert.deepEqual(painted().items, ["start"]);
+    assert.equal(logged.length, 1, "each tab's trip is logged once");
+    assert.match(logged[0], /box:tab-1/);
+  } finally {
+    sandbox.terminalMenu = read;
+    delete sandbox.console;
+  }
+});
