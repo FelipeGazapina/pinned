@@ -182,6 +182,7 @@ function page() {
     refreshProjects() {},
     retryUploadImages() {},
     refreshSyncStopped() {},
+    resetAgentSurface() {},
     settingsOpen: () => false,
     render: () => sandbox.publishThreadWatch(),
     POLL_MS: 1200,

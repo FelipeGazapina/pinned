@@ -133,6 +133,28 @@ body[data-mode="gui"] #settings-nav .settings-results:not([hidden]) { display: f
 #settings-nav .settings-results .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: rgb(var(--g-side-muted-rgb) / 0.75); }
 
 
+/* Agent activity: the actions waiting on Felipe as cards, then the audit trail as one list. */
+body[data-mode="gui"] #settings-page .agent-heading { margin: 24px 0 8px; font-size: 14px; font-weight: 600; color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirms { display: flex; flex-direction: column; gap: 8px; }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-audit) { border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirm { padding: 12px 14px; }
+body[data-mode="gui"] #settings .agent-invite { margin-top: 16px; padding: 12px 14px; border-radius: 12px; color: var(--g-fg); }
+body[data-mode="gui"] #settings :is(.agent-confirm .who, .agent-invite .hint) { color: var(--g-muted); }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-invite) button.outline { height: 32px; padding: 0 14px; }
+body[data-mode="gui"] #settings .agent-audit-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 14px; border-top: 1px solid var(--g-border); }
+body[data-mode="gui"] #settings .agent-audit-row:first-child { border-top: 0; }
+body[data-mode="gui"] #settings .agent-audit-row .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+body[data-mode="gui"] #settings .agent-audit-row .head b { font-weight: 500; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .head time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+body[data-mode="gui"] #settings .agent-audit-row > .meta { font-size: 12px; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .args { align-self: flex-start; max-width: 100%; padding: 4px 6px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+body[data-mode="gui"] #settings .agent-audit-row .detail { margin: 0; font-size: 12px; line-height: 1.45; color: var(--g-muted); overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-outcome { margin-left: 0; padding: 1px 8px; font-size: 11px; }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="success"] { border-color: color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 10%, transparent); color: var(--g-success); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="primary"] { border-color: rgb(var(--g-primary-rgb) / 0.35); background: rgb(var(--g-primary-rgb) / 0.1); color: var(--g-primary); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="warning"] { border-color: rgb(var(--g-warning-rgb) / 0.35); background: rgb(var(--g-warning-rgb) / 0.1); color: var(--g-warning-fg); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="error"] { border-color: rgb(var(--g-error-rgb) / 0.4); background: rgb(var(--g-error-rgb) / 0.1); color: var(--g-error); }
+
 /* SettingsSection, SettingsGroup and SettingsRow. */
 .settings-sections { display: flex; flex-direction: column; gap: 32px; }
 .settings-section .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-height: 28px; margin-bottom: 10px; padding: 0 16px; }

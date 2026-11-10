@@ -68,6 +68,9 @@ class Hub {
       case "settings":
         this.on.settings?.(frame.settings);
         break;
+      case "confirmations":
+        this.on.confirmations?.(frame.items);
+        break;
     }
   }
 
