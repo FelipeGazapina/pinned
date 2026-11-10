@@ -2670,7 +2670,58 @@ mod tests {
         mini.state.save(&root.join("sync.json")).unwrap();
         let before = saves();
         let pulled = mini.sync(&hub).pulled.len();
-        assert_eq!((pulled, saves() - before), (50, 2), "one save for the fetch batch and one when the sync ends");
+        assert_eq!((pulled, saves() - before), (50, 1), "one save for the fetch batch, and none when the sync ends with nothing new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_cycles_write_the_state_file_zero_times_and_a_change_once() {
+        let root = root("idle-cycles");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        let file = root.join("sync.json");
+        mac.state.save(&file).unwrap();
+        // A cycle is one sync of every checkout and one flush, as `Syncer::cycle` does.
+        let cycle = |mac: &mut Side| {
+            let before = saves();
+            mac.sync(&hub);
+            mac.state.flush().unwrap();
+            saves() - before
+        };
+        assert_eq!(cycle(&mut mac), 1, "the first cycle hashes the files and pushes them");
+        let written = std::fs::read(&file).unwrap();
+        let inode = std::fs::metadata(&file).unwrap().modified().unwrap();
+        for _ in 0..5 {
+            assert_eq!(cycle(&mut mac), 0, "an idle cycle writes nothing");
+        }
+        assert_eq!((std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap()), (written.clone(), inode));
+        put(&memory, "two two\n");
+        assert_eq!(cycle(&mut mac), 1, "a change writes once");
+        assert_ne!(std::fs::read(&file).unwrap(), written);
+        assert_eq!(cycle(&mut mac), 0);
+        let reloaded = State::load(&file, &root.join("legacy")).unwrap();
+        assert!(!reloaded.dirty, "a state read back from its file has nothing left to write");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_changes_are_written_by_a_flush_and_a_clean_state_by_none() {
+        let root = root("flush");
+        let file = root.join("sync.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state = State::load(&file, &root.join("legacy")).unwrap();
+        let before = saves();
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 1, "a state with no file yet is written once");
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 1);
+        put(&root.join("note"), "x");
+        state.hash(&root.join("note"));
+        state.flush().unwrap();
+        assert_eq!(saves() - before, 2, "a new hash is a change");
+        assert!(std::fs::read_to_string(&file).unwrap().contains("note"));
         let _ = std::fs::remove_dir_all(root);
     }
 

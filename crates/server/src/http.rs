@@ -24,6 +24,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
 
+/// The WebSocket close code for an endpoint that is going down.
+pub const GOING_AWAY: u16 = 1001;
 const MIN_PASSWORD: usize = 8;
 /// Sign-in attempts allowed within `ATTEMPT_WINDOW` from one address, the only limit a stranger can't
 /// spend on someone else's behalf.
@@ -408,6 +410,11 @@ fn close_behind() -> Message {
     Message::Close(Some(CloseFrame { code: 1013, reason: "fell behind".into() }))
 }
 
+/// 1001, going away: the hub is stopping, and the peer reconnects at once to whichever hub follows.
+fn close_going_away() -> Message {
+    Message::Close(Some(CloseFrame { code: GOING_AWAY, reason: "the hub is restarting".into() }))
+}
+
 async fn first_text(socket: &mut WebSocket) -> Option<String> {
     match tokio::time::timeout(AUTH_WAIT, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => Some(text.to_string()),
@@ -481,6 +488,7 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
+    let mut going_away = hub.watch_going_away();
     loop {
         tokio::select! {
             text = outbox.recv() => match text {
@@ -490,6 +498,10 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
                     break;
                 }
             },
+            _ = going_away.wait_for(|away| *away) => {
+                let _ = sink.send(close_going_away()).await;
+                break;
+            }
             frame = stream.next() => match frame {
                 Some(Ok(Message::Text(text))) => client_frame(&server, &account, id, &text),
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -608,12 +620,17 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
+    let mut going_away = hub.watch_going_away();
     loop {
         tokio::select! {
             text = outbox.recv() => match text {
                 Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
                 None => break,
             },
+            _ = going_away.wait_for(|away| *away) => {
+                let _ = sink.send(close_going_away()).await;
+                break;
+            }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
                 Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,

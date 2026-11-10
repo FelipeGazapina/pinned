@@ -1693,6 +1693,39 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
 }
 
 #[test]
+fn a_stopping_hub_closes_every_socket_with_going_away_and_then_stops() {
+    let hub = TestHub::start("going_away");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, machine_token) = account::register_machine(&url, &token, "mini", "linux").unwrap();
+    let mut app = Client::app(&url, &token);
+    let (mut machine, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = machine.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    machine.send(Message::text(json!({ "type": "auth", "token": machine_token, "name": "mini", "os": "linux", "version": "test" }).to_string())).unwrap();
+    read_machine(&mut machine, |frame| frame["type"] == "hello");
+
+    let asked = Instant::now();
+    hub.hub().going_away();
+
+    wait_for("the app's socket to close", || !app.pump());
+    assert_eq!(app.closed, Some(1001), "the app gets a going away close frame");
+    let closed = loop {
+        match machine.read() {
+            Ok(Message::Close(frame)) => break frame.map(|f| u16::from(f.code)),
+            Ok(Message::Ping(payload)) => machine.send(Message::Pong(payload)).unwrap(),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => assert!(asked.elapsed() < WAIT, "the machine got no close frame"),
+            Err(e) => panic!("the machine socket ended without a close frame: {e}"),
+        }
+    };
+    assert_eq!(closed, Some(1001), "the machine gets a going away close frame");
+    wait_for("the hub to stop", || hub.running.as_ref().unwrap().server.is_finished());
+    assert!(asked.elapsed() < pinned_server::SHUTDOWN_GRACE + Duration::from_secs(2), "the hub stopped in {:?}", asked.elapsed());
+}
+
+#[test]
 fn a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder() {
     let hub = TestHub::start("upload");
     let url = hub.url.clone();
