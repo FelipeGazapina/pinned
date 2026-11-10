@@ -484,6 +484,18 @@ impl BoxAccess {
     }
 }
 
+/// Whether the global orchestrator may read the account's repositories with its repo tools. Off
+/// until the user turns it on in Settings.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoInsight {
+    #[serde(default)]
+    pub on: bool,
+}
+
+fn repo_insight_is_off(insight: &RepoInsight) -> bool {
+    insight == &RepoInsight::default()
+}
+
 fn box_access_is_legacy(access: &BoxAccess) -> bool {
     access == &BoxAccess::default()
 }
@@ -746,6 +758,8 @@ struct Store {
     box_asks: Vec<BoxAsk>,
     #[serde(default)]
     box_grants: Vec<BoxGrant>,
+    #[serde(default, skip_serializing_if = "repo_insight_is_off")]
+    repo_insight: RepoInsight,
     /// The account's own MCP servers, with the names of their secrets; the values are keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mcp_servers: Vec<crate::mcp::Entry>,
@@ -1011,6 +1025,9 @@ pub struct Settings {
     pub boxes: BoxAccess,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub box_asks: Vec<BoxAsk>,
+    /// Absent on the wire while it is off.
+    #[serde(default, skip_serializing_if = "repo_insight_is_off")]
+    pub repo_insight: RepoInsight,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
@@ -3535,6 +3552,7 @@ impl Connectors {
             checked: self.checked.lock().unwrap().clone(),
             boxes: store.boxes.clone(),
             box_asks: store.box_asks.clone(),
+            repo_insight: store.repo_insight.clone(),
         }
     }
 
@@ -3810,6 +3828,19 @@ impl Connectors {
         self.save(&store)?;
         self.wake.notify_one();
         Ok(kept)
+    }
+
+    pub fn repo_insight(&self) -> RepoInsight {
+        self.store.lock().unwrap().repo_insight.clone()
+    }
+
+    /// Saves whether the global orchestrator may read the account's repositories.
+    pub fn set_repo_insight(&self, insight: RepoInsight) -> Result<RepoInsight, String> {
+        let mut store = self.store.lock().unwrap();
+        store.repo_insight = insight.clone();
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(insight)
     }
 
     pub fn box_grant(&self, connector: &str, subject: &Subject) -> Option<bool> {

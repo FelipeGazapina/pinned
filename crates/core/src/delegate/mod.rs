@@ -489,6 +489,15 @@ pub struct Run {
     pub open_turns: u32,
     pub last_error: Option<String>,
     pub background: Vec<Background>,
+    /// Time that does not count toward the time limit: the worker waited on the user.
+    pub paused: Duration,
+    /// Since when the worker waits on the user (an approval or a question), while it does.
+    pub user_wait: Option<Instant>,
+    /// The thread's turn finished and the task is held only for work it left running: a limit
+    /// that passes now ends it with its reply as the result.
+    pub turn_done: bool,
+    /// What a held thread task still runs in its session, as `task_status` lists it.
+    pub held_on: Vec<String>,
 }
 
 impl Default for Run {
@@ -503,7 +512,20 @@ impl Default for Run {
             open_turns: 0,
             last_error: None,
             background: vec![],
+            paused: Duration::ZERO,
+            user_wait: None,
+            turn_done: false,
+            held_on: vec![],
         }
+    }
+}
+
+impl Run {
+    /// The milliseconds that count toward the time limit at `now`: since it began, less the time
+    /// the worker waited on the user. Time pinned was down never reaches `begun` (see `SavedTask`).
+    pub fn counted(&self, now: Instant) -> u64 {
+        let waiting = self.user_wait.map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        now.saturating_duration_since(self.begun).saturating_sub(self.paused).saturating_sub(waiting).as_millis() as u64
     }
 }
 
@@ -1516,6 +1538,7 @@ grok-4.7-high - Grok 4.7  High
         let task = new_on(&first, Provider::Claude);
         first.link_thread(&task.id, Thread { tab: "tab-1".into(), runs: true });
         first.backdate(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.backdate_run(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
         first.set_worker_session(&task.id, "s-worker");
         drop(first);
 
@@ -2806,5 +2829,137 @@ exec '{real}' "$@"
         let start = chrono::DateTime::parse_from_rfc3339(&started).unwrap();
         let end = chrono::DateTime::parse_from_rfc3339(&card.updated).unwrap();
         assert!(end > start, "a sub-second task collapsed to one stamp: {started} {end}");
+    }
+
+    fn thread_task(delegates: &Delegates, limit: Duration) -> Task {
+        let task = new_on(delegates, Provider::Claude);
+        delegates.link_thread(&task.id, Thread { tab: "tab-w".into(), runs: true });
+        delegates.set_limits(&task.id, limit.as_millis() as u64 / 2, limit.as_millis() as u64);
+        task
+    }
+
+    fn state_of(delegates: &Delegates, id: &str) -> (String, Option<String>, Option<String>) {
+        let status = delegates.status(&parent(), id).unwrap();
+        (status["workState"].as_str().unwrap().to_owned(), status["summary"].as_str().map(str::to_owned), status["stoppedByLimit"].as_str().map(str::to_owned))
+    }
+
+    #[test]
+    fn a_worker_waiting_on_an_approval_past_its_time_limit_is_not_stopped_and_counts_on_from_where_it_paused() {
+        let delegates = Delegates::default();
+        let task = thread_task(&delegates, Duration::from_secs(60));
+        let begun = delegates.get(&task.id).unwrap().run.begun;
+        let at = |secs: u64| begun + Duration::from_secs(secs);
+        delegates.note_user_waits(&[], at(10));
+        delegates.note_user_waits(&[task.id.clone()], at(10));
+        delegates.enforce_limits(at(600), None);
+        assert_eq!(state_of(&delegates, &task.id).0, "working", "ten minutes on an approval are not work");
+
+        delegates.note_user_waits(&[], at(600));
+        assert_eq!(delegates.get(&task.id).unwrap().run.counted(at(600)), 10_000, "the clock stopped at 10 s");
+        delegates.enforce_limits(at(649), None);
+        assert_eq!(state_of(&delegates, &task.id).0, "working", "59 s counted");
+        delegates.enforce_limits(at(651), None);
+        assert_eq!(state_of(&delegates, &task.id), ("cancelled".to_owned(), None, Some("time".to_owned())), "61 s counted");
+    }
+
+    #[test]
+    fn a_worker_on_another_machine_waiting_on_an_approval_pauses_the_time_limit_here() {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.set_limits(&task.id, 30_000, 60_000);
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
+        let begun = delegates.get(&task.id).unwrap().run.begun;
+        let at = |secs: u64| begun + Duration::from_secs(secs);
+        let ask = RemoteAsk { kind: crate::global_orchestrator::AskKind::Approval, tool: Some("Bash".into()), ask: "cargo publish".into(), since: 0 };
+        delegates.set_remote_waiting(&task.id, "tab-1", "m-mini", Some(ask)).unwrap();
+        delegates.note_user_waits(&[], at(20));
+        let past_grace = 60 + REMOTE_GRACE.as_secs() + 600;
+        assert_eq!(delegates.enforce_limits(at(past_grace), None), vec![], "nothing to stop while mini's worker waits on the user");
+        assert_eq!(state_of(&delegates, &task.id).0, "working");
+
+        delegates.set_remote_waiting(&task.id, "tab-1", "m-mini", None).unwrap();
+        delegates.note_user_waits(&[], at(past_grace));
+        assert_eq!(delegates.get(&task.id).unwrap().run.counted(at(past_grace)), 20_000);
+        assert_eq!(delegates.enforce_limits(at(past_grace + 40 + REMOTE_GRACE.as_secs() - 1), None), vec![], "its grace counts from the answer too");
+        assert_eq!(delegates.enforce_limits(at(past_grace + 41 + REMOTE_GRACE.as_secs()), None).len(), 1);
+        assert_eq!(state_of(&delegates, &task.id).2.as_deref(), Some("time"));
+    }
+
+    #[test]
+    fn time_while_pinned_was_down_does_not_count_after_a_restart() {
+        let dir = scratch("down-time");
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = thread_task(&first, Duration::from_secs(3600));
+        first.backdate(&task.id, Duration::from_secs(1800));
+        first.backdate_run(&task.id, Duration::from_secs(1800));
+        first.set_worker_session(&task.id, "s-worker");
+        drop(first);
+        // pinned stays down for two hours: the wall clock moves, the counted half hour does not.
+        let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let entry = saved["tasks"].as_array_mut().unwrap().iter_mut().find(|t| t["id"] == task.id.as_str()).unwrap();
+        assert_eq!(entry["counted_ms"].as_u64().map(|ms| ms / 60_000), Some(30), "{entry}");
+        entry["started"] = json!(entry["started"].as_u64().unwrap() - 2 * 3600 * 1000);
+        std::fs::write(&file, saved.to_string()).unwrap();
+
+        let after = Delegates::load(Some(file));
+        after.enforce_limits(Instant::now() + Duration::from_secs(29 * 60), None);
+        assert_eq!(state_of(&after, &task.id).0, "working", "59 of 60 minutes counted, though 2 h 59 min passed");
+        after.enforce_limits(Instant::now() + Duration::from_secs(31 * 60), None);
+        assert_eq!(state_of(&after, &task.id).2.as_deref(), Some("time"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cap_that_passes_after_the_worker_finished_its_turn_ends_the_task_with_its_reply() {
+        let delegates = Delegates::default();
+        let limits = crate::taste::Limits { budget_cents: 500, ..crate::taste::Limits::default() };
+        let spent = |cost: f64| crate::usage::TaskUsage { cost_usd: Some(cost), ..Default::default() };
+
+        let finished = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&finished.id, limits);
+        delegates.turn_finished(&finished.id, Some("PR #12 is open and green.".into()), vec!["1 background shell".into()]);
+        delegates.meter(&[(finished.id.clone(), spent(5.10))], None);
+        assert_eq!(state_of(&delegates, &finished.id), ("result_available".to_owned(), Some("PR #12 is open and green.".to_owned()), None));
+        let ended_by = delegates.status(&parent(), &finished.id).unwrap()["endedBy"].as_str().unwrap().to_owned();
+        assert_eq!(ended_by, "pinned stopped it after it spent US$ 5.10, its budget of US$ 5.00, after its turn had finished; its last reply is the result");
+
+        let mid_turn = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&mid_turn.id, limits);
+        delegates.turn_finished(&mid_turn.id, Some("Looking.".into()), vec![]);
+        delegates.turn_started(&mid_turn.id);
+        delegates.meter(&[(mid_turn.id.clone(), spent(5.10))], None);
+        assert_eq!(state_of(&delegates, &mid_turn.id).0, "cancelled", "a turn still running is stopped as before");
+    }
+
+    #[test]
+    fn task_status_says_which_tasks_and_shells_a_finished_turn_still_waits_on() {
+        let delegates = Delegates::default();
+        let task = thread_task(&delegates, Duration::from_secs(3600));
+        let child = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-w".into()),
+            tool: None,
+            title: "Rust half".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-w".into(),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.turn_finished(&task.id, Some("Waiting on the Rust half.".into()), vec!["1 background shell".into()]);
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)), vec![(child.id.clone(), "Rust half".to_owned())]);
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(status["waitsOn"], json!({ "tasks": [{ "taskId": child.id, "title": "Rust half", "workState": "working" }], "background": ["1 background shell"] }));
+        assert!(status["next"].as_str().unwrap().starts_with(&format!("its turn ended and summary holds its reply so far; it still waits on task {} \"Rust half\" (working), 1 background shell;", child.id)), "{status}");
+
+        delegates.settle_thread(&child.id, Some("Done.".into()), None, None, vec![], None);
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)).len(), 1, "its end has not reached the worker yet");
+        delegates.claim_notice("tab-w").unwrap();
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)), vec![]);
     }
 }
