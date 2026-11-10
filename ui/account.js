@@ -156,10 +156,10 @@ const NOTIFICATIONS = {
 function repoInsightHtml() {
   const on = !!settings.repo_insight?.on;
   return `<div class="card repo-insight">
-      <div class="side-setting"><div><label for="repo-insight">Orchestrator repo access</label>
-        <p class="meta">Lets the global Orchestrator read this account's repositories to plan and check work: it sees files and searches them, never changes them. Files that may hold secrets are left out, and every read is listed in Agent activity.</p>
-        <p class="error" id="repo-insight-error"></p></div>
+      <div class="card-head"><div><b><label for="repo-insight">Orchestrator repo access</label></b>
+        <div class="hint">Lets the global Orchestrator read this account's repositories to plan and check work: it sees files and searches them, never changes them. Files that may hold secrets are left out, and every read is listed in Agent activity.</div></div>
         <label class="switch"><input type="checkbox" id="repo-insight" aria-label="Orchestrator repo access"${on ? " checked" : ""}><span></span></label></div>
+      <p class="error" id="repo-insight-error"></p>
     </div>`;
 }
 
