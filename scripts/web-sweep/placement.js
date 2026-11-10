@@ -62,6 +62,13 @@ async function signIn(page) {
   }
   await waitFor("the hub", () => page.evaluate(() => document.body.dataset.hub === "online"));
   await waitFor("both nodes online", () => page.evaluate(() => ["sweep-node", "sweep-mini"].every((n) => [...machines.values()].some((m) => m.view.online && m.view.name === n))));
+  // The web login is locked: a change to the way of working asks for the password, typed here.
+  page.unlocker = setInterval(() => page.evaluate((password) => {
+    const form = document.querySelector("dialog[open] form");
+    if (!form?.querySelector("[name=password]")) return;
+    form.querySelector("[name=password]").value = password;
+    form.querySelector(".primary").click();
+  }, PASSWORD).catch(() => {}), 300);
 }
 
 const placementOf = (page) => page.evaluate(async () => (await connectorCall("get_tastes")).placement);
@@ -87,6 +94,7 @@ const toPlacement = async (page) => {
       await open(page);
       await page.waitForTimeout(400);
       await page.screenshot({ path: path.join(SCREENS, `placement-${state}-${size}.png`) });
+      clearInterval(page.unlocker);
       await ctx.close();
     }
   };
@@ -141,6 +149,7 @@ const toPlacement = async (page) => {
   await page.click('.taste-foot button:text-is("Save")');
   await waitFor("the removal", async () => (await placementOf(page)).prefer.length === 1);
   check(JSON.stringify((await placementOf(page)).prefer) === JSON.stringify([mini]), "removing the lost machine saves a policy without it");
+  clearInterval(page.unlocker);
   await ctx.close();
   await browser.close();
   console.log("placement sweep done");
