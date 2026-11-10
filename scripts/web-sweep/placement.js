@@ -77,7 +77,7 @@ const lists = (page) =>
 const idOf = (page, name) => page.evaluate((n) => [...machines.entries()].find(([, m]) => m.view.name === n)[0], name);
 const toPlacement = async (page) => {
   await page.click('.taste-scopes button:text-is("Captains (all)")');
-  await page.locator(".taste-placement").scrollIntoViewIfNeeded();
+  await page.evaluate(() => document.querySelector(".taste-placement").scrollIntoView({ block: "start" }));
 };
 
 (async () => {
