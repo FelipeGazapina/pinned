@@ -447,6 +447,8 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
     let (out, mut outbox, overflowed) = Outbox::new();
     account.client_connected(id, db::hash(&token), out, machines);
     eprintln!("pinned-server: client {id} of account {} connected", account.id);
+    let (pushing, to) = (hub.clone(), account.clone());
+    tokio::spawn(async move { crate::surface::send_confirmations(&pushing, &to, id).await });
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
@@ -556,6 +558,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     }
     account.came_online(&machine, socket_id, row.name, row.dedicated, version.clone(), out);
     hub.push_machines(&account).await;
+    tokio::spawn(crate::surface::deliver_notices(hub.clone(), account.clone(), machine.clone()));
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 
     let (mut sink, mut stream) = socket.split();
@@ -637,73 +640,18 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
                 // and serve the global orchestrator and the Capitães, which `relay` checks against this socket,
                 // and a thread's workers on other machines, which `remote` stamps with this socket.
-                if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
-                    let result = crate::remote::serve(&hub, &account, &machine, call).await;
-                    if let Err(e) = &result {
-                        eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
-                    }
-                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
-                }
-                if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
-                    let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
-                    if let Err(e) = &result {
-                        eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
-                    }
-                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
-                }
-                if let HubCall::RecordTasks { records } = call {
-                    let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
-                    if let Err(e) = &result {
-                        eprintln!("pinned-server: machine {machine}'s task records were not kept: {e}");
-                    }
-                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
-                }
-                let work = match &call {
-                    HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
-                    HubCall::SlackReply { connector, channel, thread, .. }
-                    | HubCall::LinearCreate { connector, channel, thread, .. }
-                    | HubCall::LinearTake { connector, channel, thread, .. } => {
-                        Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
-                    }
-                    _ => None,
+                // Its sessions act as the user only through `surface`, which checks, audits and holds
+                // each act, and never decide a confirmation.
+                let surfaced = match call {
+                    HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
+                    HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
+                    HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
+                    call => return forward(hub, account, machine, socket, id, call).await,
                 };
-                let result = match work {
-                    Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
-                    Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
-                    // An app's first sign-in moves its own connectors and tastes in, which only an empty account
-                    // takes, every machine keeps its projects' files in step with the account's, and a Capitão
-                    // or the global orchestrator starts with the account's tastes, and a delegator reads how
-                    // the account's delegated tasks went.
-                    None if matches!(
-                        call,
-                        HubCall::Import { .. }
-                            | HubCall::ImportTastes { .. }
-                            | HubCall::GetTastes
-                            | HubCall::DelegationStats { .. }
-                            | HubCall::ShareProject { .. }
-                            | HubCall::SyncList { .. }
-                            | HubCall::SyncPush { .. }
-                            | HubCall::SyncPull { .. }
-                            | HubCall::SyncMarkExecutable { .. }
-                    ) =>
-                    {
-                        hub.hub_call(&account, call).await
-                    }
-                    // A thread opened with Chat to adjust changes the account's tastes, and the hub
-                    // takes that only while this machine reports such a thread open.
-                    None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
-                        if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
-                            hub.hub_call(&account, call).await
-                        } else {
-                            Err("only a machine with a Chat to adjust thread open may change the way of working".into())
-                        }
-                    }
-                    None => Err("a machine may only forward a workflow session's callbacks".into()),
-                };
-                if let Err(e) = &result {
-                    eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");
+                if let Err(e) = &surfaced {
+                    eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
                 }
-                account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+                account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, surfaced)));
             });
         }
         Ok(MachineFrame::Auth { .. }) => {}
@@ -713,6 +661,77 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             }
         }
     }
+}
+
+/// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
+async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
+        let result = crate::remote::serve(&hub, &account, &machine, call).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
+        let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    if let HubCall::RecordTasks { records } = call {
+        let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s task records were not kept: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    let work = match &call {
+        HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        HubCall::SlackReply { connector, channel, thread, .. }
+        | HubCall::LinearCreate { connector, channel, thread, .. }
+        | HubCall::LinearTake { connector, channel, thread, .. } => {
+            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
+        }
+        _ => None,
+    };
+    let result = match work {
+        Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
+        Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
+        // An app's first sign-in moves its own connectors and tastes in, which only an empty account
+        // takes, every machine keeps its projects' files in step with the account's, and a Capitão
+        // or the global orchestrator starts with the account's tastes, and a delegator reads how
+        // the account's delegated tasks went.
+        None if matches!(
+            call,
+            HubCall::Import { .. }
+                | HubCall::ImportTastes { .. }
+                | HubCall::GetTastes
+                | HubCall::DelegationStats { .. }
+                | HubCall::ShareProject { .. }
+                | HubCall::SyncList { .. }
+                | HubCall::SyncPush { .. }
+                | HubCall::SyncPull { .. }
+                | HubCall::SyncMarkExecutable { .. }
+        ) =>
+        {
+            hub.hub_call(&account, call).await
+        }
+        // A thread opened with Chat to adjust changes the account's tastes, and the hub
+        // takes that only while this machine reports such a thread open.
+        None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
+            if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
+                hub.hub_call(&account, call).await
+            } else {
+                Err("only a machine with a Chat to adjust thread open may change the way of working".into())
+            }
+        }
+        None => Err("a machine may only forward a workflow session's callbacks".into()),
+    };
+    if let Err(e) = &result {
+        eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");
+    }
+    account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
 }
 
 #[cfg(test)]

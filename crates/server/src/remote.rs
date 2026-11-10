@@ -49,7 +49,7 @@ async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Or
 }
 
 /// A machine of the account by its hub id or its name, with or without `@`.
-async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result<(String, String), String> {
+pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result<(String, String), String> {
     let asked = asked.trim().trim_start_matches('@');
     let machines = hub.machines(account).await?;
     if let Some(m) = machines.iter().find(|m| m.id == asked) {

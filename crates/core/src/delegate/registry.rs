@@ -821,6 +821,11 @@ impl Delegates {
         self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: Some(request) });
     }
 
+    /// Whether a report still queued for `tab` holds `needle`, such as a notice's id.
+    pub fn holds_report(&self, tab: &str, needle: &str) -> bool {
+        self.reports.lock().unwrap().iter().any(|report| report.tab == tab && report.text.contains(needle))
+    }
+
     fn push_report(&self, report: Report) {
         let session = report.session.filter(|session| !session.is_empty());
         self.reports.lock().unwrap().push(Report { session, ..report });

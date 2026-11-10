@@ -18,6 +18,7 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 10. Files each later unit mainly touches
 11. Rules every unit keeps
 12. Known gaps
+13. Agent capability surface (0.17.22)
 
 ## 1. Identity of the two roles
 
@@ -356,6 +357,147 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 - The hub refuses a non-host machine's `Overview` only after the overview's calls, since it reads the host from their settings answers. The refused machine gets no projects, but every machine answered the calls.
 - A machine computes its tab views and sends them in two steps (`emit_tabs`), so two threads that emit at once may deliver the older views last. The hub then holds a stale `orchestrator_turn` or `status` until the machine's next emit, for example the Capitão's next hook. `hand_to` decides from the machine's own tabs, so routing is unaffected. This predates the global orchestrator.
 - A report delivered on the host carries the host's hostname as `machine_name`, and a relayed one the hub's name for the machine. They differ when the machine was renamed on the hub.
+
+## 13. Agent capability surface (0.17.22)
+
+Defined by unit P1, branch `parity/surface`. Every session pinned launches reaches what the user can do in the app through two MCP tools, scoped to the hub account that owns its machine, written to an audit trail, and with the user's approval in the app for destructive or credential actions. P2 (`parity/session-marks`) and P3 (`parity/surface-rest`) register and wire their actions here.
+
+### 13.1 The manifest
+
+`crates/core/src/surface.rs` holds `ACTIONS: &[Action]`, one entry per `Call` and `HubCall` variant.
+
+```rust
+pub enum Side { Node, Hub }                         // Call or HubCall
+pub enum Class { Read, Write, Confirm, Excluded }
+pub struct Action {
+    pub name: &'static str,     // what act takes
+    pub side: Side,
+    pub cmd: &'static str,      // the variant's wire tag
+    pub class: Class,
+    pub wired: bool,            // act runs it; false refuses it as not wired yet
+    pub starts_work: bool,      // held to the delegation limits (13.6)
+    pub about: &'static str,    // the description agents read; for an excluded one, why
+    pub hides: &'static [&'static str], // reply fields agents never get
+}
+```
+
+- An action is named by its wire `cmd`. Where a `Call` and a `HubCall` share a `cmd`, the `HubCall` keeps the name and the `Call` is `node_<cmd>`. Today that is `clone` / `node_clone` and `read_session` / `node_read_session`.
+- Arguments are the variant's fields, as the wire enum's schemars schema describes them, without `cmd`. `act` builds `{"cmd": <cmd>, ...args}` and parses it into the `Call` or `HubCall`. A new action needs no hand-written argument schema.
+- `surface::tests::every_wire_call_has_one_action` reads the `cmd` of every variant from the schemars schemas of `Call` and `HubCall` and fails when one has no entry, or when an entry names no variant. A new variant does not pass the tests until its unit decides its class.
+- Other tests: names are unique, an excluded action is never wired, every `read` action is wired, and `hides` names fields only on wired actions.
+
+**Adding or wiring an action.** Add the variant, then its entry. To wire one: make it work through `act`, prove it with a test that calls `act` as an agent does, then set `wired: true`. An action that starts work also needs its limits path (13.6) before it is wired.
+
+### 13.2 Classes
+
+| Class | What `act` does |
+|---|---|
+| `read` | Runs it and answers the result. |
+| `write` | Runs it and answers the result. |
+| `confirm` | Runs nothing. It becomes a confirmation the user approves or denies in the app (13.5). |
+| `excluded` | Refuses it. UI plumbing, a session's own shell and files, git and gh, machine-to-hub plumbing, and the surface's own calls. |
+
+Every refusal, run and confirmation writes one audit row (13.4).
+
+### 13.3 The two tools
+
+Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global orchestrator, a Capitão, a worker, a thread, a taste chat and a workflow session get them. Both need `PINNED_TAB`: a headless delegated child (Cursor, Codex) has no tab and its parent acts for it. Both are in `permissions()`, so Claude Code does not ask. The socket waits 70 s for them.
+
+| Tool | Arguments | Result (tool text) |
+|---|---|---|
+| `actions` | `search` (optional: words matched against name and description) | `{"actions":[{"name":"rename_machine","class":"write","on":"hub","description":"…","args":{JSON Schema}}]}`, every wired action that is not excluded. `on` is `machine` for a `Call` (act takes `machine`) or `hub`. Read on the node from the manifest; no hub call. |
+| `act` | `action`, `args` (object, default `{}`), `request_id` (optional), `machine` (optional id or name, for an `on: machine` action) | `ActAnswer` as one line of JSON. A refusal is a tool error with its reason. |
+
+`ProjectTool::Actions { search: Option<String> }` and `ProjectTool::Act { action, args: Value, request_id: Option<String>, machine: Option<String> }` carry them on the socket. The node sends `HubCall::Act`; without a hub it answers `this machine is not linked to a hub, which keeps the audit trail act writes`.
+
+`ActAnswer`, tagged by `outcome`:
+
+```json
+{"outcome":"done","result":<the call's answer, redacted>}
+{"outcome":"pending","id":"<confirmation id>","next":"The user approves or denies this in the app. A notice reaches this session when they decide."}
+{"outcome":"repeat","earlier":"done","at":1794249424}
+```
+
+`repeat` answers a `read` or `write` whose `request_id` this account already audited, without running it again. A `confirm` with a used `request_id` answers its first `pending` (or the decision, once made).
+
+### 13.4 How the hub runs an act
+
+`crates/server/src/surface.rs` `act(hub, account, origin_machine, AgentAct)`. `HubCall::Act` is taken only from a machine; a client gets `only an agent session on a machine acts`.
+
+1. The caller is the tab `act.tab` in the tabs the origin machine last reported. None: refused, `<machine> runs no session <tab>`. The hub reads the role and the Claude session from that `TabView`; the node sends neither.
+2. Role: `global_orchestrator` (`orchestrator_global`), `captain` (`Role::Orchestrator`), `worker` (`Role::Worker`), `taste_chat`, `workflow` (a `connector` tab), else `session`.
+3. Refusals, in order: no such action (`no action <name>; call actions to list them`), excluded (`<name> is not open to agents: <about>`), not wired (`<name> is a <class> action that is not wired yet`), a secret in the arguments (13.7), arguments that don't parse (`<name>: <serde error>`), a `starts_work` action on another machine (`<name> starts work only on this session's own machine for now`).
+4. `confirm`: a row in `agent_confirmations`, unique per (account, `request_id`), and `ToClient::Confirmations` to the account's clients. Answers `pending`.
+5. `read` / `write`:
+   - `HubCall`: `Hub::hub_call(account, call)`, the path a signed-in client's call takes.
+   - `Call` on the origin machine (no `machine`, or `machine` naming the origin): `Call::ActFor { caller: act.tab, call }` to the origin machine.
+   - `Call` on another machine of the account (`machine` is its id or its name, any case): the plain `Call` to that machine, as the app sends it. A machine of another account reads as `this account has no machine <m>`.
+6. The answer goes through `surface::redact` and the action's `hides`, then back as `done`. An error goes back as the tool error.
+
+**Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal, or for a decision what running it came to.
+
+`AuditEntry` (outbound root):
+
+```json
+{"id":"<uuid>","at":1794249424,"machine":"<id>","machine_name":"MacBook","tab":"tab-2b-7","role":"worker","action":"rename_machine","args":"{\"id\":\"…\",\"name\":\"Mac mini\"}","outcome":"done","detail":"","request_id":"r-1"}
+```
+
+`machine_name` is empty for a machine since removed. `request_id` is omitted when absent.
+
+### 13.5 Confirmations
+
+Table `agent_confirmations (id uuid, account, machine, tab, session text, role, title text, action, args jsonb, request_id text, created_at, decided_at, approved bool, outcome text, notified bool)`, unique (account, request_id). It lives on the hub, so a node restart loses nothing.
+
+`Confirmation` (outbound root):
+
+```json
+{"id":"<uuid>","at":1794249424,"machine":"<id>","machine_name":"MacBook","tab":"tab-2b-7","title":"Clean up old machines","role":"worker","action":"remove_machine","about":"Removes a machine from the account…","args":{"id":"<machine id>"},"request_id":"r-9","decision":"approved","decided_at":1794249500,"outcome":"done"}
+```
+
+`decision`, `decided_at` and `outcome` are absent while it waits.
+
+| Wire | From | Answer |
+|---|---|---|
+| `HubCall::Confirmations` | a client or a machine | `Vec<Confirmation>`: every waiting one, oldest first, then the last 20 decided, newest first. |
+| `HubCall::DecideConfirmation { id, approve }` | a signed-in client only. A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
+| `ToClient::Confirmations { items }` | hub to client | The waiting ones, after `Hello` and after every change. An older app ignores the frame. |
+
+Deciding:
+
+1. The row is taken under one statement (`decided_at is null` and the account matches), so two clicks decide once.
+2. Approve runs the stored action as 13.4 step 5 does, for the original tab and machine, and records `outcome` (`done`, or `failed: <error>`). Deny runs nothing.
+3. One audit row: outcome `approved` (detail: what it came to) or `denied`.
+4. `ToClient::Confirmations` again.
+5. A notice to the calling session: `Call::Notice { tab, session, text, id }` to the origin machine. The text is `[pinned] The user approved your <action> request (<id>): <outcome>` plus the redacted result, or `[pinned] The user denied your <action> request (<id>). It did not run.` When the machine is offline or the call fails, `notified` stays false, and the hub sends the notice again when that machine connects.
+
+`Call::Notice` queues the text for the tab with `Delegates::queue_report`, the queue worker reports use: typed once the session is idle, or added to the hook context at its turn's end. When `tab` is gone, as after a node restart, the node finds the tab running Claude session `session`. A repeat `id` queues nothing. Answers `true` when it queued, `false` when no tab has that session.
+
+`HubCall::CreateInvite`'s `hides` is `["code"]`: the agent learns the invite's id and expiry, and the user sees the code in the app's answer to Approve.
+
+The global orchestrator's `waiting` tool lists the waiting confirmations too, as `Waiting { kind: "confirm", machine, machine_name, tab, project: "", title: "Approve <action>?", message: <args summary>, since }`. They come from `HubCall::Confirmations` on the node, never from `Overview`, so an older node never reads `WaitingKind::Confirm`.
+
+### 13.6 Limits on work an action starts
+
+`Call::ActFor { caller: TabId, call: Value }` runs `call` for the agent session in `caller` on this machine. `call` is a `Call` as JSON (a `Value`, so the enum does not contain itself).
+
+- `start_claude` (the action P1 wires through limits): the target tab becomes the caller's worker. `Delegates::claim` under the caller's project's workers-at-once limit (`caller_limits`), with the time limit and budget held to it as `delegate_task`'s are, the tab linked as the task's thread (`runs: true`, `task`, `spawned_by: caller`). Past the limit it answers the same refusal as `delegate_task`. Its first finished turn ends the task, the caller gets the task's notice, and the task's `TaskRecord` goes to the hub's metrics. A tab already running answers its folder and claims nothing.
+- Any other action with `starts_work: true` is refused by `ActFor` until its unit gives it a limits path: `<name> starts work, and nothing holds it to the limits yet`.
+- Every other call runs as `Machine::call` runs it. `ActFor` waits as long as its inner call (`may_wait`).
+
+### 13.7 Secrets
+
+- An argument object holding a non-empty string under a key named `key`, `token`, `password`, `secret`, `api_key`, `claude_token`, or ending in `_key`, `_token`, `_secret` or `_password`, at any depth, is refused: `an agent never sends a password, key or token: <field>. The user enters it in the app.`
+- `surface::redact` replaces, at any depth of an answer and of an audit summary: the values of keys named `token`, `password`, `secret`, `api_key`, `claude_token` or ending in `_token`, `_secret`, `_password`; and any string that holds something shaped like a secret (`sk-`, `ghp_`, `gho_`, `github_pat_`, `lin_api_`, `xoxb-`, `xoxp-`, `AKIA` and 16 more, a JWT, a PEM private key) with that part as `[hidden]`.
+
+### 13.8 What P1 wires
+
+Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only) and `confirmations`.
+
+P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
+
+### 13.9 Account isolation
+
+Every new query filters on the account of the socket that asked: `agent_actions`, `agent_confirmations`, `Confirmations`, `DecideConfirmation`, `AgentAudit`. `crates/server/tests/hub.rs` proves that account B's agent can't read A's audit rows or confirmations, act on A's machines, or decide A's confirmations, and that B's client can't either.
 
 ## PR
 
