@@ -154,6 +154,10 @@ body[data-mode="gui"] #settings .agent-outcome[data-tone="success"] { border-col
 body[data-mode="gui"] #settings .agent-outcome[data-tone="primary"] { border-color: rgb(var(--g-primary-rgb) / 0.35); background: rgb(var(--g-primary-rgb) / 0.1); color: var(--g-primary); }
 body[data-mode="gui"] #settings .agent-outcome[data-tone="warning"] { border-color: rgb(var(--g-warning-rgb) / 0.35); background: rgb(var(--g-warning-rgb) / 0.1); color: var(--g-warning-fg); }
 body[data-mode="gui"] #settings .agent-outcome[data-tone="error"] { border-color: rgb(var(--g-error-rgb) / 0.4); background: rgb(var(--g-error-rgb) / 0.1); color: var(--g-error); }
+/* The line in a credential form that Approve on an agent's request opened: who asked, and that entering the key approves it. */
+body[data-mode="gui"] #settings .agent-asking { display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.06); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-asking button { margin-left: auto; flex: none; }
 
 /* SettingsSection, SettingsGroup and SettingsRow. */
 .settings-sections { display: flex; flex-direction: column; gap: 32px; }

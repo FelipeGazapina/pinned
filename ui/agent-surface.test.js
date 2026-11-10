@@ -61,6 +61,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     ]),
     hub: signedIn ? { hub: (call) => (calls.push(call), answer(call)) } : null,
     page: "agent-activity",
+    actions: {},
     settingsPage: { innerHTML: "" },
     settingsOpen: () => open,
     settingsSection: (section) => sections.push(section),

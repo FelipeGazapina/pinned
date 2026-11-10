@@ -22,6 +22,23 @@ const AGENT_SHOWN_ONCE = {
     hint: (r) => `Run it yourself on the new machine. Its code works once, until ${clockTime(r.expires_at)}, and shows only until you press Done.`,
   },
 };
+/** The credential actions whose Approve opens the app's own form for the call instead of deciding:
+ * the settings page it lives on, the input to focus, the fields the user types there (sent to the
+ * hub as `entered`, never seen by the agent), what to call them, and the arguments that pick which
+ * form on the page is the one. */
+const AGENT_FORMS = {
+  connect_linear: { page: "integrations", focus: "linear-key", entered: ["key"], noun: "key" },
+  connect_slack: { page: "integrations", focus: "slack-token", entered: ["token"], noun: "token" },
+  connect_github: { page: "integrations", focus: "github-token", entered: ["token"], noun: "token" },
+  connect_vercel: { page: "integrations", focus: "vercel-key", entered: ["key"], noun: "key" },
+  connect_upstash: { page: "integrations", focus: "upstash-key", entered: ["key", "claude_token"], noun: "key and token" },
+  set_box_claude_token: { page: "integrations", focus: "box-token", entered: ["token"], noun: "token" },
+  add_account: { page: "accounts", entered: ["key"], noun: "key" },
+  set_account_key: { page: "accounts", entered: ["key"], noun: "key", same: ["account"] },
+};
+/** The confirmation whose Approve opened its form, until that form approves it, Cancel, sign-out, or
+ * the hub no longer lists it as waiting. */
+let agentApproving = null;
 /** The Agent activity page: the audit rows loaded so far, newest first, and the page's last word. */
 const agentActivityStart = () => ({ rows: [], more: false, loading: false, notice: null });
 let agentActivity = agentActivityStart();
@@ -95,6 +112,49 @@ function agentWaitingRows() {
   return [asks];
 }
 
+/** The confirmation whose Approve opened `action`'s form, or null. */
+const agentAsking = (action) => (agentApproving?.action === action ? agentApproving : null);
+
+/** The line in `action`'s form, while Approve opened it, that names who asked and how to approve. */
+function agentAskingHtml(action) {
+  const c = agentAsking(action);
+  if (!c) return "";
+  const keyless = action === "add_account" && c.args.auth !== "opencode-go";
+  const how = keyless ? "Adding the account here approves it." : `Entering the ${AGENT_FORMS[action].noun} here approves it.`;
+  return `<p class="agent-asking" id="agent-asking" role="status">${esc(`Asked by ${c.title || c.tab} on ${c.machine_name || "a removed machine"}. ${how}`)}
+    <button type="button" class="secondary" data-action="cancel-agent-approval">Cancel</button></p>`;
+}
+
+/** Approve on a credential action: the app's own form for the call, on that page, with what the
+ * agent asked for filled in. The form approves it with what the user types there. */
+async function openAgentForm(c) {
+  agentApproving = c;
+  const form = AGENT_FORMS[c.action];
+  if (form.page === "accounts") accountsUi = { machine: localIdOf(c.target ?? c.machine), removing: null, replacing: c.args.account ?? null, error: "" };
+  await openSettings(form.page);
+  if (c.action === "set_box_claude_token" && !settings.upstash) {
+    agentApproving = null;
+    return agentSay("Connect Upstash before you approve a box Claude token.", true);
+  }
+  if (form.focus) document.getElementById(form.focus)?.focus();
+}
+
+/** The confirmation's Approve with what the user typed, when `call` is the one Approve opened the
+ * form for. It answers as the call itself would. Else null, and the form makes its own call. */
+function agentApproval(call) {
+  const c = agentApproving;
+  if (c?.action !== call.cmd) return null;
+  const form = AGENT_FORMS[c.action];
+  if (form.same?.some((arg) => call[arg] !== c.args[arg])) return null;
+  const entered = Object.fromEntries(form.entered.filter((field) => call[field] !== undefined).map((field) => [field, call[field]]));
+  return decideAgentConfirmation(c.id, true, entered).then((decided) => decided.result);
+}
+
+function forgetAgentApproval() {
+  agentApproving = null;
+  document.getElementById("agent-asking")?.remove();
+}
+
 function agentAuditRowHtml(entry) {
   const when = new Date(entry.at * 1000);
   const who = [agentWords(entry.role), entry.tab, entry.machine_name || "removed machine"].join(" · ");
@@ -114,6 +174,7 @@ function agentSurfaceChanged() {
 /** The hub's push of the waiting confirmations, after hello and after every change. */
 function onAgentConfirmations(items) {
   agentConfirmations = items;
+  if (agentApproving && !items.some((c) => c.id === agentApproving.id)) forgetAgentApproval();
   agentSurfaceChanged();
   if (settingsOpen() && page === "agent-activity") loadAgentAudit();
 }
@@ -121,6 +182,7 @@ function onAgentConfirmations(items) {
 function resetAgentSurface() {
   agentConfirmations = [];
   agentShown = null;
+  agentApproving = null;
   agentActivity = agentActivityStart();
 }
 
@@ -130,17 +192,25 @@ function agentSay(text, error = false) {
   agentActivity.notice = { text, error };
 }
 
-async function decideAgentConfirmation(id, approve) {
+/** Approve or Deny. `entered` is what the user typed in a credential action's form, and its failure
+ * is thrown for that form to show, while the confirmation keeps waiting. */
+async function decideAgentConfirmation(id, approve, entered) {
   const asked = agentConfirmations.find((c) => c.id === id);
-  if (!asked || agentDeciding.has(id)) return;
+  if (!asked || agentDeciding.has(id)) {
+    if (entered) throw asked ? "It is being approved already." : "The agent's request no longer waits.";
+    return;
+  }
   agentDeciding.add(id);
   agentSurfaceChanged();
   try {
-    const decided = await hub.hub({ cmd: "decide_confirmation", id, approve });
+    const decided = await hub.hub({ cmd: "decide_confirmation", id, approve, ...(entered ? { entered } : {}) });
     agentConfirmations = agentConfirmations.filter((c) => c.id !== id);
+    if (agentApproving?.id === id) forgetAgentApproval();
     if (decided.decision === "approved" && AGENT_SHOWN_ONCE[asked.action] && decided.result) agentShown = { action: asked.action, result: decided.result };
     agentSay(decided.decision === "approved" ? `Approved ${asked.action}: ${decided.outcome}` : `Denied ${asked.action}`);
+    return decided;
   } catch (e) {
+    if (entered) throw e;
     agentSay(`Couldn't ${approve ? "approve" : "deny"} ${asked.action}: ${e}`, true);
   } finally {
     agentDeciding.delete(id);
@@ -172,8 +242,13 @@ async function loadAgentAudit(before) {
   }
 }
 
+function approveAgentConfirmation(id) {
+  const asked = agentConfirmations.find((c) => c.id === id);
+  return asked && AGENT_FORMS[asked.action] ? openAgentForm(asked) : decideAgentConfirmation(id, true);
+}
+
 const AGENT_CLICKS = {
-  approve: (button) => decideAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation, true),
+  approve: (button) => approveAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation),
   deny: (button) => decideAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation, false),
   more: () => loadAgentAudit(agentActivity.rows.at(-1)?.at),
   "copy-code": (button) =>
@@ -186,6 +261,8 @@ const AGENT_CLICKS = {
     agentSurfaceChanged();
   },
 };
+
+actions["cancel-agent-approval"] = forgetAgentApproval;
 
 function agentSurfaceClick(e) {
   const button = e.target.closest("[data-agent]");

@@ -131,7 +131,9 @@ let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
-const connectorCall = (cmd, args = {}) => (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
+/** A call to the hub, or to this machine without one. The form that Approve on an agent's request
+ * opened approves that request with it instead (`agentApproval`). */
+const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
 
 async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
@@ -237,10 +239,10 @@ function machineChipsHtml(current, action) {
 
 function integrationsHtml() {
   const account = settings.linear;
-  const body = account
+  const body = account && !agentAsking("connect_linear")
     ? `<p class="connected">Connected as <b>${esc(account.name)}</b> (${esc(account.email)}) in ${esc(account.organization)}.</p>
        <div class="actions"><button class="secondary" data-action="disconnect-linear">Disconnect</button></div>`
-    : `<ol class="steps">
+    : `${agentAskingHtml("connect_linear")}<ol class="steps">
          <li>Open Linear in your browser, where you're already signed in, and create a personal API key.
            <button class="secondary" data-action="open-linear-keys">Open Linear ↗</button></li>
          <li>Paste the key here.
@@ -267,13 +269,13 @@ function upstashCardHtml() {
   const connected = settings.upstash;
   const body = !account
     ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
-    : connected
+    : connected && !agentAsking("connect_upstash")
       ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
          ${boxTokensHtml()}
          ${boxPermissionsHtml()}
          <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
          <p class="error" id="upstash-error"></p>`
-      : `<ol class="steps">
+      : `${agentAskingHtml("connect_upstash")}<ol class="steps">
            <li>Create a Box API key in the Box tab of the Upstash console.
              <button class="secondary" data-action="open-upstash-console">Open Upstash ↗</button>
              <div class="row"><input id="upstash-key" type="password" placeholder="box_…" autocomplete="off"></div></li>
@@ -293,12 +295,14 @@ function upstashCardHtml() {
  * by `providerInstanceId`. The token Connect took stays the default. */
 function boxTokensHtml() {
   const kept = Object.entries(settings.box_claude_tokens || {});
+  const asked = agentAsking("set_box_claude_token")?.args.name;
   const rows = kept.map(([name, hint]) => `<div class="row box-token"><span><b>${esc(name)}</b> · token <b>${esc(hint)}</b></span>
       <button class="secondary" data-action="remove-box-token" data-name="${esc(name)}">Remove</button></div>`).join("");
   return `<div class="box-tokens">
       <p class="hint">Claude token per account. A worker's box signs in with the token of the account <code>delegate_task</code> names, else the default one above.</p>
       ${rows}
-      <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false">
+      ${agentAskingHtml("set_box_claude_token")}
+      <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
         <input id="box-token" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
         <button class="secondary" data-action="add-box-token">Add</button></div>
     </div>`;
@@ -360,10 +364,10 @@ function boxPermissionsHtml() {
 
 function githubCardHtml() {
   const account = settings.github;
-  const body = account
+  const body = account && !agentAsking("connect_github")
     ? `<p class="connected">Connected as <b>@${esc(account.login)}</b>${account.name ? ` (${esc(account.name)})` : ""}.</p>
        <div class="actions"><button class="secondary" data-action="disconnect-github">Disconnect</button></div>`
-    : `<ol class="steps">
+    : `${agentAskingHtml("connect_github")}<ol class="steps">
          <li>Create a classic personal access token with the <code>repo</code> scope.
            <button class="secondary" data-action="open-github-tokens">Open GitHub ↗</button></li>
          <li>Paste the token here.
@@ -380,10 +384,10 @@ function githubCardHtml() {
 
 function vercelCardHtml() {
   const account = settings.vercel;
-  const body = account
+  const body = account && !agentAsking("connect_vercel")
     ? `<p class="connected">Key <b>${esc(account.key_hint)}</b></p>
        <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
-    : `<ol class="steps">
+    : `${agentAskingHtml("connect_vercel")}<ol class="steps">
          <li>Create an AI Gateway API key in your Vercel team.
            <button class="secondary" data-action="open-vercel-keys">Open Vercel ↗</button></li>
          <li>Paste the key here.
@@ -400,10 +404,10 @@ function vercelCardHtml() {
 
 function slackCardHtml() {
   const account = settings.slack;
-  const body = account
+  const body = account && !agentAsking("connect_slack")
     ? `<p class="connected">Connected as <b>@${esc(account.name)}</b> in ${esc(account.team)}.</p>
        <div class="actions"><button class="secondary" data-action="disconnect-slack">Disconnect</button></div>`
-    : `<ol class="steps">
+    : `${agentAskingHtml("connect_slack")}<ol class="steps">
          <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
            <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
            <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
