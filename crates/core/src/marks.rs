@@ -125,6 +125,23 @@ impl SessionMarks {
     pub fn is_empty(&self) -> bool {
         *self == SessionMarks::new(&self.session)
     }
+
+    /// The changes that put this row back as it is, whatever the session's marks are by then.
+    pub fn rebuild(&self) -> Vec<MarkChange> {
+        let change = |mark| MarkChange { session: self.session.clone(), mark };
+        vec![
+            change(Mark::Clear),
+            change(Mark::Title(self.title.clone())),
+            change(Mark::Pin(self.pin)),
+            change(Mark::Order(self.order)),
+            change(Mark::Settled(self.settled)),
+            change(Mark::Unsettled(self.unsettled)),
+            change(Mark::Snoozed(self.snoozed.clone())),
+            change(Mark::Seen(self.seen)),
+            change(Mark::NoAutoSettle(self.no_auto_settle)),
+            change(Mark::Archived(self.archived.clone())),
+        ]
+    }
 }
 
 /// Refuses a call whose changes a hub should not keep: too many, an empty or overlong session id,
@@ -215,6 +232,15 @@ mod tests {
         let touched = apply(&mut rows, vec![change("s1", Mark::NoAutoSettle(true)), change("s1", Mark::Seen(Some(9.0))), change("s1", Mark::Clear)]);
         assert!(touched[0].is_empty());
         assert_eq!(serde_json::to_value(&touched[0]).unwrap(), json!({ "session": "s1" }));
+    }
+
+    #[test]
+    fn a_rebuild_puts_a_row_back_over_later_changes() {
+        let row = SessionMarks { title: Some("Fix login".into()), pin: Some(3), seen: Some(9.5), no_auto_settle: true, snoozed: Some(Snooze { until: 2.0, at: 1.0, limit: Some(7) }), ..SessionMarks::new("s1") };
+        let mut rows = BTreeMap::new();
+        apply(&mut rows, row.rebuild());
+        apply(&mut rows, vec![change("s1", Mark::Clear), change("s1", Mark::Order(Some(1)))]);
+        assert_eq!(apply(&mut rows, row.rebuild()), vec![row]);
     }
 
     #[test]

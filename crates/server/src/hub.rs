@@ -5,14 +5,14 @@ use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::delegate::{RunTarget, TaskRecord};
-use pinned_core::marks;
+use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::Tastes;
 use pinned_core::wire::BOX_USD_PER_HOUR;
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
+    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, RunSpec, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -537,9 +537,13 @@ impl Hub {
             HubCall::MarkSessions { changes } => {
                 marks::check(&changes)?;
                 let _held = account.marks.lock().await;
-                let touched = self.db.mark_sessions(account.id, changes).await?;
-                account.broadcast(&ToClient::SessionMarks { marks: touched.clone() });
-                return json(touched);
+                return json(self.write_marks(account, changes).await?);
+            }
+            HubCall::ArchiveSession { machine, tab } => return json(self.archive_session(account, &machine, &tab).await?),
+            HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session).await?),
+            HubCall::DeleteSession { machine, tab } => {
+                self.delete_session(account, &machine, &tab).await?;
+                return Ok(Value::Null);
             }
         };
         if changed {
@@ -582,6 +586,73 @@ impl Hub {
             }
             self.db.save_task_record(account.id, id, &record).await?;
         }
+        Ok(())
+    }
+
+    /// Keeps `changes` and tells the account's clients. The caller holds `account.marks`.
+    async fn write_marks(&self, account: &Account, changes: Vec<MarkChange>) -> Result<Vec<SessionMarks>, String> {
+        let touched = self.db.mark_sessions(account.id, changes).await?;
+        if !touched.is_empty() {
+            account.broadcast(&ToClient::SessionMarks { marks: touched.clone() });
+        }
+        Ok(touched)
+    }
+
+    fn open_tab(account: &Account, machine: &str, tab: &str) -> Result<(TabView, String), String> {
+        let view = account.tab(machine, tab).ok_or_else(|| format!("this account has no tab {tab} on machine {machine}"))?;
+        let session = view.session.clone().ok_or_else(|| format!("tab {tab} has no conversation yet"))?;
+        Ok((view, session))
+    }
+
+    /// Archives as the app does: the thread goes to the archive with its name and pin, then its tab
+    /// closes. A tab that does not close gets its marks back.
+    async fn archive_session(&self, account: &Account, machine: &str, tab: &str) -> Result<SessionMarks, String> {
+        let (view, session) = Self::open_tab(account, machine, tab)?;
+        if view.status == Some(AgentStatus::Working) {
+            return Err("the thread is working; stop its turn first".into());
+        }
+        let _held = account.marks.lock().await;
+        let was = self.db.session_marks_of(account.id, &session).await?;
+        let archived = Archived {
+            machine: machine.into(),
+            name: was.title.clone().or(view.title).or(view.prompt_title).unwrap_or_else(|| "New thread".into()),
+            project: project_name(&account.last_listed(machine), &view.cwd),
+            cwd: view.cwd,
+            at: pinned_core::connectors::unix_millis() as f64 / 1000.0,
+            created: None,
+            title: was.title.clone(),
+            pinned: was.pin.is_some(),
+        };
+        let mark = |mark| MarkChange { session: session.clone(), mark };
+        let row = self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Archived(Some(archived)))]).await?.remove(0);
+        if let Err(e) = self.call_machine(account, machine, Call::CloseTab { tab: tab.into() }, MACHINE_CALL_WAIT).await {
+            self.write_marks(account, was.rebuild()).await?;
+            return Err(format!("the thread's tab did not close: {}", String::from(e)));
+        }
+        Ok(row)
+    }
+
+    async fn unarchive_session(&self, account: &Account, session: &str) -> Result<Target, String> {
+        let _held = account.marks.lock().await;
+        let was = self.db.session_marks_of(account.id, session).await?;
+        let archived = was.archived.ok_or_else(|| format!("this account has no archived conversation {session}"))?;
+        if !account.is_online(&archived.machine) {
+            return Err("the conversation's machine is offline".into());
+        }
+        let run = RunSpec { folder: archived.cwd, repo: None, args: vec!["--resume".into(), session.into()], env: vec![], token: None, account: None, budget_usd: None };
+        let tab = self.call_machine(account, &archived.machine, Call::Run { run }, RUN_WAIT).await?;
+        let tab: TabId = serde_json::from_value(tab).map_err(|e| e.to_string())?;
+        let pin = if archived.pinned { Some(self.db.session_marks(account.id).await?.iter().filter_map(|row| row.pin).max().map_or(0, |last| last + 1)) } else { None };
+        let mark = |mark| MarkChange { session: session.into(), mark };
+        self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Title(archived.title)), mark(Mark::Pin(pin))]).await?;
+        Ok(Target { machine: archived.machine, tab })
+    }
+
+    async fn delete_session(&self, account: &Account, machine: &str, tab: &str) -> Result<(), String> {
+        let (_, session) = Self::open_tab(account, machine, tab)?;
+        self.call_machine(account, machine, Call::CloseTab { tab: tab.into() }, MACHINE_CALL_WAIT).await?;
+        let _held = account.marks.lock().await;
+        self.write_marks(account, vec![MarkChange { session, mark: Mark::Clear }]).await?;
         Ok(())
     }
 
@@ -948,6 +1019,15 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+}
+
+/// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
+fn project_name(projects: &[ProjectView], cwd: &str) -> String {
+    let holds = |p: &&ProjectView| cwd == p.path || cwd.strip_prefix(&p.path).is_some_and(|rest| rest.starts_with('/'));
+    match projects.iter().filter(holds).max_by_key(|p| p.path.len()) {
+        Some(project) => project.name.clone(),
+        None => cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd).to_owned(),
+    }
 }
 
 fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machines: &mut [MachineView]) {

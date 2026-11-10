@@ -3987,6 +3987,54 @@ fn a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark() {
 }
 
 #[test]
+fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_forgets_it() {
+    let hub = TestHub::start("marks_archive");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let dir = temp("marks-archive-node");
+    let creds = pair(&url, &mut ana, "box", &dir);
+    let machine = creds.machine_id.clone();
+    std::fs::write(dir.join("sessions.json"), format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display())).unwrap();
+    let _node = Node::resume(&dir, creds);
+    ana.wait_machines(&[("box", true)]);
+    let tabs_of = |f: &Value| (f["type"] == "event" && f["machine"] == machine.as_str() && f["event"]["kind"] == "tabs").then(|| f["event"]["tabs"].as_array().cloned().unwrap_or_default());
+    let listed = ana.wait("the restored tab", |f| tabs_of(f).is_some_and(|tabs| tabs.iter().any(|t| t["session"] == "conv-1")));
+    let restored = tabs_of(&listed).unwrap().into_iter().find(|t| t["session"] == "conv-1").unwrap();
+    let (tab, cwd) = (restored["id"].as_str().unwrap().to_owned(), restored["cwd"].as_str().unwrap().to_owned());
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 4 } }]))).unwrap();
+
+    let not_bobs = Err(format!("this account has no tab {tab} on machine {machine}"));
+    assert_eq!(bob.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })), not_bobs);
+    assert_eq!(bob.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": tab })), not_bobs);
+
+    let from = ana.frames.len();
+    let row = ana.hub(json!({ "cmd": "archive_session", "machine": machine, "tab": tab })).unwrap();
+    let at = row["archived"]["at"].as_f64().unwrap();
+    assert!(at > 1.7e9, "archived at {at}");
+    let project = cwd.rsplit('/').next().unwrap();
+    assert_eq!(
+        row,
+        json!({ "session": "conv-1", "archived": { "machine": machine, "cwd": cwd, "name": "Fix login", "project": project, "at": at, "title": "Fix login", "pinned": true } })
+    );
+    wait_frame(&mut ana, from, "the archived tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == tab.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])));
+    assert_eq!(bob.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })), Err("this account has no archived conversation conv-1".into()));
+
+    let back = ana.hub(json!({ "cmd": "unarchive_session", "session": "conv-1" })).unwrap();
+    let reopened = back["tab"].as_str().unwrap().to_owned();
+    assert_eq!(back, json!({ "machine": machine, "tab": reopened }));
+    assert_ne!(reopened, tab);
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])), "its name and pin are back");
+
+    let from = ana.frames.len();
+    assert_eq!(ana.hub(json!({ "cmd": "delete_session", "machine": machine, "tab": reopened })), Ok(Value::Null));
+    wait_frame(&mut ana, from, "the deleted tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == reopened.as_str())));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
+    assert_eq!(mentioning(&mut bob, "Fix login"), Vec::<Value>::new(), "bob heard nothing of ana's thread");
+}
+
+#[test]
 fn a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login() {
     let hub = TestHub::start("iso_pair");
     let url = hub.url.clone();

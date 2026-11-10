@@ -839,6 +839,12 @@ impl Db {
         rows.iter().map(|r| stored_marks(account, r.get(0))).collect()
     }
 
+    /// The session's marks, empty when it has none.
+    pub async fn session_marks_of(&self, account: Uuid, session: &str) -> Result<SessionMarks, String> {
+        let row = self.client().await?.query_opt("select marks from session_marks where account = $1 and session = $2", &[&account, &session]).await.map_err(err)?;
+        row.map_or_else(|| Ok(SessionMarks::new(session)), |r| stored_marks(account, r.get(0)))
+    }
+
     /// Lands `changes` in order and answers the sessions they named as they are now. A session left
     /// with no mark loses its row.
     pub async fn mark_sessions(&self, account: Uuid, changes: Vec<MarkChange>) -> Result<Vec<SessionMarks>, String> {

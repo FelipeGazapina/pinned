@@ -1011,6 +1011,16 @@ pub enum HubCall {
     /// landed in order. One left with only its id has no mark. The account's clients hear the same
     /// as `ToClient::SessionMarks`.
     MarkSessions { changes: Vec<crate::marks::MarkChange> },
+    /// `marks::SessionMarks` of the conversation in `tab` on `machine`, once it is archived: its tab
+    /// closed, and Settings › Archive lists it to bring back with its name and pin. Refused while
+    /// its turn runs.
+    ArchiveSession { machine: MachineId, tab: TabId },
+    /// `Target`: the new tab, on the archived conversation's machine, that resumes it with its name
+    /// and pin back.
+    UnarchiveSession { session: String },
+    /// `null`, once the conversation's tab closed and its marks are gone, so pinned forgets it.
+    /// Claude Code keeps its transcript.
+    DeleteSession { machine: MachineId, tab: TabId },
 }
 
 /// A project an external agent may work in: one folder on one machine.
