@@ -10286,6 +10286,7 @@ while True:
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_20k_report_arrives_as_head_and_tail_with_a_pointer_that_read_session_resolves_to_the_whole_text() {
         let (m, dir, path, capitao, reports) = report_stack("report-long");
         let whole: String = (0..4000).map(|i| format!("{i:04} ")).collect();
