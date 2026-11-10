@@ -9666,7 +9666,7 @@ while True:
                 seen.lock().unwrap().push(tab);
                 Ok(Value::Null)
             }
-            other => Err(format!("unexpected {other:?}")),
+            _ => Err("the hub was asked something else".into()),
         }));
         let parent = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("parent".into()));
         let worker = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, folder), false, Some("s1".into()));
