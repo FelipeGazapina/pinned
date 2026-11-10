@@ -131,6 +131,11 @@ const send = (page, key, text) =>
       if (phone) {
         shot.on("pageerror", (e) => errors.push(String(e)));
         await shot.goto(HUB);
+        if (await shot.isVisible("#login [name=email]")) {
+          await shot.fill("#login [name=email]", EMAIL);
+          await shot.fill("#login [name=password]", PASSWORD);
+          await shot.click("#login .primary");
+        }
         await waitFor("the hub on the phone", () => shot.evaluate(() => document.body.dataset.hub === "online"));
         await shot.evaluate(() => setMode("gui"));
         await waitFor("the rows on the phone", () => shot.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 60000);
