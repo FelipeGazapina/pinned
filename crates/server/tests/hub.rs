@@ -10,7 +10,7 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall};
+use pinned_core::wire::{Call, HubCall, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -1816,8 +1816,7 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     let invite = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let code = invite["code"].as_str().unwrap().to_owned();
     assert_eq!((code.len(), code.matches('-').count()), (19, 3), "four groups of four: {code}");
-    let week = invite["expires_at"].as_i64().unwrap() - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    assert!((7 * 86400 - 60..=7 * 86400 + 60).contains(&week), "a code lasts 7 days, not {week} s");
+    assert_eq!(invite["expires_at"], json!(NEVER_EXPIRES), "a code never expires; an older app that shows a date reads one far away");
     let pending = ana_client.hub(json!({ "cmd": "invites" })).unwrap();
     assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
     assert_eq!(pending["pending"][0]["id"], invite["id"]);
@@ -1839,10 +1838,17 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": code })), refused_signup(), "a code works once");
     assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used code is no longer pending");
 
-    let expired = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
-    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '1 second' where id = '{}'", expired["id"].as_str().unwrap()));
-    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": expired["code"] })), refused_signup(), "an expired code fails");
-    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"], json!([]));
+    // A row as it was before codes stopped expiring: a past `expires_at`, which nothing reads anymore.
+    let old = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '8 days' where id = '{}'", old["id"].as_str().unwrap()));
+    assert_eq!(
+        ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        [old["id"].as_str().unwrap()],
+        "an old code stays in the list",
+    );
+    let (status, dani) = signup_from(&url, "10.0.0.4", json!({ "email": "dani@acme.dev", "password": "correct horse", "invite": old["code"] }));
+    assert_eq!(status, 200, "a code made before codes stopped expiring still works: {dani}");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used old code is no longer pending");
 
     let revoked = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let kept = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
