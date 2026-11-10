@@ -231,6 +231,17 @@ async function shoot(label, ui) {
     await page.waitForTimeout(800);
     note("ux9", await page.evaluate(() => [...document.querySelectorAll("#settings-page .machine-row")].map((r) => r.innerText.replace(/\s+/g, " ").trim())));
     await shot(page, "ux9-machines");
+    // The hub moves to a newer version, so the machines are behind: the rows say so and the footer offers the way to Machines.
+    await page.evaluate(() => typeof setNewestVersion === "function" && setNewestVersion("0.17.24"));
+    await page.waitForTimeout(400);
+    note("ux9-behind", await page.evaluate(() => [...document.querySelectorAll("#settings-page .machine-row")].map((r) => ({ text: r.querySelector(".who")?.innerText.replace(/\s+/g, " ").trim(), button: r.querySelector("[data-action=update-machine]")?.outerHTML }))));
+    await shot(page, "ux9-machines-behind");
+    await page.evaluate(() => { settingsOpen() && toggleSettings(); toggleSidebar(true); });
+    await page.waitForTimeout(500);
+    note("ux10-footer", await page.evaluate(() => { const b = document.getElementById("side-update"); return { hidden: b.hidden, tip: b.dataset.tip, state: b.dataset.state }; }));
+    await shot(page, "ux10-web-update-button");
+    await page.evaluate(() => openSettings("machines"));
+    await page.waitForTimeout(600);
     await page.evaluate(() => {
       const view = [...machines.values()].find((m) => m.view.name === "sweep-node-2").view;
       view.update = { state: "failed", to: "0.17.24", reason: "checksum mismatch" };
@@ -238,6 +249,21 @@ async function shoot(label, ui) {
     });
     await page.waitForTimeout(300);
     await shot(page, "ux10-update-failed");
+
+    // The sidebar's notice goes through tell() as html: a machine named a&b must read a&b, not a&amp;b.
+    await page.evaluate(() => { settingsOpen() && toggleSettings(); });
+    note("tell", await page.evaluate(() => {
+      const view = machines.get(globalHostMachine()).view;
+      const was = [view.name, view.online];
+      view.name = "a&b";
+      view.online = false;
+      openGlobalChat();
+      const shown = document.getElementById("side-notice").textContent;
+      [view.name, view.online] = was;
+      tell("");
+      return shown;
+    }));
+    await page.evaluate(() => openSettings("machines"));
 
     // UX-12: Settings › General on a phone, down to the last toggle.
     await page.evaluate(() => { openSettings("general"); });
