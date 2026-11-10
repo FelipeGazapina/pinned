@@ -1896,6 +1896,8 @@ struct SavedTask {
     remote: Option<SavedRemote>,
     #[serde(default)]
     remote_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<crate::placement::Placed>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1981,6 +1983,7 @@ impl SavedTask {
             worker_session: task.worker_session.clone(),
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
             remote_tab: task.remote_tab.clone(),
+            placement: task.placement.clone(),
         }
     }
 
@@ -2032,6 +2035,7 @@ impl SavedTask {
             review: self.review,
             thread_tab: self.thread_tab,
             recorded: self.recorded,
+            placement: self.placement,
         }
     }
 }
