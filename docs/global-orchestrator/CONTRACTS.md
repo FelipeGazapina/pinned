@@ -502,7 +502,7 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
 
 ### 13.8 What P1 wires
 
-Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. P2's `session_marks` is a read, so it is wired too; P2's other session actions (`stop_turn`, `mark_sessions`, `archive_session`, `unarchive_session`, `delete_session`) are classified and left to P2 to wire. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
+Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. P2's `session_marks` is a read, so it is wired too. P2 wired the session actions (13.10). New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
 
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
 
@@ -511,6 +511,23 @@ Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is
 ### 13.9 Account isolation
 
 Every new query filters on the account of the socket that asked: `agent_actions`, `agent_confirmations`, `Confirmations`, `DecideConfirmation`, `AgentAudit`. `crates/server/tests/hub.rs` proves that account B's agent can't read A's audit rows or confirmations, act on A's machines, or decide A's confirmations, and that B's client can't either.
+
+### 13.10 What P2 wires: the session actions
+
+Unit P2, branches `parity/session-marks` (storage) and `parity/session-actions` (this wiring). Each runs through `act`, is `write` unless noted, and has a test through `act` (core tests on a started tab; hub tests with two accounts).
+
+| Action | Does | Notes |
+|---|---|---|
+| `stop_turn` | Stops the turn, as the stop button does. | |
+| `restart_claude`, `set_model`, `set_bypass`, `rewind`, `switch_account`, `set_workspace` | Restart a session on its conversation, with the change. | Run only on a tab whose session runs (13.6): they would otherwise start a stopped tab outside the limits. `set_model` is also held to the caller's project tier. `set_bypass` stays `write`, `on: true` needs a caller with full access, and the audit row says `loosened permissions`. |
+| `fork`, `set_folder` | Open a tab, not started, on a copy of a conversation; move a tab that has not started. | Start nothing. |
+| `regenerate_title` | Names a conversation again (a headless Haiku call). | Starts no session. |
+| `mark_sessions` | Rename, pin, order, settle, snooze, unread and auto-settle marks, in the hub, for every device. | `marks::agent_check` (`.checks`) refuses `clear` and `archived`, which only the app's own Archive and Delete write. |
+| `archive_session` | Archives the conversation in a tab; its tab closes and Settings › Archive keeps it. | Refused while its turn runs. |
+| `unarchive_session` | Reopens an archived conversation in a new tab with its name and pin back, not started (`Call::OpenRun`). | The user's own Unarchive resumes it at once. An agent resumes it with `start_claude`, under its limits. |
+| `delete_session` | Closes the tab and drops the conversation's marks. | `confirm`: it waits in Waiting on you, runs once on approval, and writes `approved` then `done` or `failed`. `close_tab` stays excluded. |
+
+`Call::OpenRun { run: RunSpec }` is the hub's way to open a tab like `Run` but not start it. It is excluded: only the hub sends it.
 
 ## PR
 

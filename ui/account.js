@@ -91,20 +91,20 @@ function invitesHtml() {
   const rows = pending
     .map(
       (invite) => `<div class="machine-row" data-invite="${esc(invite.id)}">
-        <div class="who"><b>${esc(invite.hint)}-…</b><span class="hint">Created ${esc(inviteDate(invite.created_at))} · expires ${esc(inviteDate(invite.expires_at))}</span></div>
+        <div class="who"><b>${esc(invite.hint)}-…</b><span class="hint">Created ${esc(inviteDate(invite.created_at))}</span></div>
         <button class="secondary danger" data-action="revoke-invite">Revoke</button></div>`,
     )
     .join("");
   return `<div class="card invites">
       <div class="card-head"><div><b>Invite someone</b>
-        <div class="hint">A code lets one person create their own account on this hub, with their own machines and sessions. It works once, for 7 days.</div></div></div>
+        <div class="hint">A code lets one person create their own account on this hub, with their own machines and sessions. It works once and doesn't expire.</div></div></div>
       ${
         made
           ? `<p>Send this code to the person you invite. It is shown only now.</p>
              <div class="row command"><code>${esc(made.code)}</code><button class="secondary" data-action="copy-invite">Copy</button></div>`
           : ""
       }
-      ${rows ? `<p class="hint">Codes not used yet</p><div class="machine-list">${rows}</div>` : ""}
+      ${rows ? `<p class="hint">Codes not used yet</p><div class="machine-list">${rows}</div>` : `<p class="hint">No codes waiting to be used.</p>`}
       <p class="error">${esc(error)}</p>
       <div class="actions start"><button class="${made ? "secondary" : "primary"}" data-action="create-invite">Create an invite code</button></div>
     </div>`;

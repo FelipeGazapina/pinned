@@ -10,7 +10,7 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall};
+use pinned_core::wire::{Call, HubCall, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -1823,8 +1823,7 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     let invite = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let code = invite["code"].as_str().unwrap().to_owned();
     assert_eq!((code.len(), code.matches('-').count()), (19, 3), "four groups of four: {code}");
-    let week = invite["expires_at"].as_i64().unwrap() - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    assert!((7 * 86400 - 60..=7 * 86400 + 60).contains(&week), "a code lasts 7 days, not {week} s");
+    assert_eq!(invite["expires_at"], json!(NEVER_EXPIRES), "a code never expires; an older app that shows a date reads one far away");
     let pending = ana_client.hub(json!({ "cmd": "invites" })).unwrap();
     assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
     assert_eq!(pending["pending"][0]["id"], invite["id"]);
@@ -1846,10 +1845,17 @@ fn an_invite_hub_takes_its_first_account_then_only_single_use_codes() {
     assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": code })), refused_signup(), "a code works once");
     assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used code is no longer pending");
 
-    let expired = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
-    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '1 second' where id = '{}'", expired["id"].as_str().unwrap()));
-    assert_eq!(signup_from(&url, "10.0.0.4", json!({ "email": "carla@acme.dev", "password": "correct horse", "invite": expired["code"] })), refused_signup(), "an expired code fails");
-    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"], json!([]));
+    // A row as it was before codes stopped expiring: a past `expires_at`, which nothing reads anymore.
+    let old = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
+    admin_on(&hub.database, &format!("update invites set expires_at = now() - interval '8 days' where id = '{}'", old["id"].as_str().unwrap()));
+    assert_eq!(
+        ana_client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        [old["id"].as_str().unwrap()],
+        "an old code stays in the list",
+    );
+    let (status, dani) = signup_from(&url, "10.0.0.4", json!({ "email": "dani@acme.dev", "password": "correct horse", "invite": old["code"] }));
+    assert_eq!(status, 200, "a code made before codes stopped expiring still works: {dani}");
+    assert_eq!(ana_client.hub(json!({ "cmd": "invites" })), Ok(json!({ "signup": "invite", "pending": [] })), "a used old code is no longer pending");
 
     let revoked = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
     let kept = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap();
@@ -4051,6 +4057,130 @@ fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_f
     wait_frame(&mut ana, from, "the deleted tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == reopened.as_str())));
     assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
     assert_eq!(mentioning(&mut bob, "Fix login"), Vec::<Value>::new(), "bob heard nothing of ana's thread");
+}
+
+#[test]
+fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_for_approval() {
+    let hub = TestHub::start("act_marks");
+    let url = hub.url.clone();
+    let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let tab = |id: &str, status: &str, session: &str| json!({ "id": id, "cwd": "/a/app", "bypass": false, "running": true, "status": status, "title": null, "message": null, "resume_at": null, "opened": 1, "session": session });
+    let answer = |call: &Value| match call["cmd"].as_str().unwrap() {
+        "act_for" => RawReply::Ok(json!({ "ran": call["call"]["cmd"] })),
+        "run" | "open_run" => RawReply::Ok(json!("tab-back")),
+        "notice" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    };
+    let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab("tab-agent", "working", "agent-conv"), tab("tab-t", "done", "conv-1")] })], answer);
+    let (_, bob_machine_token) = account::register_machine(&url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![json!({ "kind": "tabs", "tabs": [tab("tab-bob", "working", "bob-conv")] })], answer);
+    ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    bob.wait("bob-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    let machine = machine.id;
+    let act = |raw: &RawMachine, agent: &str, action: &str, args: Value| raw.ask(json!({ "cmd": "act", "act": { "tab": agent, "action": action, "args": args } }));
+    let calls = |raw: &RawMachine, cmd: &str| raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).cloned().collect::<Vec<Value>>();
+
+    let from = ana.frames.len();
+    let renamed = act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 0 } }] }));
+    assert_eq!(renamed, Ok(json!({ "outcome": "done", "result": [{ "session": "conv-1", "title": "Fix login", "pin": 0 }] })));
+    wait_frame(&mut ana, from, "the agent's rename and pin", |f| f["type"] == "session_marks" && f["marks"] == json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }]));
+    assert_eq!(
+        act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": "clear" }] })),
+        Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".into())
+    );
+
+    let restarts = [
+        ("stop_turn", json!({ "tab": "tab-t" })),
+        ("set_bypass", json!({ "tab": "tab-t", "on": true, "cols": 120, "rows": 32 })),
+        ("set_model", json!({ "tab": "tab-t", "model": "claude-sonnet-5-5", "cols": 120, "rows": 32 })),
+        ("restart_claude", json!({ "tab": "tab-t", "cols": 120, "rows": 32 })),
+        ("set_folder", json!({ "tab": "tab-t", "path": "/a/app/web" })),
+        ("regenerate_title", json!({ "tab": "tab-t", "previous": "", "thread": "" })),
+        ("rewind", json!({ "tab": "tab-t", "before": "m-3", "files": false, "cols": 120, "rows": 32 })),
+        ("fork", json!({ "tab": "tab-t", "through": "m-3" })),
+    ];
+    for (action, args) in &restarts {
+        assert_eq!(act(&raw, "tab-agent", action, args.clone()), Ok(json!({ "outcome": "done", "result": { "ran": action } })), "{action}");
+    }
+    let ran: Vec<Value> = calls(&raw, "act_for").into_iter().map(|c| json!([c["caller"], c["call"]])).collect();
+    let asked: Vec<Value> = restarts
+        .iter()
+        .map(|(action, args)| {
+            let mut call = args.clone();
+            call["cmd"] = json!(action);
+            json!(["tab-agent", call])
+        })
+        .collect();
+    assert_eq!(ran, asked, "each ran on the agent's machine for the agent's session, as the app sends it");
+    let audit = ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let bypass: Vec<(Value, Value)> = audit.as_array().unwrap().iter().filter(|e| e["action"] == "set_bypass").map(|e| (serde_json::from_str(e["args"].as_str().unwrap()).unwrap(), e["outcome"].clone())).collect();
+    assert_eq!(bypass, [(restarts[1].1.clone(), json!("done"))], "loosening to bypass is on the audit trail");
+
+    let archived = act(&raw, "tab-agent", "archive_session", json!({ "machine": machine, "tab": "tab-t" })).unwrap();
+    assert_eq!(archived["result"]["archived"]["name"], "Fix login");
+    assert_eq!(archived["result"]["archived"]["pinned"], true);
+    assert_eq!(calls(&raw, "close_tab"), [json!({ "cmd": "close_tab", "tab": "tab-t" })]);
+    assert_eq!(act(&raw, "tab-agent", "unarchive_session", json!({ "session": "conv-1" })), Ok(json!({ "outcome": "done", "result": { "machine": machine, "tab": "tab-back" } })));
+    let reopened = calls(&raw, "open_run");
+    assert_eq!((reopened.len(), &reopened[0]["run"]["folder"], &reopened[0]["run"]["args"]), (1, &json!("/a/app"), &json!(["--resume", "conv-1"])));
+    assert_eq!(calls(&raw, "run"), Vec::<Value>::new(), "an agent's unarchive reopens the tab and starts nothing: start_claude does, under its limits");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])));
+
+    let from = ana.frames.len();
+    let delete = |request_id: &str| raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-agent", "action": "delete_session", "args": { "machine": machine, "tab": "tab-t" }, "request_id": request_id } }));
+    let held = delete("r-del").unwrap();
+    assert_eq!(held["outcome"], "pending");
+    let id = held["id"].as_str().unwrap().to_owned();
+    wait_frame(&mut ana, from, "the delete to approve", |f| f["type"] == "confirmations" && f["items"][0]["id"] == id.as_str() && f["items"][0]["action"] == "delete_session");
+    assert_eq!(calls(&raw, "close_tab").len(), 1, "nothing closed before the user approved");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }])), "nor were its marks dropped");
+    assert_eq!(delete("r-del").unwrap()["id"], id.as_str(), "the same ask while it waits is the same wait");
+    assert_eq!(ana.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().filter(|c| c["action"] == "delete_session").count(), 1, "one confirmation, not two");
+    let decided = ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!((&decided["decision"], &decided["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
+    assert_eq!(ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })), Err(format!("no confirmation {id} waits")), "a second click decides nothing");
+    assert_eq!(calls(&raw, "close_tab").len(), 2, "the delete ran once");
+    let trail: Vec<(String, String)> = ana.hub(json!({ "cmd": "agent_audit" })).unwrap().as_array().unwrap().iter().filter(|e| e["action"] == "delete_session").map(|e| (e["outcome"].as_str().unwrap().to_owned(), e["detail"].as_str().unwrap().to_owned())).collect();
+    assert_eq!(trail.iter().map(|(outcome, _)| outcome.as_str()).collect::<Vec<_>>(), ["done", "approved", "pending"], "the trail: asked, approved, then ran: {trail:?}");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
+
+    let not_bobs = Err(format!("this account has no tab tab-agent on machine {machine}"));
+    assert_eq!(act(&bob_raw, "tab-bob", "archive_session", json!({ "machine": machine, "tab": "tab-agent" })), not_bobs);
+    assert_eq!(bob_raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-bob", "action": "stop_turn", "args": { "tab": "tab-agent" }, "machine": machine } })), Err(format!("this account has no machine {machine}")));
+    assert_eq!(act(&bob_raw, "tab-bob", "unarchive_session", json!({ "session": "agent-conv" })), Err("this account has no archived conversation agent-conv".into()));
+    let from = ana.frames.len();
+    act(&bob_raw, "tab-bob", "mark_sessions", json!({ "changes": [{ "session": "agent-conv", "mark": { "title": "Bob was here" } }] })).unwrap();
+    assert_eq!(act(&bob_raw, "tab-bob", "session_marks", json!({})), Ok(json!({ "outcome": "done", "result": [{ "session": "agent-conv", "title": "Bob was here" }] })));
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob's agent changed only bob's marks");
+    assert_eq!(ana.frames[from..].iter().filter(|f| f.to_string().contains("Bob was here")).count(), 0);
+    assert_eq!(calls(&raw, "act_for").len(), restarts.len(), "bob's agent reached nothing on ana's machine");
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
+
+    let bobs_delete = act(&bob_raw, "tab-bob", "delete_session", json!({ "machine": machine, "tab": "tab-t" })).unwrap();
+    assert_eq!(bobs_delete["outcome"], "pending", "bob's own delete waits for bob");
+    assert_eq!(ana.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })), Err(format!("no confirmation {} waits", bobs_delete["id"].as_str().unwrap())), "ana can't decide bob's");
+    let refused = bob.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })).unwrap();
+    assert!(refused["outcome"].as_str().unwrap().starts_with("failed: this account has no tab tab-t on machine"), "{refused}");
+    assert_eq!(calls(&raw, "close_tab").len(), 2, "approved by bob, it still closed nothing of ana's");
+
+    let ana_marks = ana.hub(json!({ "cmd": "session_marks" })).unwrap();
+    for call in [
+        json!({ "cmd": "archive_session", "machine": machine, "tab": "tab-agent" }),
+        json!({ "cmd": "delete_session", "machine": machine, "tab": "tab-agent" }),
+    ] {
+        assert_eq!(bob.hub(call.clone()), Err(format!("this account has no tab tab-agent on machine {machine}")), "{call}");
+    }
+    for call in [json!({ "cmd": "stop_turn", "tab": "tab-agent" }), json!({ "cmd": "set_model", "tab": "tab-agent", "model": "claude-sonnet-5-5", "cols": 80, "rows": 24 }), json!({ "cmd": "restart_claude", "tab": "tab-agent", "cols": 80, "rows": 24 })] {
+        assert!(bob.call(&machine, call.clone()).is_err(), "bob's app reaches none of ana's sessions: {call}");
+    }
+    assert_eq!(bob_raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-bob", "action": "rename_machine", "args": { "id": machine, "name": "bob's" } } })), Err(format!("this account has no machine {machine}")));
+    bob.hub(json!({ "cmd": "mark_sessions", "changes": [{ "session": "conv-1", "mark": { "title": "Bob's name for it" } }] })).unwrap();
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })).unwrap(), ana_marks, "bob's app marked a session id of his own account only");
+    assert_eq!((calls(&raw, "stop_turn"), calls(&raw, "set_model"), calls(&raw, "restart_claude")), (vec![], vec![], vec![]), "bob's app and agent sent ana's machine none of it");
+    assert_eq!(calls(&raw, "close_tab").len(), 2);
 }
 
 #[test]
