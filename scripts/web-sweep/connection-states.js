@@ -84,6 +84,8 @@ function pairNode(n) {
   execFileSync(SERVER, ["login", HUB, EMAIL, "--name", n.name, "--config-dir", n.config], { env: { ...process.env, HOME: n.home, PINNED_PASSWORD: PASSWORD }, stdio: "ignore" });
 }
 function startNode(n) {
+  // A node still running from an earlier try is the same machine: a second one would take its socket.
+  if (fs.existsSync(path.join(DIR, n.pid)) && alive(pidOf(n.pid))) return;
   const log = fs.openSync(path.join(DIR, n.log), "a");
   const node = spawn(SERVER, ["node", "--config-dir", n.config], { env: nodeEnv(n), stdio: ["ignore", log, log], detached: true });
   node.unref();
@@ -152,6 +154,7 @@ async function signIn(page) {
     };
 
     await signIn(page);
+    await page.evaluate(`globalThis.machineOnline = ${machineOnline}`);
     await waitFor("the hub and both nodes", () => page.evaluate(() => document.body.dataset.hub === "online" && machineOnline("sweep-node") && machineOnline("sweep-node-2")));
     await page.evaluate(() => setMode("gui"));
     for (const n of NODES) {
