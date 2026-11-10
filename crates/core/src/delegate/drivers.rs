@@ -169,7 +169,7 @@ pub fn codex_mcp_flags(
     args
 }
 
-fn toml_str(value: &str) -> String {
+pub fn toml_str(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {
