@@ -41,6 +41,9 @@ async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Or
     if !account.is_online(&machine) {
         return Err(format!("{name} is offline, so it can't take the worker; nothing ran elsewhere"));
     }
+    if let Some(reason) = pinned_core::load::refusal(&name, &request.target, account.state_of(&machine).as_ref()) {
+        return Err(reason);
+    }
     let token = hub.connectors(account).await?.github_token().filter(|_| repo.as_deref().is_some_and(github::hosts));
     let mut started = call(hub, account, &machine, Call::Delegate { origin, request: Box::new(request), repo, token }, RUN_WAIT).await?;
     started["machine"] = json!(machine);

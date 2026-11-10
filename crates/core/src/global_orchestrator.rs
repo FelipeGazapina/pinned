@@ -335,6 +335,9 @@ pub struct OverviewMachine {
     /// Why its projects may be missing or old, such as `precisa atualizar o pinned`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// Its load, accounts and Workers at once, as it last reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::load::MachineState>,
 }
 
 /// One project, with every machine that has a checkout of it.
@@ -365,6 +368,9 @@ pub struct OverviewCheckout {
     /// Worker tabs of the project running on that machine.
     #[serde(default)]
     pub workers: u32,
+    /// How busy that machine is, as it last reported. Absent while it is offline or too old to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<crate::load::Load>,
 }
 
 /// Whether a message to the project's Capitão would be typed now.
@@ -506,6 +512,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
                 captain: CaptainState::of(captain),
                 captain_tab: captain.map(|t| t.id.clone()),
                 workers: workers as u32,
+                load: None,
             };
             let key = project.repo.clone().unwrap_or_else(|| format!("{}:{}", machine.id, project.path));
             match projects.iter_mut().find(|p| p.key == key) {
@@ -539,7 +546,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
     sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
     let machines = machines
         .iter()
-        .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned) })
+        .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned), state: None })
         .collect();
     Overview { projects, waiting, machines, sessions: Some(sessions) }
 }

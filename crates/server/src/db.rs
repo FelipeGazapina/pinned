@@ -582,7 +582,7 @@ impl Db {
             )
             .await
             .map_err(err)?;
-        let view = MachineView { id: id.to_string(), name: name.to_owned(), os: os.to_owned(), online: false, last_seen: row.get(0), upstash_box: None, version: String::new(), update: None };
+        let view = MachineView { id: id.to_string(), name: name.to_owned(), os: os.to_owned(), online: false, last_seen: row.get(0), upstash_box: None, version: String::new(), update: None, state: None };
         Ok((view, token.text))
     }
 
@@ -616,7 +616,7 @@ impl Db {
             .map_err(err)?;
         Ok(rows
             .iter()
-            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3), upstash_box: r.get(4), version: r.get(5), update: None })
+            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3), upstash_box: r.get(4), version: r.get(5), update: None, state: None })
             .collect())
     }
 

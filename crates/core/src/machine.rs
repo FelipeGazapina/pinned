@@ -4123,7 +4123,8 @@ impl Machine {
         let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
         let account = self.account_for(None, &cwd)?;
         // The caller's limits, held no looser than this machine's own for the project.
-        let limits = origin.limits.narrow(self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits());
+        let own = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
+        let limits = origin.limits.narrow(own);
         (request.target.machine, request.target.boxed) = (None, None);
         let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
         let side = ChildParent {
@@ -4138,12 +4139,19 @@ impl Machine {
             cwd,
             ceiling: origin.access,
             limits,
-            // The caller's machine counted it against Workers at once.
-            parallel: None,
+            // The caller counted it against its own Workers at once, and this machine counts its own.
+            parallel: Some(own.parallel),
             delegator: origin.delegator.clone(),
             origin: Some(origin),
         };
         self.launch_child(side, None, request)
+    }
+
+    /// What a machine that is full answers a worker another machine sent it.
+    fn remote_full(&self, working: usize, most: u32) -> String {
+        let (_, name) = self.machine_ids();
+        let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+        format!("{name} is full: {working} in this project there, and its Workers at once allows {most}. Wait for one to finish, raise Workers at once in Settings › Way of working, or pick another machine.")
     }
 
     /// Moves a task off an account a usage limit stopped. It goes to the next rung of the
@@ -4246,6 +4254,7 @@ impl Machine {
             role: request.role.clone(),
         }, parallel) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Full(working) if origin.is_some() => return Err(self.remote_full(working, parallel.unwrap_or_default())),
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
@@ -4662,6 +4671,11 @@ impl Machine {
     /// account in `delegates.limits()`, which stands in for the providers that report no windows.
     fn standing(&self, account: &Account) -> Option<(crate::delegate::Limit, bool)> {
         self.fetch_go_usage(account);
+        self.standing_known(account)
+    }
+
+    /// `standing` from what is already known, which asks no Console. The 20 s report uses it.
+    fn standing_known(&self, account: &Account) -> Option<(crate::delegate::Limit, bool)> {
         let limits = self.delegates.limits();
         let now = limits.now();
         let usage = self.usage.lock().unwrap().get(&account.id).copied().unwrap_or_default();
@@ -4689,7 +4703,7 @@ impl Machine {
     }
 
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, Access, Inherited, LimitNote, ListedAccount};
+        use crate::delegate::{capabilities, Access, Inherited};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -4699,8 +4713,50 @@ impl Machine {
             (Account::builtin(Provider::Claude), None, Access::Auto)
         };
         let parent = Inherited { account: account.id, model, access };
-        let listed = self
-            .accounts
+        let listed = self.listed_accounts(true);
+        let search = (!search.is_empty()).then_some(search);
+        let mut answer = capabilities(&parent, &listed, search);
+        answer["machines"] = self.machines_listed();
+        Ok(answer.to_string())
+    }
+
+    /// Every machine of the account with the summary it last reported, for `orchestrator_capabilities`.
+    /// This machine's own entry is read live. While the hub can't answer, it is the only entry.
+    fn machines_listed(&self) -> Value {
+        let (id, name) = self.machine_ids();
+        let own = self.state();
+        let mut views = match self.call_hub(HubCall::Machines).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
+            Ok(views) => views,
+            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None }],
+        };
+        for view in views.iter_mut().filter(|view| view.id == id) {
+            view.state = Some(own.clone());
+        }
+        crate::load::machines_json(&views, Some(&id))
+    }
+
+    /// The summary this machine reports to the hub every 20 s.
+    pub fn state(&self) -> crate::load::MachineState {
+        let tabs = self.tabs();
+        let listed = self.listed_accounts(false);
+        // A task held for a machine elsewhere runs there, so it is not this machine's load.
+        let working = self.delegates.running().iter().filter(|id| self.delegates.get(id).is_some_and(|task| task.remote.is_none())).count() as u32;
+        let worker_tabs = tabs.iter().filter(|tab| tab.running && tab.role == Some(Role::Worker)).count() as u32;
+        crate::load::MachineState {
+            load: crate::load::sample(&home()),
+            accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
+            sessions: tabs.iter().filter(|tab| tab.running).count() as u32,
+            workers: working.max(worker_tabs),
+            workers_at_once: self.tastes().resolve(&TasteScope::Captains).limits().parallel,
+            reported_at: 0,
+        }
+    }
+
+    /// This machine's accounts as a delegated child sees them. `fresh` asks the OpenCode Go
+    /// Console for an allowance first, which the 20 s report does not.
+    fn listed_accounts(&self, fresh: bool) -> Vec<crate::delegate::ListedAccount> {
+        use crate::delegate::{LimitNote, ListedAccount};
+        self.accounts
             .list()
             .into_iter()
             .map(|account| {
@@ -4713,7 +4769,7 @@ impl Machine {
                 if !found {
                     constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
                 }
-                let standing = self.standing(&account);
+                let standing = if fresh { self.standing(&account) } else { self.standing_known(&account) };
                 if let Some((limit, blocked)) = &standing {
                     constraints.push(if *blocked { limit.note() } else { format!("{} A task may try it now.", limit.note()) });
                 }
@@ -4721,9 +4777,7 @@ impl Machine {
                 let limit = standing.filter(|(_, blocked)| *blocked).map(|(limit, _)| LimitNote { reason: limit.reason, resume_at: limit.resume_at, retry_at: Some(limit.retry_at).filter(|_| limit.resume_at.is_none()) });
                 ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints }
             })
-            .collect::<Vec<_>>();
-        let search = (!search.is_empty()).then_some(search);
-        Ok(capabilities(&parent, &listed, search).to_string())
+            .collect()
     }
 
     /// Opens a finished delegated task's conversation as a thread nested under `tab`, its owner.
