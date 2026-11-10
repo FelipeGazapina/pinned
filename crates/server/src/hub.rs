@@ -682,6 +682,7 @@ impl Hub {
                 return Ok(Value::Null);
             }
             HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
+            HubCall::ToolHeld { .. } => return Err("only a machine records its sessions' held tool calls".into()),
             HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
             HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
             HubCall::Unlock { .. } => return Err("only the app unlocks, on its own connection".into()),

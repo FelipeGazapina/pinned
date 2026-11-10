@@ -127,6 +127,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
+        hooks::write_agent_settings(&files.join(hooks::AGENT_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -175,7 +176,14 @@ impl Launch {
                     }
                     cmd.arg("--settings");
                     // The global orchestrator's own: no Bash, and its file tools held to its folders.
-                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
+                    // An agent session's runs the never list on each tool call; a user's own tab's doesn't.
+                    cmd.arg(if global::is_global(env) {
+                        self.settings.with_file_name(hooks::GLOBAL_SETTINGS)
+                    } else if crate::agent::role_of(env).is_some() || crate::agent::session_of(env).is_some() {
+                        self.settings.with_file_name(hooks::AGENT_SETTINGS)
+                    } else {
+                        self.settings.clone()
+                    });
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -2868,6 +2876,21 @@ impl Machine {
         crate::repo_look::guard(&roots, &cwd, tool, input).map(|()| String::new())
     }
 
+    /// Sends the hub one Agent activity row for a tool call the never-list hook held, or would have.
+    /// Only for an agent session this machine runs; without a hub the row is dropped.
+    fn tool_held(&self, tab: &str, tool: String, args: Value, item: crate::preauth::never::NeverItem, log_only: bool, request_id: Option<String>) {
+        let agent = self.tab(tab, |t| global::is_global(&t.env) || role_of(&t.env).is_some() || crate::agent::session_of(&t.env).is_some());
+        if agent != Ok(true) {
+            return;
+        }
+        let detail = crate::preauth::hook::detail(item, log_only);
+        if let Err(e) = self.call_hub(HubCall::ToolHeld { tab: tab.to_owned(), tool, args, detail, request_id }) {
+            if e != NOT_LINKED {
+                eprintln!("pinned: a held tool call's row was not written: {e}");
+            }
+        }
+    }
+
     /// The global orchestrator's repo tools, always through the hub: it checks that the account
     /// allows them, holds them to the read rate and writes each to the audit trail.
     fn repo_tool(&self, tab: &str, project: &str, machine: Option<&str>, look: crate::repo_look::RepoLook) -> Result<String, String> {
@@ -4074,6 +4097,10 @@ impl Machine {
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
+                Message::ToolHeld { tab, tool, args, item, log_only, request_id } => {
+                    machine.tool_held(&tab, tool, args, item, log_only, request_id);
+                    Ok(String::new())
+                }
                 message => other(message),
             }
         })

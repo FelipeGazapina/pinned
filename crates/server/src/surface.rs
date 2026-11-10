@@ -81,6 +81,20 @@ impl Trail<'_> {
     }
 }
 
+/// Writes the Agent activity row of a tool call the never-list hook on `origin` held in session
+/// `tab`, or would have held: `permission:<tool>`, refused, with the call's arguments summarized.
+#[allow(clippy::too_many_arguments)]
+pub async fn tool_held(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, tab: &str, tool: &str, args: &Value, detail: &str, request_id: Option<&str>) -> Result<Value, String> {
+    let caller = Caller::of(account, origin, tab)?;
+    let tool: String = tool.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')).take(120).collect();
+    let action = format!("permission:{tool}");
+    let detail = surface::mask_secrets(&detail.chars().take(300).collect::<String>());
+    let request_id = request_id.filter(|id| !id.is_empty());
+    let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &action, args: surface::summary(args), request_id };
+    trail.write(AuditOutcome::Refused, &detail).await?;
+    Ok(Value::Null)
+}
+
 fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
