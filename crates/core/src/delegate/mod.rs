@@ -312,6 +312,15 @@ pub struct Task {
     pub limits: crate::taste::Limits,
     /// What it used so far, as its transcript reports it.
     pub usage: crate::usage::TaskUsage,
+    pub delegator: Delegator,
+    pub effort: Option<String>,
+    /// The limit that stopped it, when one did.
+    pub limit: Option<String>,
+    pub review: Option<Review>,
+    /// The thread's tab, kept for the record after the tab is gone.
+    pub thread_tab: Option<String>,
+    /// The hub holds this task's record as it is now.
+    pub recorded: bool,
 }
 
 /// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
@@ -381,6 +390,8 @@ pub enum StreamEvent {
     TurnStart,
     Step(Item),
     Background(Vec<Background>),
+    /// A finished turn's tokens, and the process's cost so far when the provider prints it.
+    Usage(UsageReport),
     TurnEnd { text: String, error: Option<String> },
 }
 
@@ -399,11 +410,13 @@ pub struct SpawnSpec<'a> {
 
 mod catalog;
 mod drivers;
+mod metrics;
 mod registry;
 mod request;
 
 pub use catalog::*;
 pub use drivers::*;
+pub use metrics::*;
 pub use registry::*;
 pub use request::*;
 
@@ -979,6 +992,15 @@ grok-4.7-high - Grok 4.7  High
             at: String::new(),
             text: "Look at the tests.".into()
         }));
+        assert_eq!(
+            [cursor.usage, claude.usage, codex.usage],
+            [
+                UsageReport { tokens_in: 16_289 + 24_224, tokens_out: 71, cost_usd: None },
+                UsageReport { tokens_in: 6 + 17_998 + 69_766, tokens_out: 177, cost_usd: Some(0.004517060000000001) },
+                UsageReport { tokens_in: 10, tokens_out: 4, cost_usd: None },
+            ],
+            "each provider's turn usage, with the cost only Claude prints"
+        );
         let failed = (driver(Provider::Codex).parse)(
             r#"{"type":"turn.failed","error":{"message":"rate limit"}}"#,
         );
@@ -1379,6 +1401,105 @@ grok-4.7-high - Grok 4.7  High
             "{status}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn start(delegates: &Delegates, provider: Provider, model: Option<&str>, title: &str) -> Task {
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: title.into(),
+            account: provider.spec().builtin.into(),
+            provider,
+            model: model.map(str::to_owned),
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let captain = Delegator { kind: DelegatorKind::Captain, tab: Some("tab-1".into()), project: Some("github.com/acme/site".into()), project_name: Some("site".into()) };
+        delegates.describe(&task.id, captain, Some("high".into()));
+        task
+    }
+
+    fn line(delegates: &Delegates, id: &str, line: &str) {
+        delegates.apply(id, ChildEvent::Line(line.to_owned()), None);
+    }
+
+    #[test]
+    fn a_finished_failed_limited_and_cancelled_task_each_keep_their_record_across_a_reload() {
+        let dir = scratch("records");
+        let file = dir.join("delegates.json");
+        let delegates = Delegates::load(Some(file.clone()));
+        let done = start(&delegates, Provider::Claude, Some("claude-opus-5-5"), "Fix the login");
+        line(&delegates, &done.id, INIT);
+        line(&delegates, &done.id, REPLY);
+        line(&delegates, &done.id, r#"{"type":"result","result":"PR opened","total_cost_usd":0.42,"usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":90,"output_tokens":300}}"#);
+        let failed = start(&delegates, Provider::Claude, Some("claude-sonnet-5-5"), "Port the parser");
+        line(&delegates, &failed.id, r#"{"type":"result","is_error":true,"result":"rate limit","usage":{"input_tokens":500,"output_tokens":20}}"#);
+        let limited = start(&delegates, Provider::Cursor, Some("grok-4.7"), "Profile the sync");
+        delegates.set_limits(&limited.id, 1_000, 2_000);
+        let cancelled = start(&delegates, Provider::Claude, Some("claude-haiku-5-5"), "Sweep the docs");
+        later(&delegates, Duration::from_secs(5));
+        delegates.cancel(&parent(), &cancelled.id, "the parent asked", None).unwrap();
+        drop(delegates);
+
+        let delegates = Delegates::load(Some(file));
+        let records = delegates.records();
+        let by = |id: &str| records.iter().find(|r| r.id == id).unwrap().clone();
+        let summary = |r: &TaskRecord| json!([r.title, r.outcome, r.reason, r.limit, r.model, r.tier, r.effort, r.delegator.label(), r.usage.tokens_in, r.usage.tokens_out, r.usage.cost_usd]);
+        assert_eq!(summary(&by(&done.id)), json!(["Fix the login", "done", null, null, "claude-opus-5-5", "high", "high", "Captain site", 1100, 300, 0.42]));
+        assert_eq!(summary(&by(&failed.id)), json!(["Port the parser", "failed", "rate limit", null, "claude-sonnet-5-5", "mid", "high", "Captain site", 500, 20, null]));
+        let limit = by(&limited.id);
+        assert_eq!(json!([limit.outcome, limit.limit, limit.model]), json!(["limit", "time", "grok-4.7"]));
+        assert!(limit.reason.as_deref().is_some_and(|r| r.starts_with("pinned stopped it after")), "{:?}", limit.reason);
+        assert_eq!(summary(&by(&cancelled.id)), json!(["Sweep the docs", "cancelled", "the parent asked", null, "claude-haiku-5-5", "low", "high", "Captain site", 0, 0, null]));
+        for record in &records {
+            assert_eq!(record.usage.wall_ms, record.ended - record.started, "{}", record.id);
+            assert_eq!(record.target, RunTarget::Local);
+        }
+        let status = delegates.status(&parent(), &limited.id).unwrap();
+        assert_eq!(status["stoppedByLimit"], "time", "{status}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delegator_marks_a_result_accepted_and_the_same_title_started_again_marks_the_last_one_redone() {
+        let delegates = Delegates::default();
+        let first = start(&delegates, Provider::Codex, None, "Fix the login");
+        let working = (parent(), first.id.clone());
+        assert_eq!(delegates.review(&working.0, &working.1, Verdict::Accepted, None).unwrap_err(), format!("{} is still working; review it once it ends", first.id));
+        line(&delegates, &first.id, r#"{"type":"turn.failed","error":{"message":"tests fail"}}"#);
+        let other = Caller { tab: Some("tab-2".into()), task: None };
+        assert_eq!(delegates.review(&other, &first.id, Verdict::Accepted, None).unwrap_err(), format!("task {} belongs to another session", first.id));
+
+        let second = start(&delegates, Provider::Codex, None, " fix the LOGIN ");
+        let review = delegates.get(&first.id).unwrap().review.unwrap();
+        assert_eq!((review.verdict, review.auto, review.note), (Verdict::Redone, true, Some(format!("started again as {}", second.id))));
+        line(&delegates, &second.id, r#"{"type":"turn.completed"}"#);
+        delegates.review(&parent(), &second.id, Verdict::Accepted, Some("merged by hand".into())).unwrap();
+        let third = start(&delegates, Provider::Codex, None, "Fix the login");
+        let kept = delegates.get(&second.id).unwrap().review.unwrap();
+        assert_eq!((kept.verdict, kept.auto, kept.note.as_deref()), (Verdict::Accepted, false, Some("merged by hand")), "a verdict the delegator gave stays");
+        assert!(!delegates.accept_auto(&second.id, "its PR merged".into()));
+        assert!(!delegates.get(&second.id).unwrap().review.unwrap().auto, "a signal does not overwrite the delegator");
+        assert!(!delegates.accept_auto(&third.id, "its PR merged".into()), "a task still working gets no verdict");
+
+        let sent = delegates.unrecorded(10);
+        assert_eq!(sent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str(), second.id.as_str()], "only finished tasks have a record");
+        delegates.mark_recorded(&sent);
+        assert!(delegates.unrecorded(10).is_empty());
+        line(&delegates, &third.id, r#"{"type":"turn.completed"}"#);
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(delegates.accept_auto(&third.id, "its PR #7 merged".into()));
+        assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [third.id.as_str()], "a merge is sent once");
+        delegates.mark_recorded(&delegates.unrecorded(10));
+        assert!(!delegates.accept_auto(&third.id, "its PR #7 merged".into()), "the next poll of the merged PR changes nothing");
+        assert!(delegates.unrecorded(10).is_empty(), "and sends nothing");
+        delegates.review(&parent(), &first.id, Verdict::Accepted, None).unwrap();
+        assert_eq!(delegates.unrecorded(10).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [first.id.as_str()], "a new verdict is sent again");
     }
 
     #[test]

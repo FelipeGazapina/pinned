@@ -995,6 +995,12 @@ pub enum HubCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// From a machine: `null`, once the hub keeps these records of its delegated tasks, as they
+    /// are now. The hub stamps the machine, and box time for a machine that is a box.
+    RecordTasks { records: Vec<crate::delegate::TaskRecord> },
+    /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
+    /// (1, 7 or 30), on every machine.
+    DelegationStats { days: u32 },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1581,6 +1587,7 @@ mod tests {
             _ => panic!("not an import"),
         }
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
             json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),

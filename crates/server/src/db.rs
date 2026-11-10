@@ -10,6 +10,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
+use pinned_core::delegate::TaskRecord;
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
@@ -73,6 +74,12 @@ create table if not exists agent_sessions (id uuid primary key, grant_id uuid no
 create table if not exists agent_calls (grant_id uuid not null references agent_grants on delete cascade, key text not null,
   tool text not null, args_hash bytea not null, state text not null, session uuid, result jsonb,
   created_at timestamptz not null default now(), primary key (grant_id, key));
+-- One finished delegated task per row, as the machine that ran it last sent it. `ended` is unix
+-- milliseconds. A removed machine's rows stay: they are the account's history.
+create table if not exists delegation_tasks (account uuid not null references accounts on delete cascade,
+  machine uuid not null, id text not null, ended bigint not null, record jsonb not null,
+  primary key (account, machine, id));
+create index if not exists delegation_tasks_ended on delegation_tasks (account, ended);
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -742,6 +749,59 @@ impl Db {
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+    }
+
+    /// Stores `record` as the machine's latest word on that task.
+    pub async fn save_task_record(&self, account: Uuid, machine: Uuid, record: &TaskRecord) -> Result<(), String> {
+        let ended = i64::try_from(record.ended).map_err(|_| format!("task {} ended at an impossible time", record.id))?;
+        let value = serde_json::to_value(record).map_err(|e| e.to_string())?;
+        self.client()
+            .await?
+            .execute(
+                "insert into delegation_tasks (account, machine, id, ended, record) values ($1, $2, $3, $4, $5)
+                 on conflict (account, machine, id) do update set ended = excluded.ended, record = excluded.record",
+                &[&account, &machine, &record.id, &ended, &value],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    pub async fn task_record(&self, account: Uuid, machine: Uuid, id: &str) -> Result<Option<TaskRecord>, String> {
+        let row = self.client().await?.query_opt("select record from delegation_tasks where account = $1 and machine = $2 and id = $3", &[&account, &machine, &id]).await.map_err(err)?;
+        row.map(|r| serde_json::from_value(r.get(0)).map_err(|e| format!("task {id} has an unreadable record: {e}"))).transpose()
+    }
+
+    /// The account's task records that ended at `since` (unix ms) or later. An unreadable one is skipped.
+    pub async fn task_records(&self, account: Uuid, since: u64) -> Result<Vec<TaskRecord>, String> {
+        let since = i64::try_from(since).unwrap_or(i64::MAX);
+        let rows = self.client().await?.query("select record from delegation_tasks where account = $1 and ended >= $2", &[&account, &since]).await.map_err(err)?;
+        Ok(rows.iter().filter_map(|r| serde_json::from_value(r.get(0)).ok()).collect())
+    }
+
+    /// The box time already billed to the other tasks of `machine`, in milliseconds.
+    pub async fn billed_box_ms(&self, account: Uuid, machine: Uuid, except: &str) -> Result<u64, String> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "select coalesce(sum((record->'usage'->>'box_ms')::bigint), 0)::bigint from delegation_tasks where account = $1 and machine = $2 and id <> $3",
+                &[&account, &machine, &except],
+            )
+            .await
+            .map_err(err)?;
+        Ok(u64::try_from(row.get::<_, i64>(0)).unwrap_or(0))
+    }
+
+    /// When the box `machine` runs in was made, in unix milliseconds, while it is one of the account's boxes.
+    pub async fn box_created_ms(&self, account: Uuid, machine: Uuid) -> Result<Option<u64>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select (extract(epoch from created_at) * 1000)::bigint from boxes where account = $1 and machine = $2", &[&account, &machine])
+            .await
+            .map_err(err)?;
+        Ok(row.and_then(|r| u64::try_from(r.get::<_, i64>(0)).ok()))
     }
 
     pub async fn tastes(&self, account: Uuid) -> Result<Option<Tastes>, String> {

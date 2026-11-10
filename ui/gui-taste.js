@@ -318,6 +318,7 @@ function tasteRender() {
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
       ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
+    ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
   const back = focused && [...pageView.querySelectorAll("button, select, input")].find((el) => tasteFocusKey(el) === focused);
@@ -407,5 +408,6 @@ SHELL_PAGES.taste = {
     tasteRender();
     tasteFetch();
     tasteFetchProjects();
+    delegationFetch();
   },
 };

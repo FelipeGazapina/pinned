@@ -643,6 +643,13 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     }
                     return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
                 }
+                if let HubCall::RecordTasks { records } = call {
+                    let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
+                    if let Err(e) = &result {
+                        eprintln!("pinned-server: machine {machine}'s task records were not kept: {e}");
+                    }
+                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+                }
                 let work = match &call {
                     HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
                     HubCall::SlackReply { connector, channel, thread, .. }
@@ -657,12 +664,14 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
                     // An app's first sign-in moves its own connectors and tastes in, which only an empty account
                     // takes, every machine keeps its projects' files in step with the account's, and a Capitão
-                    // or the global orchestrator starts with the account's tastes.
+                    // or the global orchestrator starts with the account's tastes, and a delegator reads how
+                    // the account's delegated tasks went.
                     None if matches!(
                         call,
                         HubCall::Import { .. }
                             | HubCall::ImportTastes { .. }
                             | HubCall::GetTastes
+                            | HubCall::DelegationStats { .. }
                             | HubCall::ShareProject { .. }
                             | HubCall::SyncList { .. }
                             | HubCall::SyncPush { .. }

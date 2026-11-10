@@ -18,6 +18,8 @@ const CAPABILITIES_TOOL: &str = "orchestrator_capabilities";
 const DELEGATE_TOOL: &str = "delegate_task";
 const STATUS_TOOL: &str = "task_status";
 const CANCEL_TASK_TOOL: &str = "task_cancel";
+const REVIEW_TOOL: &str = "task_review";
+const STATS_TOOL: &str = "delegation_stats";
 pub const SERVER: &str = "pinned";
 /// Leaves the reminders tools out, on a machine with no desktop to show them on.
 pub const NO_REMINDERS: &str = "--no-reminders";
@@ -144,7 +146,7 @@ pub fn write_mcp_config(path: &Path, exe: &Path, reminders: bool) -> std::io::Re
 
 pub fn permissions() -> Vec<String> {
     let project = project_tools().map(|(_, tool)| tool["name"].as_str().unwrap().to_owned());
-    [TOOL, LIST_TOOL, CANCEL_TOOL, CAPABILITIES_TOOL, DELEGATE_TOOL, STATUS_TOOL, CANCEL_TASK_TOOL]
+    [TOOL, LIST_TOOL, CANCEL_TOOL, CAPABILITIES_TOOL, DELEGATE_TOOL, STATUS_TOOL, CANCEL_TASK_TOOL, REVIEW_TOOL, STATS_TOOL]
         .map(String::from)
         .into_iter()
         .chain(project)
@@ -258,7 +260,11 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
     };
     let mut tools = if reminders { reminder_tools() } else { vec![] };
     if !global {
-        tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || spawner));
+        tools.extend(delegation_tools().into_iter().filter(|tool| (tool["name"] != DELEGATE_TOOL && tool["name"] != REVIEW_TOOL) || spawner));
+    }
+    // Whoever picks workers reads how earlier ones went, the global orchestrator included.
+    if !child {
+        tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
     Value::Array(tools)
@@ -349,7 +355,31 @@ fn delegation_tools() -> Vec<Value> {
                 "required": ["taskId"],
             },
         }),
+        json!({
+            "name": REVIEW_TOOL,
+            "description": "Say whether you used a finished task's result: accepted when you kept it, redone when you threw it away or had it done again. delegation_stats counts these per model. pinned marks a task accepted by itself when the pull request its thread watched merges, and redone when you start a task with the same title again; your verdict overrides both.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string" },
+                    "verdict": { "type": "string", "enum": ["accepted", "redone"] },
+                    "note": { "type": "string", "description": "Why, in a few words." },
+                },
+                "required": ["taskId", "verdict"],
+            },
+        }),
     ]
+}
+
+fn stats_tool() -> Value {
+    json!({
+        "name": STATS_TOOL,
+        "description": "How delegated tasks went, per model, across every machine of the account (this machine's alone when it has no hub): runs, the share that finished done, median minutes and median cost, the limits that stopped them, and how many results were accepted or redone. Read it before picking a model for a worker.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "days": { "type": "number", "enum": [1, 7, 30], "description": "The period, in days. 7 when omitted." } },
+        },
+    })
 }
 
 fn reminder_tools() -> Vec<Value> {
@@ -587,6 +617,16 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             search: args["search"].as_str().unwrap_or("").to_owned(),
         }),
         STATUS_TOOL => required(args, "taskId").map(|id| Message::TaskStatus { tab: session_var(TAB_ENV), task: session_var(TASK_ENV), id }),
+        REVIEW_TOOL => required(args, "taskId").and_then(|id| {
+            Ok(Message::TaskReview {
+                tab: session_var(TAB_ENV),
+                task: session_var(TASK_ENV),
+                id,
+                verdict: required(args, "verdict")?,
+                note: args["note"].as_str().map(str::to_owned),
+            })
+        }),
+        STATS_TOOL => Ok(Message::DelegationStats { days: args["days"].as_u64() }),
         CANCEL_TASK_TOOL => required(args, "taskId").map(|id| Message::TaskCancel {
             tab: session_var(TAB_ENV),
             task: session_var(TASK_ENV),
@@ -1088,14 +1128,14 @@ fn restore_var(name: &str, value: Option<String>) {
     fn a_session_gets_the_project_tools_a_delegated_child_lacks() {
         let names = |child| tool_definitions(true, child, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
-        let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
+        let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &["agents"], &memory].concat());
         assert_eq!(
-            permissions()[7..],
+            permissions()[9..],
             [
                 "mcp__pinned__agents",
                 "mcp__pinned__memory_search",
@@ -1168,11 +1208,11 @@ fn restore_var(name: &str, value: Option<String>) {
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "agents"], &memory].concat();
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
