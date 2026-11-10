@@ -181,7 +181,7 @@ const patch = () => {
   renderSidebar();
   return true;
 };
-const keepPatched = (p) => p.evaluate(`window.__patch = ${patch};`);
+const keepPatched = (p) => p.evaluate((src) => { window.__patch = (0, eval)(src); }, String(patch));
 
 const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !== "open") document.getElementById("chat-sidebar-toggle")?.click(); });
 
