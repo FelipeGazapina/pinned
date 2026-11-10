@@ -418,7 +418,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 16] {
+fn project_tools() -> [(Audience, serde_json::Value); 17] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -433,6 +433,14 @@ fn project_tools() -> [(Audience, serde_json::Value); 16] {
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
             "inputSchema": no_args,
+        })),
+        (Audience::Spawners, serde_json::json!({
+            "name": "work_cost",
+            "description": "What this piece of work cost so far: this session's own cost plus every worker it delegated, theirs in turn, and their Upstash Boxes, whether they ran here, on another machine or in a box. Answers total_usd (own_usd + agents_usd + box_usd), unknown (how many parts have no known cost, such as a Cursor worker: they add nothing to the total, so total_usd is then a floor, never a guess), workers, wall_ms, tokens, and tasks: each worker's id, title, model, machine, state, cost_usd (absent when unknown), box_usd, wall_ms and tokens. With taskId, that task and the workers under it instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string", "description": "A worker you started, to read its own subtree. Omit for this session's whole tree." } },
+            },
         })),
         (Audience::Everyone, serde_json::json!({
             "name": "memory_search",
@@ -1174,14 +1182,15 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
-        assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
+        assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, [&delegation[..], &["agents"], &memory].concat());
+        assert_eq!(on_a_node, [&delegation[..], &["agents", "work_cost"], &memory].concat());
         assert_eq!(
             permissions()[9..],
             [
                 "mcp__pinned__agents",
+                "mcp__pinned__work_cost",
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
                 "mcp__pinned__memory_forget",
@@ -1260,7 +1269,7 @@ fn restore_var(name: &str, value: Option<String>) {
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
-        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents"], &memory].concat();
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
