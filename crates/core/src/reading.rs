@@ -59,7 +59,7 @@ fn truncated(text: &str, max: usize) -> String {
 /// The conversation items worth an agent's context: what was said and which tools ran. Reasoning
 /// and tool output stay out, since tool output can hold whatever a file held.
 pub fn conversation(page: &Value, limit: usize) -> Value {
-    let items: Vec<Value> = page["items"]
+    let mut items: Vec<Value> = page["items"]
         .as_array()
         .map(|items| {
             items
