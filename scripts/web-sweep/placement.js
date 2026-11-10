@@ -83,7 +83,7 @@ const toPlacement = async (page) => {
       const page = await ctx.newPage();
       await signIn(page);
       await page.evaluate(() => openPage("taste"));
-      await page.waitForSelector(".taste-placement .taste-ladder, .taste-placement select");
+      await page.waitForSelector(".taste-placement select[data-place-add]");
       await open(page);
       await page.waitForTimeout(400);
       await page.screenshot({ path: path.join(SCREENS, `placement-${state}-${size}.png`) });
