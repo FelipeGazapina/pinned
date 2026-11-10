@@ -7,7 +7,7 @@
 //
 // Each run opens the state's sessions, walks them with workload.js, and reads `footprint`, the
 // figure Activity Monitor shows as Memory, twice: once after boot and once after the walk.
-// `web` runs a hub and a node, and counts Chrome's renderer processes. `app` runs the desktop
+// `web` runs a hub and a node, and counts the page's renderer process in Chrome. `app` runs the desktop
 // binary under a HOME of its own and counts its process plus its WebKit helpers; its window
 // shows on screen for the length of the run. One JSON line per run, then a summary with the
 // median of each figure. A run that walked fewer sessions than the state holds, or logged a
@@ -21,9 +21,21 @@
 // WebKit process on this Mac collect and drop its caches once. What is left is what the page
 // really holds; the difference was garbage WebKit had not collected yet.
 //
-// `web --ablate` goes on after the last reading: it empties one holder at a time in the page
-// (other threads' items, hidden terminals, caches) and prints what each gave back. It ranks
-// what to cut; it measures no change.
+// `app --steps` reads after each part of the walk (the vector model, the threads, the terminals,
+// the pages), to see which part a figure comes from.
+//
+// `app --threads` opens the threads one at a time before the walk and reads after each, with
+// what the thread drew, to see which threads a figure comes from. Give it a short --idle.
+//
+// `web --floors` also reads the renderer on an empty page and on the sign-in page, which is the
+// app's code and styles with no session open.
+//
+// `web --dump <file>` writes Chrome's own memory-infra account of the renderer after the walk.
+//
+// `--ablate` goes on after the last reading: it empties one holder at a time in the page (other
+// threads' items, hidden terminals, caches) and prints what each gave back. It ranks what to
+// cut; it measures no change. WebKit gives memory back only when told it is low, so `app`
+// needs --pressure with it.
 //
 // Flags: --runs N (3), --repo <checkout> (this one) picks the ui/ and target/debug to run,
 // --settle ms (400) is the wait on each thread, --idle s (30) the wait before the app is read,
@@ -42,7 +54,7 @@ const argv = process.argv.slice(2);
 const flag = (name, fallback) => (argv.includes(`--${name}`) ? argv[argv.indexOf(`--${name}`) + 1] : fallback);
 const [kind, stateArg] = argv;
 if (!["web", "app"].includes(kind) || !stateArg) {
-  console.error("usage: run.js web|app <state dir> [--runs N] [--repo <checkout>] [--settle ms] [--models dir] [--ablate] [--pressure]");
+  console.error("usage: run.js web|app <state dir> [--runs N] [--repo <checkout>] [--settle ms] [--models dir] [--ablate] [--pressure] [--steps] [--threads] [--try file.js] [--dump file] [--floors]");
   process.exit(2);
 }
 const STATE = path.resolve(stateArg);
@@ -60,6 +72,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(STATE, "manifest.json"), "
 const HOME = path.join(STATE, "home");
 const RUN = path.join(STATE, "run");
 const WORKLOAD = fs.readFileSync(path.join(__dirname, "workload.js"), "utf8");
+// --try <file.js> runs that script in the page, to test an idea without a rebuild: before the
+// sign-in on the web, and with the probe in the app, a few seconds after its window loads.
+const TRY = flag("try") ? fs.readFileSync(flag("try"), "utf8") : "";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const median = (list) => [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)];
@@ -196,9 +211,13 @@ async function web() {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const blank = argv.includes("--floors") ? await measureRenderers(browser) : undefined;
     const pageErrors = [];
     page.on("pageerror", (e) => pageErrors.push(String(e)));
     await page.goto(hub);
+    await page.waitForSelector("#login [name=email]");
+    const shell = argv.includes("--floors") ? await measureRenderers(browser) : undefined;
+    if (TRY) await page.evaluate(TRY);
     await page.fill("#login [name=email]", EMAIL);
     await page.fill("#login [name=password]", PASSWORD);
     await page.click("#login .primary");
@@ -214,6 +233,9 @@ async function web() {
       const { processInfo } = await browserCdp.send("SystemInfo.getProcessInfo");
       const groups = { renderer: [], gpu: [], browser: [] };
       for (const p of processInfo) if (p.type === "renderer" || p.type === "GPU" || p.type === "browser") groups[p.type.toLowerCase()].push(p.id);
+      // Chrome keeps a spare renderer and may run the service worker in one of its own; the page's is the largest.
+      const sizes = footprint(groups.renderer);
+      groups.renderer = [groups.renderer.reduce((a, b) => ((sizes.get(a)?.bytes ?? 0) >= (sizes.get(b)?.bytes ?? 0) ? a : b))];
       const { metrics } = await cdp.send("Performance.getMetrics");
       const metric = (name) => metrics.find((m) => m.name === name)?.value ?? 0;
       return { ...(await measure(groups)), heap: mb(metric("JSHeapUsedSize")), dom_nodes: metric("Nodes"), ...(argv.includes("--ablate") ? { categories: categories(groups.renderer) } : {}) };
@@ -223,6 +245,7 @@ async function web() {
     const walked = await page.evaluate((settle) => ramBench.walk(settle, false), SETTLE);
     const walk = await read();
     walked.errors.push(...pageErrors);
+    if (flag("dump")) fs.writeFileSync(flag("dump"), JSON.stringify(await memoryDump(browser), null, 1));
     const ablation = [];
     if (argv.includes("--ablate")) {
       for (const [name, empty] of ABLATIONS) {
@@ -231,10 +254,44 @@ async function web() {
         ablation.push({ name, note, renderer: after.renderer, heap: after.heap, categories: after.categories });
       }
     }
-    return { primary: walk.renderer, boot, walk, booted, walked, ...(ablation.length ? { ablation } : {}) };
+    return { primary: walk.renderer, boot, walk, booted, walked, ...(blank ? { floors: { blank, shell } } : {}), ...(ablation.length ? { ablation } : {}) };
   } finally {
     await browser.close();
   }
+}
+
+/** MB of Chrome's renderers now, with no collection asked for. */
+async function measureRenderers(browser) {
+  await sleep(3000);
+  const cdp = await browser.newBrowserCDPSession();
+  const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+  const sizes = footprint(processInfo.filter((p) => p.type === "renderer").map((p) => p.id));
+  return mb(Math.max(...[...sizes.values()].map((p) => p.bytes)));
+}
+
+/** Chrome's own account of the page's renderer, as chrome://tracing's memory-infra dumps it: MB per
+ * allocator and per part of it, largest first. */
+async function memoryDump(browser) {
+  const cdp = await browser.newBrowserCDPSession();
+  const events = [];
+  cdp.on("Tracing.dataCollected", ({ value }) => events.push(...value));
+  await cdp.send("Tracing.start", { traceConfig: { includedCategories: ["disabled-by-default-memory-infra"], memoryDumpConfig: { triggers: [] } } });
+  await cdp.send("Tracing.requestMemoryDump", { levelOfDetail: "detailed" });
+  const done = new Promise((resolve) => cdp.once("Tracing.tracingComplete", resolve));
+  await cdp.send("Tracing.end");
+  await done;
+  const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+  const renderers = new Set(processInfo.filter((p) => p.type === "renderer").map((p) => p.id));
+  const sizes = {};
+  for (const event of events) {
+    if (event.ph !== "v" || !renderers.has(event.pid)) continue;
+    for (const [name, dump] of Object.entries(event.args?.dumps?.allocators ?? {})) {
+      const size = parseInt(dump.attrs?.size?.value ?? "0", 16);
+      // A page has its own renderer, and the spare one Chrome keeps holds next to nothing.
+      if (size) sizes[name.replace(/0x[0-9a-f]+/gi, "*")] = Math.max(sizes[name.replace(/0x[0-9a-f]+/gi, "*")] ?? 0, size);
+    }
+  }
+  return Object.fromEntries(Object.entries(sizes).filter(([, bytes]) => bytes >= 1048576).sort((a, b) => b[1] - a[1]).map(([name, bytes]) => [name, mb(bytes)]));
 }
 
 /** Each empties one holder in the page, after the one before it, and says how much it held. */
@@ -285,6 +342,11 @@ const ABLATIONS = [
     for (const id of ["thread", "thread-list", "page-view", "panel-body"]) document.getElementById(id).replaceChildren();
     return `${nodes} nodes before`;
   }],
+  ["every element", () => {
+    const nodes = document.getElementsByTagName("*").length;
+    document.body.replaceChildren();
+    return `${nodes} nodes before`;
+  }],
 ];
 
 async function app() {
@@ -329,12 +391,18 @@ async function app() {
   });
   const base = `http://127.0.0.1:${PORT + 2}`;
   const ablations = argv.includes("--ablate") ? ABLATIONS : [];
+  // --steps reads after each part of the walk; the last part's reading is then the walk's.
+  const parts = ["memory", "threads", "terminals", "pages", "home"].filter((part) => part !== "memory" || memory);
+  const threads = argv.includes("--threads") ? Array.from({ length: manifest.sessions }, (_, i) => [`thread${i}`, `() => ramBench.visit(${i}, ${SETTLE})`]) : [];
+  const walk = argv.includes("--steps") ? parts.map((part) => [part === "home" ? "walk" : part, `() => ramBench.step("${part}", ${SETTLE})`]) : [["walk", `() => ramBench.walk(${SETTLE}, ${memory})`]];
   const phases = [
     ["boot", `() => ramBench.boot(${manifest.sessions})`],
-    ["walk", `() => ramBench.walk(${SETTLE}, ${memory})`],
+    ...threads,
+    ...walk,
     ...ablations.map(([, empty], i) => [`ablate${i}`, `async () => ({ note: await (${empty})() })`]),
   ];
   const probe = `${WORKLOAD}
+${TRY}
 (async () => {
   const post = (phase, result) => fetch("${base}/report?phase=" + phase, { method: "POST", body: JSON.stringify(result) });
   for (const [phase, work] of [${phases.map(([phase, work]) => `["${phase}", ${work}]`).join(", ")}]) {
@@ -357,24 +425,30 @@ async function app() {
       }
       const helpers = helpersOf(child.pid);
       const sums = await measure({ app: [child.pid], ...helpers });
-      return { total: sums.app + sums.content + sums.gpu + sums.network, ...sums, ...(ablations.length ? { categories: categories(helpers.content) } : {}) };
+      return { total: sums.app + sums.content + sums.gpu + sums.network, ...sums, ...(ablations.length || argv.includes("--steps") || threads.length ? { categories: categories(helpers.content) } : {}) };
     };
     const results = {};
     const readings = {};
+    const pressed = {};
     for (const [phase] of phases) {
       results[phase] = await reported(phase);
       readings[phase] = await read();
+      if (argv.includes("--pressure") && phase !== "boot") {
+        execFileSync("notifyutil", ["-p", "org.WebKit.lowMemory"]);
+        pressed[phase] = await read();
+      }
       // The probe's wait on /go may land after its report does.
       await waitFor(() => go[phase], `the app to wait after ${phase}`);
       go[phase]();
     }
-    let pressed;
-    if (argv.includes("--pressure")) {
-      execFileSync("notifyutil", ["-p", "org.WebKit.lowMemory"]);
-      pressed = await read();
-    }
-    const ablation = ablations.map(([name], i) => ({ name, note: results[`ablate${i}`].note ?? results[`ablate${i}`].failed, content: readings[`ablate${i}`].content, categories: readings[`ablate${i}`].categories }));
-    return { primary: readings.walk.total, boot: readings.boot, walk: readings.walk, booted: results.boot, walked: results.walk, ...(pressed ? { pressed } : {}), ...(ablation.length ? { ablation } : {}) };
+    const ablation = ablations.map(([name], i) => {
+      const reading = pressed[`ablate${i}`] ?? readings[`ablate${i}`];
+      return { name, note: results[`ablate${i}`].note ?? results[`ablate${i}`].failed, content: reading.content, categories: reading.categories };
+    });
+    const visits = threads.map(([phase]) => ({ ...results[phase], content: readings[phase].content, graphics: readings[phase].categories?.["Owned physical footprint (unmapped) (graphics)"] }));
+    const steps = argv.includes("--steps") ? parts.slice(0, -1).map((part) => ({ part, ...readings[part], ...(pressed[part] ? { pressed: pressed[part].content } : {}) })) : [];
+    const walked = argv.includes("--steps") ? { visited: results.threads?.visited, vectors: results.memory?.vectors ?? "not asked", ...results.walk } : results.walk;
+    return { primary: readings.walk.total, boot: readings.boot, walk: readings.walk, booted: results.boot, walked, ...(pressed.walk ? { pressed: pressed.walk } : {}), ...(steps.length ? { steps } : {}), ...(visits.length ? { visits } : {}), ...(ablation.length ? { ablation } : {}) };
   } finally {
     server.close();
     server.closeAllConnections?.();

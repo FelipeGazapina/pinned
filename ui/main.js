@@ -589,11 +589,8 @@ async function moveTab(tab, path) {
   focusInput();
 }
 
-function addTab(machine, view) {
-  const el = document.createElement("div");
-  el.className = "term";
-  el.hidden = true;
-  terms.append(el);
+/** A terminal as every tab starts with: no history, and no elements until `open`. */
+function newTerminal() {
   const term = new Terminal({
     fontFamily: "ui-monospace, Menlo, monospace",
     fontSize: 12,
@@ -605,7 +602,17 @@ function addTab(machine, view) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  term.open(el);
+  return { term, fit };
+}
+
+function addTab(machine, view) {
+  const el = document.createElement("div");
+  el.className = "term";
+  el.hidden = true;
+  terms.append(el);
+  // The terminal gets its elements when it first comes on screen (see `refit`). Until then it
+  // reads its session's output like any other, at a small part of the memory.
+  const { term, fit } = newTerminal();
 
   const button = document.createElement("div");
   button.className = "tab";
@@ -822,6 +829,20 @@ function focusInput() {
   else active.term.focus();
 }
 
+/** One terminal with elements and nothing to show, which measures for the ones that have none. */
+let ruler = null;
+/** The size the tab's terminal would fit at if it had its elements, so its session runs at the
+ * width the terminal view will show it in. */
+function measured(tab) {
+  ruler ??= newTerminal();
+  if (ruler.term.element) tab.el.append(ruler.term.element);
+  else ruler.term.open(tab.el);
+  if (typeof terminalLook === "function") Object.assign(ruler.term.options, terminalLook());
+  const dims = ruler.fit.proposeDimensions();
+  ruler.term.element.remove();
+  return dims;
+}
+
 // The window's minimum height leaves no room for a terminal; a fit there would reflow the
 // buffer into a few cells and claude would redraw at that size, so such a size is ignored.
 const MIN_TERM_COLS = 20;
@@ -829,11 +850,15 @@ const MIN_TERM_ROWS = 4;
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
-  // The app view lays the terminal out under its closed drawer, where nobody can scroll it.
-  if (tab === active && (!guiOn() || document.body.dataset.drawer === "open")) keepHistory(tab);
-  const dims = tab.fit.proposeDimensions();
+  // The app view lays the terminal out under its closed drawer, where nobody can see or scroll it.
+  if (tab === active && (!guiOn() || document.body.dataset.drawer === "open")) {
+    if (!tab.term.element) tab.term.open(tab.el);
+    keepHistory(tab);
+  }
+  const dims = tab.term.element ? tab.fit.proposeDimensions() : measured(tab);
   if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
-  tab.fit.fit();
+  if (tab.term.element) tab.fit.fit();
+  else tab.term.resize(dims.cols, dims.rows);
   if (tab.view.running) callOn(tab.machine, { cmd: "resize_pty", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
 }
 
@@ -1097,10 +1122,18 @@ window.addEventListener("keydown", (e) => {
 
 const UPLOAD_LIMIT = 25 << 20;
 
+/** xterm pastes through its own elements. A terminal that has none yet gets the same paste: line
+ * ends as carriage returns, inside the brackets its session asked for. */
+function pasteInto(tab, text) {
+  if (tab.term.element) return tab.term.paste(text);
+  const typed = text.replace(/\r?\n/g, "\r");
+  typeInto(tab, tab.term.modes.bracketedPasteMode ? `\x1b[200~${typed}\x1b[201~` : typed);
+}
+
 // Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
 function pastePaths(tab, paths, files) {
   if (guiOn() && tab === active) return insertPaths(paths, files);
-  tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
+  pasteInto(tab, paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
   tab.term.focus();
 }
 
@@ -1372,7 +1405,7 @@ document.getElementById("paste-key").onclick = async () => {
   if (!active) return;
   try {
     const text = await navigator.clipboard.readText();
-    if (text) active.term.paste(text);
+    if (text) pasteInto(active, text);
   } catch {
     showAttachNote("pinned may not read the clipboard. Allow it in the site's settings.", true);
   }
