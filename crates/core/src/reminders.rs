@@ -418,7 +418,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 16] {
+fn project_tools() -> [(Audience, serde_json::Value); 19] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });

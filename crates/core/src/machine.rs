@@ -112,6 +112,7 @@ impl Launch {
         let files = files.tempdir()?.keep();
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
+        hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -159,7 +160,8 @@ impl Launch {
                         cmd.args(configs);
                     }
                     cmd.arg("--settings");
-                    cmd.arg(&self.settings);
+                    // The global orchestrator's own: no Bash, and its file tools held to its folders.
+                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -2622,6 +2624,19 @@ impl Machine {
         Ok(out)
     }
 
+    /// Whether the global orchestrator's tool call may run. Every other session's may: only the
+    /// global orchestrator's settings send its calls here.
+    fn guard(&self, tab: &str, tool: &str, input: &Value) -> Result<String, String> {
+        let (cwd, global, account) = self.tab(tab, |t| (t.cwd.clone(), global::is_global(&t.env), t.account.clone()))?;
+        if !global {
+            return Ok(String::new());
+        }
+        let projects: Vec<PathBuf> = self.projects.lock().unwrap().iter().map(|p| p.path.clone()).collect();
+        let config = self.accounts.env(&account).into_iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map_or_else(|| home().join(".claude"), |(_, v)| PathBuf::from(v));
+        let roots = orchestrator_roots(&cwd, self.uploads.as_deref(), &config, &claude_tmp(), &projects);
+        crate::repo_look::guard(&roots, &cwd, tool, input).map(|()| String::new())
+    }
+
     /// The global orchestrator's repo tools, always through the hub: it checks that the account
     /// allows them, holds them to the read rate and writes each to the audit trail.
     fn repo_tool(&self, tab: &str, project: &str, machine: Option<&str>, look: crate::repo_look::RepoLook) -> Result<String, String> {
@@ -3778,6 +3793,7 @@ impl Machine {
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
+                Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
             }
         })
@@ -5448,6 +5464,33 @@ fn canonical(path: &str) -> PathBuf {
 
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
+
+/// Claude Code's name for a folder under `projects/` and its temp folder: every character but a
+/// letter or digit becomes `-`.
+fn claude_slug(path: &Path) -> String {
+    path.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Where Claude Code keeps each session's scratchpad: `/tmp/claude-<uid>`.
+fn claude_tmp() -> PathBuf {
+    #[cfg(unix)]
+    return PathBuf::from(format!("/tmp/claude-{}", unsafe { libc::getuid() }));
+    #[cfg(not(unix))]
+    return std::env::temp_dir().join("claude");
+}
+
+/// The folders the global orchestrator's own file tools reach. It reads the user's uploads, its
+/// scratchpad, its memory, its own folder and each Captain's scratchpad, and writes only the
+/// scratchpad, the memory and its own folder.
+fn orchestrator_roots(own: &Path, uploads: Option<&Path>, config: &Path, tmp: &Path, projects: &[PathBuf]) -> crate::repo_look::Roots {
+    let scratch = tmp.join(claude_slug(own));
+    let memory = config.join("projects").join(claude_slug(own)).join("memory");
+    let write = vec![scratch, memory, own.to_owned()];
+    let mut read = write.clone();
+    read.extend(uploads.map(Path::to_owned));
+    read.extend(projects.iter().map(|p| tmp.join(claude_slug(p))));
+    crate::repo_look::Roots { read, write }
+}
 
 /// Most of a worker's last message an orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
@@ -9398,7 +9441,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", hooks::GLOBAL_SETTINGS, "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -9729,6 +9772,16 @@ while True:
 
     #[test]
     #[cfg(unix)]
+    fn the_global_orchestrators_file_tools_reach_its_folders_and_read_captains_scratchpads() {
+        let own = Path::new("/Users/ana/.pinned/orquestrador");
+        let roots = orchestrator_roots(own, Some(Path::new("/Users/ana/.pinned/uploads")), Path::new("/Users/ana/.claude"), Path::new("/tmp/claude-501"), &[PathBuf::from("/Users/ana/code/site.app")]);
+        let scratch = PathBuf::from("/tmp/claude-501/-Users-ana--pinned-orquestrador");
+        let memory = PathBuf::from("/Users/ana/.claude/projects/-Users-ana--pinned-orquestrador/memory");
+        assert_eq!(roots.write, [scratch.clone(), memory.clone(), own.to_owned()]);
+        assert_eq!(roots.read, [scratch, memory, own.to_owned(), PathBuf::from("/Users/ana/.pinned/uploads"), PathBuf::from("/tmp/claude-501/-Users-ana-code-site-app")]);
+    }
+
+    #[test]
     fn a_20k_report_arrives_as_head_and_tail_with_a_pointer_that_read_session_resolves_to_the_whole_text() {
         let (m, dir, path, capitao, reports) = report_stack("report-long");
         let whole: String = (0..4000).map(|i| format!("{i:04} ")).collect();

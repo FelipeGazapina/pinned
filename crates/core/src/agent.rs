@@ -377,6 +377,9 @@ pub enum Message {
     CancelReminder { id: u64 },
     /// Not flattened, since a tool's own `kind` argument would collide with the message's tag.
     Project { tab: String, tool: ProjectTool },
+    /// Claude Code's PreToolUse hook in the global orchestrator's session: may tool `tool` run
+    /// with `input`? Ok("") lets it, Err says why not.
+    Guard { tab: String, tool: String, input: serde_json::Value },
     Usage {
         #[serde(flatten)]
         usage: Usage,
