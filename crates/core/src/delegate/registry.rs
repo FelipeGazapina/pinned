@@ -11,10 +11,15 @@ pub struct Delegates {
     tasks: Mutex<Vec<Task>>,
     agents: Arc<Mutex<HashMap<String, Agent>>>,
     reports: Mutex<Vec<Report>>,
+    /// The notices this machine took, oldest first: a hub that sends one again gets `true` and nothing is queued.
+    notices: Mutex<Vec<String>>,
     store: Option<PathBuf>,
     cursor: Arc<Mutex<Option<Cache>>>,
     warming: Arc<AtomicBool>,
 }
+
+/// How many taken notices a machine remembers: a hub resends only those decided in the last week.
+const NOTICES_KEPT: usize = 4000;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Report {
@@ -55,6 +60,7 @@ impl Default for Delegates {
             tasks: Mutex::new(vec![]),
             agents: Arc::new(Mutex::new(HashMap::new())),
             reports: Mutex::new(vec![]),
+            notices: Mutex::new(vec![]),
             store: None,
             cursor: Arc::new(Mutex::new(None)),
             warming: Arc::new(AtomicBool::new(false)),
@@ -93,6 +99,7 @@ impl Delegates {
         let Ok(saved) = serde_json::from_slice::<SavedFile>(&bytes) else { return delegates };
         *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
         *delegates.reports.lock().unwrap() = saved.reports;
+        *delegates.notices.lock().unwrap() = saved.notices;
         if delegates.adopt_restart() {
             delegates.persist();
         }
@@ -826,9 +833,27 @@ impl Delegates {
         self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: Some(request) });
     }
 
-    /// Whether a report still queued for `tab` holds `needle`, such as a notice's id.
-    pub fn holds_report(&self, tab: &str, needle: &str) -> bool {
-        self.reports.lock().unwrap().iter().any(|report| report.tab == tab && report.text.contains(needle))
+    /// Whether the notice `key` was already taken, queued or typed.
+    pub fn took_notice(&self, key: &str) -> bool {
+        self.notices.lock().unwrap().iter().any(|taken| taken == key)
+    }
+
+    /// Queues a notice for `tab` and remembers `key`, across a restart, so a notice sent again is
+    /// queued no more, whether it still waits or was typed long ago. False when `key` was taken.
+    pub fn queue_notice(&self, key: &str, tab: &str, session: Option<String>, text: String) -> bool {
+        {
+            let mut notices = self.notices.lock().unwrap();
+            if notices.iter().any(|taken| taken == key) {
+                return false;
+            }
+            notices.push(key.to_owned());
+            if notices.len() > NOTICES_KEPT {
+                let extra = notices.len() - NOTICES_KEPT;
+                notices.drain(..extra);
+            }
+        }
+        self.queue_report(tab, session, text);
+        true
     }
 
     fn push_report(&self, report: Report) {
@@ -936,6 +961,7 @@ impl Delegates {
         let saved = SavedFile {
             tasks: self.tasks.lock().unwrap().iter().map(SavedTask::from_task).collect(),
             reports: self.reports.lock().unwrap().clone(),
+            notices: self.notices.lock().unwrap().clone(),
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -1560,6 +1586,8 @@ struct SavedFile {
     tasks: Vec<SavedTask>,
     #[serde(default)]
     reports: Vec<Report>,
+    #[serde(default)]
+    notices: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -2914,7 +2914,13 @@ impl Machine {
 
     /// Queues `text` for the session in `tab`, or in the tab that now runs Claude session
     /// `session`, as worker reports are queued: typed once it is idle. False when no tab has it.
+    /// A notice already taken, as `tab` and `id`, answers true and queues nothing, however long ago
+    /// it was typed and across a restart.
     fn notice(&self, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        let key = format!("{tab}/{id}");
+        if self.delegates.took_notice(&key) {
+            return true;
+        }
         let found = {
             let tabs = self.tabs.lock().unwrap();
             match tabs.get(tab) {
@@ -2923,8 +2929,7 @@ impl Machine {
             }
         };
         let Some((tab, running)) = found else { return false };
-        if !self.delegates.holds_report(&tab, id) {
-            self.delegates.queue_report(&tab, running.or(session), text);
+        if self.delegates.queue_notice(&key, &tab, running.or(session), text) {
             self.emit_tabs();
         }
         self.arm_delegate_pass();
@@ -10012,6 +10017,16 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(notice_call(&m, &mine, None, "c-1"), Ok(json!(true)));
         assert_eq!(notice_call(&m, &other, None, "c-1"), Ok(json!(true)));
         assert_eq!((m.view(&mine).unwrap().queued, m.view(&other).unwrap().queued), (1, 1), "one tab's notice kept another's out");
+    }
+
+    #[test]
+    fn the_notices_a_machine_remembers_are_the_newest_few_thousand() {
+        let d = crate::delegate::Delegates::default();
+        for n in 0..4001 {
+            assert!(d.queue_notice(&format!("t/{n}"), "t", None, format!("n{n}")));
+        }
+        assert!(!d.took_notice("t/0"), "the oldest id was kept");
+        assert!(d.took_notice("t/4000"));
     }
 
     #[test]
