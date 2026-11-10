@@ -24,6 +24,8 @@
 // `app --steps` reads after each part of the walk (the vector model, the threads, the terminals,
 // the pages), to see which part a figure comes from.
 //
+// `app --scroll` first scrolls every thread for three seconds and reports the frame times.
+//
 // `app --threads` opens the threads one at a time before the walk and reads after each, with
 // what the thread drew, to see which threads a figure comes from. Give it a short --idle.
 //
@@ -54,7 +56,7 @@ const argv = process.argv.slice(2);
 const flag = (name, fallback) => (argv.includes(`--${name}`) ? argv[argv.indexOf(`--${name}`) + 1] : fallback);
 const [kind, stateArg] = argv;
 if (!["web", "app"].includes(kind) || !stateArg) {
-  console.error("usage: run.js web|app <state dir> [--runs N] [--repo <checkout>] [--settle ms] [--models dir] [--ablate] [--pressure] [--steps] [--threads] [--try file.js] [--dump file] [--floors]");
+  console.error("usage: run.js web|app <state dir> [--runs N] [--repo <checkout>] [--settle ms] [--models dir] [--ablate] [--pressure] [--steps] [--threads] [--try file.js] [--dump file] [--floors] [--scroll]");
   process.exit(2);
 }
 const STATE = path.resolve(stateArg);
@@ -397,6 +399,7 @@ async function app() {
   const walk = argv.includes("--steps") ? parts.map((part) => [part === "home" ? "walk" : part, `() => ramBench.step("${part}", ${SETTLE})`]) : [["walk", `() => ramBench.walk(${SETTLE}, ${memory})`]];
   const phases = [
     ["boot", `() => ramBench.boot(${manifest.sessions})`],
+    ...(argv.includes("--scroll") ? [["scroll", "() => ramBench.scroll()"]] : []),
     ...threads,
     ...walk,
     ...ablations.map(([, empty], i) => [`ablate${i}`, `async () => ({ note: await (${empty})() })`]),
@@ -415,7 +418,7 @@ ${TRY}
   }
 })();`;
   fs.writeFileSync(path.join(RUN, "probe.js"), probe);
-  const child = start(path.join(TARGET, "pinned"), [], { env: env({ HOME, CFFIXED_USER_HOME: HOME, SHELL: path.join(bin, "shell"), PATH: `${bin}:${process.env.PATH}`, PINNED_PROBE: path.join(RUN, "probe.js") }) });
+  const child = start(path.join(TARGET, "pinned"), (flag("app-args") ?? "").split(" ").filter(Boolean), { env: env({ HOME, CFFIXED_USER_HOME: HOME, SHELL: path.join(bin, "shell"), PATH: `${bin}:${process.env.PATH}`, PINNED_PROBE: path.join(RUN, "probe.js") }) });
   try {
     const read = async () => {
       // WebKit has no call that collects on demand; idle seconds let its own timers run.
@@ -441,6 +444,12 @@ ${TRY}
       await waitFor(() => go[phase], `the app to wait after ${phase}`);
       go[phase]();
     }
+    if (flag("surfaces")) {
+      const out = fs.openSync(flag("surfaces"), "w");
+      try {
+        execFileSync("footprint", ["-v", ...helpersOf(child.pid).content.map(String)], { stdio: ["ignore", out, "ignore"], maxBuffer: 1 << 30 });
+      } catch {}
+    }
     const ablation = ablations.map(([name], i) => {
       const reading = pressed[`ablate${i}`] ?? readings[`ablate${i}`];
       return { name, note: results[`ablate${i}`].note ?? results[`ablate${i}`].failed, content: reading.content, categories: reading.categories };
@@ -448,7 +457,7 @@ ${TRY}
     const visits = threads.map(([phase]) => ({ ...results[phase], content: readings[phase].content, graphics: readings[phase].categories?.["Owned physical footprint (unmapped) (graphics)"] }));
     const steps = argv.includes("--steps") ? parts.slice(0, -1).map((part) => ({ part, ...readings[part], ...(pressed[part] ? { pressed: pressed[part].content } : {}) })) : [];
     const walked = argv.includes("--steps") ? { visited: results.threads?.visited, vectors: results.memory?.vectors ?? "not asked", ...results.walk } : results.walk;
-    return { primary: readings.walk.total, boot: readings.boot, walk: readings.walk, booted: results.boot, walked, ...(pressed.walk ? { pressed: pressed.walk } : {}), ...(steps.length ? { steps } : {}), ...(visits.length ? { visits } : {}), ...(ablation.length ? { ablation } : {}) };
+    return { primary: readings.walk.total, boot: readings.boot, walk: readings.walk, booted: results.boot, walked, ...(pressed.walk ? { pressed: pressed.walk } : {}), ...(steps.length ? { steps } : {}), ...(visits.length ? { visits } : {}), ...(results.scroll ? { scroll: results.scroll } : {}), ...(ablation.length ? { ablation } : {}) };
   } finally {
     server.close();
     server.closeAllConnections?.();

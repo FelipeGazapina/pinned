@@ -92,7 +92,31 @@ window.ramBench = (() => {
       const scrolls = (/auto|scroll/.test(style.overflowX) && el.scrollWidth > el.clientWidth) || (/auto|scroll/.test(style.overflowY) && el.scrollHeight > el.clientHeight);
       if (scrolls) scrollers[`${el.tagName.toLowerCase()}.${el.className}`] = (scrollers[`${el.tagName.toLowerCase()}.${el.className}`] ?? 0) + 1;
     }
-    return { items: threadOf(tab).items.length, nodes: count("*"), images: count("img"), blocks: count("pre"), scrollers };
+    // A layer's surface is its size in device pixels, four bytes each.
+    const surface = (el) => Math.round((el.scrollWidth * el.scrollHeight * devicePixelRatio ** 2 * 4) / 1048576);
+    return { items: threadOf(tab).items.length, nodes: count("*"), images: count("img"), blocks: count("pre"), scrollers, thread: [threadView.clientWidth, threadView.clientHeight, threadView.scrollHeight, surface(threadView)], sidebar: [threadList.clientWidth, threadList.scrollHeight, surface(threadList)] };
+  }
+
+  /** Scrolls every thread up from its end, 40 px a frame for three seconds, and says how long the
+   * frames took: what a change to how the page scrolls or paints costs in smoothness. */
+  async function scroll() {
+    const gaps = [];
+    for (const tab of [...tabs]) {
+      activate(tab);
+      await painted(tab);
+      await sleep(300);
+      let last = await frame().then(() => performance.now());
+      for (const end = last + 3000; last < end; ) {
+        threadView.scrollTop -= 40;
+        await frame();
+        const now = performance.now();
+        gaps.push(now - last);
+        last = now;
+      }
+    }
+    gaps.sort((a, b) => a - b);
+    const at = (q) => Math.round(gaps[Math.floor((gaps.length - 1) * q)] * 10) / 10;
+    return { frames: gaps.length, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1), over_20ms: gaps.filter((g) => g > 20).length, over_34ms: gaps.filter((g) => g > 34).length };
   }
 
   async function step(name, settleMs) {
@@ -105,5 +129,5 @@ window.ramBench = (() => {
     return { ...done, ...counts() };
   }
 
-  return { boot, walk, step, visit };
+  return { boot, walk, step, visit, scroll };
 })();
