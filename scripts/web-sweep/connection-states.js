@@ -171,6 +171,7 @@ async function signIn(page) {
         }
       }, [n.name, dir, n === NODES[0] ? 2 : 1]);
     }
+    console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => [t.machine.slice(0, 4), t.view.cwd, t.view.status]))));
     await page.evaluate(`(${seed})(${JSON.stringify({ rows: ROWS })})`);
     if (phone) await page.evaluate(() => toggleSidebar(true));
     await settle();
