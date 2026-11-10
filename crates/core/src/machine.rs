@@ -5061,8 +5061,11 @@ const HOME_ENV: &str = "HOME";
 #[cfg(windows)]
 const HOME_ENV: &str = "USERPROFILE";
 
+/// Tests keep the global orchestrator's folder and skill homes inside their config dir, never in
+/// `$HOME`. This crate's own tests count wherever their binary is copied; another crate's tests
+/// count by running from cargo's `deps` folder.
 fn test_binary() -> bool {
-    std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
+    cfg!(test) || std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
 }
 
 pub(crate) fn home() -> PathBuf {
