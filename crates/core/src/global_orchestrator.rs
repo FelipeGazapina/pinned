@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn waiting_holds_questions_mid_turn_and_failures_but_not_the_idle_notice_or_the_orchestrators_own_tab() {
         let site = [project("/w/site", Some("github.com/o/site"))];
-        let question = TabView { interrupted: true, title: Some("Fix the form".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794234244), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let question = TabView { interrupted: true, ask_detail: Some("git push origin main".into()), title: Some("Fix the form".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794234244), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
         let idle_notice = TabView { interrupted: false, message: Some("Claude is waiting for your input".into()), ..view("tab-c-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::NeedsInput)) };
         let failed = TabView { message: Some("API Error: 500".into()), updated: Some(1794234300), ..view("tab-c-3", "/tmp/scratch", None, false, Some(AgentStatus::Failed)) };
         let own = TabView { orchestrator_global: true, interrupted: true, ..view("tab-c-4", "/home/f/.pinned/orquestrador", None, true, Some(AgentStatus::NeedsInput)) };
@@ -966,12 +966,21 @@ mod tests {
             serde_json::json!({
                 "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-1", "machine_name": "MacBook", "online": true, "version": "0.17.19", "path": "/w/site", "captain": "livre", "captain_tab": "tab-c-1", "workers": 1 }] }],
                 "waiting": [
-                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-2", "kind": "needs_input", "project": "/w/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244 },
+                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-2", "kind": "needs_input", "ask": "approval", "tool": "Bash", "detail": "git push origin main", "project": "/w/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244 },
                     { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-3", "kind": "failed", "message": "API Error: 500", "since": 1794234300 },
                 ],
                 "machines": [{ "id": "m-1", "name": "MacBook", "online": true, "version": "0.17.19" }],
             })
         );
+    }
+
+    #[test]
+    fn a_permission_notice_is_an_approval_with_its_tool_and_any_other_a_question() {
+        assert_eq!(ask_of(Some("Claude needs your permission to use Bash")), (AskKind::Approval, Some("Bash".into())));
+        assert_eq!(ask_of(Some("Claude needs your permission to use mcp__pinned__act")), (AskKind::Approval, Some("mcp__pinned__act".into())));
+        assert_eq!(ask_of(Some("Claude needs your permission")), (AskKind::Approval, None));
+        assert_eq!(ask_of(Some("Claude needs your input")), (AskKind::Question, None));
+        assert_eq!(ask_of(None), (AskKind::Question, None));
     }
 
     #[test]
@@ -1010,10 +1019,12 @@ mod tests {
         let verdict = |case: &serde_json::Value| {
             let tab = tab_of(case);
             let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.21", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
-            (case["case"].clone(), serde_json::to_value(overview_at(&machines, now).waiting.first().map(|w| w.kind)).unwrap(), offer_of(&tab, now).is_some())
+            let overview = overview_at(&machines, now);
+            let waiting = overview.waiting.first();
+            (case["case"].clone(), serde_json::to_value(waiting.map(|w| w.kind)).unwrap(), serde_json::to_value(waiting.and_then(|w| w.ask)).unwrap(), offer_of(&tab, now).is_some())
         };
         let cases_list = cases["cases"].as_array().unwrap();
-        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone(), c["offer"] == true)).collect::<Vec<_>>());
+        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone(), c["ask"].clone(), c["offer"] == true)).collect::<Vec<_>>());
     }
 
     #[test]

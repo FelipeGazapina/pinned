@@ -295,11 +295,15 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .waiting-row:focus-visible { box-shadow: inset 0 0 0 2px rgb(var(--g-ink-rgb) / 0.2); }
 .waiting-row .dot { width: 8px; height: 8px; flex: none; margin-top: 6px; border-radius: 50%; background: var(--g-side-muted); }
 .waiting-row .dot.question { background: var(--g-warning); }
+.waiting-row .dot.approval { background: var(--g-warning); }
 .waiting-row .dot.failed { background: var(--g-error); }
 .waiting-row .texts { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .waiting-row .l2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--g-side-fg); }
 .waiting-row .where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-side-muted); }
 .waiting-row .where .kind { color: var(--g-side-fg); font-weight: 500; }
+/* What the thread asks: the tool an approval is for, then the command, the question or the error. */
+.waiting-row .asked { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-side-muted); }
+.waiting-row .asked .tool { margin-right: 6px; padding: 0 5px; border-radius: 4px; font: 500 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--g-side-fg); background: rgb(var(--g-ink-rgb) / 0.08); }
 /* A finished turn that ended asking something waits on nobody: greyed, under its own head, with a hollow dot. */
 .waiting-row.offer { opacity: 0.62; }
 .waiting-row.offer .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--g-side-muted); }
