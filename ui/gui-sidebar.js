@@ -299,29 +299,37 @@ function snoozeLimitStops() {
   }
 }
 
-/** The fixed rows above the projects: the global orchestrator's own row, with how many threads
- * wait on Felipe, then those threads. The row names the orchestrator as its settings do and its host
- * machine under that. Empty while no machine can hold the conversation. */
+/** The fixed rows above the projects: the global orchestrator's own row, with how many things
+ * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
+ * orchestrator as its settings do and its host machine under that, and is left out while no
+ * machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
   const host = globalHostMachine();
-  if (!host) return [];
-  const waiting = globalWaitingRows();
-  const row = document.createElement("button");
-  row.type = "button";
-  row.className = "global-row";
-  row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
-  row.dataset.globalOpen = "true";
-  const count = waiting.length ? `<span class="count" title="${waiting.length} waiting on you">${waiting.length}</span>` : "";
-  row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
-  if (!waiting.length) return [row];
+  const asks = agentWaitingRows();
+  if (!host && !asks.length) return [];
+  const threads = globalWaitingRows();
+  const waiting = [...asks, ...threads];
+  const n = agentConfirmations.length + threads.length;
+  const top = [];
+  if (host) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "global-row";
+    row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
+    row.dataset.globalOpen = "true";
+    const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
+    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
+    top.push(row);
+  }
+  if (!waiting.length) return top;
   const head = document.createElement("button");
   head.type = "button";
   head.className = "waiting-head";
   head.dataset.shelf = "waiting";
   head.setAttribute("aria-expanded", ui.waitingOpen);
-  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span><span class="count">${waiting.length}</span>${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-  return [row, head, ...(ui.waitingOpen ? waiting : [])];
+  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+  return [...top, head, ...(ui.waitingOpen ? waiting : [])];
 }
 
 /** What each `waitingKindOf` answer reads as, and the tone of its dot. */
@@ -1296,6 +1304,7 @@ threadList.addEventListener("click", (e) => {
   const projectsLink = e.target.closest("[data-global-projects]");
   if (projectsLink && typeof openGlobalProjects === "function") return openGlobalProjects();
   if (e.target.closest("[data-global-open]")) return openGlobalChat();
+  if (e.target.closest("[data-agent]")) return agentSurfaceClick(e);
   const waiting = e.target.closest(".waiting-row");
   if (waiting) {
     const tab = tabByKey(waiting.dataset.waiting);

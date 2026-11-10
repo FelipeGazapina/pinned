@@ -117,7 +117,7 @@ let settings = { linear: null, slack: null, connectors: [], checked: null };
  * with `settingsSection({ page, label, icon, show, search })`: `show` draws the page into settingsPage,
  * and `search` lists the settings it holds as `{ title, terms, id }`. A result scrolls to the element
  * `id`, or else to the heading or label on the page that reads `title`. */
-const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "connectors", "account", "machines", "archive"];
+const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "connectors", "account", "machines", "agent-activity", "archive"];
 const settingsSections = [];
 function settingsSection(section) {
   const rank = (p) => (SETTINGS_ORDER.includes(p) ? SETTINGS_ORDER.indexOf(p) : SETTINGS_ORDER.length - 1.5);
