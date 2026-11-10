@@ -114,7 +114,9 @@ const toPlacement = async (page) => {
   check(!(await page.$$eval('select[data-place-add="prefer"] option:not([disabled])', (o) => o.map((x) => x.value))).includes(node), "a machine already in Avoid can't be picked for Prefer");
   check(/Unsaved changes/.test(await page.locator(".taste-foot").innerText()), "an edit shows the unsaved footer");
   await page.click('.taste-foot button:text-is("Save")');
-  await waitFor("the save", async () => (await placementOf(page)).prefer.length === 1);
+  await waitFor("the save", async () => (await placementOf(page)).prefer.length === 1).catch(async (e) => {
+    throw new Error(`${e.message}; the footer says: ${await page.locator(".taste-foot").innerText().catch(() => "(no footer)")}`);
+  });
   const saved = await placementOf(page);
   check(saved.prefer[0] === mini && saved.avoid[0] === node && saved.heavy === "worktree", "the hub stores the saved policy by machine id");
 
