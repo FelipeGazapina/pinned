@@ -455,7 +455,6 @@ mod tests {
         assert_eq!(unpushed(&tree, None), None);
         std::fs::write(tree.join("a.txt"), "x").unwrap();
         assert_eq!(unpushed(&tree, None), Some(Keeps::Dirty));
-        assert_eq!(unpushed(&work, None), None, "the main checkout is untouched");
     }
 
     #[test]

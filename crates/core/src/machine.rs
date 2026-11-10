@@ -9794,9 +9794,9 @@ while True:
         std::fs::remove_file(folder.join("draft.txt")).unwrap();
         assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "kept sessions are not looked at again at once");
         m.auto_archive_kept.lock().unwrap().clear();
-        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "a commit no remote has: this repository has no remote at all");
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "clean now, but its one commit is on no remote");
         assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
-        let _ = worker;
+        assert!(m.auto_archive_kept.lock().unwrap().contains_key(&worker));
         let _ = std::fs::remove_dir_all(dir);
     }
 
