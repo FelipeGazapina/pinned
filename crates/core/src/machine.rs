@@ -6430,6 +6430,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_turn_boundary_sends_the_tab_list_once_when_it_changes_and_once_more_when_the_stats_are_in() {
+        let tabs_sent = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let seen = tabs_sent.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+            if let Event::Tabs { tabs } = event {
+                seen.lock().unwrap().push(tabs.len());
+            }
+        });
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let settle = || {
+            let mut last = usize::MAX;
+            loop {
+                std::thread::sleep(Duration::from_millis(300));
+                let now = tabs_sent.lock().unwrap().len();
+                if now == last {
+                    return now;
+                }
+                last = now;
+            }
+        };
+        tabs_sent.lock().unwrap().clear();
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        assert_eq!(settle(), 1, "a turn start: one list");
+        tabs_sent.lock().unwrap().clear();
+        m.record_event(done_event(&tab));
+        assert_eq!(settle(), 2, "a turn end: one list for the change, one when the stats are read");
+        assert_eq!(*tabs_sent.lock().unwrap(), [2, 2], "each carries every tab: {other}");
+    }
+
+    #[test]
     fn call_hub_reaches_the_installed_hub_and_refuses_while_unlinked() {
         let machine = machine();
         assert_eq!(machine.call_hub(HubCall::Overview).unwrap_err(), "this machine is not linked to a hub");
