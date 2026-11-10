@@ -1732,6 +1732,42 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    #[ignore = "size probe: cargo test -p pinned-core tasks_json_size -- --ignored --nocapture"]
+    fn tasks_json_size() {
+        let size = |count: u64, span_days: u64| {
+            let dir = scratch("tasks-json-size");
+            let file = dir.join("tasks.json");
+            let delegates = Delegates::load(Some(file.clone()));
+            let now = registry::unix_millis();
+            for n in 0..count {
+                let task = new_on(&delegates, Provider::Claude);
+                let mut tasks = delegates.tasks.lock().unwrap();
+                let task = tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+                let age = (count - n) * span_days * DAY / count;
+                task.started = now - age - 60_000;
+                task.ended = Some(now - age);
+                task.state = if n % 9 == 0 { WorkState::Failed } else { WorkState::ResultAvailable };
+                task.delivered = true;
+                task.title = format!("Task {n}: port the parser and its tests");
+                task.summary = Some(format!("Done {n}. ").repeat(300));
+                task.cwd = PathBuf::from("/Users/someone/projetos/personal-harness/.claude/worktrees/pinned-902601c8");
+            }
+            delegates.set_model("none", None);
+            let compact = std::fs::read(&file).unwrap();
+            let value: Value = serde_json::from_slice(&compact).unwrap();
+            let kept = value["tasks"].as_array().unwrap().len();
+            let pretty = serde_json::to_vec_pretty(&value).unwrap().len();
+            let _ = std::fs::remove_dir_all(&dir);
+            (kept, compact.len(), pretty)
+        };
+        let (kept_all, compact_all, pretty_all) = size(377, 10);
+        eprintln!("377 tasks over 10 days: kept {kept_all}; before (pretty, unpruned) = {pretty_all} bytes, after (compact) = {compact_all} bytes");
+        let (kept, compact, _) = size(1500, 40);
+        let (_, compact_unpruned, pretty_unpruned) = size(1500, 10);
+        eprintln!("1500 tasks over 40 days: kept {kept}; before (pretty, nothing dropped) = {pretty_unpruned} bytes; compact alone = {compact_unpruned}; after (compact, pruned) = {compact} bytes");
+    }
+
+    #[test]
     fn a_reload_keeps_how_a_task_ended_and_its_limits() {
         let dir = scratch("reload-ended");
         let file = dir.join("delegates.json");
