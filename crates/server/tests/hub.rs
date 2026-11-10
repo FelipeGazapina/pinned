@@ -7240,3 +7240,28 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && f.to_string().contains(&ana_id)).collect();
     assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine: {leaked:?}");
 }
+
+#[test]
+fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
+    let hub = TestHub::start_with("machine_load_projects", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (creds, id) = registered(&url, &token, "ana@acme.dev", "book");
+    let home = temp("machine-load-projects");
+    let node = Node::start(&home, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true)]);
+    let folder = home.join("site");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = node.machine.open_project(folder).display().to_string();
+    wait_for("the node reports its load", || state_of(&mut client, &id).is_some());
+
+    let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
+    let checkout = overview["projects"][0]["checkouts"].as_array().unwrap().iter().find(|c| c["path"] == json!(path)).unwrap_or_else(|| panic!("{overview}")).clone();
+    assert!(checkout["load"]["disk_free_mb"].as_u64().is_some() && checkout["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "the checkout shows its machine's load: {checkout}");
+    let machine = &overview["machines"][0];
+    assert_eq!(machine["name"], "book");
+    assert!(machine["state"]["accounts"].as_array().unwrap().iter().any(|a| a["id"] == "claude"), "{machine}");
+    assert!(machine["state"]["workers_at_once"].as_u64().is_some_and(|n| n > 0), "{machine}");
+}
