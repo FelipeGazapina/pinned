@@ -249,15 +249,41 @@ const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.
 /** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
 function statsLabel(tab) {
   const stats = tab?.view.stats;
-  if (!stats) return "";
+  const work = tab?.view.work;
+  if (!stats && !work) return "";
   const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
-  const active = stats.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
-  const cost = stats.cost_usd == null ? "" : stats.cost_usd < 0.01 ? "<$0.01" : `$${stats.cost_usd.toFixed(2)}`;
-  return [active, cost].filter(Boolean).join(" · ");
+  const active = stats?.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
+  // A thread that delegated shows the cost of the whole piece of work: its own session and its workers.
+  const usd = work ? work.usd : stats?.cost_usd;
+  const cost = usd == null ? "" : costLabel(usd, work?.unknown);
+  return [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
 }
+/** A cost as `$1.26`, with a `+` when parts of it have no known cost, so it is a floor. */
+const costLabel = (usd, unknown = 0) => `${usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`}${unknown ? "+" : ""}`;
+const nWorkers = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+/** What top-level threads cost with the workers under them, as `{ usd, unknown, workers }`, or null when none has a cost.
+ * Each thread's `work` already holds the workers it delegated, so they are not added again. */
+function costOf(roots) {
+  let sum = null;
+  for (const { view } of roots) {
+    const part = view.work ?? (view.stats?.cost_usd == null ? null : { usd: view.stats.cost_usd, unknown: 0, workers: 0 });
+    if (!part) continue;
+    sum ??= { usd: 0, unknown: 0, workers: 0 };
+    for (const key of Object.keys(sum)) sum[key] += part[key];
+  }
+  return sum;
+}
+/** The project's cost as `$1.26 · 2 workers`, or "". */
+const projectCostLabel = (roots) => {
+  const sum = costOf(roots);
+  return sum ? [costLabel(sum.usd, sum.unknown), sum.workers ? nWorkers(sum.workers) : ""].filter(Boolean).join(" · ") : "";
+};
+const unknownTitle = (n) => `${n} ${n === 1 ? "part has" : "parts have"} no known cost, so the real total is higher`;
 function statsHtml(tab) {
   const label = statsLabel(tab);
-  return label ? `<span class="stats" data-stats="${esc(tab.key)}">${esc(label)}</span>` : "";
+  const work = tab.view.work;
+  const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</span>` : "";
 }
 function statusSlot(tab) {
   const phase = phaseOf(tab);
@@ -627,11 +653,12 @@ function projectHead(key, roots, kids) {
   const running = all.filter((t) => t.view.role === "worker" && ["working", "delegating"].includes(phaseOf(t))).length;
   const states = [queued ? `<span class="state queued">${queued} queued</span>` : "", running ? `<span class="state running">${running} running</span>` : ""].join("");
   const where = [...new Set(all.map((t) => machineName(t.machine)))].join(", ");
+  const spent = projectCostLabel(roots);
   const name = projectName(roots[0]);
   const head = document.createElement("div");
   head.className = "project-head";
   head.dataset.project = key;
-  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}<span class="where" title="${esc(where)}">${esc(where)}</span>`;
+  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}${spent ? `<span class="state cost" title="What this project's threads and workers cost">${esc(spent)}</span>` : ""}<span class="where" title="${esc(where)}">${esc(where)}</span>`;
   return head;
 }
 
@@ -769,6 +796,10 @@ const boxAgeText = (secs) => {
   return `${Math.floor(hours / 24)}d${hours % 24}h`;
 };
 const boxSpent = (st) => st.age_secs / 3600 * st.rate_usd_per_hour;
+/** Box machines whose last `box_status` failed: their chip says the cost is unavailable instead of vanishing. */
+const boxDown = new Set();
+const boxUnavailableHtml = () =>
+  `<span class="remote box unavailable" title="Upstash Box · its status could not be read, so its cost is unknown">${icon("server")}<span class="head">box cost unavailable</span></span>`;
 const boxChipHtml = (st) => {
   const spent = boxSpent(st);
   const money = st.budget_usd != null ? `$${spent.toFixed(2)} of $${st.budget_usd.toFixed(2)}` : `$${spent.toFixed(2)}`;
@@ -782,8 +813,10 @@ async function refreshBoxInfo() {
   await Promise.all(seen.map(async (m) => {
     try {
       boxInfo.set(m, await hub.hub({ cmd: "box_status", machine: m }));
+      boxDown.delete(m);
     } catch {
       boxInfo.delete(m);
+      boxDown.add(m);
     }
   }));
   if (guiOn()) {
@@ -808,7 +841,8 @@ function cardRow(tab) {
     ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const box = tab.machine !== LOCAL && !scratchMachine && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
-  const remote = box ? boxChipHtml(box) : tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const boxLost = !box && tab.machine !== LOCAL && !scratchMachine && boxDown.has(tab.machine);
+  const remote = box ? boxChipHtml(box) : boxLost ? boxUnavailableHtml() : tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot

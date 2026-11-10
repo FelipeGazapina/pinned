@@ -48,14 +48,12 @@ pub struct WorkCost {
 }
 
 impl WorkCost {
-    /// Adds the cost of the thread's own session.
+    /// Adds the cost of the thread's own session, when its transcript has one yet. A thread that
+    /// has not run a turn has spent nothing, so it is not counted as unknown.
     pub fn with_own(mut self, own: Option<f64>) -> WorkCost {
-        match own {
-            Some(usd) => {
-                self.total_usd += usd;
-                self.own_usd = Some(usd);
-            }
-            None => self.unknown += 1,
+        if let Some(usd) = own {
+            self.total_usd += usd;
+            self.own_usd = Some(usd);
         }
         self
     }
