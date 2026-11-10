@@ -4004,6 +4004,11 @@ fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_f
     let machine = creds.machine_id.clone();
     std::fs::write(dir.join("sessions.json"), format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display())).unwrap();
     let _node = Node::resume(&dir, creds);
+    // A resume answers once Claude has drawn for 2s, and the stand-in's `cat` draws nothing.
+    let drawing = dir.join("claude-drawing");
+    std::fs::write(&drawing, "#!/bin/sh\necho resumed\nexec cat\n").unwrap();
+    std::fs::set_permissions(&drawing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&drawing, dir.join("claude")).unwrap();
     ana.wait_machines(&[("box", true)]);
     let tabs_of = |f: &Value| (f["type"] == "event" && f["machine"] == machine.as_str() && f["event"]["kind"] == "tabs").then(|| f["event"]["tabs"].as_array().cloned().unwrap_or_default());
     let listed = ana.wait("the restored tab", |f| tabs_of(f).is_some_and(|tabs| tabs.iter().any(|t| t["session"] == "conv-1")));

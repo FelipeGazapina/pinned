@@ -616,21 +616,25 @@ impl Hub {
         if view.status == Some(AgentStatus::Working) {
             return Err("the thread is working; stop its turn first".into());
         }
-        let _held = account.marks.lock().await;
-        let was = self.db.session_marks_of(account.id, &session).await?;
-        let archived = Archived {
-            machine: machine.into(),
-            name: was.title.clone().or(view.title).or(view.prompt_title).unwrap_or_else(|| "New thread".into()),
-            project: project_name(&account.last_listed(machine), &view.cwd),
-            cwd: view.cwd,
-            at: pinned_core::connectors::unix_millis() as f64 / 1000.0,
-            created: None,
-            title: was.title.clone(),
-            pinned: was.pin.is_some(),
+        let (was, row) = {
+            let _held = account.marks.lock().await;
+            let was = self.db.session_marks_of(account.id, &session).await?;
+            let archived = Archived {
+                machine: machine.into(),
+                name: was.title.clone().or(view.title).or(view.prompt_title).unwrap_or_else(|| "New thread".into()),
+                project: project_name(&account.last_listed(machine), &view.cwd),
+                cwd: view.cwd,
+                at: pinned_core::connectors::unix_millis() as f64 / 1000.0,
+                created: None,
+                title: was.title.clone(),
+                pinned: was.pin.is_some(),
+            };
+            let mark = |mark| MarkChange { session: session.clone(), mark };
+            let row = self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Archived(Some(archived)))]).await?.remove(0);
+            (was, row)
         };
-        let mark = |mark| MarkChange { session: session.clone(), mark };
-        let row = self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Archived(Some(archived)))]).await?.remove(0);
         if let Err(e) = self.call_machine(account, machine, Call::CloseTab { tab: tab.into() }, MACHINE_CALL_WAIT).await {
+            let _held = account.marks.lock().await;
             self.write_marks(account, was.rebuild()).await?;
             return Err(format!("the thread's tab did not close: {}", String::from(e)));
         }
@@ -638,17 +642,29 @@ impl Hub {
     }
 
     async fn unarchive_session(&self, account: &Account, session: &str) -> Result<Target, String> {
-        let _held = account.marks.lock().await;
-        let was = self.db.session_marks_of(account.id, session).await?;
-        let archived = was.archived.ok_or_else(|| format!("this account has no archived conversation {session}"))?;
-        if !account.is_online(&archived.machine) {
-            return Err("the conversation's machine is offline".into());
-        }
-        let run = RunSpec { folder: archived.cwd, repo: None, args: vec!["--resume".into(), session.into()], env: vec![], token: None, account: None, budget_usd: None };
-        let tab = self.call_machine(account, &archived.machine, Call::Run { run }, RUN_WAIT).await?;
-        let tab: TabId = serde_json::from_value(tab).map_err(|e| e.to_string())?;
-        let pin = if archived.pinned { Some(self.db.session_marks(account.id).await?.iter().filter_map(|row| row.pin).max().map_or(0, |last| last + 1)) } else { None };
         let mark = |mark| MarkChange { session: session.into(), mark };
+        let (was, archived) = {
+            let _held = account.marks.lock().await;
+            let was = self.db.session_marks_of(account.id, session).await?;
+            let archived = was.archived.clone().ok_or_else(|| format!("this account has no archived conversation {session}"))?;
+            if !account.is_online(&archived.machine) {
+                return Err("the conversation's machine is offline".into());
+            }
+            // Off the Archive page before the resume starts, so a second Unarchive can't open it twice.
+            self.write_marks(account, vec![mark(Mark::Archived(None))]).await?;
+            (was, archived)
+        };
+        let run = RunSpec { folder: archived.cwd, repo: None, args: vec!["--resume".into(), session.into()], env: vec![], token: None, account: None, budget_usd: None };
+        let started = self.call_machine(account, &archived.machine, Call::Run { run }, RUN_WAIT).await.map_err(String::from);
+        let _held = account.marks.lock().await;
+        let tab: TabId = match started.and_then(|tab| serde_json::from_value(tab).map_err(|e| e.to_string())) {
+            Ok(tab) => tab,
+            Err(e) => {
+                self.write_marks(account, was.rebuild()).await?;
+                return Err(e);
+            }
+        };
+        let pin = if archived.pinned { Some(self.db.session_marks(account.id).await?.iter().filter_map(|row| row.pin).max().map_or(0, |last| last + 1)) } else { None };
         self.write_marks(account, vec![mark(Mark::Clear), mark(Mark::Title(archived.title)), mark(Mark::Pin(pin))]).await?;
         Ok(Target { machine: archived.machine, tab })
     }
