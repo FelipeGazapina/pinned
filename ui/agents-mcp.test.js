@@ -12,6 +12,7 @@ function load({ framed = false, signedIn = true } = {}) {
     console,
     URL,
     TAURI: true,
+    APP_LOCALE: "en-US",
     window,
     location: { pathname: "/", search: "" },
     sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },

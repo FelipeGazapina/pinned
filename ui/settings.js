@@ -1521,7 +1521,7 @@ function commandPreview(c) {
 function checkedText() {
   const checked = settings.checked;
   if (!checked) return "Not checked yet. Connectors are checked every minute.";
-  const at = new Date(checked.at).toLocaleTimeString();
+  const at = new Date(checked.at).toLocaleTimeString(APP_LOCALE);
   return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Connectors are checked every minute.`;
 }
 

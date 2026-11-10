@@ -88,7 +88,7 @@ actions["projects-machine"] = (button) => {
 actions["open-project"] = (button) => showProjectHistory(button.dataset.path);
 actions["projects-back"] = showProjectsPage;
 
-const when = (unix) => new Date(unix * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+const when = (unix) => new Date(unix * 1000).toLocaleString(APP_LOCALE, { dateStyle: "short", timeStyle: "short" });
 const lineClass = (line) =>
   line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")
     ? "f"

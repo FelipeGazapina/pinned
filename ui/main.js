@@ -768,7 +768,7 @@ function render() {
     (active.machine === LOCAL ? "" : `${machineName(active.machine)}  `) + (tilde(active.view.cwd) || "claude");
   document.getElementById("status-text").textContent =
     active.view.status === "failed" && active.view.resume_at
-      ? `limit, continues ${new Date(active.view.resume_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      ? `limit, continues ${new Date(active.view.resume_at * 1000).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" })}`
       : STATUS_TEXT[statusOf(active)];
 }
 
@@ -1125,9 +1125,9 @@ const LIMITS = [
 
 function resetsText(resetsAt) {
   const date = new Date(resetsAt * 1000);
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = date.toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
   if (date.toDateString() === new Date().toDateString()) return `resets ${time}`;
-  return `resets ${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `resets ${date.toLocaleDateString(APP_LOCALE, { weekday: "short" })} ${time}`;
 }
 
 // A window's figure stops holding once it resets, so it leaves the meter then.

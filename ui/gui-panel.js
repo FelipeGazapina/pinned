@@ -608,7 +608,7 @@ onRekey((from, to) => {
 
 const shortTime = (unix) => {
   const d = new Date(unix * 1000);
-  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
+  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString(APP_LOCALE, { month: "short", day: "numeric" });
 };
 
 /** `again` asks once more while the diff on screen stays, as T3's Refresh does. */
