@@ -83,6 +83,7 @@ async function loadInvites() {
 }
 
 const inviteDate = (unix) => new Date(unix * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+const clockTime = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function invitesHtml() {
   if (invitesUi.signup !== "invite") return "";
@@ -255,7 +256,7 @@ function showMachinesPage() {
         <div><b>Add a server</b><div class="hint">A Linux box or another Mac that runs sessions without the app</div></div></div>
       ${
         pair
-          ? `<p>Run this on the server. The code works once, until ${esc(new Date(pair.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}.</p>
+          ? `<p>Run this on the server. The code works once, until ${esc(clockTime(pair.expires_at))}.</p>
              <div class="row command"><code>${esc(pair.command)}</code><button class="secondary" data-action="copy-pair">Copy</button></div>`
           : `<div class="actions start"><button class="primary" data-action="pair">Get a pairing command</button></div>`
       }

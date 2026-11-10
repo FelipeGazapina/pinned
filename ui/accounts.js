@@ -5,14 +5,17 @@ let accountsUi = { machine: LOCAL, removing: null, replacing: null, error: "" };
 
 function showAccountsPage() {
   if (!machines.get(accountsUi.machine)?.view.online) accountsUi.machine = onlineMachines()[0];
+  const asked = agentAsking("add_account")?.args;
+  const choice = !asked ? "claude" : asked.auth === "opencode-go" ? "opencode-go" : asked.provider;
   settingsPage.innerHTML = `<h2>Accounts</h2>
     ${machineChipsHtml(accountsUi.machine, "accounts-machine")}
     <p class="hint">Each project runs and pays for its sessions with the account you pick for it under Projects. Accounts are kept per machine.</p>
     <div id="account-list"></div>
     <form class="card add-account">
       <div class="card-head"><div><b>Add an account</b><div class="hint">Another subscription or login, kept apart from the others on ${esc(machineName(accountsUi.machine))}</div></div></div>
-      <div class="row"><select name="provider">${options(Object.keys(PROVIDERS), (p) => PROVIDERS[p])}</select>
-        <input name="name" placeholder="Work" autocomplete="off" spellcheck="false">
+      ${agentAskingHtml("add_account")}
+      <div class="row"><select name="provider"${asked ? " disabled" : ""}>${options(Object.keys(PROVIDERS), (p) => PROVIDERS[p], choice)}</select>
+        <input name="name" placeholder="Work" autocomplete="off" spellcheck="false"${asked ? ` value="${esc(asked.name)}" readonly` : ""}>
         <input name="key" type="password" placeholder="OpenCode Go API key (oc_sk_...)" autocomplete="off" spellcheck="false" hidden>
         <button class="primary">Add account</button></div>
       <p class="error" id="add-account-error"></p>
@@ -25,6 +28,7 @@ function showAccountsPage() {
     if (go) form.key.focus();
   };
   form.provider.onchange = toggleKey;
+  if (asked) toggleKey();
   form.onsubmit = (e) => {
     e.preventDefault();
     addAccount(form);
@@ -66,7 +70,7 @@ function accountCardHtml(a) {
       : "";
   const replace =
     go && accountsUi.replacing === a.id
-      ? `<div class="replace-key"><input name="key" type="password" placeholder="oc_sk_..." autocomplete="off" spellcheck="false">
+      ? `<div class="replace-key">${agentAsking("set_account_key")?.args.account === a.id ? agentAskingHtml("set_account_key") : ""}<input name="key" type="password" placeholder="oc_sk_..." autocomplete="off" spellcheck="false">
            <button class="primary" data-action="save-account-key">Save key</button>
            <button class="secondary" data-action="cancel-account-key">Cancel</button>
            <p class="error" data-key-error></p></div>`
@@ -96,7 +100,8 @@ async function addAccount(form) {
   form.querySelector("button").disabled = true;
   const { machine } = accountsUi;
   try {
-    const added = await callOn(machine, { cmd: "add_account", provider: go ? "claude" : choice, name, auth: go ? "opencode-go" : undefined, key: go ? key : undefined });
+    const call = { cmd: "add_account", provider: go ? "claude" : choice, name, auth: go ? "opencode-go" : undefined, key: go ? key : undefined };
+    const added = await (agentApproval(call) ?? callOn(machine, call));
     setAccounts(machine, [...(machines.get(machine).accounts ?? []).filter((a) => a.id !== added.id), added]);
     form.name.value = "";
     form.key.value = "";
@@ -132,6 +137,7 @@ Object.assign(actions, {
     drawAccountList();
   },
   "cancel-account-key"() {
+    if (agentAsking("set_account_key")) forgetAgentApproval();
     accountsUi = { ...accountsUi, replacing: null };
     drawAccountList();
   },
@@ -145,7 +151,8 @@ Object.assign(actions, {
     button.disabled = true;
     error.textContent = "";
     try {
-      const saved = await callOn(accountsUi.machine, { cmd: "set_account_key", account, key });
+      const call = { cmd: "set_account_key", account, key };
+      const saved = await (agentApproval(call) ?? callOn(accountsUi.machine, call));
       setAccounts(accountsUi.machine, (machines.get(accountsUi.machine).accounts ?? []).map((a) => (a.id === account ? saved : a)));
       accountsUi.replacing = null;
       drawAccountList();

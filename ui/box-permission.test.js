@@ -22,6 +22,8 @@ test("the Upstash card offers a box permission for each actor kind", () => {
     load() { return null; },
     save() {},
     listen() {},
+    agentAsking: () => null,
+    agentAskingHtml: () => "",
     document: {
       body: { dataset: {} },
       getElementById() { return element(); },
@@ -59,6 +61,8 @@ test("an ask that arrives while the Upstash card is open is drawn", () => {
     load(key) { return key === "settings-page" ? "integrations" : null; },
     save() {},
     listen() {},
+    agentAsking: () => null,
+    agentAskingHtml: () => "",
     document: {
       body: { dataset: { page: "settings" } },
       getElementById(id) { return id === "box-asks" ? asks : element(); },
