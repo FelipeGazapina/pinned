@@ -757,6 +757,7 @@ mod tests {
             orchestrator_turn: false,
             queued: 0,
             question: None,
+            ask_detail: None,
         }
     }
 
