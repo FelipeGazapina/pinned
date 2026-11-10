@@ -457,6 +457,15 @@ impl Tab {
         }
     }
 
+    /// Between turns, for `auto_archive`: a live session that `notice_idle` finds idle, or one
+    /// with no live session that no turn was cut off in and the user types nothing into.
+    fn idle_for_archive(&self) -> bool {
+        if self.session.is_some() {
+            return self.notice_idle();
+        }
+        self.status != Some(AgentStatus::Working) && !self.interrupted && self.turn_pending.is_none() && self.draft.empty()
+    }
+
     fn notice_idle(&self) -> bool {
         if self.session.is_none() || self.turn_pending.is_some() || !self.draft.empty() {
             return false;
@@ -561,6 +570,11 @@ pub struct Machine {
     /// A session start already waited for the link to load the MCP servers.
     mcp_waited: AtomicBool,
     global: Mutex<global::Settings>,
+    /// When this machine archives a finished session on its own.
+    auto_archive: Mutex<crate::auto_archive::Settings>,
+    /// The sessions the hub or their folders kept open, and when: they are not looked at again
+    /// for `auto_archive::RETRY_SECS`.
+    auto_archive_kept: Mutex<HashMap<String, Instant>>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
@@ -690,7 +704,7 @@ impl Machine {
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
-        Arc::new_cyclic(|me| Machine {
+        let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
             scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
@@ -738,6 +752,8 @@ impl Machine {
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
+            auto_archive: Mutex::new(crate::auto_archive::Settings::load(dir.as_deref())),
+            auto_archive_kept: Mutex::default(),
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
@@ -750,7 +766,9 @@ impl Machine {
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
             hub_name: Mutex::default(),
-        })
+        });
+        machine.start_auto_archive();
+        machine
     }
 
     pub fn launch(&self) -> &Launch {
@@ -1001,6 +1019,8 @@ impl Machine {
             Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
+            Call::AutoArchiveSettings => json(self.auto_archive_settings()),
+            Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
@@ -2376,6 +2396,72 @@ impl Machine {
         Ok(settings)
     }
 
+    pub fn auto_archive_settings(&self) -> crate::auto_archive::Settings {
+        *self.auto_archive.lock().unwrap()
+    }
+
+    pub fn set_auto_archive_settings(&self, settings: crate::auto_archive::Settings) -> Result<crate::auto_archive::Settings, String> {
+        let settings = settings.cleaned();
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.auto_archive.lock().unwrap() = settings;
+        self.auto_archive_kept.lock().unwrap().clear();
+        Ok(settings)
+    }
+
+    /// Asks the hub to archive each finished session whose work is over, its report delivered, and
+    /// which idled for the grace period the settings give its kind. See `auto_archive::keeps`. The
+    /// tabs are read in one pass and git, which runs in each folder, only for a tab nothing else
+    /// keeps. Archived: the hub closes the tab and keeps the conversation to unarchive.
+    fn auto_archive_tick(&self, now: u64) -> Vec<String> {
+        use crate::auto_archive::{keeps, unpushed, Facts, RETRY_SECS};
+        let settings = self.auto_archive_settings();
+        if settings.workers.is_none() && settings.sessions.is_none() {
+            return vec![];
+        }
+        let candidates: Vec<(TabView, bool)> = {
+            let turns = self.turns.lock().unwrap().clone();
+            let queued = self.delegates.queued();
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued), t.idle_for_archive())).collect()
+        };
+        let looked = Instant::now();
+        {
+            let mut kept = self.auto_archive_kept.lock().unwrap();
+            kept.retain(|tab, at| candidates.iter().any(|(view, _)| view.id == *tab) && looked.duration_since(*at) < Duration::from_secs(RETRY_SECS));
+        }
+        let mut archived = vec![];
+        for (view, idle) in candidates {
+            if self.auto_archive_kept.lock().unwrap().contains_key(&view.id) {
+                continue;
+            }
+            let tasks = self.delegates.thread_ends(&view.id);
+            let children = self.delegates.working_for(&format!("tab:{}", view.id));
+            if keeps(&Facts { tab: &view, idle, tasks: &tasks, children, now }, &settings).is_some() {
+                continue;
+            }
+            // Git first, so a folder with work nobody has never reaches the hub.
+            let kept = unpushed(Path::new(&view.cwd), self.launch.path_env.as_deref()).map(|keeps| keeps.to_string()).or_else(|| self.call_hub(HubCall::AutoArchive { tab: view.id.clone() }).err());
+            if kept.is_some() {
+                self.auto_archive_kept.lock().unwrap().insert(view.id, looked);
+                continue;
+            }
+            eprintln!("pinned: auto-archived {} ({})", view.id, view.title.as_deref().or(view.prompt_title.as_deref()).unwrap_or("untitled"));
+            archived.push(view.id);
+        }
+        if !archived.is_empty() {
+            self.emit_tabs();
+        }
+        archived
+    }
+
+    /// Starts the check that archives finished sessions, every `auto_archive::CHECK_SECS`.
+    fn start_auto_archive(&self) {
+        self.every(Duration::from_secs(crate::auto_archive::CHECK_SECS), |machine| {
+            let now = crate::connectors::unix_millis() / 1000;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| machine.auto_archive_tick(now)));
+        });
+    }
+
     /// Hands `text` from the global orchestrator `sender` to the Capitão of the project at `path`,
     /// opening the Capitão when the project has none. It is typed now when the Capitão is idle,
     /// becomes its first prompt when it is stopped or has no conversation yet, and otherwise waits
@@ -3623,6 +3709,7 @@ impl Machine {
     pub fn restore_tabs(&self) -> Vec<TabId> {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
+            self.delegates.end_unresumed();
             return vec![];
         };
         let now = unix_now();
@@ -3662,10 +3749,37 @@ impl Machine {
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
         self.delegates.rebind(&sessions);
+        self.resume_workers(&sessions);
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
         }
         ids
+    }
+
+    /// Ties each working task that a restart carried over to its worker's restored tab, and ends the
+    /// ones whose worker did not come back. A worker's tab gets back what its spawn gave it.
+    fn resume_workers(&self, sessions: &[(String, String)]) {
+        for (task, tab) in self.delegates.resume_workers(sessions) {
+            let Some(info) = self.delegates.get(&task) else { continue };
+            let origin = match &info.parent {
+                crate::delegate::Parent::Tab(key) => crate::delegate::Origin::of_key(key).map(|(machine, tab)| crate::delegate::Origin {
+                    machine: machine.to_owned(),
+                    machine_name: String::new(),
+                    tab: tab.to_owned(),
+                    task: info.client_request_id.clone().unwrap_or_default(),
+                    access: info.access,
+                    delegator: info.delegator.clone(),
+                    limits: info.limits,
+                }),
+                crate::delegate::Parent::Task(_) => None,
+            };
+            let _ = self.tab(&tab, |t| {
+                t.task = Some(task.clone());
+                t.title = Some(info.title.clone());
+                t.origin = origin;
+            });
+        }
+        self.delegates.end_unresumed();
     }
 
     /// Each account's usage, as its sessions last reported it.
@@ -3981,7 +4095,7 @@ impl Machine {
         if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
             self.delegates.status(&caller, id)?;
             if !remote.machine.is_empty() {
-                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
                 match self.call_hub(cancel) {
                     Ok(answer) => self.settle_from(tab, id, &remote, &answer),
                     // The task ends here whatever the other side says, or it would hang here for good.
@@ -4129,7 +4243,7 @@ impl Machine {
         if remote.machine.is_empty() {
             return None;
         }
-        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: None };
         let answer = self.call_hub(asked).ok()?;
         self.settle_from(tab, id, remote, &answer);
         Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
@@ -4151,17 +4265,16 @@ impl Machine {
             error: answer["error"].as_str().map(str::to_owned),
             usage,
         };
-        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end).is_some() {
             self.emit_tabs();
         }
     }
 
     /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
     fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
-        if !self.delegates.settle_remote(task, tab, from, end) {
-            return false;
-        }
-        self.maybe_deliver(tab);
+        // The tab that delegated it may have a new id since: a restart gives every tab one.
+        let Some(parent) = self.delegates.settle_remote(task, tab, from, end) else { return false };
+        self.maybe_deliver(&parent);
         self.emit_tabs();
         true
     }
@@ -4172,7 +4285,7 @@ impl Machine {
     fn check_remotes(&self, now: Instant) {
         use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
         for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
-            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.clone(), task: id.clone(), cancel: None };
+            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(&id, &tab), task: id.clone(), cancel: None };
             let failed = match self.call_hub(asked) {
                 Ok(answer) => {
                     self.settle_from(&tab, &id, &remote, &answer);
@@ -4194,7 +4307,7 @@ impl Machine {
 
     /// Tells the machine that runs a task this machine ended that it ended, best-effort.
     fn cancel_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, reason: &str) {
-        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
         if let Err(e) = self.call_hub(cancel) {
             eprintln!("pinned: could not tell {} that {id} ended here: {e}", remote.name);
         }
@@ -5116,7 +5229,7 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed)) = self.tab(tab, |t| {
+        let Ok((new, changed, task)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
             if new {
                 t.tally = Tally::default();
@@ -5128,11 +5241,14 @@ impl Machine {
                 t.cwd = worktree;
                 changed = true;
             }
-            t.claude_session = Some(session);
-            (new, changed)
+            t.claude_session = Some(session.clone());
+            (new, changed, t.task.clone())
         }) else {
             return false;
         };
+        if let Some(task) = task {
+            self.delegates.set_worker_session(&task, &session);
+        }
         if changed {
             self.save_sessions();
             self.stamp_parent_sessions();
@@ -9883,6 +9999,169 @@ while True:
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A machine whose hub archives are the ones `archived` lists, with a worker thread on a
+    /// project at `folder`. The worker's task ended and its result went to its parent.
+    fn archiving_machine(name: &str, folder: &Path) -> (Arc<Machine>, String, Arc<Mutex<Vec<String>>>, PathBuf) {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent, Thread};
+        let dir = temp(name);
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let archived = Arc::new(Mutex::new(vec![]));
+        let seen = archived.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::AutoArchive { tab } => {
+                seen.lock().unwrap().push(tab);
+                Ok(Value::Null)
+            }
+            _ => Err("the hub was asked something else".into()),
+        }));
+        let parent = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("parent".into()));
+        let worker = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, folder), false, Some("s1".into()));
+        m.tab(&worker, |t| {
+            t.status = Some(AgentStatus::Done);
+            t.updated = Some(1000);
+        })
+        .unwrap();
+        let ask = NewTask {
+            parent: Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder.to_owned(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(task) = m.delegates.claim(ask, None) else { panic!("the task was not new") };
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        m.delegates.settle_thread(&task.id, Some("Fixed.".into()), None, None, vec![], None);
+        assert!(m.delegates.claim_notice(&parent).is_some(), "the report goes to the parent");
+        (m, worker, archived, dir)
+    }
+
+    const LATER: u64 = 4_000_000_000;
+
+    #[test]
+    fn a_finished_worker_is_archived_through_the_hub_after_its_grace_period() {
+        let (m, worker, archived, dir) = archiving_machine("auto-archive", &temp("auto-archive-folder"));
+        let now = crate::connectors::unix_millis() / 1000;
+        assert_eq!(m.auto_archive_tick(now), Vec::<String>::new(), "it ended just now");
+        assert_eq!(m.auto_archive_tick(now + 29 * 60), Vec::<String>::new(), "29 minutes");
+        assert_eq!(m.auto_archive_tick(now + 31 * 60), [worker.clone()]);
+        assert_eq!(*archived.lock().unwrap(), [worker]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_archive_stays_off_where_the_setting_says_never() {
+        let (m, _, archived, dir) = archiving_machine("auto-archive-off", &temp("auto-archive-off-folder"));
+        let off = crate::auto_archive::Settings { workers: None, sessions: None };
+        assert_eq!(m.call(Call::SetAutoArchiveSettings { settings: off }), Ok(json!({ "workers": null, "sessions": null })));
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
+        assert_eq!(m.call(Call::AutoArchiveSettings), Ok(json!({ "workers": null, "sessions": null })));
+        drop(m);
+        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(again.auto_archive_settings(), off, "it survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worker_with_a_task_still_running_is_not_archived() {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent};
+        let folder = temp("auto-archive-child-folder");
+        let (m, worker, archived, dir) = archiving_machine("auto-archive-child", &folder);
+        let ask = NewTask {
+            parent: Parent::Tab(worker.clone()),
+            tool: None,
+            title: "Sub".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder,
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{worker}"),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(child) = m.delegates.claim(ask, None) else { panic!("the child was not new") };
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "its own child still works");
+        m.delegates.cancel(&crate::delegate::Caller { tab: Some(worker.clone()), task: None }, &child.id, "test", None).unwrap();
+        assert_eq!(m.auto_archive_tick(LATER), [worker], "the child ended");
+        assert_eq!(archived.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worker_whose_report_has_not_been_delivered_is_not_archived() {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent, Thread};
+        let folder = temp("auto-archive-undelivered-folder");
+        let (m, _, archived, dir) = archiving_machine("auto-archive-undelivered", &folder);
+        let worker = m.add_tab(folder.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &folder), false, Some("s2".into()));
+        m.tab(&worker, |t| t.updated = Some(1000)).unwrap();
+        let ask = NewTask {
+            parent: Parent::Tab("gone".into()),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder,
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:gone".into(),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(task) = m.delegates.claim(ask, None) else { panic!("the task was not new") };
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        m.delegates.settle_thread(&task.id, Some("Fixed.".into()), None, None, vec![], None);
+        let first = m.auto_archive_tick(LATER);
+        assert!(!first.contains(&worker), "the result has not reached anyone");
+        assert_eq!(archived.lock().unwrap().len(), first.len());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worktree_with_unpushed_work_is_kept_and_looked_at_again_only_after_a_while() {
+        let folder = temp("auto-archive-git-folder");
+        git(&folder, &["init", "-q", "-b", "main"]);
+        git(&folder, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        std::fs::write(folder.join("draft.txt"), "x").unwrap();
+        let (m, worker, archived, dir) = archiving_machine("auto-archive-git", &folder);
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "an untracked file is work nobody has");
+        std::fs::remove_file(folder.join("draft.txt")).unwrap();
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "kept sessions are not looked at again at once");
+        m.auto_archive_kept.lock().unwrap().clear();
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "clean now, but its one commit is on no remote");
+        assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
+        assert!(m.auto_archive_kept.lock().unwrap().contains_key(&worker));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hub_that_keeps_the_thread_open_is_asked_again_only_after_a_while() {
+        let (m, worker, _, dir) = archiving_machine("auto-archive-refused", &temp("auto-archive-refused-folder"));
+        let asked = Arc::new(Mutex::new(0));
+        let count = asked.clone();
+        m.set_hub(Arc::new(move |_| {
+            *count.lock().unwrap() += 1;
+            Err("it is pinned".into())
+        }));
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(*asked.lock().unwrap(), 1, "a pinned thread is not asked about every minute");
+        assert!(m.auto_archive_kept.lock().unwrap().contains_key(&worker));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_turn_that_ends_asking_the_user_offers_until_the_next_turn_and_blocks_nobody() {
@@ -10828,6 +11107,140 @@ Have another model review a risky change before it goes ahead.";
         (task.state.as_str().to_owned(), task.error)
     }
 
+    /// A machine over `dir`'s config as `limited_captain` made it, as after the app restarted.
+    #[cfg(unix)]
+    fn restarted(dir: &Path) -> Arc<Machine> {
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn reports(tab: &str, session: &str, status: AgentStatus, reply: Option<&str>) -> AgentEvent {
+        AgentEvent { session: Some(session.into()), reply: reply.map(str::to_owned), ..hook(tab, status) }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_working_thread_task_survives_a_restart_on_the_tab_its_session_got_and_still_ends() {
+        let (m, dir, captain) = limited_captain("restart-keeps", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.record_event(reports(&worker, "s-worker", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 2);
+        let by_session = |session: &str| tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some(session)).unwrap()).cloned().unwrap();
+        let (captain_now, worker_now) = (by_session("s-captain"), by_session("s-worker"));
+        assert_ne!(worker_now, worker, "a restart gives the worker's tab a new id");
+        let info = after.delegates.get(&task).unwrap();
+        assert_eq!(info.state.as_str(), "working", "its worker's session resumed, so the task did not fail: {:?}", info.error);
+        assert_eq!((info.thread.map(|t| (t.tab, t.runs)), info.parent), (Some((worker_now.clone(), true)), crate::delegate::Parent::Tab(captain_now.clone())), "the task follows its worker and its parent by session");
+        assert_eq!(after.tab(&worker_now, |t| t.task.clone()).unwrap(), Some(task.clone()));
+
+        after.record_event(reports(&worker_now, "s-worker", AgentStatus::Done, Some("Fixed the parser.")));
+        let ended = after.delegates.get(&task).unwrap();
+        assert_eq!((ended.state.as_str(), ended.summary.as_deref()), ("result_available", Some("Fixed the parser.")), "the resumed worker's turn ends it as before");
+        let notice = after.delegates.claim_notice(&captain_now).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task) && notice.contains("result available"), "the captain that came back hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_task_whose_session_never_reported_ends_with_the_reason() {
+        let (m, dir, captain) = limited_captain("restart-no-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        after.restore_tabs();
+        assert_eq!(state_of(&after, &task), ("cancelled".into(), Some(crate::delegate::RESTART_ENDED.into())));
+        let notice = after.delegates.claim_notice(&after.tabs.lock().unwrap().keys().next().cloned().unwrap()).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the parent is told why: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_task_is_still_working_after_the_origin_restarts_and_takes_its_end_by_the_old_tab_id() {
+        use crate::delegate::RemoteTarget;
+        let root = temp("remote-origin-restart");
+        let (app, config) = (root.join("app"), root.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some("s-parent".into()));
+        let task = delegated_elsewhere(&before, &tab, "m-mini", "mini");
+        before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()) });
+        before.record_event(reports(&tab, "s-parent", AgentStatus::Working, None));
+        before.quit();
+        drop(before);
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_ne!(tabs[0], tab, "the parent has a new tab id");
+        assert_eq!(state_of(&after, &task), ("working".into(), None), "the machine that runs it was not restarted");
+        let remote = after.delegates.get(&task).unwrap().remote.expect("the remote survives the restart");
+        assert_eq!((remote.machine.as_str(), remote.name.as_str(), remote.tab.as_deref()), ("m-mini", "mini", Some("tab-9")));
+
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        after.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { tab, .. } => {
+                seen.lock().unwrap().push(tab);
+                Err("mini is offline".into())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        after.check_remotes(Instant::now());
+        assert_eq!(*asked.lock().unwrap(), vec![tab.clone()], "the 60 s look asks after it by the tab id the other machine knows");
+
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
+        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), false, "only the machine that runs it ends it");
+        assert!(after.remote_ended("m-mini", &tab, &task, &end), "the end the machine sends, naming the old tab id, is taken");
+        let done = after.delegates.get(&task).unwrap();
+        assert_eq!((done.state.as_str(), done.summary.as_deref()), ("result_available", Some("Green.")));
+        let notice = after.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task), "the parent's new tab hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_host_that_restarts_keeps_reporting_its_end_to_the_machine_that_asked() {
+        let (m, dir, _captain) = limited_captain("restart-host", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        git(&dir.join("app"), &["init", "-q"]);
+        git(&dir.join("app"), &["remote", "add", "origin", "git@github.com:acme/app.git"]);
+        let origin = crate::delegate::Origin {
+            machine: "m-mac".into(),
+            machine_name: "mac".into(),
+            tab: "tab-7".into(),
+            task: "task-mac".into(),
+            access: crate::delegate::Access::Auto,
+            delegator: Default::default(),
+            limits: Default::default(),
+        };
+        let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+        let started: Value = serde_json::from_str(&m.start_for_origin(origin, request, Some("git@github.com:acme/app.git".into()), None).unwrap_or_else(|e| panic!("{e}"))).unwrap();
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&worker, "s-host", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        let worker_now = tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some("s-host")).unwrap()).cloned().unwrap();
+        assert!(after.tab(&worker_now, |t| t.origin.is_some()).unwrap(), "the worker still answers to the tab on the other machine");
+        after.record_event(reports(&worker_now, "s-host", AgentStatus::Done, Some("Done there.")));
+        assert_eq!(after.delegates.remote_ends().into_iter().map(|(id, machine, tab, origin_task, end)| (id, machine, tab, origin_task, end.state)).collect::<Vec<_>>(), vec![(task, "m-mac".into(), "tab-7".into(), "task-mac".into(), "result_available".into())]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+
     #[test]
     fn a_remote_task_past_its_limit_ends_here_when_its_machine_never_reports() {
         let m = machine();
@@ -11715,7 +12128,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(notice.contains(&finished), "the finished task was forgotten: {notice}");
         assert!(notice.contains("result available"), "the finished task's notice was forgotten: {notice}");
         assert!(notice.contains(&running.id), "the killed child was forgotten: {notice}");
-        assert!(notice.contains("stopped by restart"), "the killed child did not say why: {notice}");
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the killed child did not say why: {notice}");
         let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
         assert_eq!(status["summary"], "DONE");
         let _ = std::fs::remove_dir_all(root);
