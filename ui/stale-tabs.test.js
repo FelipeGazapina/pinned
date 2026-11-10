@@ -302,3 +302,73 @@ test("overlapping no-tab errors refresh a machine once", async () => {
   );
   assert.deepEqual(context.refreshed, ["box"]);
 });
+
+/** setTabs and removeTab as main.js runs them, over tabs with no terminal. */
+function tabsContext() {
+  const take = (startAt, endAt) => {
+    const start = src.indexOf(startAt);
+    return src.slice(start, src.indexOf(endAt, start));
+  };
+  const context = { console, LOCAL: "local", tabs: [], active: null, order: [], unseen: new Set() };
+  vm.createContext(context);
+  const machine = () => ({ tabs: [], tabPaths: "", transport: { detach() {} } });
+  context.machines = new Map([["box", machine()], ["mini", machine()]]);
+  context.activate = (tab) => {
+    context.active = tab;
+  };
+  context.addTab = (machine, view) => {
+    const tab = { key: `${machine}:${view.id}`, machine, view, sink: {}, term: { dispose() {} }, el: { remove() {} }, button: { remove() {} } };
+    context.tabs.push(tab);
+    if (!context.active) context.activate(tab);
+    return tab;
+  };
+  context.updateView = (tab, view) => {
+    tab.view = view;
+  };
+  for (const name of ["placeTabs", "refreshProjects", "render", "noteTabs", "renderUnseen"]) context[name] = () => {};
+  vm.runInContext(`${take("const keyOf =", "const missingTabId")}\n${take("// Tabs closed here", "const refreshTabs")}\n${take("function removeTab", "function activate")}`, context);
+  const list = (machine, views, options) => vm.runInContext("setTabs", context)(machine, views, options);
+  list("box", [{ id: "tab-a-1", session: "s1", cwd: "/w" }, { id: "tab-a-2", session: "s2", cwd: "/w" }]);
+  list("mini", [{ id: "tab-m-1", session: "s9", cwd: "/w" }, { id: "tab-m-2", session: "s8", cwd: "/w" }]);
+  context.activate(context.tabs.find((t) => t.key === "box:tab-a-2"));
+  return { context, list, pick: (key) => context.activate(context.tabs.find((t) => t.key === key)) };
+}
+const restarted = [{ id: "tab-b-1", session: "s1", cwd: "/w" }, { id: "tab-b-2", session: "s2", cwd: "/w" }];
+
+test("the thread on screen when its machine restarts is back on screen under its new tab id", () => {
+  const { context, list } = tabsContext();
+  list("box", [], { forget: false });
+  assert.equal(context.active.key, "mini:tab-m-1", "another thread fills the screen while the machine is away");
+  list("box", restarted);
+  assert.equal(context.active.key, "box:tab-b-2");
+});
+
+test("the thread on screen is back at once when its machine lists it under a new id without going offline", () => {
+  const { context, list } = tabsContext();
+  list("box", restarted);
+  assert.equal(context.active.key, "box:tab-b-2");
+});
+
+test("the thread on screen when its machine drops off is back on screen when it reconnects with the same ids", () => {
+  const { context, list } = tabsContext();
+  list("box", [], { forget: false });
+  list("box", [{ id: "tab-a-1", session: "s1", cwd: "/w" }, { id: "tab-a-2", session: "s2", cwd: "/w" }]);
+  assert.equal(context.active.key, "box:tab-a-2");
+});
+
+test("a thread picked while the machine was away stays on screen when the machine comes back", () => {
+  const { context, list, pick } = tabsContext();
+  list("box", [], { forget: false });
+  pick("mini:tab-m-2");
+  list("box", restarted);
+  assert.equal(context.active.key, "mini:tab-m-2");
+});
+
+test("a thread closed elsewhere does not come back when a later restart lists its session", () => {
+  const { context, list } = tabsContext();
+  list("box", [{ id: "tab-a-1", session: "s1", cwd: "/w" }]);
+  assert.equal(context.active.key, "mini:tab-m-1", "a neighbour fills the screen");
+  list("box", [], { forget: false });
+  list("box", restarted);
+  assert.equal(context.active.key, "mini:tab-m-1");
+});

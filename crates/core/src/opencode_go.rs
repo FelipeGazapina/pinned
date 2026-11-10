@@ -220,19 +220,10 @@ fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| format!("could not reach OpenCode Go: {e}"))
 }
 
-/// Skips Claude Code's theme wizard on the first launch in a new home. A folder's trust prompt is
-/// still the user's call, as it is for every added account.
+/// Skips Claude Code's theme wizard on the first launch in a new home.
 pub fn prepare_home(home: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
-    let path = home.join(".claude.json");
-    let mut value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).map_err(|e| format!("could not read {}: {e}", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(Default::default()),
-        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-    };
-    let object = value.as_object_mut().ok_or_else(|| format!("{} is not a JSON object", path.display()))?;
-    object.insert("hasCompletedOnboarding".into(), Value::Bool(true));
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?).map_err(|e| format!("could not save {}: {e}", path.display()))
+    crate::first_run::seed(&home.join(".claude.json"), None)
 }
 
 /// Drops a Claude login left in a home that is being reused for a Go account. The login lives in

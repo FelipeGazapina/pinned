@@ -461,6 +461,11 @@ pub fn is_unknown_command(err: &str) -> bool {
 
 fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::UnboundedSender<Outgoing>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
+        // The hub alone gets the token, in its reply: no other caller of this machine does.
+        Ok(ToMachine::Call { id, call: Call::SetupToken { account } }) => {
+            let (shared, machine) = (shared.clone(), machine.clone());
+            std::thread::spawn(move || shared.send(&MachineFrame::Reply(Reply::new(id, machine.setup_token(&account).map(Value::String)))));
+        }
         Ok(ToMachine::Call { id, call }) if call.may_wait() => {
             let (shared, machine) = (shared.clone(), machine.clone());
             std::thread::spawn(move || finish_call(&shared, &machine, id, call));
@@ -760,6 +765,7 @@ mod tests {
                 tutorial_helper: "tutorial".into(),
                 sock: "sock".into(),
                 vector_search: false,
+                first_run_wait: std::time::Duration::from_secs(60),
             },
             None,
             None,
@@ -834,6 +840,7 @@ mod tests {
                 tutorial_helper: "tutorial".into(),
                 sock: "sock".into(),
                 vector_search: false,
+                first_run_wait: std::time::Duration::from_secs(60),
             },
             None,
             None,

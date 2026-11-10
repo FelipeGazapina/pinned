@@ -234,7 +234,7 @@ function renderLimitNote(tab) {
   const at = tab?.view.resume_at;
   note.hidden = !at;
   if (!at) return;
-  const time = new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = new Date(at * 1000).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
   const buttons = switchTargets(tab).map((a) => `<button type="button" class="outline" data-switch-account="${esc(a.id)}">Continue under ${esc(a.name)}</button>`);
   setHtml(note, `<span>${icon("circle-alert")}${esc(accountName(tab.machine, tab.view.account))} hit its usage limit. This thread continues by itself at ${esc(time)}.</span>${buttons.join("")}`);
 }
@@ -632,7 +632,7 @@ function limitBanner(tab) {
   const key = threadKey(tab);
   const snoozed = at && sideMarks.snoozed[key]?.until === at;
   const actions = at && at > (tab.view.updated ?? 0) ? `<button type="button" class="ghost" data-banner-act="resume">${tab.view.held ? "Resume at reset" : "Cancel auto-resume"}</button>${snoozed ? "" : `<button type="button" class="ghost" data-banner-act="snooze"${at <= Date.now() / 1000 ? " disabled" : ""}>Snooze until reset</button>`}` : "";
-  return { id: `limit:${at}`, variant: "warning", icon: "gauge", title: esc("Usage limit reached"), description: esc(at ? `Resets ${new Date(at * 1000).toLocaleString()}` : "Reset time unavailable; retry manually"), actions };
+  return { id: `limit:${at}`, variant: "warning", icon: "gauge", title: esc("Usage limit reached"), description: esc(at ? `Resets ${new Date(at * 1000).toLocaleString(APP_LOCALE)}` : "Reset time unavailable; retry manually"), actions };
 }
 /** As T3 Code: the local checkout moved off the branch the thread last ran on. */
 function branchBanner(tab) {

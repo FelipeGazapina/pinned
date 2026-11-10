@@ -743,6 +743,10 @@ mod tests {
         let output = |bytes: usize| serde_json::json!({ "type": "user", "uuid": "r", "timestamp": "t", "message": { "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "x".repeat(bytes) }] } }).to_string();
 
         assert_eq!(reply(&[user("Ship it."), said("Shipped."), said("Want the release too?"), reload.clone()]), Some("Want the release too?".into()), "a slash command after the reply");
+        let tool = serde_json::json!({ "type": "assistant", "uuid": "c", "timestamp": "t", "message": { "content": [{ "type": "tool_use", "id": "t", "name": "Bash", "input": { "command": "ls" } }] } }).to_string();
+        let pr = serde_json::json!({ "type": "pr-link", "prNumber": 661, "prUrl": "https://github.com/acme/app/pull/661", "prRepository": "acme/app", "timestamp": "t" }).to_string();
+        let ended = serde_json::json!({ "type": "system", "subtype": "stop_hook_summary" }).to_string();
+        assert_eq!(reply(&[user("Ship it."), said("Shipped."), tool, output(10), pr, ended]), Some("Shipped.".into()), "tool, PR and hook lines after the reply");
         assert_eq!(reply(&[user("Ship it."), said("Shipped."), user("Now the docs.")]), None, "the latest turn wrote nothing yet");
         assert_eq!(reply(&[said("Shipped."), user("/Users/f/notes.md has the plan, read it")]), None, "a prompt that starts with a path");
         let long: Vec<String> = [said("Before the tools.")].into_iter().chain((0..5).map(|_| output(100 << 10))).collect();

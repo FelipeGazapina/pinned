@@ -38,6 +38,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The app's hub login lives in the OS credential store (login_store.rs). keyring v4's store crates
+# wrap security-framework 3.7 and windows-sys 0.61, which the build already has.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+keyring-core = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
 [target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "1", default-features = false }
 uds_windows = "1.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }

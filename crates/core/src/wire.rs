@@ -252,6 +252,11 @@ pub enum Call {
     /// The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation
     /// for an agent this way, which then starts it with `start_claude`, under the limits.
     OpenRun { run: RunSpec },
+    /// The new tab's id, with claude already running, for a workflow's Run now: a task held to the
+    /// limits of the project it runs in, whose first finished turn ends it and goes to the
+    /// delegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;
+    /// inside `ActFor` the asking session's own task narrows the limits and hears when it ends.
+    RunNow { run: RunSpec, title: String },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
     /// The absolute path the file was saved under, in a private folder of the machine, for a
@@ -378,6 +383,12 @@ pub enum Call {
     MemoryStatus { path: String },
     /// The new tab's id, running the CLI's login for the account in the account's home.
     SignIn { account: AccountId },
+    /// The long-lived token `claude setup-token` prints for the Claude account `account`, which the
+    /// user approves in the browser it opens on this machine. It runs in no tab, and the machine
+    /// answers it only to the hub, which keeps it for that account's boxes.
+    SetupToken { account: AccountId },
+    /// Whether a `SetupToken` for `account` was waiting, which this stops.
+    CancelSetupToken { account: AccountId },
     /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
     /// account signed in here and resumes it there, continuing a turn a usage limit stopped.
     SwitchAccount { tab: TabId, account: AccountId, cols: u16, rows: u16 },
@@ -730,6 +741,7 @@ impl Call {
         matches!(
             self,
             Call::Run { .. }
+                | Call::RunNow { .. }
                 | Call::PullRequest { .. }
                 | Call::PrStatus { .. }
                 | Call::Favicon { .. }
@@ -875,6 +887,15 @@ pub struct RunSpec {
     pub budget_usd: Option<f64>,
 }
 
+/// The session a workflow's Run now started.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct RunStarted {
+    pub workflow: String,
+    pub machine: MachineId,
+    pub machine_name: String,
+    pub tab: TabId,
+}
+
 /// An interactive Upstash Box session: its phase, age and budget, for its cost display.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct BoxStatus {
@@ -980,6 +1001,9 @@ pub enum HubCall {
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
+    /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
+    /// on the machine the workflow names and under the limits of its project there.
+    RunWorkflow { id: String },
     /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
@@ -1106,6 +1130,12 @@ pub enum HubCall {
     SetBoxClaudeToken { name: String, token: String },
     /// `connectors::Settings::box_claude_tokens`, without the token kept for `name`.
     RemoveBoxClaudeToken { name: String },
+    /// `connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its
+    /// Claude account `account` and the hub kept the token it printed under that name. The token
+    /// reaches no client.
+    MintBoxClaudeToken { machine: MachineId, account: AccountId },
+    /// Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.
+    CancelBoxClaudeToken { machine: MachineId, account: AccountId },
     /// From a machine: `null`, once the hub keeps these records of its delegated tasks, as they
     /// are now. The hub stamps the machine, and box time for a machine that is a box.
     RecordTasks { records: Vec<crate::delegate::TaskRecord> },
@@ -1799,6 +1829,8 @@ mod tests {
         }
         round_trip(HubCall::SetBoxClaudeToken { name: "bloom".into(), token: "sk-ant-oat01-1".into() }, json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-1" }));
         round_trip(HubCall::RemoveBoxClaudeToken { name: "bloom".into() }, json!({ "cmd": "remove_box_claude_token", "name": "bloom" }));
+        round_trip(HubCall::MintBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "bloom" }));
+        round_trip(HubCall::CancelBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "cancel_box_claude_token", "machine": "m1", "account": "bloom" }));
         let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
         round_trip(
             HubCall::RemoteEnded { to: "m1".into(), tab: "tab-1".into(), task: "task-1".into(), end: end.clone() },

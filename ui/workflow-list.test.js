@@ -71,3 +71,59 @@ test("a connector without a trigger still renders a card", () => {
   assert.match(html, /Old thing/);
   assert.match(html, /data-toggle="enabled"/);
 });
+
+const mention = () => ({
+  id: "c2",
+  name: "Nightly checks",
+  enabled: true,
+  trigger: { kind: "linear-label", label: "nightly" },
+  folder: "/repo",
+  machine: "",
+  model: "",
+  effort: "high",
+  permissionMode: "auto",
+  worktree: false,
+  instructions: "Check the build.",
+  fix: "off",
+  proof: false,
+  columns: { picked: "", coding: "", review: "" },
+});
+
+// The card of `connector` after the workflow's last Run now went as `last`, if any.
+function runNowCard(connector, last) {
+  const context = listWorld([connector]);
+  if (last) vm.runInContext(`runNow.set(${JSON.stringify(connector.id)}, ${JSON.stringify(last)})`, context);
+  return context.connectorsHtml();
+}
+
+test("a workflow's card offers Run now, with nothing under it before a run", () => {
+  const html = runNowCard(mention());
+  assert.match(html, /<button class="secondary run-now" data-action="run-now"[^>]*>Run now<\/button>/);
+  assert.doesNotMatch(html, /run-now-outcome/);
+});
+
+test("Run now turns into a disabled Starting… while the run starts, so it can't start twice", () => {
+  const html = runNowCard(mention(), { state: "running" });
+  assert.match(html, /<button class="secondary run-now" disabled aria-busy="true">Starting…<\/button>/);
+  assert.doesNotMatch(html, /data-action="run-now"/);
+});
+
+test("a started run names its machine and opens its session", () => {
+  const html = runNowCard(mention(), { state: "started", workflow: "c2", machine: "m-1", machine_name: "Mac mini", tab: "tab-9" });
+  assert.match(html, /Started on Mac mini\. <button class="link" data-action="run-now-open" data-machine="m-1" data-tab="tab-9">Open session<\/button>/);
+  assert.match(html, /data-action="run-now"/, "it can run again");
+});
+
+test("a run the limits refused says why in plain words", () => {
+  const error = "1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.";
+  const html = runNowCard(mention(), { state: "refused", error });
+  assert.match(html, /<p class="run-now-outcome refused" role="alert">Didn't start: 1 worker already runs in this project, the most it allows at once\./);
+  assert.ok(runNowCard(mention(), { state: "refused", error: "<b>x</b>" }).includes("Didn't start: &#60;b&#62;x&#60;/b&#62;"), "the error is text, not markup");
+});
+
+test("a workflow with no session of its own shows Run now disabled with the reason", () => {
+  const html = runNowCard(slackMessage());
+  assert.match(html, /<button class="secondary run-now" disabled title="It sorts Slack messages into other workflows and has no session of its own\.">Run now<\/button>/);
+  const called = listWorld([]).runNowHtml({ ...mention(), trigger: { kind: "called" } });
+  assert.equal(called.button, '<button class="secondary run-now" disabled title="It answers only the Slack threads another workflow hands it.">Run now</button>');
+});

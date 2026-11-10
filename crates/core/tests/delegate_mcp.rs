@@ -88,6 +88,7 @@ esac"#,
         tutorial_helper: dir.join("helper"),
         sock: dir.join("pinned.sock"),
         vector_search: false,
+        first_run_wait: std::time::Duration::from_secs(60),
     };
     let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), |_| {});
     machine

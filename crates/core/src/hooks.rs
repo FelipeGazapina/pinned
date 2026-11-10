@@ -35,6 +35,9 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
         "hooks": hooks,
         "statusLine": { "type": "command", "command": statusline_command(exe) },
         "permissions": { "allow": reminders::permissions() },
+        // A session pinned starts with bypass would otherwise wait on Claude Code's warning, in a
+        // tab no one may be watching. Without the bypass flag the warning never shows.
+        "skipDangerousModePermissionPrompt": true,
     }))?)
 }
 
@@ -126,7 +129,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
     Some(AgentEvent {
         status,
         cwd: field("cwd"),
-        message: field("message"),
+        message: field("message").or_else(|| (status == AgentStatus::Failed).then(|| failure_text(&hook)).flatten()),
         tab: std::env::var(TAB_ENV).ok(),
         session: field("session_id").or_else(|| field("thread-id")).or_else(|| field("thread_id")),
         title: field("transcript_path")
@@ -145,6 +148,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
             .flatten(),
         permission_mode: field("permission_mode"),
         hook_feedback: false,
+        reply: (status == AgentStatus::Done).then(|| field("last_assistant_message").or_else(|| field("last-assistant-message"))).flatten().filter(|text| !text.trim().is_empty()),
     })
 }
 
@@ -235,6 +239,15 @@ fn run_statusline(command: &str, input: &str) -> Vec<u8> {
     // A command that never reads its input closes the pipe early, and still gets to print.
     let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
     child.wait_with_output().map(|out| out.stdout).unwrap_or_default()
+}
+
+/// What a StopFailure hook says stopped the turn: the details, the API error Claude Code rendered
+/// as the last message, and the error kind. A last message that is not an API error is the turn's
+/// partial reply, which says nothing about why it stopped.
+fn failure_text(hook: &serde_json::Value) -> Option<String> {
+    let last = hook["last_assistant_message"].as_str().filter(|text| text.trim_start().starts_with("API Error"));
+    let lines: Vec<&str> = [hook["error_details"].as_str(), last, hook["error"].as_str()].into_iter().flatten().map(str::trim).filter(|text| !text.is_empty()).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 #[cfg(unix)]
@@ -570,7 +583,7 @@ mod tests {
         })
         .unwrap();
         let sock = sock.display().to_string();
-        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false };
+        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
         assert_eq!(
             deliver(&sock, event(AgentStatus::Working, Some("how do we deploy?"))),
             Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
@@ -650,6 +663,7 @@ mod tests {
             settings["statusLine"],
             serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
         );
+        assert_eq!(settings["skipDangerousModePermissionPrompt"], true, "a bypass session must not wait on Claude Code's warning");
         let _ = std::fs::remove_file(file);
     }
 
@@ -698,5 +712,25 @@ mod tests {
         assert_eq!(claude.permission_mode, None);
         let plan = event_from(Some("working"), r#"{"permission_mode":"plan","prompt":"look"}"#).unwrap();
         assert_eq!(plan.permission_mode.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn a_stop_hook_hands_over_the_turns_last_message_and_nothing_else_does() {
+        let stop = r#"{"session_id":"s1","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"Pronto. O PR #7 está verde."}"#;
+        assert_eq!(event_from(Some("done"), stop).unwrap().reply.as_deref(), Some("Pronto. O PR #7 está verde."));
+        let codex = r#"{"type":"agent-turn-complete","thread-id":"thr-9","last-assistant-message":"ok"}"#;
+        assert_eq!(event_from(Some("done"), codex).unwrap().reply.as_deref(), Some("ok"));
+        let empty = r#"{"session_id":"s1","last_assistant_message":"  "}"#;
+        assert_eq!(event_from(Some("done"), empty).unwrap().reply, None, "a turn that ended on a tool call has no text to hand over");
+        assert_eq!(event_from(Some("done"), r#"{"session_id":"s1"}"#).unwrap().reply, None);
+        let failed = r#"{"session_id":"s1","error":"rate_limit","last_assistant_message":"Parti"}"#;
+        assert_eq!(event_from(Some("failed"), failed).unwrap().reply, None);
+        assert_eq!(event_from(Some("failed"), failed).unwrap().message.as_deref(), Some("rate_limit"), "a partial reply is not the error");
+        let go = r#"{"session_id":"s1","error":"rate_limit","last_assistant_message":"API Error: Request rejected (429) · Go usage limit exceeded"}"#;
+        assert_eq!(event_from(Some("failed"), go).unwrap().message.as_deref(), Some("API Error: Request rejected (429) · Go usage limit exceeded\nrate_limit"));
+        assert_eq!(event_from(Some("done"), go).unwrap().message, None);
+        let event = event_from(Some("done"), stop).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&serde_json::to_string(&event).unwrap()).unwrap().reply, event.reply, "it survives the socket to the machine");
+        assert!(!serde_json::to_string(&AgentEvent { reply: None, ..event }).unwrap().contains("reply"), "an event sent on carries no reply field");
     }
 }

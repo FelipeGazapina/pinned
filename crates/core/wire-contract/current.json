@@ -665,6 +665,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -1261,6 +1282,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"
@@ -5129,6 +5184,23 @@
                 ]
               },
               {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
                 "type": "object",
                 "properties": {
@@ -5916,6 +5988,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -8310,6 +8424,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -9530,6 +9665,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -10124,6 +10280,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"
@@ -13927,6 +14117,23 @@
                 ]
               },
               {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
                 "type": "object",
                 "properties": {
@@ -14706,6 +14913,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -17021,6 +17270,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -19135,6 +19405,23 @@
                 ]
               },
               {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
                 "type": "object",
                 "properties": {
@@ -19922,6 +20209,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -22790,6 +23119,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -24744,6 +25094,23 @@
                 ]
               },
               {
+                "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
                 "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
                 "type": "object",
                 "properties": {
@@ -25523,6 +25890,48 @@
                 "required": [
                   "cmd",
                   "name"
+                ]
+              },
+              {
+                "description": "`connectors::Settings::box_claude_tokens`, once `machine` ran `claude setup-token` for its\nClaude account `account` and the hub kept the token it printed under that name. The token\nreaches no client.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mint_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether `machine` was still waiting on a `MintBoxClaudeToken` for `account`, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_box_claude_token"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account"
                 ]
               },
               {
@@ -28294,6 +28703,27 @@
               },
               "limit": {
                 "description": "The limit that stopped it: `time`, or `budget` once spend is enforced.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
                 "type": [
                   "string",
                   "null"
@@ -32271,6 +32701,13 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "moved": {
+                "description": "Tasks a usage limit moved off the account or model they asked for.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
               "cancelled": {
                 "type": "integer",
                 "format": "uint32",
@@ -32349,6 +32786,7 @@
               "done",
               "failed",
               "limited",
+              "moved",
               "cancelled",
               "accepted",
               "redone",
@@ -32562,6 +33000,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "moved": {
+                "description": "Tasks a usage limit moved off the account or model they asked for.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               },
               "cancelled": {
                 "type": "integer",
@@ -36209,6 +36654,60 @@
             ]
           }
         }
+      }
+    },
+    "RunStarted": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunStarted",
+        "description": "The session a workflow's Run now started.",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string"
+          },
+          "tab": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "machine",
+          "machine_name",
+          "tab"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunStarted",
+        "description": "The session a workflow's Run now started.",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string"
+          },
+          "tab": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "machine",
+          "machine_name",
+          "tab"
+        ]
       }
     },
     "Session": {
@@ -48074,6 +48573,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -48670,6 +49190,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"
@@ -52928,6 +53482,27 @@
                 ]
               },
               {
+                "description": "The new tab's id, with claude already running, for a workflow's Run now: a task held to the\nlimits of the project it runs in, whose first finished turn ends it and goes to the\ndelegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;\ninside `ActFor` the asking session's own task narrows the limits and hears when it ends.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run",
+                  "title"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -53522,6 +54097,40 @@
                   "cmd": {
                     "type": "string",
                     "const": "sign_in"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "The long-lived token `claude setup-token` prints for the Claude account `account`, which the\nuser approves in the browser it opens on this machine. It runs in no tab, and the machine\nanswers it only to the hub, which keeps it for that account's boxes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "setup_token"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account"
+                ]
+              },
+              {
+                "description": "Whether a `SetupToken` for `account` was waiting, which this stops.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_setup_token"
                   },
                   "account": {
                     "type": "string"

@@ -104,6 +104,20 @@ pub fn save_connector(connectors: State<Connectors>, connector: Connector) -> Re
     connectors.save_connector(connector)
 }
 
+/// Runs a saved workflow now on this Mac while it's signed out, held to its project's limits here.
+#[tauri::command]
+pub async fn run_workflow(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, id: String) -> Result<pinned_core::wire::RunStarted, String> {
+    let run = connectors.run_now(&id, "the account's owner, from Settings › Workflows")?;
+    if matches!(run.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
+        return Err("this workflow runs in an Upstash Box, which needs pinned signed in".into());
+    }
+    let spec = run.spec();
+    let title = pinned_core::connectors::run_now_title(&spec);
+    let machine = machine.inner().clone();
+    let tab = pinned_core::connectors::off_worker(move || machine.run_now(&spec, &title, None)).await?;
+    Ok(pinned_core::wire::RunStarted { workflow: id, machine: "local".into(), machine_name: String::new(), tab })
+}
+
 #[tauri::command]
 pub fn delete_connector(connectors: State<Connectors>, id: String) -> Result<(), String> {
     connectors.delete_connector(&id)

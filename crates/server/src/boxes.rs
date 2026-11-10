@@ -15,13 +15,13 @@ use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
 use serde::{Deserialize, Serialize};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
-use pinned_core::wire::{BoxStatus, Call, RunSpec, BOX_USD_PER_HOUR};
+use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
 use pinned_core::taste::TasteScope;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -143,8 +143,7 @@ pub enum BoxWork {
     /// `spec` as `Call::Run`: a workflow's session or an interactive one.
     #[default]
     Run,
-    /// A `delegate_task` worker for `origin`, signed in with the Claude token kept for the pinned
-    /// account `claude`, or the connection's own for none.
+    /// A `delegate_task` worker for `origin`, signed in as the pinned agent account `claude`.
     Delegate { origin: Origin, request: Box<Request>, claude: Option<String> },
     /// The Captain of the project `spec.repo` clones, started on the global orchestrator's message.
     Captain {
@@ -157,6 +156,17 @@ pub enum BoxWork {
 }
 
 impl BoxRow {
+    /// The pinned agent account whose Claude token the box signs in with, chosen before the row
+    /// was written: a worker's in its work, any other box's in its spec. A row an older hub wrote
+    /// names none and keeps the default account it was opened for.
+    pub fn signs_in_as(&self) -> String {
+        let named = match &self.work {
+            BoxWork::Delegate { claude, .. } => claude.as_deref(),
+            _ => self.spec.account.as_deref(),
+        };
+        named.filter(|name| !name.is_empty()).map_or_else(accounts::default_account, str::to_owned)
+    }
+
     pub fn remains(&self) -> Remains {
         Remains { id: self.id.clone(), machine: self.machine, upstash: self.upstash.clone(), why: format!("{:?}", self.phase) }
     }
@@ -324,6 +334,9 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
         outcome,
         reason,
         limit,
+        asked_account: None,
+        asked_model: None,
+        moved_because: None,
         review: None,
         thread: None,
     }
@@ -381,6 +394,77 @@ async fn allowed(connectors: &Connectors, permission: BoxPermission, who: &str, 
                 Err("Upstash Box: waiting for a yes on the Upstash card in Connectors before it opens a box for this; ask again once it is answered".into())
             }
         },
+    }
+}
+
+/// How long the box path waits for a machine to list its projects before it reads the list that
+/// machine gave last.
+const PROJECTS_WAIT: Duration = Duration::from_secs(10);
+
+/// Where to add the Claude token a box needs.
+const ADD_TOKEN: &str = "add it in Settings › Integrations › Upstash Box › Claude token per account";
+
+/// Refuses `account` when no Claude token is kept for it, before any box is reserved or billed. A
+/// box never signs in as another account instead.
+fn token_kept(connectors: &Connectors, account: &str, project: Option<&str>) -> Result<(), String> {
+    if connectors.box_claude_token(account).is_some() {
+        return Ok(());
+    }
+    Err(match project {
+        Some(project) => format!("No Claude token is kept for {account}, the account {project} runs on: {ADD_TOKEN}."),
+        None => format!("No Claude token is kept for {account}: {ADD_TOKEN}."),
+    })
+}
+
+/// A project's name as a refusal reads it: its repository's, else its folder's.
+fn project_name(folder: Option<&str>, repo: Option<&str>) -> String {
+    let named = repo.and_then(machine::repo_name).or_else(|| folder.and_then(|f| std::path::Path::new(f).file_name()?.to_str()));
+    named.unwrap_or("this project").to_owned()
+}
+
+/// The pinned agent account the sessions of a project run under on the account's machines, as
+/// each lists its projects: the one at `folder`, else any cloning `repo`. A machine that does not
+/// answer counts with the projects it listed last. A box's own machine runs every project under
+/// the default account, so it never counts. A project no machine has runs under the default
+/// account, as it would on a machine that opened it first.
+async fn project_account(hub: &Hub, account: &Arc<Account>, folder: Option<&str>, repo: Option<&str>) -> Result<String, String> {
+    let machines = hub.machines(account).await?;
+    let listed = futures_util::future::join_all(machines.iter().filter(|m| m.upstash_box.is_none()).map(|m| async move {
+        let fresh = match m.online {
+            true => hub.call_machine(account, &m.id, Call::ListProjects, PROJECTS_WAIT).await.ok().and_then(|v| serde_json::from_value::<Vec<ProjectView>>(v).ok()),
+            false => None,
+        };
+        let projects = match fresh {
+            Some(projects) => {
+                account.listed(&m.id, projects.clone());
+                projects
+            }
+            None => account.last_listed(&m.id),
+        };
+        (m.name.clone(), projects)
+    }))
+    .await;
+    let key = repo.and_then(machine::repo_key);
+    let at_folder = |p: &ProjectView| folder.is_some_and(|f| p.path == f);
+    let cloning = |p: &ProjectView| key.is_some() && p.repo.as_deref().and_then(machine::repo_key) == key;
+    let all = || listed.iter().flat_map(|(name, projects)| projects.iter().map(move |p| (name, p)));
+    let mut matched: Vec<(&String, &ProjectView)> = all().filter(|(_, p)| at_folder(p)).collect();
+    if matched.is_empty() {
+        matched = all().filter(|(_, p)| cloning(p)).collect();
+    }
+    let accounts: BTreeSet<&str> = matched.iter().map(|(_, p)| p.account.as_str()).collect();
+    match accounts.into_iter().collect::<Vec<_>>().as_slice() {
+        [] => Ok(accounts::default_account()),
+        [one] => Ok((*one).to_owned()),
+        several => {
+            let on: Vec<String> = matched.iter().map(|(name, p)| format!("{} on {name}", p.account)).collect::<BTreeSet<_>>().into_iter().collect();
+            Err(format!(
+                "{} runs on {} accounts ({}): give it one account on every machine, so a box knows whose Claude token to sign in with",
+                project_name(folder, repo),
+                several.len(),
+                on.join(", ")
+            ))
+        }
     }
 }
 
@@ -511,14 +595,27 @@ impl Boxes {
 
     /// `Hub::open` for a box run. The account's workflow permission decides what happens.
     /// `Fresh` gives the issue or thread its own box. `Fixed` reuses one box for every run.
-    /// `Ask` opens nothing until the user says yes. `Off`, and a disconnected Upstash, open nothing.
+    /// `Ask` opens nothing until the user says yes; the user's own Run now counts as that yes. `Off`, and a disconnected Upstash, open nothing.
     /// A run whose issue or thread already has a box goes to it. On failure the row ends, and the
     /// answer says why, which reaches the workflow's check line.
-    pub async fn open(&self, hub: &Hub, account: &Arc<Account>, run: Run, step: BoxStep) -> Result<Placement, String> {
+    /// The box signs in as the account the workflow names, else as its project's.
+    pub async fn open(&self, hub: &Hub, account: &Arc<Account>, mut run: Run, step: BoxStep) -> Result<Placement, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        match connectors.box_access().workflow {
-            BoxPermission::Off => return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()),
+        let permission = connectors.box_access().workflow;
+        if permission == BoxPermission::Off {
+            return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into());
+        }
+        let folder = run.cwd.to_str().filter(|f| !f.is_empty());
+        let signs_in = match run.account.as_deref().filter(|a| !a.is_empty()) {
+            Some(named) => named.to_owned(),
+            None => project_account(hub, account, folder, run.repo.as_deref()).await?,
+        };
+        token_kept(&connectors, &signs_in, Some(&project_name(folder, run.repo.as_deref())))?;
+        run.account = Some(signs_in);
+        match permission {
+            // The owner's own Run now click is the yes: an agent's never opens a box.
+            BoxPermission::Ask if pinned_core::connectors::is_run_now(&run.subject) => {}
             BoxPermission::Ask => match connectors.box_grant(&run.connector, &run.subject) {
                 Some(true) => {}
                 Some(false) => return Err("Upstash Box: you said no to a box for this, so none was opened".into()),
@@ -527,25 +624,38 @@ impl Boxes {
                     return Err("Upstash Box: waiting for a yes before it opens a box for this".into());
                 }
             },
-            BoxPermission::Fresh | BoxPermission::Fixed { .. } => {}
+            BoxPermission::Off | BoxPermission::Fresh | BoxPermission::Fixed { .. } => {}
         }
-        if matches!(connectors.box_access().workflow, BoxPermission::Fixed { .. }) {
+        if matches!(permission, BoxPermission::Fixed { .. }) {
             return self.open_fixed(hub, account, &connectors, run, step, &keys).await;
         }
         self.open_new(hub, account, run, step, &keys, None, false).await
     }
 
     /// An interactive session on a new box cloning `repo`. The client polls `box_status` until it
-    /// runs, then opens its tab. The budget dialog is the session permission's ask; a session
-    /// permission of off refuses.
+    /// runs, then opens its tab. The user's own budget dialog is the session permission's ask; a
+    /// session permission of off refuses.
     /// An agent's `open_box` passes its `opener`, so the box is that session's task once it ends.
+    /// Its ask is a question on the Upstash card for that session, which only the user answers.
     pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        if matches!(connectors.box_access().session, BoxPermission::Off) {
-            return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
+        match (connectors.box_access().session, &opener) {
+            (BoxPermission::Off, _) => return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()),
+            (BoxPermission::Ask, Some(opener)) => {
+                let name = account.name_of(&opener.machine.to_string()).unwrap_or_else(|| opener.machine.to_string());
+                let asked = Subject::LinearIssue { issue: format!("sessions of {name} {}", opener.tab) };
+                allowed(&connectors, BoxPermission::Ask, "Sessions", INTERACTIVE_CONNECTOR, &asked).await?;
+            }
+            _ => {}
         }
         let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
+        // An agent's box signs in as the account its own session runs under; the user's, as the project's.
+        let signs_in = match opener.as_ref().and_then(|o| account.tab(&o.machine.to_string(), &o.tab)) {
+            Some(tab) => tab.account,
+            None => project_account(hub, account, None, Some(&repo)).await?,
+        };
+        token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
         let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
         if let Some(budget) = budget_usd {
             if !(budget >= BOX_USD_PER_HOUR) {
@@ -557,7 +667,7 @@ impl Boxes {
         let id = new_row_id();
         let machine = Uuid::new_v4();
         let subject = Subject::LinearIssue { issue: format!("box {id}") };
-        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), name], env: session_env(INTERACTIVE_CONNECTOR, &subject), token: None, account: None, budget_usd };
+        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), name], env: session_env(INTERACTIVE_CONNECTOR, &subject), token: None, account: Some(signs_in), budget_usd };
         let fresh = BoxRow {
             id: id.clone(),
             account: account.id,
@@ -598,7 +708,8 @@ impl Boxes {
     /// `delegate_task` with `target.box`: a new box, opened with the account's own connection,
     /// that runs `request` as a worker for `origin`. It answers at once with the box's machine; the
     /// box boots and starts the worker in the background, and a boot that fails ends the task on
-    /// `origin`'s machine. `request.target.account` names the Claude token the box signs in with.
+    /// `origin`'s machine. The box signs in as the account `request.target.account` names, else as
+    /// the one `origin`'s tab runs under.
     pub async fn open_delegate(&self, hub: &Arc<Hub>, account: &Arc<Account>, origin: Origin, mut request: Request, repo: Option<String>, boxed: BoxTarget) -> Result<serde_json::Value, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
@@ -607,15 +718,27 @@ impl Boxes {
         if request.target.driver_kind.as_deref().is_some_and(|kind| kind != "claude") {
             return Err("a box runs Claude Code only: leave driverKind out".into());
         }
-        let claude = request.target.account.take().filter(|name| !name.is_empty());
-        connectors.box_claude_token(claude.as_deref())?;
         let repo = boxed.repo.or(repo).as_deref().and_then(origin_repo).ok_or("a box clones a GitHub repository, and this thread's origin is none: pass target.box.repo as owner/repo")?;
+        let claude = match request.target.account.take().filter(|name| !name.is_empty()) {
+            Some(named) => {
+                token_kept(&connectors, &named, None)?;
+                named
+            }
+            None => {
+                let signs_in = match account.tab(&origin.machine, &origin.tab) {
+                    Some(tab) => tab.account,
+                    None => project_account(hub, account, None, Some(&repo)).await?,
+                };
+                token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
+                signs_in
+            }
+        };
         self.within_cap(&hub.db.boxes(account.id).await?)?;
         (request.target.machine, request.target.boxed, request.target.driver_kind) = (None, None, None);
         let budget_usd = box_budget(hub, account, Some(&repo), None).await?;
         let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), request.title.clone()], env: vec![], token: None, account: None, budget_usd };
         let subject = Subject::LinearIssue { issue: format!("task {}/{}", origin.machine, origin.task) };
-        let work = BoxWork::Delegate { origin, request: Box::new(request), claude };
+        let work = BoxWork::Delegate { origin, request: Box::new(request), claude: Some(claude) };
         let row = self.reserve_work(hub, account, DELEGATE_CONNECTOR, subject, spec, boxed.size, work, &keys).await?;
         Ok(serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" }))
     }
@@ -642,10 +765,12 @@ impl Boxes {
                 Phase::Ending(_) => Err("Upstash Box: this project's last box is still being deleted; send it again in a minute".into()),
             };
         }
+        let signs_in = project_account(hub, account, None, Some(&repo)).await?;
+        token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
         self.within_cap(&hub.db.boxes(account.id).await?)?;
         let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
         let budget_usd = box_budget(hub, account, Some(&repo), None).await?;
-        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), format!("Captain {name}")], env: vec![], token: None, account: None, budget_usd };
+        let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), format!("Captain {name}")], env: vec![], token: None, account: Some(signs_in), budget_usd };
         let row = self.reserve_work(hub, account, CAPTAIN_CONNECTOR, subject, spec, size, work, &keys).await?;
         Ok(serde_json::json!({ "outcome": "iniciado", "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id }))
     }
@@ -771,6 +896,11 @@ impl Boxes {
             Some(Ok(row)) => match row.phase {
                 Phase::Ending(_) => Err("Upstash Box: the last box for this is still being deleted; the next check tries again".into()),
                 Phase::Creating | Phase::Booting => Err("Upstash Box: its box is still booting; the next check tries again".into()),
+                Phase::Running if Some(row.signs_in_as()) != run.account => Err(format!(
+                    "Upstash Box: the one reused box signs in as {}, and this run's project runs on {}: choose New box each time for workflows",
+                    row.signs_in_as(),
+                    run.account.as_deref().unwrap_or_default()
+                )),
                 Phase::Running => {
                     let mut spec = run.spec();
                     spec.token = None;
@@ -978,10 +1108,9 @@ impl Boxes {
             return Err(format!("could not make {DIR}: {}", tail(&made)));
         }
         self.api.write(key, id, &format!("{DIR}/account.json"), serde_json::to_string_pretty(&creds).unwrap()).await?;
-        let keys = match &row.work {
-            BoxWork::Delegate { claude, .. } => Keys { api_key: keys.api_key.clone(), claude_token: connectors.box_claude_token(claude.as_deref())? },
-            _ => keys.clone(),
-        };
+        let signs_in = row.signs_in_as();
+        let claude_token = connectors.box_claude_token(&signs_in).ok_or_else(|| format!("No Claude token is kept for {signs_in}: {ADD_TOKEN}."))?;
+        let keys = Keys { api_key: keys.api_key.clone(), claude_token };
         self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref())).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
@@ -1030,7 +1159,9 @@ impl Boxes {
         }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-        let value = hub.call_machine(account, machine, Call::Run { run: spec }, RUN_WAIT).await.map_err(String::from)?;
+        // A box's node keeps no agent accounts: it runs as the one whose token its box.env holds.
+        spec.account = None;
+        let value = hub.call_machine(account, machine, crate::hub::run_call(spec, subject), RUN_WAIT).await.map_err(String::from)?;
         let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the box started the session without a tab id".to_owned())?;
         Ok(Placement { machine: machine.to_owned(), tab })
     }

@@ -1,6 +1,7 @@
 //! The calls block, so make them off any async runtime's workers (reqwest's blocking client
 //! panics inside one). The binary installs rustls's ring provider before the first call.
 
+use crate::login_store::LoginStore;
 use crate::wire::{AccountView, MachineId, MachineView};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,67 @@ impl Credentials {
 
     pub fn remove(dir: &Path) {
         let _ = std::fs::remove_file(dir.join(FILE));
+    }
+
+    /// The entry the app's login store keeps this login under: the hub, then the account's email,
+    /// which the hub keeps unique and never changes. `account.json` holds both, so a start with no
+    /// network names the entry too.
+    pub fn login_account(&self) -> String {
+        format!("{} {}", self.hub, self.email)
+    }
+
+    /// The app's credentials. With a store, the login comes from it, and a login `account.json`
+    /// still holds moves there first: written, read back, then taken out of the file. A move that
+    /// fails or stops halfway leaves the file's login in place, and the next start tries again.
+    /// When the file has no login and the store has none to give, or fails, the app is signed out.
+    pub fn load_app(dir: &Path, store: Option<&dyn LoginStore>) -> Option<Credentials> {
+        let mut creds = Credentials::load(dir)?;
+        let Some(store) = store else { return Some(creds) };
+        if !creds.user_token.is_empty() {
+            if let Err(e) = creds.move_login(dir, store) {
+                eprintln!("pinned: the hub login stays in account.json for now: {e}");
+            }
+        } else {
+            match store.get(&creds.login_account()) {
+                Ok(Some(login)) => creds.user_token = login,
+                // Signed out: a link started with an empty token would never connect. The file
+                // stays, and a new sign-in overwrites it.
+                Ok(None) => return None,
+                Err(e) => {
+                    eprintln!("pinned: could not read the hub login: {e}");
+                    return None;
+                }
+            }
+        }
+        Some(creds)
+    }
+
+    /// Saves the app's credentials: the login to the store, every other field to `account.json`.
+    /// When the store refuses the login, the file keeps it, as before, until a start moves it.
+    pub fn save_app(&self, dir: &Path, store: Option<&dyn LoginStore>) -> Result<(), String> {
+        let Some(store) = store else { return self.save(dir) };
+        self.move_login(dir, store).or_else(|e| {
+            eprintln!("pinned: the hub login stays in account.json for now: {e}");
+            self.save(dir)
+        })
+    }
+
+    /// Forgets the app's credentials. The file goes first, so a sign-out cut short leaves the app
+    /// signed out rather than signed in without its login.
+    pub fn remove_app(&self, dir: &Path, store: Option<&dyn LoginStore>) {
+        Credentials::remove(dir);
+        if let Some(Err(e)) = store.map(|store| store.delete(&self.login_account())) {
+            eprintln!("pinned: could not delete the hub login from the store: {e}");
+        }
+    }
+
+    fn move_login(&self, dir: &Path, store: &dyn LoginStore) -> Result<(), String> {
+        let account = self.login_account();
+        store.set(&account, &self.user_token)?;
+        if store.get(&account)?.as_deref() != Some(self.user_token.as_str()) {
+            return Err("the store did not keep it".into());
+        }
+        Credentials { user_token: String::new(), ..self.clone() }.save(dir)
     }
 
     /// Saves these credentials without the login an older pinned kept beside the machine's token,
@@ -263,6 +325,7 @@ fn send(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::login_store::fake::{Memory, Reads, Writes};
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
@@ -304,6 +367,131 @@ mod tests {
         assert_eq!(Credentials::load(&dir).unwrap().user_token, "");
         assert_eq!(creds.forget_login(&dir), Ok(None), "nothing left to forget");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn signed_in(email: &str, login: &str) -> Credentials {
+        Credentials {
+            hub: "https://pinned.example.com".into(),
+            email: email.into(),
+            user_token: login.into(),
+            machine_id: "8c0f1f4e-5b8a-4c4e-9a59-0d6b4f0f2a11".into(),
+            machine_token: "m-t0k".into(),
+        }
+    }
+
+    fn on_disk(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("account.json")).unwrap()
+    }
+
+    #[test]
+    fn an_older_login_moves_from_account_json_into_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Memory::default();
+        signed_in("ana@acme.dev", "u-t0k").save(dir.path()).unwrap();
+
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")));
+        assert_eq!(store.logins(), [("https://pinned.example.com ana@acme.dev".to_owned(), "u-t0k".to_owned())]);
+        assert_eq!(Credentials::load(dir.path()), Some(signed_in("ana@acme.dev", "")), "the file keeps every field but the login");
+        assert!(!on_disk(dir.path()).contains("u-t0k"));
+    }
+
+    #[test]
+    fn moving_the_login_again_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Memory::default();
+        signed_in("ana@acme.dev", "u-t0k").save(dir.path()).unwrap();
+        Credentials::load_app(dir.path(), Some(&store)).unwrap();
+        let (file, logins) = (on_disk(dir.path()), store.logins());
+
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")));
+        assert_eq!((on_disk(dir.path()), store.logins()), (file.clone(), logins.clone()));
+
+        signed_in("ana@acme.dev", "u-t0k").save(dir.path()).unwrap();
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")), "a move cut short after the store's write");
+        assert_eq!((on_disk(dir.path()), store.logins()), (file, logins), "ends where a whole move ends");
+    }
+
+    #[test]
+    fn a_store_that_does_not_keep_the_login_leaves_it_in_account_json() {
+        for writes in [Writes::Refused, Writes::Lost] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Memory::with(writes);
+            signed_in("ana@acme.dev", "u-t0k").save(dir.path()).unwrap();
+            let file = on_disk(dir.path());
+
+            assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")), "the app still signs in");
+            assert_eq!(on_disk(dir.path()), file, "the file is untouched");
+            assert_eq!(store.logins(), []);
+
+            let working = Memory::default();
+            assert_eq!(Credentials::load_app(dir.path(), Some(&working)), Some(signed_in("ana@acme.dev", "u-t0k")));
+            assert_eq!(working.logins().len(), 1, "a later start moves it");
+            assert_eq!(Credentials::load(dir.path()).unwrap().user_token, "");
+        }
+    }
+
+    #[test]
+    fn a_store_that_cannot_give_the_login_means_signed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        signed_in("ana@acme.dev", "").save(dir.path()).unwrap();
+        let file = on_disk(dir.path());
+
+        assert_eq!(Credentials::load_app(dir.path(), Some(&Memory::with_reads(Reads::Refused))), None, "a failing read");
+        assert_eq!(Credentials::load_app(dir.path(), Some(&Memory::default())), None, "an item that is gone");
+        assert_eq!(on_disk(dir.path()), file, "the file stays for a new sign-in to overwrite");
+
+        let store = Memory::default();
+        store.set("https://pinned.example.com ana@acme.dev", "u-t0k").unwrap();
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")), "a login it has still loads");
+    }
+
+    #[test]
+    fn signing_in_puts_the_login_in_the_store_and_the_rest_in_account_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Memory::default();
+        signed_in("ana@acme.dev", "u-t0k").save_app(dir.path(), Some(&store)).unwrap();
+        assert_eq!(Credentials::load(dir.path()), Some(signed_in("ana@acme.dev", "")));
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("ana@acme.dev", "u-t0k")));
+
+        let refused = tempfile::tempdir().unwrap();
+        signed_in("ana@acme.dev", "u-t0k").save_app(refused.path(), Some(&Memory::with(Writes::Refused))).unwrap();
+        assert_eq!(Credentials::load(refused.path()), Some(signed_in("ana@acme.dev", "u-t0k")), "a refused login is not lost");
+    }
+
+    #[test]
+    fn signing_out_deletes_account_json_and_the_store_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Memory::default();
+        let ana = signed_in("ana@acme.dev", "u-t0k");
+        ana.save_app(dir.path(), Some(&store)).unwrap();
+
+        ana.remove_app(dir.path(), Some(&store));
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), None);
+        assert_eq!(store.logins(), []);
+        ana.remove_app(dir.path(), Some(&store));
+    }
+
+    #[test]
+    fn switching_accounts_leaves_only_the_new_login_in_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Memory::default();
+        let ana = signed_in("ana@acme.dev", "u-ana");
+        ana.save_app(dir.path(), Some(&store)).unwrap();
+
+        ana.remove_app(dir.path(), Some(&store));
+        signed_in("bob@acme.dev", "u-bob").save_app(dir.path(), Some(&store)).unwrap();
+        assert_eq!(store.logins(), [("https://pinned.example.com bob@acme.dev".to_owned(), "u-bob".to_owned())]);
+        assert_eq!(Credentials::load_app(dir.path(), Some(&store)), Some(signed_in("bob@acme.dev", "u-bob")));
+    }
+
+    #[test]
+    fn without_a_store_the_login_stays_in_account_json() {
+        let dir = tempfile::tempdir().unwrap();
+        signed_in("ana@acme.dev", "u-t0k").save_app(dir.path(), None).unwrap();
+        assert_eq!(Credentials::load(dir.path()), Some(signed_in("ana@acme.dev", "u-t0k")));
+        assert_eq!(Credentials::load_app(dir.path(), None), Some(signed_in("ana@acme.dev", "u-t0k")));
+        signed_in("ana@acme.dev", "u-t0k").remove_app(dir.path(), None);
+        assert_eq!(Credentials::load_app(dir.path(), None), None);
     }
 
     #[test]

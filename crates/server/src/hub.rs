@@ -12,7 +12,7 @@ use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, RunSpec, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
+    Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, RunSpec, RunStarted, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
 use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
@@ -25,6 +25,8 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+/// Longer than a machine's `claude setup-token` waits for the user's approval in the browser.
+const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.as_secs() + 30);
 /// How long importing an MCP server waits for the machine to read its account's config.
 const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
@@ -80,6 +82,26 @@ impl Outbox {
     }
 }
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
+
+/// The call that starts `spec` on a machine. A Run now goes as `RunNow`, which the machine holds
+/// to the limits of the project it runs in.
+pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
+    if pinned_core::connectors::is_run_now(subject) {
+        let title = pinned_core::connectors::run_now_title(&spec);
+        Call::RunNow { run: spec, title }
+    } else {
+        Call::Run { run: spec }
+    }
+}
+
+/// A machine whose pinned predates Run now can't read it: say so, instead of its parse error.
+pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Subject, refused: String) -> String {
+    if !pinned_core::connectors::is_run_now(subject) || !refused.contains("can't answer that") {
+        return refused;
+    }
+    let name = account.name_of(machine).unwrap_or_else(|| machine.to_owned());
+    format!("{name} runs an older pinned that has no Run now: update it in Settings › Machines")
+}
 
 pub struct Hub {
     pub db: Db,
@@ -308,20 +330,37 @@ impl Hub {
         }
     }
 
-    async fn open_on_pool(&self, account: &Account, run: Run, preferred: &str) -> Result<Placement, String> {
+    /// The user's Run now of workflow `id`: it goes where a triggered run of it would go, to its
+    /// machine, any machine, or its Upstash Box, and each machine holds it to its project's limits.
+    pub async fn run_workflow(&self, account: &Account, id: &str) -> Result<RunStarted, String> {
+        let run = self.connectors(account).await?.run_now(id, "the account's owner, from Settings › Workflows")?;
+        let placed = self.open_placed(account.id, Work::Run(run)).await?.ok_or("no machine started the run")?;
+        Ok(account.started(id, placed))
+    }
+
+    pub(crate) async fn run_spec(&self, account: &Account, run: &Run) -> RunSpec {
         let token = self.connectors(account).await.ok().and_then(|c| c.github_token());
         let mut spec = run.spec();
         spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-        let mut refused = vec![];
+        spec
+    }
+
+    async fn open_on_pool(&self, account: &Account, run: Run, preferred: &str) -> Result<Placement, String> {
+        let spec = self.run_spec(account, &run).await;
+        let mut refused: Vec<String> = vec![];
         for machine in account.run_pool(preferred) {
-            match self.call_machine(account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
+            match self.call_machine(account, &machine, run_call(spec.clone(), &run.subject), RUN_WAIT).await {
                 Ok(value) => {
                     let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the machine started the session without a tab id".to_owned())?;
                     return Ok(Placement { machine, tab });
                 }
                 Err(Unanswered::Refused(e)) => {
                     eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector);
-                    refused.push(e);
+                    let e = too_old_for_run_now(account, &machine, &run.subject, e);
+                    // Every machine reads the same tastes, so a limit refuses alike on each.
+                    if !refused.contains(&e) {
+                        refused.push(e);
+                    }
                 }
                 // The run may have started there, so it doesn't go to a second machine. The next
                 // check finds its tab, or sends it again, and a machine answers a run it has with that session.
@@ -388,6 +427,16 @@ impl Hub {
         }
     }
 
+    /// A machine whose pinned predates Use for boxes can't read the call: say so, instead of its parse error.
+    fn too_old_to_mint(&self, account: &Account, machine: &str, refused: Unanswered) -> String {
+        let refused = String::from(refused);
+        if !pinned_core::link::is_unknown_command(&refused) {
+            return refused;
+        }
+        let name = account.name_of(machine).unwrap_or_else(|| machine.to_owned());
+        format!("{name} runs an older pinned that can't mint a Claude token for boxes: update it in Settings › Machines")
+    }
+
     /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
@@ -447,6 +496,7 @@ impl Hub {
             HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
+            HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
             HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
@@ -520,6 +570,18 @@ impl Hub {
             }
             HubCall::SetBoxClaudeToken { name, token } => (json(c().await?.set_box_claude_token(&name, &token)?), true),
             HubCall::RemoveBoxClaudeToken { name } => (json(c().await?.remove_box_claude_token(&name)?), true),
+            HubCall::MintBoxClaudeToken { machine, account: name } => {
+                let connectors = c().await?;
+                if connectors.box_keys().is_none() {
+                    return Err("connect Upstash Box first".into());
+                }
+                let minted = self.call_machine(account, &machine, Call::SetupToken { account: name.clone() }, MINT_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e))?;
+                let token = minted.as_str().ok_or("the machine answered no token")?;
+                (json(connectors.set_box_claude_token(&name, token)?), true)
+            }
+            HubCall::CancelBoxClaudeToken { machine, account: name } => {
+                return self.call_machine(account, &machine, Call::CancelSetupToken { account: name }, MACHINE_CALL_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e));
+            }
             HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
@@ -903,6 +965,11 @@ impl Account {
     /// The id and name of every online machine.
     pub fn online(&self) -> Vec<(MachineId, String)> {
         self.live.lock().unwrap().machines.iter().map(|(id, m)| (id.clone(), m.name.clone())).collect()
+    }
+
+    /// What a Run now of workflow `workflow` answers once `placed` took it.
+    pub fn started(&self, workflow: &str, placed: Placement) -> RunStarted {
+        RunStarted { workflow: workflow.to_owned(), machine_name: self.name_of(&placed.machine).unwrap_or_default(), machine: placed.machine, tab: placed.tab }
     }
 
     pub fn name_of(&self, machine: &str) -> Option<String> {

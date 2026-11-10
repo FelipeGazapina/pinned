@@ -771,6 +771,8 @@ mod tests {
         assert!(!may_type(state_of(&tab(Some(AgentStatus::Working), None, true)).0), "a turn may show a permission menu before its hook reports it");
         let idle = tab(Some(AgentStatus::NeedsInput), Some("Claude is waiting for your input"), true);
         assert_eq!(state_of(&idle), ("done", None));
+        let stuck = "Claude Code is waiting on its folder-trust prompt in /w/app; open the session to answer it";
+        assert_eq!(state_of(&tab(Some(AgentStatus::Failed), Some(stuck), true)), ("failed", Some(stuck.into())), "a start that waits on the user says why");
         assert!(may_type("done") && may_type("failed"));
         assert!(!may_type("starting"), "a session that hasn't reported may show a startup dialog");
         assert_eq!(state_of(&tab(Some(AgentStatus::Done), None, false)).0, "ended");

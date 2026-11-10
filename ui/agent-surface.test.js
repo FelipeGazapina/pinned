@@ -71,6 +71,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     ago: () => "5m",
     inviteDate: () => "Nov 16",
     clockTime: () => "14:30",
+    APP_LOCALE: "en-US",
     icon: (name) => `<i data-icon="${name}"></i>`,
     document: {
       createElement: element,

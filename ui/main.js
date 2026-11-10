@@ -98,11 +98,19 @@ function setTabs(machine, views, { forget = true } = {}) {
   views = views.filter((v) => !closing.has(keyOf(machine, v.id)));
   m.tabs = views;
   const keep = new Set(views.map((v) => keyOf(machine, v.id)));
+  const shown = active;
+  if (shown?.machine === machine && !keep.has(shown.key)) lost = { machine, key: shown.key, session: shown.view.session ?? null };
   for (const tab of tabs.filter((t) => t.machine === machine && !keep.has(t.key))) removeTab(tab, forget);
   for (const view of views) {
     const tab = tabByKey(keyOf(machine, view.id));
     if (tab) updateView(tab, view);
     else addTab(machine, view);
+  }
+  if (lost && active !== shown) lost.instead = active;
+  if (lost?.machine === machine && views.length) {
+    const back = tabs.find((t) => t.machine === machine && (t.key === lost.key || (!!lost.session && t.view.session === lost.session)));
+    if (back && active === lost.instead) activate(back);
+    lost = null;
   }
   placeTabs();
   const paths = views.map((v) => v.cwd).sort().join("\n");
@@ -113,6 +121,11 @@ function setTabs(machine, views, { forget = true } = {}) {
   render();
   noteTabs(machine);
 }
+
+/** The thread on screen when its machine took its tab away, and the one shown instead. When the
+ * machine lists that conversation again, under the same id or the new one a restart gives it, it
+ * comes back on screen, unless another thread was picked meanwhile. */
+let lost = null;
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
@@ -713,7 +726,8 @@ function show(tab) {
   }
   refit(tab);
   render();
-  if (!pickerOpen() && !settingsOpen()) focusInput();
+  // On a phone the prompt's focus raises the keyboard over the thread just picked.
+  if (!pickerOpen() && !settingsOpen() && !(guiOn() && touchComposer())) focusInput();
   markSeen(tab);
 }
 
@@ -768,7 +782,7 @@ function render() {
     (active.machine === LOCAL ? "" : `${machineName(active.machine)}  `) + (tilde(active.view.cwd) || "claude");
   document.getElementById("status-text").textContent =
     active.view.status === "failed" && active.view.resume_at
-      ? `limit, continues ${new Date(active.view.resume_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      ? `limit, continues ${new Date(active.view.resume_at * 1000).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" })}`
       : STATUS_TEXT[statusOf(active)];
 }
 
@@ -1125,9 +1139,9 @@ const LIMITS = [
 
 function resetsText(resetsAt) {
   const date = new Date(resetsAt * 1000);
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = date.toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
   if (date.toDateString() === new Date().toDateString()) return `resets ${time}`;
-  return `resets ${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `resets ${date.toLocaleDateString(APP_LOCALE, { weekday: "short" })} ${time}`;
 }
 
 // A window's figure stops holding once it resets, so it leaves the meter then.

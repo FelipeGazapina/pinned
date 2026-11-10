@@ -141,3 +141,49 @@ test("a question in a narrow terminal reads as a menu when claude wraps its hint
   ];
   assert.deepEqual(menuOn(screen).options.map((o) => o.head), ["North route", "South route", "Type something.", "Chat about this"]);
 });
+
+// The end of a Captain's answer on 2026-11-10, as claude 2.1.322 left it on screen while idle.
+const ARCHIVE_ANSWER_SCREEN = [
+  "  - tab-22: \"0.17.22 final pass: full tests, two-account, UI sweep\".",
+  "",
+  "  Both are in Settings › Archive and can be brought back.",
+  "  - Not archived: the restart didn't reopen the rest of the old worker tabs (19–20, 23, 25–30, 32–34,",
+  "  36–40), so there was nothing left to archive.",
+  "  - Skipped: none. No tab had uncommitted work or was still running.",
+  "",
+  "  I've sent this report to the Orchestrator. I also saved a project memory (#68): pinned renumbers",
+  "  tabs when it restarts, so tabs should be matched by session or title, never by number.",
+  "",
+  RULE,
+  "❯",
+  RULE,
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+];
+
+test("a › inside claude's answer is text, and a menu drawn under the same answer still reads", () => {
+  assert.equal(context.menuOn(ARCHIVE_ANSWER_SCREEN), null);
+  const asked = [...ARCHIVE_ANSWER_SCREEN.slice(0, 10), RULE, " Bash command", "   git status", " Do you want to proceed?", " ❯ 1. Yes", "   2. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"];
+  assert.deepEqual(menuOn(asked).options.map((o) => o.head), ["Yes", "No, and tell Claude what to do differently (esc)"]);
+});
+
+test("an option that names Settings › Archive is not the chosen one", () => {
+  const screen = [
+    RULE,
+    " ☐ Finished workers",
+    "Where should the finished workers go?",
+    "❯ 1. Delete them",
+    "     Their conversations are gone for good.",
+    "  2. Keep them in Settings › Archive",
+    "     They can be brought back from there.",
+    "  3. Type something.",
+    RULE,
+    "  4. Chat about this",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+  ];
+  assert.deepEqual(menuOn(screen).options.map((o) => [o.head, o.chosen]), [
+    ["Delete them", true],
+    ["Keep them in Settings › Archive", false],
+    ["Type something.", false],
+    ["Chat about this", false],
+  ]);
+});

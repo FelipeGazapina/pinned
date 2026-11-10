@@ -179,6 +179,15 @@ pub struct TaskRecord {
     /// The limit that stopped it: `time`, or `budget` once spend is enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<String>,
+    /// The account the request asked for, when a usage limit moved the task to `account`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_account: Option<String>,
+    /// The model the request asked for, when a usage limit moved the task to `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_model: Option<String>,
+    /// Why the task ran elsewhere than asked: the limit that stopped the account it asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_because: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,
     /// The worker thread that showed it, on `machine`.
@@ -195,6 +204,9 @@ pub struct Group {
     pub done: u32,
     pub failed: u32,
     pub limited: u32,
+    /// Tasks a usage limit moved off the account or model they asked for.
+    #[serde(default)]
+    pub moved: u32,
     pub cancelled: u32,
     pub accepted: u32,
     pub redone: u32,
@@ -329,6 +341,7 @@ fn group(key: String, label: String, records: &[&TaskRecord]) -> Group {
             TaskOutcome::Limit => g.limited += 1,
             TaskOutcome::Cancelled => g.cancelled += 1,
         }
+        g.moved += u32::from(r.moved_because.is_some());
         match r.review.as_ref().map(|review| review.verdict) {
             Some(Verdict::Accepted) => g.accepted += 1,
             Some(Verdict::Redone) => g.redone += 1,
@@ -379,6 +392,9 @@ impl DelegationStats {
             }
             if g.limited > 0 {
                 row["stoppedByLimit"] = json!(g.limits);
+            }
+            if g.moved > 0 {
+                row["movedByLimit"] = json!(g.moved);
             }
             if g.accepted + g.redone > 0 {
                 row["accepted"] = json!(g.accepted);
@@ -440,6 +456,9 @@ mod tests {
             outcome,
             reason: None,
             limit: (outcome == TaskOutcome::Limit).then(|| "time".into()),
+            asked_account: None,
+            asked_model: None,
+            moved_because: None,
             review: None,
             thread: None,
         }

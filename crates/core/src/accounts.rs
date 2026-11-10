@@ -160,12 +160,21 @@ pub struct View {
     /// machine sends none, and the picker falls back to its own short list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<crate::claude_models::ClaudeModel>,
+    /// A usage limit stopped this account, so `delegate_task` routes around it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limited: bool,
+    /// What stopped it: the error's first line, or the usage window that is full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reason: Option<String>,
+    /// Unix seconds when the limit lifts, when the provider said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_resume_at: Option<u64>,
 }
 
 impl View {
     pub fn new(account: Account, status: Status) -> View {
         let provider_name = if account.auth == Auth::OpenCodeGo { "OpenCode Go" } else { account.provider.spec().name };
-        View { provider_name: provider_name.into(), builtin: account.is_builtin(), account, status, models: vec![] }
+        View { provider_name: provider_name.into(), builtin: account.is_builtin(), account, status, models: vec![], limited: false, limit_reason: None, limit_resume_at: None }
     }
 }
 

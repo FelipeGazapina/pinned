@@ -397,12 +397,12 @@ function resetsInText(resetsAt, now) {
 /** T3 Code's `formatUpcomingTimestamp`: the time today, "tomorrow at" it, or the date and time. */
 function upcomingText(unix, now) {
   const date = new Date(unix * 1000);
-  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const time = date.toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" });
   const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const diff = Math.round((day(date) - day(new Date(now * 1000))) / 86400000);
   if (diff <= 0) return time;
   if (diff === 1) return `tomorrow at ${time}`;
-  return `${date.toLocaleDateString(undefined, date.getFullYear() === new Date(now * 1000).getFullYear() ? { month: "numeric", day: "numeric" } : { month: "numeric", day: "numeric", year: "numeric" })} ${time}`;
+  return `${date.toLocaleDateString(APP_LOCALE, date.getFullYear() === new Date(now * 1000).getFullYear() ? { month: "numeric", day: "numeric" } : { month: "numeric", day: "numeric", year: "numeric" })} ${time}`;
 }
 const windowElapsed = (w, now) => (w.resets_at && w.minutes ? Math.max(0, Math.min(1, (w.minutes * 60 - (w.resets_at - now)) / (w.minutes * 60))) : null);
 const windowLeft = (w) => Math.round(100 - Math.max(0, Math.min(100, w.used)));

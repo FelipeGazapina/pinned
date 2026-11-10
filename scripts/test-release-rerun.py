@@ -519,6 +519,16 @@ def shell_problems(wf):
     return problems
 
 
+def runner_files(label, work):
+    """What a hosted runner gives each leg: its OS name, a temp dir, and the file a step exports env through."""
+    temp = work / "runner-temp"
+    temp.mkdir()
+    (work / "github-env").touch()
+    lowered = label.lower()
+    runner_os = "Windows" if "windows" in lowered else "macOS" if "macos" in lowered else "Linux"
+    return {"RUNNER_OS": runner_os, "RUNNER_TEMP": str(temp), "GITHUB_ENV": str(work / "github-env")}
+
+
 def runner_env():
     return {
         key: value
@@ -747,7 +757,7 @@ class Replay:
         ctx = context(tag, matrix)
         ctx["env"] = expanded(self.wf.get("env"), ctx)
         ctx["env"].update(expanded(job.get("env"), ctx))
-        job_env = {**env, **ctx["env"]}
+        job_env = {**env, **ctx["env"], **runner_files(expand(job["runs-on"], ctx), work)}
         stderr = []
         for index, step in enumerate(job["steps"], start=1):
             unknown = sorted(set(step) - STEP_KEYS)

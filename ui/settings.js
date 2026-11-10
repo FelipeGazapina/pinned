@@ -271,6 +271,7 @@ function upstashCardHtml() {
     ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
     : connected && !agentAsking("connect_upstash")
       ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         ${boxLoginsHtml()}
          ${boxTokensHtml()}
          ${boxPermissionsHtml()}
          <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
@@ -291,15 +292,63 @@ function upstashCardHtml() {
     </div>`;
 }
 
-/** The Claude token each pinned account signs a worker's box in with, which `delegate_task` picks
- * by `providerInstanceId`. The token Connect took stays the default. */
+/** The Claude accounts signed in on the account's machines, one row per account, read off each
+ * online machine's `list_accounts`; `minting` is the row whose setup-token waits in a browser. */
+const boxLogins = { rows: null, minting: null };
+
+async function loadBoxLogins() {
+  if (!account || !settings.upstash) return;
+  const found = new Map();
+  // This computer first, so the browser setup-token opens is the one in front of the user.
+  const ids = onlineMachines().filter((id) => !machines.get(id)?.view.upstash_box).sort((a, b) => (b === LOCAL) - (a === LOCAL));
+  for (const id of ids) {
+    const listed = await accountsOf(id).catch(() => []);
+    for (const a of listed ?? []) {
+      if (a.provider !== "claude" || (a.auth ?? "login") !== "login" || !a.signed_in || found.has(a.id)) continue;
+      found.set(a.id, { id: a.id, email: a.email ?? "", plan: a.plan ?? "", org: a.org ?? "", machine: hubIdOf(id), on: machineName(id) });
+    }
+  }
+  boxLogins.rows = [...found.values()];
+  redrawBoxLogins();
+}
+
+function redrawBoxLogins() {
+  const box = document.getElementById("box-logins");
+  if (box) box.innerHTML = boxLoginRows();
+}
+
+function boxLoginRows() {
+  if (boxLogins.rows == null) return `<p class="hint">Looking for the Claude accounts signed in on your machines…</p>`;
+  if (!boxLogins.rows.length) return `<p class="hint">No Claude account is signed in on an online machine.</p>`;
+  const kept = settings.box_claude_tokens || {};
+  return boxLogins.rows.map((row) => {
+    const who = [row.email, row.plan, row.org].filter(Boolean).map(esc).join(" · ") || "signed in";
+    const waiting = boxLogins.minting?.account === row.id;
+    const action = waiting
+      ? `<span class="hint">Approve in the browser on ${esc(row.on)}, signed in as ${esc(row.email || row.id)}</span>
+         <button class="secondary" data-action="cancel-box-login" data-account="${esc(row.id)}" data-machine="${esc(row.machine)}">Cancel</button>`
+      : `${kept[row.id] ? `<span class="hint">Used for boxes</span>` : ""}
+         <button class="secondary" data-action="use-for-boxes" data-account="${esc(row.id)}" data-machine="${esc(row.machine)}"${boxLogins.minting ? " disabled" : ""}>${kept[row.id] ? "Renew" : "Use for boxes"}</button>`;
+    return `<div class="row box-login"><span><b>${esc(row.id)}</b> ${who} · on ${esc(row.on)}</span>${action}</div>`;
+  }).join("");
+}
+
+function boxLoginsHtml() {
+  return `<div class="box-logins">
+      <p class="hint">Claude accounts signed in on your machines. Use for boxes runs <code>claude setup-token</code> on that machine: approve it in the browser that opens there, signed in as the email shown, and boxes for that account's projects sign in with the token it makes.</p>
+      <div id="box-logins">${boxLoginRows()}</div>
+    </div>`;
+}
+
+/** The Claude token each pinned account signs a box in with: the one its project runs on, or the
+ * one `delegate_task` names. The token Connect took is the claude account's. */
 function boxTokensHtml() {
   const kept = Object.entries(settings.box_claude_tokens || {});
   const asked = agentAsking("set_box_claude_token")?.args.name;
   const rows = kept.map(([name, hint]) => `<div class="row box-token"><span><b>${esc(name)}</b> · token <b>${esc(hint)}</b></span>
       <button class="secondary" data-action="remove-box-token" data-name="${esc(name)}">Remove</button></div>`).join("");
   return `<div class="box-tokens">
-      <p class="hint">Claude token per account. A worker's box signs in with the token of the account <code>delegate_task</code> names, else the default one above.</p>
+      <p class="hint">Claude token per account. Every box signs in with the token of the account its project runs on, or of the one <code>delegate_task</code> names. The token above is the claude account's. A box whose account has no token here doesn't open.</p>
       ${rows}
       ${agentAskingHtml("set_box_claude_token")}
       <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
@@ -340,7 +389,7 @@ function boxAccess() {
 function boxAskRows() {
   return (settings.box_asks || []).map((ask) => {
     const issue = ask.subject.issue;
-    const what = ask.connector === "delegate" || ask.connector === "captain" ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
+    const what = ["delegate", "captain", "session"].includes(ask.connector) ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
     return `<p class="hint">Allow a box for ${esc(what)}?
       <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
       <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
@@ -358,7 +407,7 @@ function boxPermissionsHtml() {
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows, workers, and Captains follow this now. Sessions keep the choice and follow it in the next update.</p>
+    <p class="hint">Workflows, workers and Captains follow this. A session an agent opens follows Off and Ask first; one you open asks you its budget. A yes or no here needs no password.</p>
     ${boxAsksHtml()}`;
 }
 
@@ -764,14 +813,45 @@ function connectorsHtml() {
 
 function cardHtml(c, i) {
   const steps = flowOf(c).filter(([id]) => isOn(c, id));
+  const run = runNowHtml(c);
   return `<div class="flow-card" data-index="${i}" data-on="${c.enabled}">
     <button class="open" data-action="edit-connector">
       <span class="chain">${steps.map(([id]) => iconHtml(STEPS[id])).join("<i></i>")}</span>
       <b>${esc(c.name)}</b>
       <span class="hint">${esc(sentence(c))}</span>
     </button>
+    ${run.button}
     ${switchHtml('data-toggle="enabled"', c.enabled)}
+    ${run.outcome}
   </div>`;
+}
+
+/** Each workflow's last Run now, by id: `{ state: "running" }`, the `RunStarted` it answered
+ * with `state: "started"`, or `{ state: "refused", error }`. Kept while the app runs. */
+const runNow = new Map();
+
+/** Why a workflow has no session of its own to run now, or null when it has one. */
+function runNowBlocked(c) {
+  if (c.trigger?.kind === "slack-message") return "It sorts Slack messages into other workflows and has no session of its own.";
+  if (c.trigger?.kind === "called") return "It answers only the Slack threads another workflow hands it.";
+  if (!TRIGGERS[c.trigger?.kind]) return "Repair its trigger first.";
+  return null;
+}
+
+/** The card's Run now button and the line under it with how the last run went. */
+function runNowHtml(c) {
+  const blocked = runNowBlocked(c);
+  const last = runNow.get(c.id);
+  if (blocked) return { button: `<button class="secondary run-now" disabled title="${esc(blocked)}">Run now</button>`, outcome: "" };
+  if (last?.state === "running") return { button: `<button class="secondary run-now" disabled aria-busy="true">Starting…</button>`, outcome: "" };
+  const button = `<button class="secondary run-now" data-action="run-now" title="Start this workflow's session now, without waiting for its trigger">Run now</button>`;
+  if (last?.state === "started") {
+    const where = last.machine_name || machineName(last.machine);
+    const open = `<button class="link" data-action="run-now-open" data-machine="${esc(last.machine)}" data-tab="${esc(last.tab)}">Open session</button>`;
+    return { button, outcome: `<p class="run-now-outcome started" role="status">Started on ${esc(where)}. ${open}</p>` };
+  }
+  if (last?.state === "refused") return { button, outcome: `<p class="run-now-outcome refused" role="alert">Didn't start: ${esc(last.error)}</p>` };
+  return { button, outcome: "" };
 }
 
 const who = (c) => (c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude");
@@ -1490,7 +1570,7 @@ function commandPreview(c) {
 function checkedText() {
   const checked = settings.checked;
   if (!checked) return "Not checked yet. Connectors are checked every minute.";
-  const at = new Date(checked.at).toLocaleTimeString();
+  const at = new Date(checked.at).toLocaleTimeString(APP_LOCALE);
   return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Connectors are checked every minute.`;
 }
 
@@ -1669,6 +1749,25 @@ const actions = {
       document.getElementById("upstash-error").textContent = e;
     }
   },
+  async "use-for-boxes"(button) {
+    const { account: name, machine } = button.dataset;
+    boxLogins.minting = { account: name, machine };
+    redrawBoxLogins();
+    try {
+      settings.box_claude_tokens = await connectorCall("mint_box_claude_token", { machine, account: name });
+      boxLogins.minting = null;
+      showPage("integrations");
+    } catch (e) {
+      boxLogins.minting = null;
+      redrawBoxLogins();
+      const line = document.getElementById("upstash-error");
+      if (line) line.textContent = e;
+    }
+  },
+  async "cancel-box-login"(button) {
+    const { account: name, machine } = button.dataset;
+    await connectorCall("cancel_box_claude_token", { machine, account: name }).catch(console.warn);
+  },
   async "answer-box"(button) {
     const id = button.dataset.id;
     const allow = button.dataset.allow === "yes";
@@ -1788,6 +1887,24 @@ const actions = {
     if (graphApi()) draft.graph = graphApi().startingGraph(draft);
     edit(-1, draft);
     showStep(draft.graph.nodes[0]?.id, true);
+  },
+  async "run-now"(button) {
+    const c = settings.connectors[Number(button.closest(".flow-card").dataset.index)];
+    if (!c || runNow.get(c.id)?.state === "running") return;
+    runNow.set(c.id, { state: "running" });
+    redraw();
+    try {
+      runNow.set(c.id, { state: "started", ...(await connectorCall("run_workflow", { id: c.id })) });
+    } catch (err) {
+      runNow.set(c.id, { state: "refused", error: String(err?.message ?? err) });
+    }
+    if (settingsOpen() && page === "connectors" && view.name === "list") redraw();
+  },
+  "run-now-open"(button) {
+    revealTab(button.dataset.machine, button.dataset.tab).catch((err) => {
+      const line = button.closest(".run-now-outcome");
+      if (line) line.textContent = `Couldn't open that session: ${err?.message ?? err}`;
+    });
   },
   "edit-connector"(button) {
     edit(Number(button.closest(".flow-card").dataset.index));
@@ -2162,7 +2279,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
