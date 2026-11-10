@@ -217,7 +217,7 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
         stats: [...document.querySelectorAll(".thread-row .stats")].map((e) => e.textContent),
         head: document.querySelector(".project-head .state.cost")?.textContent,
       }));
-      console.log(name, JSON.stringify(seen));
+      console.log(name, JSON.stringify(seen), JSON.stringify(await p.evaluate(() => ({ sidebar: document.body.dataset.sidebar, rows: document.querySelectorAll(".thread-row").length, tabs: tabs.length, roles: tabs.map((t) => t.view.role) }))));
       check(seen.stats.includes("1h 12m · $1.56 · 2 workers"), `${name}: the Captain card says ${JSON.stringify(seen.stats)}`);
       check(seen.head === "$1.56 · 2 workers", `${name}: the project head says ${seen.head}`);
       await p.screenshot(path.join(SCREENS, `real-captain-${name}.png`));
