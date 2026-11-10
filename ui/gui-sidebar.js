@@ -399,6 +399,7 @@ async function openGlobalChat() {
     const tab = open ?? await revealTab(host, await callOn(host, { cmd: "open_global_orchestrator" }));
     activate(tab);
   } catch (e) {
+    console.error(e);
     tell(`Couldn't open the orchestrator: ${esc(e)}`, 6000);
   }
 }
@@ -1801,6 +1802,7 @@ async function openOrchestrator(machine, path) {
     const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path }));
     if (!tab.view.running) await startTab(tab);
   } catch (e) {
+    console.error(e);
     tell(`Couldn't open the Captain: ${esc(e)}`, 6000);
   }
 }

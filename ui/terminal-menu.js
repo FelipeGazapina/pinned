@@ -32,7 +32,7 @@ function readMenu(lines, previewRow) {
   let end = lines.length - 1;
   while (end >= 0 && (!lines[end].trim() || hint(end) || hintTail(end)) && !CURSOR.test(lines[end])) end--;
   let cursor = end;
-  while (cursor >= Math.max(0, end - 16) && !CURSOR.test(lines[cursor])) cursor--;
+  while (cursor >= Math.max(0, end - 16) && !CHOSEN.test(lines[cursor])) cursor--;
   if (cursor < Math.max(0, end - 16)) return null;
   const at = lines[cursor].search(CURSOR) + 2;
   const option = (l) => l.length > at && !l.slice(0, at).replace(CURSOR, "").trim() && l[at] !== " ";
@@ -52,7 +52,7 @@ function readMenu(lines, previewRow) {
       const unnumberedLast = preview && !number && rule(lines[k - 1]);
       if (numbered && !unnumberedLast && Number(number?.[1]) !== options.length + 1) return null;
       const head = text.slice(number?.[0].length ?? 0);
-      options.push({ n: options.length + 1, label: head, head, more: "", chosen: CURSOR.test(lines[k]) });
+      options.push({ n: options.length + 1, label: head, head, more: "", chosen: CHOSEN.test(lines[k]) });
     } else if (continued(lines[k]) && options.length) {
       options.at(-1).label += ` ${lines[k].trim()}`;
       options.at(-1).more = `${options.at(-1).more} ${lines[k].trim()}`.trim();
@@ -71,6 +71,9 @@ function readMenu(lines, previewRow) {
   return { question, box, options, amend: /Tab to amend/.test(hints) };
 }
 const CURSOR = /[❯›](?= )/;
+/** The line claude marks as the chosen option: ❯ or › first on it, then the option. The same
+ * signs inside a sentence, as in "Settings › Archive", are text. */
+const CHOSEN = /^\s*[❯›] \S/;
 
 const PREVIEW_ROW = /^[\s❯›]*1\.\s.*\S\s+┌─+┐\s*$/;
 
