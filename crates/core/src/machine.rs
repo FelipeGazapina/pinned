@@ -2543,7 +2543,7 @@ impl Machine {
         }
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
-            _ => truncate(&self.last_reply(captain).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
+            _ => truncate(&self.reply_of(captain, event).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
         };
         // Up to the hub it may wait a minute, which the hook that ended the turn must not.
         let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
@@ -2968,9 +2968,16 @@ impl Machine {
         thread::last_reply(&self.transcript(tab).ok()?).ok()?
     }
 
+    /// What the tab's turn that `event` ends said last: the reply its Stop hook handed over, else the
+    /// transcript's. Claude Code runs that hook before it writes the turn's last message to the
+    /// transcript, so the file alone can still end on the turn's prompt.
+    fn reply_of(&self, tab: &str, event: &AgentEvent) -> Option<String> {
+        event.reply.clone().or_else(|| self.last_reply(tab))
+    }
+
     /// Keeps what the tab's finished turn asked the user, which makes it wait on the user.
-    fn note_question(&self, tab: &str) {
-        let question = self.last_reply(tab).as_deref().and_then(global::question_in);
+    fn note_question(&self, tab: &str, said: Option<String>) {
+        let question = said.as_deref().and_then(global::question_in);
         let _ = self.tab(tab, |t| t.question = question);
     }
 
@@ -2984,7 +2991,7 @@ impl Machine {
         }
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
-            AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.last_reply(worker).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
+            AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.reply_of(worker, event).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
             // Claude says it waits for input a while after every finished turn too.
             AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
             AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),
@@ -3365,7 +3372,7 @@ impl Machine {
         let ids: Vec<TabId> = restored.into_iter().map(|(id, _)| id).collect();
         // A turn that asked before the restart still waits on the user.
         for id in ids.iter().filter(|id| self.tab(id, |t| !t.interrupted).unwrap_or(false)) {
-            self.note_question(id);
+            self.note_question(id, self.last_reply(id));
         }
         self.emit_tabs();
         // A resumed session reports no new id, so its transcript is read here.
@@ -4192,7 +4199,7 @@ impl Machine {
         }
         // The meter reads a working task only; this reads the turn that just ended before it settles.
         self.meter_workers();
-        let parent = self.delegates.settle_thread(&task, self.last_reply(tab), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        let parent = self.delegates.settle_thread(&task, self.reply_of(tab, event), error, self.thread_steps(tab), self.launch.path_env.as_deref());
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -4238,7 +4245,7 @@ impl Machine {
             .collect()
         };
         for (tab, project) in ended {
-            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
             if !self.settle_thread_task(&tab, &event) {
                 self.report_worker(&tab, &project, &event, Some(AgentStatus::Working));
             }
@@ -4464,7 +4471,7 @@ impl Machine {
             if held {
                 let _ = self.tab(tab, |t| t.status = Some(AgentStatus::Working));
             } else if event.status == AgentStatus::Done {
-                self.note_question(tab);
+                self.note_question(tab, self.reply_of(tab, &event));
             }
             match role {
                 Some((Role::Worker, _)) if held => {}
@@ -4485,7 +4492,7 @@ impl Machine {
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
-        self.emit(Event::Agent { event });
+        self.emit(Event::Agent { event: AgentEvent { reply: None, ..event } });
     }
 
     /// Runs `f` on the tab `id`, failing once the tab is closed.
@@ -6270,7 +6277,7 @@ pub(crate) mod tests {
             prompt: None,
             snapshot: None,
             permission_mode: None,
-            hook_feedback: false,
+            hook_feedback: false, reply: None,
         };
         m.record_event(event(AgentStatus::NeedsInput, Some("Fix the build"), Some("Claude needs your permission to use Bash")));
         let view = m.view(&tab).unwrap();
@@ -6291,7 +6298,7 @@ pub(crate) mod tests {
         git(&dir, &["branch", "other"]);
         let m = machine();
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
@@ -6426,7 +6433,7 @@ pub(crate) mod tests {
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
         let tab = m.open_tab(None, false).unwrap();
-        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
         m.record_status(&tab, &failed(Some(1792400000)));
         m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
         assert!(m.view(&tab).unwrap().held);
@@ -6766,7 +6773,7 @@ pub(crate) mod tests {
             prompt: Some("fix the bug".into()),
             snapshot: None,
             permission_mode: None,
-            hook_feedback: false,
+            hook_feedback: false, reply: None,
         };
         m.record_event(working.clone());
         m.record_event(AgentEvent { status: AgentStatus::Done, prompt: None, snapshot: None, ..working });
@@ -8054,7 +8061,7 @@ exec sleep 30
             prompt: None,
             snapshot: None,
             permission_mode: None,
-            hook_feedback: false,
+            hook_feedback: false, reply: None,
         }
     }
 
@@ -8395,7 +8402,7 @@ while True:
     }
 
     fn hook(tab: &str, status: AgentStatus) -> AgentEvent {
-        AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false }
+        AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
     }
 
     /// A Capitão whose session is a pty running cat in raw mode, which writes what it is typed
@@ -8938,6 +8945,82 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The Stop hook's payload for session s1, as Claude Code 2.1.322 sends it, with the turn's last
+    /// message in `last_assistant_message`.
+    #[cfg(unix)]
+    fn stop_hook(tab: &str, transcript: &Path, last: &str) -> AgentEvent {
+        let payload = json!({ "session_id": "s1", "transcript_path": transcript, "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": last, "background_tasks": [] });
+        AgentEvent { tab: Some(tab.into()), ..hooks::event_from(Some("done"), &payload.to_string()).unwrap() }
+    }
+
+    /// The lines of a real Capitão's turn (client-apps, 2026-11-10) up to where Claude Code runs the
+    /// Stop hook: the final text is not in the file yet. Only the texts are paraphrased.
+    #[cfg(unix)]
+    fn turn_before_its_last_text() -> Vec<Value> {
+        let at = "2026-11-10T11:00:00.000Z";
+        let call = |id: &str, name: &str| json!({ "type": "assistant", "timestamp": at, "isSidechain": false, "message": { "content": [{ "type": "tool_use", "id": id, "name": name, "input": {} }] } });
+        let result = |id: &str| json!({ "type": "user", "timestamp": at, "isSidechain": false, "message": { "content": [{ "type": "tool_result", "tool_use_id": id, "content": "ok" }] } });
+        let thinking = json!({ "type": "assistant", "timestamp": at, "isSidechain": false, "message": { "content": [{ "type": "thinking", "thinking": "", "signature": "sig" }] } });
+        let metadata = || [json!({ "type": "last-prompt" }), json!({ "type": "ai-title" }), json!({ "type": "mode" }), json!({ "type": "permission-mode" }), json!({ "type": "session-owner" }), json!({ "type": "atis-latch" }), json!({ "type": "pr-link", "prNumber": 661, "prUrl": "https://github.com/acme/app/pull/661", "prRepository": "acme/app", "timestamp": at })];
+        let mut lines = vec![
+            json!({ "type": "user", "timestamp": at, "isSidechain": false, "turnPosition": { "promptIndex": 21, "turnIndex": 23 }, "message": { "content": "\n\n<pasted_content id=\"0464\">\n[Orchestrator] New task from Felipe: route the Slack messages.\n</pasted_content>" } }),
+            json!({ "type": "attachment", "timestamp": at, "isSidechain": false, "attachment": { "type": "hook_additional_context", "content": ["memory"] } }),
+        ];
+        lines.extend(metadata());
+        lines.extend([thinking.clone(), call("t1", "ToolSearch"), result("t1")]);
+        lines.extend(metadata());
+        lines.extend([call("t2", "mcp__pinned__delegate_task"), call("t3", "mcp__pinned__delegate_task"), result("t2"), result("t3")]);
+        lines.extend(metadata());
+        lines.push(thinking);
+        lines
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitaos_report_carries_the_reply_its_stop_hook_hands_over_before_the_transcript_has_it() {
+        let dir = temp("report-hook-reply");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+
+        assert_eq!(enqueue(&m, &path, "r-1", "r-1").unwrap()["outcome"], "entregue");
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        append_transcript(&dir, "s1", &turn_before_its_last_text());
+        let transcript = dir.join("config/accounts/work/projects/-site/s1.jsonl");
+        m.record_event(stop_hook(&capitao, &transcript, "Recebi a tarefa do workflow. Dois workers já rodam."));
+
+        wait_for("the report", || read_pty(&inbox).contains("\x1b[201~"));
+        let report = read_pty(&inbox);
+        let report = report.split("\x1b[200~").nth(1).unwrap().split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r");
+        assert_eq!(report, "Recebi a tarefa do workflow. Dois workers já rodam.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_report_carries_the_reply_its_stop_hook_hands_over_before_the_transcript_has_it() {
+        let (m, root, worker, transcript, typed) = worker_reporting_home("report-hook-reply-worker");
+        m.record_event(s1_hook(&worker, "working", &transcript, Some("Board check\n\nCompare the screens.")));
+        append(&transcript, &turn_before_its_last_text());
+        m.record_event(stop_hook(&worker, &transcript, "Todas as telas batem com os boards."));
+        let expected = finished(&worker, "Todas as telas batem com os boards.");
+        wait_for("the report", || typed().len() >= expected.len());
+        assert_eq!(typed(), expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
@@ -9051,7 +9134,7 @@ while True:
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
-        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false });
+        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -9694,7 +9777,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(notice("tab-gone-9", Some("s-1"), "c-2"), Ok(json!(true)), "a restart's new tab id is found by the session");
         assert_eq!(m.view(&tab).unwrap().queued, 2);
         assert_eq!(notice("tab-gone-9", Some("s-other"), "c-3"), Ok(json!(false)));
-        let done = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: Some("s-1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true };
+        let done = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: Some("s-1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true, reply: None };
         let (context, _) = m.take_notices(&done);
         assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.\n[pinned] The user approved your remove_machine request (c-2): done.");
     }
@@ -10206,7 +10289,7 @@ Have another model review a risky change before it goes ahead.";
             m.call(Call::MemorySave { path: path.clone(), title: title.into(), text: text.into(), kind: None, id: None }).unwrap();
         }
         let prompt = |tab: &str, status, prompt: &str| {
-            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None, permission_mode: None, hook_feedback: false };
+            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
             ask(&sock, &serde_json::to_string(&Message::Agent(event)).unwrap())
         };
         assert_eq!(
@@ -10341,7 +10424,7 @@ Have another model review a risky change before it goes ahead.";
             prompt: None,
             snapshot: None,
             permission_mode: None,
-            hook_feedback: false,
+            hook_feedback: false, reply: None,
         });
         m.close_tab(&_first);
         let finished = {
@@ -10550,7 +10633,7 @@ Have another model review a risky change before it goes ahead.";
         let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into()));
         let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into()));
         m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
-        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
+        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
 
         m.record_event(event(&worker, AgentStatus::Working, None));
         m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));
