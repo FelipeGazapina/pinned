@@ -5,6 +5,7 @@
 //! pass after a restart finishes whatever the last hub left halfway.
 
 use crate::hub::{Account, Hub, RUN_WAIT};
+use pinned_core::delegate::BOX_CONNECT_WAIT;
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
@@ -99,7 +100,7 @@ impl Default for Policy {
     fn default() -> Policy {
         let minutes = |m: u64| Duration::from_secs(m * 60);
         Policy {
-            boot_wait: minutes(6),
+            boot_wait: BOX_CONNECT_WAIT,
             idle: minutes(10),
             done: minutes(2),
             exited: minutes(5),
@@ -215,6 +216,25 @@ pub enum End {
     Disconnected,
     Failed(String),
 }
+
+/// Why a box ended, as the task it ran hears it.
+fn ended_because(why: &End) -> String {
+    match why {
+        End::TabClosed => "its worker's thread was closed".into(),
+        End::Exited => "its worker exited".into(),
+        End::Idle => "its worker sat idle".into(),
+        End::Done => "its work was done".into(),
+        End::Offline => "it went offline".into(),
+        End::Expired => "it ran out of time or budget".into(),
+        End::Removed => "someone removed its machine".into(),
+        End::Vanished => "it was deleted outside pinned".into(),
+        End::Disconnected => "Upstash Box was disconnected".into(),
+        End::Failed(e) => e.clone(),
+    }
+}
+
+/// How long the hub waits on the delegating machine to take a box's end.
+const ORIGIN_WAIT: Duration = Duration::from_secs(30);
 
 const ENDS: [(End, &str); 9] = [
     (End::TabClosed, "tab-closed"),
@@ -793,13 +813,6 @@ impl Boxes {
             let Some(_driving) = hub.boxes.drive_guard(&booting.id) else { return };
             if let Err(e) = hub.boxes.drive(&hub, &account, booting.clone(), &booting.spec, &keys).await {
                 eprintln!("pinned-server: could not boot box {} for {}: {e}", booting.id, booting.connector);
-                if let BoxWork::Delegate { origin, .. } = &booting.work {
-                    let end = RemoteEnd { state: "failed".into(), summary: None, error: Some(format!("Upstash Box: {e}")) };
-                    let ended = Call::RemoteEnded { from: booting.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
-                    if let Err(e) = hub.call_machine(&account, &origin.machine, ended, RUN_WAIT).await {
-                        eprintln!("pinned-server: could not tell {} its box failed: {}", origin.machine, String::from(e));
-                    }
-                }
             }
         });
         Ok(row)
@@ -1014,7 +1027,7 @@ impl Boxes {
             let left = self.policy.boot_wait.saturating_sub(row.age).max(self.policy.boot_wait / 2);
             match tokio::time::timeout(left, self.boot(hub, account, &row, keys)).await {
                 Ok(booted) => booted,
-                Err(_) => Err(format!("the box did not boot within {} s", left.as_secs())),
+                Err(_) => Err(format!("the box did not connect within {}", pinned_core::delegate::wait_span(self.policy.boot_wait))),
             }
         };
         let booted = match booted {
@@ -1034,6 +1047,7 @@ impl Boxes {
                 if hub.db.set_box_phase(&row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
+                    self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
                     self.record_agent_box(hub, account, &row).await;
                     if let Err(e) = self.end(hub, account, &row.remains(), Some(keys)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
@@ -1189,15 +1203,32 @@ impl Boxes {
         Ok(())
     }
 
+    /// A worker box ended before its task did: the machine whose tab delegated the task hears it
+    /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
+    async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
+        let BoxWork::Delegate { origin, .. } = &row.work else { return };
+        let error = match why {
+            End::Done => return,
+            End::Failed(e) => format!("Upstash Box: {e}"),
+            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
+        };
+        let end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error) };
+        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
+        if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
+            eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+        }
+    }
+
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
     async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
-            let ending = Phase::Ending(why);
+            let ending = Phase::Ending(why.clone());
             if !hub.db.set_box_phase(&row.id, &row.phase, &ending).await? {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
+            self.tell_origin(hub, account, &row, &why).await;
         }
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), keys).await?;

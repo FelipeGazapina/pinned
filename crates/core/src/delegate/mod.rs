@@ -20,6 +20,27 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 pub const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
+/// How long a worker box may take to boot and connect to the hub. Past it, its task fails.
+pub const BOX_CONNECT_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How long a task on another machine may run past its time limit before this machine ends it
+/// itself. The machine that runs it holds it to the limit and reports its end, unless it is gone.
+pub const REMOTE_GRACE: Duration = Duration::from_secs(5 * 60);
+/// The hub's answer about a worker box whose node has not connected yet.
+pub const BOX_BOOTING: &str = "the box is still booting";
+
+/// Whether the hub answered that the account has no such machine any more: a box that ended, or
+/// a machine someone removed.
+pub fn machine_gone(error: &str) -> bool {
+    error.starts_with("this account has no machine ")
+}
+
+/// "5 min" for a whole number of minutes, else seconds.
+pub fn wait_span(wait: Duration) -> String {
+    match wait.as_secs() {
+        secs if secs >= 60 && secs % 60 == 0 => format!("{} min", secs / 60),
+        secs => format!("{secs} s"),
+    }
+}
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const STDERR_CLOSE_WAIT: Duration = Duration::from_secs(1);

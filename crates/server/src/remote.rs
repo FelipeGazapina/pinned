@@ -69,7 +69,7 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
     let answer = match (&worker_box, account.is_online(machine)) {
-        (Some(_), false) => Err("the box is still booting".to_owned()),
+        (Some(_), false) => Err(pinned_core::delegate::BOX_BOOTING.to_owned()),
         _ => call(hub, account, machine, asked, LOOK_WAIT).await,
     };
     match (worker_box, cancel) {

@@ -4874,6 +4874,92 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     }
 }
 
+/// mac, paired to ana's account with a Captain on the `site` checkout, which may delegate to a box.
+fn mac_with_captain(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, String, String) {
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let creds = pair(&hub.url, &mut ana.client, "mac", dir);
+    let mac_id = creds.machine_id.clone();
+    let mac = Node::start(dir, creds);
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&dir.join("site"), SITE);
+    let site = mac.machine.open_project(dir.join("site")).display().to_string();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    (mac, mac_id, captain)
+}
+
+#[test]
+fn a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it() {
+    let hub = TestHub::start_with_boxes("rbox_end", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-end-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let machine = ana.box_machine();
+
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: the box ended before its task did: someone removed its machine")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot() {
+    let mut hub = TestHub::start_with_boxes("rbox_boot", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-boot-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the bootstrap to start", || hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")));
+
+    // The box hangs on the restarted hub's boot too.
+    hub.boxes.state.lock().unwrap().hanging = true;
+    hub.restart();
+    wait_for("the task to fail on mac", || task_status(&mac_dir, &captain, &task)["workState"] == "failed");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["error"].as_str(), Some("Upstash Box: the box did not connect within 8 s"), "{status}");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+}
+
+#[test]
+fn task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account() {
+    let hub = TestHub::start_with_boxes("remote_gone", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("remote-gone-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let _mini = RawMachine::start(&hub.url, &mini.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": mini.machine_id })).unwrap();
+    let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": task, "reason": "not now" })).unwrap();
+    assert_eq!(
+        (cancel["workState"].as_str(), cancel["note"].as_str()),
+        (Some("cancelled"), Some("mini is gone from this account, so pinned cancelled the task here")),
+        "{cancel}"
+    );
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "cancelled");
+}
+
 #[test]
 fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection() {
     let hub = TestHub::start_with_boxes("box_captain", Signup::Open, fast());

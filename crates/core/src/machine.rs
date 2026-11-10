@@ -52,6 +52,9 @@ const MCP_WAIT: Duration = Duration::from_millis(500);
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
+/// How often this machine asks after each task it delegated elsewhere on its own, so one whose
+/// machine is gone, whose box never connected or whose end got lost ends here too.
+const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -523,6 +526,8 @@ pub struct Machine {
     builtin_claude_config: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
+    /// A thread is asking after the tasks this machine delegated elsewhere.
+    checking_remotes: Arc<AtomicBool>,
     sending_records: AtomicBool,
     /// After the hub refused records, when to offer them again.
     records_retry: Mutex<Option<Instant>>,
@@ -533,8 +538,9 @@ pub struct Machine {
     usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
-    /// Ends of tasks run here for another machine's tabs that the hub could not pass on yet.
-    remote_ends: Mutex<Vec<(Instant, HubCall)>>,
+    /// When the end of each task run here for another machine's tab was last sent, by task, so
+    /// an end the hub could not pass on is sent again at most every `REMOTE_LOOK`.
+    remote_ends: Mutex<HashMap<String, Instant>>,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
@@ -709,6 +715,7 @@ impl Machine {
             builtin_claude_config,
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
+            checking_remotes: Arc::default(),
             sending_records: AtomicBool::new(false),
             records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
@@ -3354,6 +3361,10 @@ impl Machine {
         *self.hub.lock().unwrap() = Some(hub);
         *self.mcp_loaded.lock().unwrap() = None;
         self.mcp_waited.store(false, Ordering::SeqCst);
+        // Ends kept from before a restart go out once there is a hub to take them.
+        if !self.delegates.remote_ends().is_empty() {
+            self.arm_delegate_pass();
+        }
     }
 
     /// The account's enabled MCP servers: the hub's answer within `MCP_WAIT`, else the ones it
@@ -3893,15 +3904,29 @@ impl Machine {
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let remote = self.delegates.get(id).filter(|t| !t.state.terminal()).and_then(|t| t.remote);
+        let mut note = None;
         if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
             self.delegates.status(&caller, id)?;
             if !remote.machine.is_empty() {
                 let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
-                let answer = self.call_hub(cancel).map_err(|e| format!("{} did not take the cancel: {}", remote.name, needs_update(e)))?;
-                self.settle_from(tab, id, &remote, &answer);
+                match self.call_hub(cancel) {
+                    Ok(answer) => self.settle_from(tab, id, &remote, &answer),
+                    // The task ends here whatever the other side says, or it would hang here for good.
+                    Err(e) => {
+                        eprintln!("pinned: {} did not take the cancel of {id}: {e}", remote.name);
+                        note = Some(match crate::delegate::machine_gone(&e) {
+                            true => format!("{} is gone from this account, so pinned cancelled the task here", remote.name),
+                            false => format!("{} did not take the cancel ({}), so pinned cancelled the task here only: its worker there may still run", remote.name, needs_update(e)),
+                        });
+                    }
+                }
             }
         }
-        self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+        let mut body = self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref())?;
+        if let Some(note) = note {
+            body["note"] = json!(note);
+        }
+        Ok(body.to_string())
     }
 
     /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
@@ -4013,6 +4038,62 @@ impl Machine {
         true
     }
 
+    /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
+    /// whose end got lost ends as its machine answers; one whose machine left the account, or
+    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here.
+    fn check_remotes(&self, now: Instant) {
+        use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
+        for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
+            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.clone(), task: id.clone(), cancel: None };
+            let failed = match self.call_hub(asked) {
+                Ok(answer) => {
+                    self.settle_from(&tab, &id, &remote, &answer);
+                    continue;
+                }
+                Err(e) if machine_gone(&e) => format!("{} is gone from this account (a box that ended, or a machine someone removed), so its worker can't finish", remote.name),
+                Err(e) if e == BOX_BOOTING && ran >= BOX_CONNECT_WAIT => {
+                    let failed = format!("the box did not connect within {}", wait_span(BOX_CONNECT_WAIT));
+                    self.cancel_remote(&tab, &id, &remote, &failed);
+                    failed
+                }
+                Err(_) => continue,
+            };
+            self.delegates.fail(&id, failed, self.launch.path_env.as_deref());
+            self.maybe_deliver(&tab);
+            self.emit_tabs();
+        }
+    }
+
+    /// Tells the machine that runs a task this machine ended that it ended, best-effort.
+    fn cancel_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, reason: &str) {
+        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+        if let Err(e) = self.call_hub(cancel) {
+            eprintln!("pinned: could not tell {} that {id} ended here: {e}", remote.name);
+        }
+    }
+
+    /// `check_remotes` and the cancels `stopped` needs on a thread of their own, since each asks
+    /// the hub and the hub may wait on another machine.
+    fn look_after_remotes(&self, stopped: Vec<(String, String, crate::delegate::RemoteTarget)>) {
+        let Some(me) = self.me.upgrade() else { return };
+        if !stopped.is_empty() {
+            let me = me.clone();
+            std::thread::spawn(move || {
+                for (tab, id, remote) in stopped {
+                    me.cancel_remote(&tab, &id, &remote, "it ran past its time limit");
+                }
+            });
+        }
+        if self.checking_remotes.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let checking = self.checking_remotes.clone();
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.check_remotes(Instant::now())));
+            checking.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// `Call::RemoteTask`: the status of the task started here for `task` of `tab` on `origin`, or
     /// its state once cancelled.
     fn remote_task(&self, origin: &str, tab: &str, task: &str, cancel: Option<&str>) -> Result<Value, String> {
@@ -4030,22 +4111,32 @@ impl Machine {
     }
 
     /// Sends the end of each task that a tab on another machine delegated here back through the
-    /// hub. An end the hub could not pass on waits for the next pass, at most every `REMOTE_LOOK`.
+    /// hub. Each stays undelivered on disk until the hub passed it on, and an end that did not get
+    /// through is sent again at most every `REMOTE_LOOK`.
     fn send_remote_ends(&self, now: Instant) {
-        let fresh: Vec<_> = self.delegates.claim_remote_ends().into_iter().map(|(_, machine, tab, task, end)| HubCall::RemoteEnded { to: machine, tab, task, end }).collect();
+        let due: Vec<_> = {
+            let mut sent = self.remote_ends.lock().unwrap();
+            let ends = self.delegates.remote_ends();
+            sent.retain(|id, _| ends.iter().any(|(task, ..)| task == id));
+            ends.into_iter().filter(|(id, ..)| sent.get(id).is_none_or(|at| now.saturating_duration_since(*at) >= REMOTE_LOOK)).collect()
+        };
         // A worker box goes once its end got through, so the tasks' records go first.
-        if !fresh.is_empty() && self.hub.lock().unwrap().is_some() {
+        if !due.is_empty() && self.hub.lock().unwrap().is_some() {
             self.record_now();
         }
-        let held = std::mem::take(&mut *self.remote_ends.lock().unwrap());
-        let (again, mut waiting): (Vec<_>, Vec<_>) = held.into_iter().partition(|(at, _)| now.saturating_duration_since(*at) >= REMOTE_LOOK);
-        for call in fresh.into_iter().chain(again.into_iter().map(|(_, call)| call)) {
-            if let Err(e) = self.call_hub(call.clone()) {
-                eprintln!("pinned: could not send a delegated task's end back: {e}");
-                waiting.push((now, call));
+        for (id, machine, tab, task, end) in due {
+            self.remote_ends.lock().unwrap().insert(id.clone(), now);
+            match self.call_hub(HubCall::RemoteEnded { to: machine.clone(), tab, task, end }) {
+                Ok(taken) => {
+                    if taken != Value::Bool(true) {
+                        eprintln!("pinned: {machine} did not take the end of {id}: its task there had ended already");
+                    }
+                    self.delegates.remote_end_sent(&id);
+                    self.remote_ends.lock().unwrap().remove(&id);
+                }
+                Err(e) => eprintln!("pinned: could not send the end of {id} back to {machine}: {e}"),
             }
         }
-        self.remote_ends.lock().unwrap().extend(waiting);
     }
 
     /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
@@ -4599,7 +4690,8 @@ impl Machine {
                 continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
@@ -10383,6 +10475,157 @@ Have another model review a risky change before it goes ahead.";
         let ended = status();
         assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after 30 min, its limit")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A task `tab` delegated to `machine`, named `name`, as `delegate_elsewhere` leaves it.
+    fn delegated_elsewhere(m: &Machine, tab: &str, machine: &str, name: &str) -> String {
+        use crate::delegate::{Access, Mode, NewTask, Parent, RemoteTarget};
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(tab.into()),
+            tool: None,
+            title: "Slow suite".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()) });
+        task.id
+    }
+
+    fn state_of(m: &Machine, id: &str) -> (String, Option<String>) {
+        let task = m.delegates.get(id).unwrap();
+        (task.state.as_str().to_owned(), task.error)
+    }
+
+    #[test]
+    fn a_remote_task_past_its_limit_ends_here_when_its_machine_never_reports() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.delegates.set_limits(&id, 30_000, 60_000);
+        let begun = Instant::now();
+        assert_eq!(m.delegates.enforce_limits(begun + Duration::from_secs(61), None), vec![]);
+        assert_eq!(state_of(&m, &id).0, "working", "mini holds it to its limit and has a grace to report its end");
+        let stopped = m.delegates.enforce_limits(begun + Duration::from_secs(60) + crate::delegate::REMOTE_GRACE + Duration::from_secs(1), None);
+        assert_eq!(stopped.iter().map(|(tab, task, remote)| (tab.as_str(), task.as_str(), remote.machine.as_str())).collect::<Vec<_>>(), vec![("tab-1", id.as_str(), "m-mini")], "mini is told best-effort");
+        assert_eq!(state_of(&m, &id), ("cancelled".into(), Some("pinned stopped it after 6 min, past its limit of 1 min: mini never reported its end".into())));
+    }
+
+    #[test]
+    fn a_cancel_ends_a_remote_task_here_whatever_the_hub_answers() {
+        let m = machine();
+        let gone = delegated_elsewhere(&m, "tab-1", "m-gone", "mini");
+        let offline = delegated_elsewhere(&m, "tab-1", "m-off", "laptop");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { machine, .. } if machine == "m-gone" => Err(format!("this account has no machine {machine}")),
+            HubCall::RemoteTask { .. } => Err("laptop is offline".into()),
+            _ => Err("not this test's".into()),
+        }));
+        let cancel = |id: &str| serde_json::from_str::<Value>(&m.task_cancel(Some("tab-1".into()), None, id, "not now").unwrap()).unwrap();
+        let body = cancel(&gone);
+        assert_eq!((body["workState"].as_str(), body["note"].as_str()), (Some("cancelled"), Some("mini is gone from this account, so pinned cancelled the task here")), "{body}");
+        let body = cancel(&offline);
+        assert_eq!(
+            (body["workState"].as_str(), body["note"].as_str()),
+            (Some("cancelled"), Some("laptop did not take the cancel (laptop is offline), so pinned cancelled the task here only: its worker there may still run")),
+            "{body}"
+        );
+        assert_eq!((state_of(&m, &gone), state_of(&m, &offline)), (("cancelled".into(), Some("not now".into())), ("cancelled".into(), Some("not now".into()))));
+    }
+
+    #[test]
+    fn a_box_that_never_connects_fails_its_task_after_the_connect_window() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "Box · Slow suite");
+        let cancels = Arc::new(Mutex::new(vec![]));
+        let told = cancels.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { cancel: Some(reason), .. } => {
+                told.lock().unwrap().push(reason);
+                Ok(json!({ "workState": "cancelled" }))
+            }
+            HubCall::RemoteTask { .. } => Err(crate::delegate::BOX_BOOTING.into()),
+            _ => Err("not this test's".into()),
+        }));
+        let begun = Instant::now();
+        m.check_remotes(begun + Duration::from_secs(61));
+        assert_eq!(state_of(&m, &id).0, "working", "a box may take a few minutes to boot");
+        m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
+        assert_eq!(state_of(&m, &id), ("failed".into(), Some("the box did not connect within 5 min".into())));
+        assert_eq!(*cancels.lock().unwrap(), vec!["the box did not connect within 5 min".to_owned()], "the hub is told, so it deletes the box");
+    }
+
+    #[test]
+    fn a_remote_task_whose_machine_left_the_account_fails_on_the_next_look_and_a_lost_end_lands() {
+        let m = machine();
+        let gone = delegated_elsewhere(&m, "tab-1", "m-gone", "mini");
+        let done = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { machine, .. } if machine == "m-gone" => Err(format!("this account has no machine {machine}")),
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": "Green." })),
+            _ => Err("not this test's".into()),
+        }));
+        let now = Instant::now();
+        m.check_remotes(now);
+        assert_eq!(state_of(&m, &gone).0, "working", "asked a moment ago, at its start");
+        m.check_remotes(now + Duration::from_secs(61));
+        assert_eq!(state_of(&m, &gone), ("failed".into(), Some("mini is gone from this account (a box that ended, or a machine someone removed), so its worker can't finish".into())));
+        assert_eq!(state_of(&m, &done).0, "result_available", "an end that never arrived lands on the look");
+        assert_eq!(m.delegates.get(&done).unwrap().summary.as_deref(), Some("Green."));
+    }
+
+    #[test]
+    fn an_undelivered_remote_end_survives_a_restart_of_the_machine_that_ran_it() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent};
+        let root = temp("remote-end-restart");
+        let config = root.join("config");
+        let first = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        first.set_hub(Arc::new(|_| Err("mac is offline".into())));
+        let key = Origin::key("m-mac", "tab-1");
+        let task = first.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Slow suite".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        first.delegates.fail(&task.id, "the suite broke".into(), None);
+        first.send_remote_ends(Instant::now());
+        drop(first);
+
+        let second = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let (sent, ends) = std::sync::mpsc::channel();
+        second.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteEnded { to, tab, task, end } = call {
+                let _ = sent.send((to, tab, task, end.state, end.error));
+                return Ok(json!(true));
+            }
+            Ok(Value::Null)
+        }));
+        assert_eq!(
+            ends.recv_timeout(Duration::from_secs(10)),
+            Ok(("m-mac".into(), "tab-1".into(), "task-mac".into(), "failed".into(), Some("the suite broke".into()))),
+            "the end mac never got goes out once the restarted machine has a hub"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        drop(second);
+        let third = Machine::new(launch(), Some(config), None, |_| {});
+        assert_eq!(third.delegates.remote_ends(), vec![], "an end the hub took is not sent again");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
