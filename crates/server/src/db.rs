@@ -735,6 +735,17 @@ impl Db {
         Ok(row.map(|r| r.get(0)))
     }
 
+    /// The row `subject` has for `connector`, whatever phase it is in.
+    pub async fn box_row_for(&self, account: Uuid, connector: &str, subject: &Subject) -> Result<Option<BoxRow>, String> {
+        let subject = serde_json::to_value(subject).unwrap();
+        let row = self
+            .client().await?
+            .query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3"), &[&account, &connector, &subject])
+            .await
+            .map_err(err)?;
+        row.as_ref().map(|r| readable(box_row(r))).transpose()
+    }
+
     pub async fn box_exists(&self, id: &str) -> Result<bool, String> {
         let row = self.client().await?.query_one("select exists (select 1 from boxes where id = $1)", &[&id]).await.map_err(err)?;
         Ok(row.get(0))
@@ -1064,11 +1075,22 @@ impl Db {
         row.map(|r| serde_json::from_value(r.get(0)).map_err(|e| format!("task {id} has an unreadable record: {e}"))).transpose()
     }
 
-    /// The account's task records that ended at `since` (unix ms) or later. An unreadable one is skipped.
-    pub async fn task_records(&self, account: Uuid, since: u64) -> Result<Vec<TaskRecord>, String> {
+    /// The account's task records that ended at `since` (unix ms) or later, and how many stored
+    /// rows did not read as one. Those are left out of the records and logged once.
+    pub async fn task_records(&self, account: Uuid, since: u64) -> Result<(Vec<TaskRecord>, u32), String> {
         let since = i64::try_from(since).unwrap_or(i64::MAX);
-        let rows = self.client().await?.query("select record from delegation_tasks where account = $1 and ended >= $2", &[&account, &since]).await.map_err(err)?;
-        Ok(rows.iter().filter_map(|r| serde_json::from_value(r.get(0)).ok()).collect())
+        let rows = self.client().await?.query("select id, record from delegation_tasks where account = $1 and ended >= $2", &[&account, &since]).await.map_err(err)?;
+        let (mut records, mut unreadable) = (Vec::with_capacity(rows.len()), vec![]);
+        for row in &rows {
+            match serde_json::from_value::<TaskRecord>(row.get(1)) {
+                Ok(record) => records.push(record),
+                Err(e) => unreadable.push((row.get::<_, String>(0), e.to_string())),
+            }
+        }
+        if let Some((id, why)) = unreadable.first() {
+            eprintln!("pinned-server: {} of account {account}'s stored task records did not read, so delegation_stats leaves them out (first: {id}: {why})", unreadable.len());
+        }
+        Ok((records, u32::try_from(unreadable.len()).unwrap_or(u32::MAX)))
     }
 
     /// The box time already billed to the other tasks of `machine`, in milliseconds.

@@ -52,6 +52,9 @@ const MCP_WAIT: Duration = Duration::from_millis(500);
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
+/// How long a start the hub did not answer waits before it asks again, when the hub was not
+/// there to answer (a timeout already waited).
+const START_RETRY: Duration = Duration::from_secs(5);
 /// How often this machine asks after each task it delegated elsewhere on its own, so one whose
 /// machine is gone, whose box never connected or whose end got lost ends here too.
 const REMOTE_CHECK: Duration = Duration::from_secs(60);
@@ -3987,14 +3990,16 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
-        let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
-        match self.call_hub(asked) {
+        let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
+        let begun = Instant::now();
+        match self.call_hub(asked.clone()) {
             Ok(answer) => {
-                let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
-                let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
-                let tab = answer["tabId"].as_str().map(str::to_owned);
-                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
-                self.arm_delegate_pass();
+                self.remote_answered(&task.id, &answer);
+                self.remote_started(&task.id)
+            }
+            // The hub may still be starting it: a failed task here would let a retry start a second one.
+            Err(error) if crate::link::is_unanswered(&error) => {
+                self.finish_start(tab, task.id.clone(), asked, begun);
                 self.remote_started(&task.id)
             }
             Err(error) => {
@@ -4003,6 +4008,54 @@ impl Machine {
                 Err(error)
             }
         }
+    }
+
+    /// Notes where the hub started the worker of remote task `id`.
+    fn remote_answered(&self, id: &str, answer: &Value) {
+        let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
+        let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
+        let tab = answer["tabId"].as_str().map(str::to_owned);
+        self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+        self.arm_delegate_pass();
+    }
+
+    /// A start the hub did not answer stays a starting task. A thread asks again, since the hub
+    /// answers the same start with the worker or box it already has, until it answers or
+    /// `BOX_CONNECT_WAIT` has passed since `begun`, which fails the task.
+    fn finish_start(&self, tab: String, id: String, asked: HubCall, begun: Instant) {
+        use crate::delegate::{wait_span, BOX_CONNECT_WAIT};
+        let Some(me) = self.me.upgrade() else { return };
+        std::thread::spawn(move || {
+            let failed = loop {
+                if me.delegates.get(&id).is_none_or(|task| task.state.terminal()) {
+                    return;
+                }
+                if begun.elapsed() >= BOX_CONNECT_WAIT {
+                    break format!("the hub did not finish starting it within {}", wait_span(BOX_CONNECT_WAIT));
+                }
+                match me.call_hub(asked.clone()) {
+                    Ok(answer) => {
+                        if me.delegates.get(&id).is_none_or(|task| task.state.terminal()) {
+                            let remote = crate::delegate::RemoteTarget { machine: answer["machine"].as_str().unwrap_or_default().to_owned(), name: String::new(), tab: None, looked: None };
+                            me.cancel_remote(&tab, &id, &remote, "it was cancelled while it started");
+                        } else {
+                            me.remote_answered(&id, &answer);
+                            me.emit_tabs();
+                        }
+                        return;
+                    }
+                    Err(e) if crate::link::is_unanswered(&e) => {
+                        if e != crate::link::HUB_TIMEOUT {
+                            std::thread::sleep(START_RETRY);
+                        }
+                    }
+                    Err(e) => break needs_update(e),
+                }
+            };
+            me.delegates.fail(&id, failed, me.launch.path_env.as_deref());
+            me.maybe_deliver(&tab);
+            me.emit_tabs();
+        });
     }
 
     fn remote_started(&self, id: &str) -> Result<String, String> {
@@ -4029,13 +4082,18 @@ impl Machine {
     /// Ends the remote task when `answer`, the status its machine gave, says it ended.
     fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
         let state = answer["workState"].as_str().unwrap_or_default();
+        let usage = serde_json::from_value::<crate::usage::TaskUsage>(answer["usage"].clone()).ok();
         if !matches!(state, "result_available" | "failed" | "cancelled") {
+            if let Some(usage) = usage {
+                self.delegates.note_remote_usage(id, usage);
+            }
             return;
         }
         let end = crate::delegate::RemoteEnd {
             state: state.to_owned(),
             summary: answer["summary"].as_str().map(str::to_owned),
             error: answer["error"].as_str().map(str::to_owned),
+            usage,
         };
         if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
             self.emit_tabs();
@@ -5324,6 +5382,10 @@ fn is_absolute_anywhere(path: &str) -> bool {
 fn with_remote(mut body: Value, remote: &crate::delegate::RemoteTarget) -> Value {
     body["machine"] = json!(remote.name);
     body["tabId"] = json!(remote.tab);
+    if remote.machine.is_empty() {
+        body["starting"] = json!(true);
+        body["next"] = json!("the hub is still starting it, so do not start it again: call task_status with this taskId, and it ends here as failed if the start does not finish");
+    }
     body
 }
 
@@ -10728,6 +10790,95 @@ Have another model review a risky change before it goes ahead.";
         m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
         assert_eq!(state_of(&m, &id), ("failed".into(), Some("the box did not connect within 5 min".into())));
         assert_eq!(*cancels.lock().unwrap(), vec!["the box did not connect within 5 min".to_owned()], "the hub is told, so it deletes the box");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_the_hub_did_not_answer_stays_starting_and_a_repeat_returns_the_same_task() {
+        let (m, dir, captain) = limited_captain("start-timeout", TastePatch::default());
+        let asks = Arc::new(Mutex::new(vec![]));
+        let released = Arc::new(AtomicBool::new(false));
+        let (seen, answering) = (asks.clone(), released.clone());
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Delegate { task, .. } => {
+                seen.lock().unwrap().push(task);
+                if !answering.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(20));
+                    return Err(crate::link::HUB_TIMEOUT.into());
+                }
+                Ok(json!({ "machine": "m-box", "machineName": "Box · Slow", "box": "b1", "workState": "working" }))
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let asked = json!({ "task": "Run the suite.", "title": "Slow", "clientRequestId": "req-1", "target": { "box": { "repo": "acme/site" } } });
+        let first = delegate_task(&m, &captain, asked.clone());
+        let task = first["taskId"].as_str().unwrap().to_owned();
+        assert_eq!((first["workState"].as_str(), first["starting"].as_bool()), (Some("working"), Some(true)), "a timeout is not a failure: {first}");
+        let repeat = delegate_task(&m, &captain, asked);
+        assert_eq!(repeat["taskId"].as_str(), Some(task.as_str()), "the same request is the same task: {repeat}");
+
+        released.store(true, Ordering::SeqCst);
+        wait_for("the hub to answer the asked-again start", || m.delegates.get(&task).and_then(|t| t.remote).is_some_and(|remote| remote.machine == "m-box"));
+        assert_eq!(state_of(&m, &task).0, "working");
+        let asks = asks.lock().unwrap();
+        assert!(asks.len() >= 2 && asks.iter().all(|asked| *asked == task), "every ask names the one task, so the hub finds the box it made: {asks:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_still_unanswered_after_the_connect_window_fails_its_task() {
+        let (m, dir, captain) = limited_captain("start-window", TastePatch::default());
+        m.set_hub(Arc::new(|_| Err(crate::link::HUB_TIMEOUT.into())));
+        let first = delegate_task(&m, &captain, json!({ "task": "Run the suite.", "title": "Slow", "target": { "box": { "repo": "acme/site" } } }));
+        let task = first["taskId"].as_str().unwrap().to_owned();
+        let late = Instant::now().checked_sub(crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1)).unwrap();
+        m.finish_start(captain.clone(), task.clone(), HubCall::Overview, late);
+        wait_for("the late start to fail", || state_of(&m, &task).0 == "failed");
+        assert_eq!(state_of(&m, &task).1.as_deref(), Some("the hub did not finish starting it within 5 min"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hub_that_refuses_a_start_fails_its_task_at_once() {
+        let (m, dir, captain) = limited_captain("start-refused", TastePatch::default());
+        m.set_hub(Arc::new(|_| Err("Upstash Box is not connected".into())));
+        let request = crate::delegate::parse_request(&json!({ "task": "Run the suite.", "title": "Slow", "target": { "box": { "repo": "acme/site" } } })).unwrap();
+        assert_eq!(m.start_delegate(Some(captain), None, None, request), Err("Upstash Box is not connected".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_remote_workers_usage_lands_on_its_task_live_and_at_its_end_and_nothing_is_recorded_here() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let working = json!({ "workState": "working", "usage": { "tokens_in": 500, "tokens_out": 10, "cost_usd": 0.1, "wall_ms": 30_000 } });
+        m.set_hub(Arc::new(move |_| Ok(working.clone())));
+        let remote = m.delegates.get(&id).unwrap().remote.unwrap();
+        m.look_remote("tab-1", &id, &remote);
+        assert_eq!(m.delegates.get(&id).unwrap().usage.tokens_in, 500, "a look shows what the worker used so far");
+
+        let end = crate::delegate::RemoteEnd {
+            state: "result_available".into(),
+            summary: Some("Green.".into()),
+            error: None,
+            usage: Some(crate::usage::TaskUsage { tokens_in: 1200, tokens_out: 30, cost_usd: Some(0.42), wall_ms: 90_000, box_usd: Some(0.05), box_ms: Some(30 * 60_000) }),
+        };
+        assert!(m.remote_ended("m-mini", "tab-1", &id, &end));
+        let usage = m.delegates.get(&id).unwrap().usage;
+        assert_eq!((usage.tokens_in, usage.cost_usd, usage.box_ms), (1200, Some(0.42), Some(30 * 60_000)));
+        assert_eq!(m.delegates.records().len(), 0, "the machine that ran the task records it, so a run counts once");
+        assert!(m.delegates.unrecorded(10).is_empty());
+    }
+
+    #[test]
+    fn the_first_word_on_a_task_the_hub_was_still_starting_is_its_end_from_the_machine_that_ran_it() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "", "Box · Slow");
+        let end = crate::delegate::RemoteEnd { state: "failed".into(), summary: None, error: Some("Upstash Box: the box ended before its task did".into()), usage: None };
+        assert!(m.remote_ended("m-box", "tab-1", &id, &end), "a start that never got its answer still hears how it ended");
+        assert_eq!(state_of(&m, &id), ("failed".into(), Some("Upstash Box: the box ended before its task did".into())));
     }
 
     #[test]
