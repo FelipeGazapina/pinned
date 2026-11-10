@@ -1470,12 +1470,16 @@ impl<'c, 'a> Scan<'c, 'a> {
         let mut force: Option<String> = None;
         let (mut tags, mut all) = (false, false);
         let mut pos: Vec<&str> = vec![];
+        let mut unresolved_ref = false;
         let mut after_dd = false;
         let mut i = 0;
         while i < rest.args.len() {
-            let t = rest.args[i].text.as_str();
+            let w = &rest.args[i];
+            let t = w.text.as_str();
             i += 1;
             if after_dd || !t.starts_with('-') || t == "-" {
+                // A branch named by a variable could be the default branch.
+                unresolved_ref |= !pos.is_empty() && (w.var_at.is_some() || w.glob_at.is_some());
                 pos.push(t);
             } else if t == "--" {
                 after_dd = true;
@@ -1508,6 +1512,9 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         if all {
             self.hit(NeverItem::PushToMain, "git push --all");
+        }
+        if unresolved_ref {
+            self.hit(NeverItem::PushToMain, "git push to a ref the shell computes");
         }
         if tags {
             self.hit(NeverItem::Release, "git push --tags");
@@ -1871,6 +1878,8 @@ mod tests {
             ("git push origin fix-0.17.24/foo:railway-hub", FOO, Some(PushToMain)),
             ("git push origin railway-hub", FOO, Some(PushToMain)),
             ("git push --all", FOO, Some(PushToMain)),
+            ("git push origin $BRANCH", FOO, Some(PushToMain)),
+            ("git push -u origin $(git branch --show-current)", FOO, Some(PushToMain)),
             ("git commit -m x && git push origin main", FOO, Some(PushToMain)),
             ("gh pr merge 12", FOO, Some(PushToMain)),
             ("gh pr merge --squash", FOO, Some(PushToMain)),
