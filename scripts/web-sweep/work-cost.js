@@ -207,7 +207,7 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
         await waitFor("the threads on the phone", () => p.evaluate(() => tabs.length >= 3));
         await p.evaluate(() => { for (const t of tabs.filter((t) => t.view.role !== "orchestrator").slice(0, 2)) t.view.role = "worker"; });
       }
-      const draw = () => p.evaluate(`(${patch})()`);
+      const draw = () => p.evaluate(patch);
       await waitFor("the Captain and two workers", draw);
       if (phone) await openDrawer(p);
       await sleepMs(500);
@@ -233,9 +233,8 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
       // A box tab whose box_status fails keeps its chip and says why. The real refresh runs and fails: this node is no box.
       await p.evaluate((m) => { machines.get(m).view.name = "Box · gamma"; }, node);
       await p.evaluate(() => refreshBoxInfo());
-      await p.evaluate(() => { setPage?.(""); }).catch(() => {});
-      await p.evaluate(`(${patch})()`);
-      await p.evaluate(() => { for (const t of tabs) activate?.(tabs.find((x) => x.view.role === "orchestrator")); });
+      await p.evaluate(patch);
+      await p.evaluate(() => activate(tabs.find((x) => x.view.role === "orchestrator")));
       if (phone) await openDrawer(p);
       await sleepMs(500);
       const chip = await p.evaluate(() => document.querySelector(".thread-row .remote.box.unavailable .head")?.textContent ?? null);
