@@ -10577,7 +10577,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_thread_task_whose_session_never_reported_ends_with_the_reason_and_a_crash_does_not_save_the_time_it_ran() {
+    fn a_thread_task_whose_session_never_reported_ends_with_the_reason() {
         let (m, dir, captain) = limited_captain("restart-no-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
         let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
         let task = started["taskId"].as_str().unwrap().to_owned();
