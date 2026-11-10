@@ -509,6 +509,17 @@ impl Tab {
     }
 }
 
+/// How much a summary of the accounts asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// What the 20 s report knows: no CLI runs, and no allowance is fetched.
+    Reported,
+    /// Each account's CLI is asked now.
+    Now,
+    /// As `Now`, and the OpenCode Go Console is asked for an allowance too.
+    Full,
+}
+
 pub struct Machine {
     launch: Launch,
     default_cwd: PathBuf,
@@ -524,6 +535,8 @@ pub struct Machine {
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
+    /// What each account's CLI last said about its sign-in, which the 20 s report reads instead of asking.
+    statuses: accounts::StatusCache,
     /// One file of finished turns per project.
     history_dir: Option<PathBuf>,
     /// Files clients attached, saved for sessions to read.
@@ -726,6 +739,7 @@ impl Machine {
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
+            statuses: Default::default(),
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
@@ -990,11 +1004,14 @@ impl Machine {
                         let _ = self.accounts.remove(&account.id);
                         return Err(error);
                     }
+                    self.statuses.forget(&account.id);
                     json(self.view_account(account))
                 } else if key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
                     Err("only an OpenCode Go account takes an API key".into())
                 } else {
-                    json(self.view_account(self.accounts.add(provider, &name, auth)?))
+                    let account = self.accounts.add(provider, &name, auth)?;
+                    self.statuses.forget(&account.id);
+                    json(self.view_account(account))
                 }
             }
             Call::SetAccountKey { account, key } => {
@@ -1016,7 +1033,9 @@ impl Machine {
                 if self.tabs.lock().unwrap().values().any(|t| t.account.id == account) {
                     return Err(format!("close the tabs that run under {account} before removing it"));
                 }
-                json(self.accounts.remove(&account)?)
+                let removed = self.accounts.remove(&account)?;
+                self.statuses.forget(&account);
+                json(removed)
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
@@ -1520,8 +1539,63 @@ impl Machine {
         Ok(self.claude_models())
     }
 
+    /// Asks the account's CLI now, and keeps the answer for the report.
     fn status(&self, account: &Account) -> accounts::Status {
-        self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref())
+        let status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        self.statuses.put(&account.id, status.clone());
+        status
+    }
+
+    /// What the machine report knows of the account's sign-in, without running a CLI. None until
+    /// a refresh has asked once. A Go account's key is a file, so it is always read.
+    fn reported_status(&self, account: &Account) -> Option<accounts::Status> {
+        if account.auth == Auth::OpenCodeGo {
+            return Some(self.status(account));
+        }
+        self.statuses.get(&account.id)
+    }
+
+    /// Asks the CLI of each account whose status is missing or five minutes old, each on a thread of
+    /// its own so the report that called this does not wait. The next report has the answer.
+    pub fn refresh_statuses(&self) {
+        for account in self.accounts.list() {
+            self.refresh_status(account, accounts::STATUS_FRESH);
+        }
+    }
+
+    /// Asks, and waits for, each account that has no status yet, all at once. The link calls it once
+    /// when it connects, so the first report lists every account. A reconnect asks nobody again.
+    pub fn warm_statuses(&self) {
+        std::thread::scope(|scope| {
+            for account in self.accounts.list().into_iter().filter(|account| account.auth != Auth::OpenCodeGo && self.statuses.get(&account.id).is_none()) {
+                if let Some(ticket) = self.statuses.claim(&account.id, accounts::STATUS_FRESH) {
+                    scope.spawn(move || self.ask_status(&account, ticket));
+                }
+            }
+        });
+    }
+
+    fn refresh_status(&self, account: Account, fresh: Duration) {
+        if account.auth == Auth::OpenCodeGo {
+            return;
+        }
+        let Some(ticket) = self.statuses.claim(&account.id, fresh) else { return };
+        let Some(machine) = self.me.upgrade() else { return };
+        std::thread::spawn(move || machine.ask_status(&account, ticket));
+    }
+
+    fn ask_status(&self, account: &Account, ticket: u64) {
+        let status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        self.statuses.finish(&account.id, ticket, status);
+    }
+
+    /// An account's sign-in changed or the account is gone: what was kept is wrong, so the next
+    /// report gets an answer asked after the change.
+    fn sign_in_changed(&self, id: &str) {
+        self.statuses.forget(id);
+        if let Some(account) = self.accounts.get(id) {
+            self.refresh_status(account, Duration::ZERO);
+        }
     }
 
     /// Adds a tab in the folder kept for threads without a project, which no project lists, and
@@ -5102,7 +5176,7 @@ impl Machine {
             (Account::builtin(Provider::Claude), None, Access::Auto)
         };
         let parent = Inherited { account: account.id, model, access };
-        let listed = self.listed_accounts(true);
+        let listed = self.listed_accounts(Look::Full);
         let search = (!search.is_empty()).then_some(search);
         let mut answer = capabilities(&parent, &listed, search);
         answer["machines"] = self.machines_listed();
@@ -5124,10 +5198,23 @@ impl Machine {
         crate::load::machines_json(&views, Some(&id))
     }
 
-    /// The summary this machine reports to the hub every 20 s.
+    /// The summary this machine reports to the hub every 20 s. It runs no agent CLI: an account's
+    /// sign-in is what the last refresh found, and an account nobody asked yet is left out until the
+    /// refresh this starts has finished. The hub rechecks with `state` before it refuses a worker.
+    pub fn report_state(&self) -> crate::load::MachineState {
+        let state = self.summary(Look::Reported);
+        self.refresh_statuses();
+        state
+    }
+
+    /// The summary as of now, asking each account's CLI. The hub asks for it before it refuses a worker.
     pub fn state(&self) -> crate::load::MachineState {
+        self.summary(Look::Now)
+    }
+
+    fn summary(&self, look: Look) -> crate::load::MachineState {
         let tabs = self.tabs();
-        let listed = self.listed_accounts(false);
+        let listed = self.listed_accounts(look);
         // A task held for a machine elsewhere runs there, so it is not this machine's load.
         let working = self.delegates.running().iter().filter(|id| self.delegates.get(id).is_some_and(|task| task.remote.is_none())).count() as u32;
         let worker_tabs = tabs.iter().filter(|tab| tab.running && tab.role == Some(Role::Worker)).count() as u32;
@@ -5142,15 +5229,15 @@ impl Machine {
         }
     }
 
-    /// This machine's accounts as a delegated child sees them. `fresh` asks the OpenCode Go
-    /// Console for an allowance first, which the 20 s report does not.
-    fn listed_accounts(&self, fresh: bool) -> Vec<crate::delegate::ListedAccount> {
+    /// This machine's accounts as a delegated child sees them, by how much `look` asks for.
+    fn listed_accounts(&self, look: Look) -> Vec<crate::delegate::ListedAccount> {
         use crate::delegate::{LimitNote, ListedAccount};
+        let fresh = look == Look::Full;
         self.accounts
             .list()
             .into_iter()
-            .map(|account| {
-                let status = self.status(&account);
+            .filter_map(|account| {
+                let status = if look == Look::Reported { self.reported_status(&account)? } else { self.status(&account) };
                 let found = self.launch.bin(account.provider).is_file();
                 let (models, mut constraints) = self.catalog_of(&account, found);
                 if !status.signed_in {
@@ -5165,7 +5252,7 @@ impl Machine {
                 }
                 let limited = standing.as_ref().is_some_and(|(_, blocked)| *blocked);
                 let limit = standing.filter(|(_, blocked)| *blocked).map(|(limit, _)| LimitNote { reason: limit.reason, resume_at: limit.resume_at, retry_at: Some(limit.retry_at).filter(|_| limit.resume_at.is_none()) });
-                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints }
+                Some(ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints })
             })
             .collect()
     }
@@ -5308,9 +5395,12 @@ impl Machine {
     }
 
     fn exited(&self, tab: &str, session: u64) {
-        let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
+        let Ok((screen, signing_in)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()))) else { return };
         if screen.lock().unwrap().session != session {
             return;
+        }
+        if let Some(account) = signing_in {
+            self.sign_in_changed(&account);
         }
         self.end_session(tab);
         let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
@@ -13099,6 +13189,106 @@ Have another model review a risky change before it goes ahead.";
         assert!(state.load.cpus.is_some_and(|cpus| cpus > 0) && state.load.disk_free_mb.is_some(), "{:?}", state.load);
         let text = serde_json::to_string(&state).unwrap();
         assert!(!text.contains('@') && !text.contains("token"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A claude that logs in while `$0.in` exists and writes a line to `$0.runs` for each status asked.
+    #[cfg(unix)]
+    fn counting_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo run >> \"$0.runs\"; if [ -e \"$0.in\" ]; then echo '{\"loggedIn\":true}'; else echo '{\"loggedIn\":false}'; fi; exit 0; fi\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn status_runs(claude: &Path) -> usize {
+        std::fs::read_to_string(format!("{}.runs", claude.display())).map_or(0, |text| text.lines().count())
+    }
+
+    #[cfg(unix)]
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < until, "waited for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_20_second_report_runs_each_accounts_status_cli_once_however_many_reports_go_out() {
+        let dir = temp("report-cached");
+        let claude = counting_claude(&dir);
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let after_add = status_runs(&claude);
+        assert_eq!(after_add, 1, "adding the account asked its CLI once, to show it");
+
+        let first = m.report_state();
+        assert!(first.accounts.iter().any(|a| a.id == "work" && a.can_run_child_task), "{first:?}");
+        assert!(!first.accounts.iter().any(|a| a.id == "claude"), "the built-in account was never asked: {first:?}");
+        wait_until("the first refresh", || m.statuses.get("claude").is_some());
+        for _ in 0..8 {
+            let state = m.report_state();
+            assert!(state.accounts.iter().any(|a| a.id == "claude" && a.can_run_child_task), "{state:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(status_runs(&claude) - after_add, 1, "nine reports ran the built-in account's CLI once and the added account's never");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn warming_before_the_first_report_lists_every_account_and_a_second_warm_asks_nobody() {
+        let dir = temp("report-warm");
+        let claude = counting_claude(&dir);
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.warm_statuses();
+        assert_eq!(status_runs(&claude), 1, "the built-in Claude account was asked once");
+        for _ in 0..3 {
+            m.warm_statuses();
+            let state = m.report_state();
+            assert!(state.accounts.iter().any(|a| a.id == "claude" && a.can_run_child_task), "{state:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(status_runs(&claude), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_status_older_than_the_window_is_asked_again_off_the_report_and_the_old_one_is_reported_meanwhile() {
+        let dir = temp("report-stale");
+        let claude = counting_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let before = status_runs(&claude);
+        let work = m.accounts.get("work").unwrap();
+        assert!(m.statuses.claim("work", accounts::STATUS_FRESH).is_none(), "a status just read is fresh");
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        m.refresh_status(work, Duration::ZERO);
+        wait_until("the refresh", || m.statuses.get("work").is_some_and(|s| s.signed_in));
+        assert_eq!(status_runs(&claude) - before, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_state_asked_for_directly_reads_the_cli_live_while_the_report_keeps_the_cached_one() {
+        let dir = temp("report-live");
+        let claude = counting_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let signed_in = |state: &crate::load::MachineState| state.accounts.iter().any(|a| a.id == "work" && a.can_run_child_task);
+        assert!(!signed_in(&m.report_state()), "signed out when the account was added");
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        assert!(!signed_in(&m.report_state()), "the report still has the cached answer");
+        assert!(signed_in(&m.state()), "the recheck before a refusal reads it live");
+        assert!(signed_in(&m.report_state()), "and the live read is what the report has afterwards");
         let _ = std::fs::remove_dir_all(dir);
     }
 

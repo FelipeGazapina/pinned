@@ -227,7 +227,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
 /// tastes and the catalogs, so only a thread of its own calls it.
 fn report_state(shared: &Shared, machine: &Machine) {
     if shared.online() {
-        shared.send(&MachineFrame::Event { event: MachineEvent::State { state: machine.state() } });
+        shared.send(&MachineFrame::Event { event: MachineEvent::State { state: machine.report_state() } });
     }
 }
 
@@ -429,6 +429,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     std::thread::spawn(move || {
         sharing.share_tastes_again();
         sharing.send_records();
+        sharing.warm_statuses();
         report_state(&reporting, &sharing);
     });
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
