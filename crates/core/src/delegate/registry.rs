@@ -146,6 +146,11 @@ impl Delegates {
         self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
     }
 
+    /// How many tasks the session `caller_key` (`Caller::key`) started are still at work.
+    pub fn working_for(&self, caller_key: &str) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && task.caller_key == caller_key).count()
+    }
+
     /// The folder of each task still at work.
     #[cfg(test)]
     pub fn working_cwds(&self) -> Vec<PathBuf> {
