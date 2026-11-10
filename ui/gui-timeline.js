@@ -919,7 +919,7 @@ function globalReportsHtml(user, t, tab, first, by, reports) {
 
 /** One Captain's report: who sent it and when, over what it says, its Captain opening the thread. */
 function reportRowHtml(report, at) {
-  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
+  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md">${markdown(report.text)}</div></div>`;
 }
 
 /** The prompt bubble as every other thread draws it. */
@@ -1776,7 +1776,11 @@ threadView.addEventListener("click", (e) => {
   }
   const reportThread = e.target.closest("[data-report-tab]");
   if (reportThread) {
-    revealTab(reportThread.dataset.reportMachine, reportThread.dataset.reportTab).catch((e) => tell(`Couldn't open that thread: ${esc(e)}`, 6000));
+    const { reportMachine: machine, reportTab: id, reportProject: project } = reportThread.dataset;
+    // A restart gives the Captain a new tab id; the report still names its project and machine.
+    const captain = !tabByKey(keyOf(machine, id)) && tabs.find((t) => t.machine === machine && isOrchestrator(t) && projectName(t) === project);
+    if (captain) return activate(captain);
+    revealTab(machine, id).catch((e) => tell(`Couldn't open that thread: ${esc(e)}`, 6000));
     return;
   }
   const dialogKey = e.target.closest("[data-dialog-key]");
