@@ -669,6 +669,7 @@ impl Hub {
                 return json(self.write_marks(account, changes).await?);
             }
             HubCall::ArchiveSession { machine, tab } => return json(self.archive_session(account, &machine, &tab).await?),
+            HubCall::AutoArchive { .. } => return Err("only a machine archives its own finished threads".into()),
             HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session, true).await?),
             HubCall::DeleteSession { machine, tab } => {
                 self.delete_session(account, &machine, &tab).await?;
@@ -788,6 +789,17 @@ impl Hub {
             return Err(format!("the thread's tab did not close: {}", String::from(e)));
         }
         Ok(row)
+    }
+
+    /// Archives the thread of `tab` for `machine`, which found it finished (`auto_archive::keeps`).
+    /// The hub knows what the machine can't: a pinned thread, an orchestrator and a working one stay.
+    pub(crate) async fn auto_archive(&self, account: &Account, machine: &str, tab: &str) -> Result<SessionMarks, String> {
+        let (view, session) = Self::open_tab(account, machine, tab)?;
+        let marks = self.db.session_marks_of(account.id, &session).await?;
+        if let Some(keeps) = pinned_core::auto_archive::hub_keeps(&view, &marks) {
+            return Err(format!("{tab} stays open: {keeps}"));
+        }
+        self.archive_session(account, machine, tab).await
     }
 
     /// Reopens an archived conversation in a new tab with its name and pin back. The user's Unarchive

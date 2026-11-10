@@ -384,6 +384,8 @@ pub struct Task {
     pub newest_text: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
+    /// Unix seconds `delivered` was set, when it was set since this was recorded.
+    pub delivered_at: Option<u64>,
     /// This task's folder is a worktree `new_worktree` made.
     pub isolated: bool,
     /// `tab:<id>` or `task:<id>` of the session that started it. Idempotency and ownership use it.
@@ -394,11 +396,21 @@ pub struct Task {
     pub parent_session: Option<String>,
     pub ended_by: Option<String>,
     pub run: Run,
-    /// The pinned thread that shows this child under its parent. Not saved: a restart cancels
-    /// every working task, and tab ids do not outlive the process.
+    /// The pinned thread that shows this child under its parent. Tab ids do not outlive the
+    /// process, so it is not saved: a restart ties the task to its worker's restored tab again, by
+    /// `worker_session`.
     pub thread: Option<Thread>,
-    /// The machine that runs this task for its parent here, when it runs elsewhere. Not saved.
+    /// The Claude session of the thread that runs this task, which a restart resumes.
+    pub worker_session: Option<String>,
+    /// Loaded from disk as a thread's worker that `restore_tabs` is to bring back. It ends if no
+    /// restored tab has `worker_session`.
+    pub resuming: bool,
+    /// The machine that runs this task for its parent here, when it runs elsewhere. Saved, so a
+    /// restarted origin still takes the end that machine sends.
     pub remote: Option<RemoteTarget>,
+    /// The tab the machine that runs this task knows its parent by. A restart gives that tab a new
+    /// id here, and the other machine keeps naming the old one.
+    pub remote_tab: Option<String>,
     /// The delegation limits it runs under. Its own children are held to them or tighter.
     pub limits: crate::taste::Limits,
     /// What it used so far, as its transcript reports it.
@@ -1472,6 +1484,28 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
+    #[test]
+    fn a_resumed_task_keeps_counting_toward_its_time_limit_from_its_original_start() {
+        let dir = scratch("limit-across-restart");
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_on(&first, Provider::Claude);
+        first.link_thread(&task.id, Thread { tab: "tab-1".into(), runs: true });
+        first.backdate(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.set_worker_session(&task.id, "s-worker");
+        drop(first);
+
+        let after = Delegates::load(Some(file));
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a thread's worker is resumed by the restart, not ended");
+        after.enforce_limits(Instant::now(), None);
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a minute of its limit is left");
+        after.enforce_limits(Instant::now() + Duration::from_secs(120), None);
+        let ended = after.get(&task.id).unwrap();
+        assert_eq!(ended.state, WorkState::Cancelled);
+        assert!(ended.error.unwrap().contains("its limit"), "the limit counted the time before the restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn after_each_stop(name: &str, provider: Provider, lines: &[&str]) -> Vec<Value> {
         let dir = scratch(name);
         let file = dir.join("delegates.json");
@@ -1514,8 +1548,8 @@ grok-4.7-high - Grok 4.7  High
             vec![
                 json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
                 json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
-                json!(["quit", "cancelled", "PR opened", "stopped by restart"]),
-                json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
+                json!(["quit", "cancelled", "PR opened", RESTART_ENDED]),
+                json!(["crash", "cancelled", "PR opened", RESTART_ENDED]),
             ]
         );
     }
@@ -2691,10 +2725,10 @@ exec '{real}' "$@"
         delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None });
         assert_eq!(delegates.cards("tab-1"), vec![], "its thread on mini nests under tab-1 instead");
         let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
-        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-other", &end), "another machine can't end it");
-        assert!(!delegates.settle_remote(&task.id, "tab-2", "m-mini", &end), "nor can it end another tab's task");
-        assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end));
-        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), "an end lands once");
+        assert!(delegates.settle_remote(&task.id, "tab-1", "m-other", &end).is_none(), "another machine can't end it");
+        assert!(delegates.settle_remote(&task.id, "tab-2", "m-mini", &end).is_none(), "nor can it end another tab's task");
+        assert_eq!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), Some("tab-1".into()));
+        assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end).is_none(), "an end lands once");
         let (text, _) = delegates.claim_notice("tab-1").unwrap();
         assert_eq!(text, format!("[pinned] Delegated task {} \"Slow suite\" (Claude Code) finished: result available. It ran on mini, in thread tab-9. Call task_status with taskId \"{}\".", task.id, task.id));
         assert_eq!(delegates.records(), vec![], "mini, which ran it, keeps its record");
