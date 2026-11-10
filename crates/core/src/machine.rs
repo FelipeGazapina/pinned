@@ -33,6 +33,23 @@ const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 const FIRST_RUN_LOOKS: u32 = 10;
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
+
+/// Ends a `Machine::coalesce_tabs` scope: sends the one tab list the scope held back.
+struct CoalescedTabs<'a> {
+    machine: &'a Machine,
+    outer: bool,
+}
+
+impl Drop for CoalescedTabs<'_> {
+    fn drop(&mut self) {
+        if !self.outer {
+            return;
+        }
+        if COALESCING.with(Cell::take).is_some_and(|(_, asked)| asked) {
+            self.machine.emit_tabs();
+        }
+    }
+}
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
@@ -685,6 +702,8 @@ impl Default for Gate {
 }
 
 thread_local! {
+    /// The machine whose `emit_tabs` calls this thread holds back, and whether any came.
+    static COALESCING: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
     static ARMED_RESTART: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -5511,6 +5530,8 @@ impl Machine {
 
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
+            // Everything below that changes a tab sends the list once, when the event is done.
+            let _one_list = self.coalesce_tabs();
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             let (before, role, waiting) = self.tab(tab, |t| (t.status, role_of(&t.env), t.background_wait.is_some())).unwrap_or_default();
             // Claude Code's idle notice after the turn end the worker waits past.
@@ -5556,7 +5577,7 @@ impl Machine {
             self.record_turn(tab, &event);
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
             if new_session || turn_ended {
-                self.refresh_stats(tab, turn_ended);
+                self.refresh_stats_in_event(tab, turn_ended);
             }
             self.maybe_deliver(tab);
             self.continue_when_limit_lifts(tab);
@@ -5624,7 +5645,23 @@ impl Machine {
     }
 
     fn emit_tabs(&self) {
-        self.emit(Event::Tabs { tabs: self.tabs() });
+        let held = COALESCING.with(|c| match c.get() {
+            Some((machine, _)) if machine == self as *const Machine as usize => {
+                c.set(Some((machine, true)));
+                true
+            }
+            _ => false,
+        });
+        if !held {
+            self.emit(Event::Tabs { tabs: self.tabs() });
+        }
+    }
+
+    /// Holds back this thread's `emit_tabs` calls until the guard drops, then sends the list once
+    /// if any was asked for. The list is read when it is sent, so it carries every change.
+    fn coalesce_tabs(&self) -> CoalescedTabs<'_> {
+        let outer = COALESCING.with(|c| c.get().is_none() && { c.set(Some((self as *const Machine as usize, false))); true });
+        CoalescedTabs { machine: self, outer }
     }
 
     fn exited(&self, tab: &str, session: u64) {
@@ -5716,15 +5753,38 @@ impl Machine {
         let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
         std::thread::spawn(move || {
             let before = machine.tab(&tab, |t| t.tally.turns).ok();
-            for _ in 0..TURN_LOG_WAIT.0 {
-                let after = machine.read_stats(&tab);
-                if !turn_ended || after.is_none() || after != before {
-                    break;
-                }
-                std::thread::sleep(TURN_LOG_WAIT.1);
-            }
+            machine.wait_for_turn_log(&tab, turn_ended, before, 0);
             machine.emit_tabs();
         });
+    }
+
+    /// Like `refresh_stats`, for a hook event whose own list is sent when the event ends: the
+    /// stats are read now, so that list carries them. Only a finished turn that its transcript has
+    /// not caught up with is waited for in the background, and sends the list again.
+    fn refresh_stats_in_event(&self, tab: &str, turn_ended: bool) {
+        let before = self.tab(tab, |t| t.tally.turns).ok();
+        let after = self.read_stats(tab);
+        if !turn_ended || after.is_none() || after != before {
+            return;
+        }
+        let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(TURN_LOG_WAIT.1);
+            machine.wait_for_turn_log(&tab, true, before, 1);
+            machine.emit_tabs();
+        });
+    }
+
+    /// Reads the stats until the transcript shows the turn that ended, or gives up. `tried` reads
+    /// have been made already.
+    fn wait_for_turn_log(&self, tab: &str, turn_ended: bool, before: Option<u32>, tried: u32) {
+        for _ in tried..TURN_LOG_WAIT.0 {
+            let after = self.read_stats(tab);
+            if !turn_ended || after.is_none() || after != before {
+                break;
+            }
+            std::thread::sleep(TURN_LOG_WAIT.1);
+        }
     }
 
     /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
@@ -6429,35 +6489,98 @@ pub(crate) mod tests {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
     }
 
-    #[test]
-    fn a_turn_boundary_sends_the_tab_list_once_when_it_changes_and_once_more_when_the_stats_are_in() {
-        let tabs_sent = Arc::new(Mutex::new(Vec::<usize>::new()));
-        let seen = tabs_sent.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+    /// Machine with a built-in-free account, so its transcripts are under `dir`, and a log of every tab list it sends.
+    fn counting_machine(name: &str) -> (Arc<Machine>, PathBuf, Arc<Mutex<Vec<Vec<TabView>>>>, Account) {
+        let dir = temp(name);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let seen = sent.clone();
+        let m = Machine::new(launch(), Some(dir.join("config")), Some("/repo".into()), move |event| {
             if let Event::Tabs { tabs } = event {
-                seen.lock().unwrap().push(tabs.len());
+                seen.lock().unwrap().push(tabs);
             }
         });
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let settle = || {
-            let mut last = usize::MAX;
-            loop {
-                std::thread::sleep(Duration::from_millis(300));
-                let now = tabs_sent.lock().unwrap().len();
-                if now == last {
-                    return now;
-                }
-                last = now;
+        let account = m.accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        (m, dir, sent, account)
+    }
+
+    /// Waits until no list has come for 400 ms and returns how many came.
+    fn lists_sent(sent: &Mutex<Vec<Vec<TabView>>>) -> usize {
+        let mut last = usize::MAX;
+        loop {
+            std::thread::sleep(Duration::from_millis(400));
+            let now = sent.lock().unwrap().len();
+            if now == last {
+                return now;
             }
-        };
-        tabs_sent.lock().unwrap().clear();
+            last = now;
+        }
+    }
+
+    #[test]
+    fn a_turn_that_ends_with_its_transcript_in_place_sends_one_tab_list_with_the_stats_in_it() {
+        let (m, dir, sent, account) = counting_machine("emits-caught-up");
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let _other = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join("sess-1.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("sess-1".into())).unwrap();
+
         m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
-        assert_eq!(settle(), 1, "a turn start: one list");
-        tabs_sent.lock().unwrap().clear();
+        assert_eq!(lists_sent(&sent), 1, "a turn start sends one list");
+        sent.lock().unwrap().clear();
+
+        std::fs::write(&transcript, "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":5000}\n").unwrap();
         m.record_event(done_event(&tab));
-        assert_eq!(settle(), 2, "a turn end: one list for the change, one when the stats are read");
-        assert_eq!(*tabs_sent.lock().unwrap(), [2, 2], "each carries every tab: {other}");
+        assert_eq!(lists_sent(&sent), 1, "a turn end sends one list, and not a second when the stats are read");
+        let lists = sent.lock().unwrap();
+        let mine = lists[0].iter().find(|v| v.id == tab).unwrap();
+        assert_eq!((lists[0].len(), mine.stats.as_ref().and_then(|s| s.active_ms)), (2, Some(5000)), "the one list has every tab and the finished turn's time");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_turn_that_ends_before_its_transcript_does_sends_the_list_again_when_the_stats_land() {
+        let (m, dir, sent, account) = counting_machine("emits-behind");
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join("sess-1.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("sess-1".into())).unwrap();
+
+        m.record_event(done_event(&tab));
+        std::fs::write(&transcript, "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":7000}\n").unwrap();
+        assert_eq!(lists_sent(&sent), 2, "the list at the event, and the list with the stats once the transcript has them");
+        let lists = sent.lock().unwrap();
+        let active = |list: &Vec<TabView>| list[0].stats.as_ref().and_then(|s| s.active_ms);
+        assert_eq!((active(&lists[0]), active(&lists[1])), (None, Some(7000)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_tab_changes_of_one_hook_event_send_one_list() {
+        let (m, dir, sent, account) = counting_machine("emits-coalesce");
+        let tab = m.add_tab("/repo".into(), account, vec![], vec![], false, None);
+        {
+            let _one_list = m.coalesce_tabs();
+            m.emit_tabs();
+            m.emit_tabs();
+            m.emit_tabs();
+            let _nested = m.coalesce_tabs();
+            m.emit_tabs();
+            assert_eq!(sent.lock().unwrap().len(), 0, "nothing is sent while the scope holds them back");
+        }
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        {
+            let _quiet = m.coalesce_tabs();
+        }
+        assert_eq!(sent.lock().unwrap().len(), 1, "a scope that changed nothing sends nothing");
+        m.emit_tabs();
+        assert_eq!(sent.lock().unwrap().len(), 2, "outside a scope each call sends");
+        assert_eq!(sent.lock().unwrap()[1][0].id, tab);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
