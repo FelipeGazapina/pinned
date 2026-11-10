@@ -611,3 +611,104 @@ test("nudged reads and poll-only reads leave the screen a fresh read shows, for 
     for (const name of want.agents) assert.match(pushed.screen.agents, new RegExp(name), `seed ${seed} agents`);
   }
 });
+
+/** A thread view with layout: 600px on screen, each drawn turn 100px tall, the spacers as tall as
+ * their style says, so a scroll puts a known turn at the top. */
+function laidOutView() {
+  const view = { dataset: {}, clientHeight: 600, html: "", top: 0, firstElementChild: {} };
+  const parts = () => [...view.html.matchAll(/<div class="spacer" style="height:(\d+)px"><\/div>|<section class="turn" data-turn-id="([^"]+)"/g)];
+  const layout = () => {
+    let y = 0;
+    const turns = [];
+    for (const [, spacer, id] of parts()) {
+      if (spacer) y += Number(spacer);
+      else {
+        turns.push({ id, y });
+        y += 100;
+      }
+    }
+    return { turns, height: y };
+  };
+  const turnEl = ({ id, y }) => ({
+    dataset: { turnId: id },
+    getBoundingClientRect: () => ({ top: y - view.top, bottom: y + 100 - view.top }),
+    nextElementSibling: { getBoundingClientRect: () => ({ top: y + 100 - view.top }) },
+  });
+  Object.defineProperties(view, {
+    innerHTML: { get: () => view.html, set: (html) => (view.html = html) },
+    scrollHeight: { get: () => layout().height },
+    scrollTop: { get: () => view.top, set: (top) => (view.top = Math.max(0, Math.min(top, layout().height - view.clientHeight))) },
+  });
+  view.getBoundingClientRect = () => ({ top: 0, bottom: 600 });
+  view.querySelectorAll = (selector) => (selector === ".lane > .turn" ? layout().turns.map(turnEl) : []);
+  view.querySelector = (selector) => {
+    if (selector === ".lane > .spacer") return { getBoundingClientRect: () => ({ top: -view.top }) };
+    const id = /data-turn-id="([^"]+)"/.exec(selector)?.[1];
+    const turn = id && layout().turns.find((t) => t.id === id);
+    return turn ? turnEl(turn) : null;
+  };
+  view.firstOnScreen = () => layout().turns.find(({ y }) => y + 100 > view.top)?.id;
+  return view;
+}
+
+function longThreadTab(id) {
+  const tab = tabFor(id, "idle");
+  const items = Array.from({ length: 30 }, (_, i) => [
+    { kind: "user", id: `${id}-${i + 1}`, at: `t${i}`, text: `ask ${i + 1}` },
+    { kind: "text", at: `t${i}`, text: `answer ${i + 1}` },
+  ]).flat();
+  Object.assign(tab.thread, { session: `s-${id}`, loaded: true, items, heights: new Map(items.filter((i) => i.kind === "user").map((i) => [i.id, 100])) });
+  return tab;
+}
+
+test("a thread left scrolled up shows the same turn when the reader comes back to it", () => {
+  const plain = sandbox.threadView;
+  const view = laidOutView();
+  sandbox.threadView = view;
+  sandbox.CSS = { escape: (text) => text };
+  try {
+    const a = longThreadTab("tab-a");
+    const b = longThreadTab("tab-b");
+    sandbox.tabs = [a, b];
+    sandbox.active = a;
+    sandbox.renderThread();
+    assert.equal(view.firstOnScreen(), "tab-a-25", "a thread opens at its end");
+    view.scrollTop = 2050;
+    vm.runInContext("threadAtEnd = false", sandbox);
+    assert.equal(view.firstOnScreen(), "tab-a-21");
+    sandbox.active = b;
+    sandbox.renderThread();
+    assert.equal(view.firstOnScreen(), "tab-b-25", "another thread opens at its own end");
+    sandbox.active = a;
+    sandbox.renderThread();
+    assert.equal(view.firstOnScreen(), "tab-a-21");
+    assert.equal(view.scrollTop, 2050);
+  } finally {
+    sandbox.threadView = plain;
+  }
+});
+
+test("a thread left at its end is at its end when the reader comes back, turns that came meanwhile included", () => {
+  const plain = sandbox.threadView;
+  const view = laidOutView();
+  sandbox.threadView = view;
+  sandbox.CSS = { escape: (text) => text };
+  try {
+    const a = longThreadTab("tab-a");
+    const b = longThreadTab("tab-b");
+    sandbox.tabs = [a, b];
+    sandbox.active = a;
+    sandbox.renderThread();
+    vm.runInContext("threadAtEnd = true", sandbox);
+    sandbox.active = b;
+    sandbox.renderThread();
+    a.thread.items.push({ kind: "user", id: "tab-a-31", at: "t31", text: "ask 31" }, { kind: "text", at: "t31", text: "answer 31" });
+    a.thread.heights.set("tab-a-31", 100);
+    sandbox.active = a;
+    sandbox.renderThread();
+    assert.equal(view.firstOnScreen(), "tab-a-26");
+    assert.equal(view.scrollTop, view.scrollHeight - view.clientHeight);
+  } finally {
+    sandbox.threadView = plain;
+  }
+});
