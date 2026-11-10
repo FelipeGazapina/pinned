@@ -161,7 +161,7 @@ const login = async (page) => {
   return page.evaluate(() => [...machines.keys()].find((k) => machines.get(k).view.name === "sweep-node"));
 };
 
-const AS = { captain: { active_ms: 72 * 60000, cost_usd: 0.84 }, worker: { active_ms: 4 * 60000, cost_usd: 0.42 }, remote: { active_ms: 9 * 60000, cost_usd: 0 } };
+const AS = { captain: { active_ms: 72 * 60000, cost_usd: 0.84 }, worker: { active_ms: 4 * 60000, cost_usd: 0.42 }, remote: { active_ms: 9 * 60000, cost_usd: 0.3 } };
 
 /** What the node would send for a Captain with two workers, one of them on another machine. */
 const patch = () => {
@@ -169,7 +169,7 @@ const patch = () => {
   const workers = tabs.filter((t) => t.view.role === "worker").slice(0, 2);
   if (!captain || workers.length < 2) return false;
   captain.view.stats = window.AS.captain;
-  captain.view.work = { usd: 1.26, unknown: 0, workers: 2 };
+  captain.view.work = { usd: 1.56, unknown: 0, workers: 2 };
   workers.forEach((w, i) => {
     w.view.spawned_by = captain.view.id;
     w.view.stats = i ? window.AS.remote : window.AS.worker;
@@ -218,15 +218,15 @@ const openDrawer = (p) => p.evaluate(() => { if (document.body.dataset.sidebar !
         head: document.querySelector(".project-head .state.cost")?.textContent,
       }));
       console.log(name, JSON.stringify(seen));
-      check(seen.stats.includes("1h 12m · $1.26 · 2 workers"), `${name}: the Captain card says ${JSON.stringify(seen.stats)}`);
-      check(seen.head === "$1.26 · 2 workers", `${name}: the project head says ${seen.head}`);
+      check(seen.stats.includes("1h 12m · $1.56 · 2 workers"), `${name}: the Captain card says ${JSON.stringify(seen.stats)}`);
+      check(seen.head === "$1.56 · 2 workers", `${name}: the project head says ${seen.head}`);
       await p.screenshot(path.join(SCREENS, `real-captain-${name}.png`));
 
       // The projects page: its row shows the project total.
       await p.evaluate(() => { openGlobalProjects(); });
       await waitFor("the projects page row", () => p.evaluate(() => !!document.querySelector(".gp-row .gp-cost")));
       const row = await p.evaluate(() => document.querySelector(".gp-row .gp-cost").textContent);
-      check(row === "$1.26", `${name}: the projects page row says ${row}`);
+      check(row === "$1.56 · 2 workers", `${name}: the projects page row says ${row}`);
       await sleepMs(300);
       await p.screenshot(path.join(SCREENS, `real-projects-${name}.png`));
 
