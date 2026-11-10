@@ -929,51 +929,15 @@ mod tests {
         assert!(!find("write_file").unwrap().elsewhere && find("write_file").unwrap().class == Excluded);
     }
 
-    #[test]
-    fn each_action_p3b_wires_parses_from_what_an_agent_sends() {
-        let sent = [
-            ("add_account", json!({ "provider": "claude", "name": "Side" })),
-            ("set_account_key", json!({ "account": "go" })),
-            ("remove_account", json!({ "account": "side" })),
-            ("sign_in", json!({ "account": "work" })),
-            ("device_hub", json!({})),
-            ("device_agents", json!({ "allow": true })),
-            ("device", json!({ "op": "list" })),
-            ("update_self", json!({})),
-            ("read_file", json!({ "tab": "tab-1", "path": "src/a.rs" })),
-            ("search", json!({ "tab": "tab-1", "query": "fn main" })),
-            ("files", json!({ "tab": "tab-1" })),
-            ("diff", json!({ "tab": "tab-1", "scope": "uncommitted" })),
-            ("mcp_servers", json!({ "path": "/w/site" })),
-            ("connect_linear", json!({})),
-            ("disconnect_linear", json!({})),
-            ("connect_slack", json!({})),
-            ("disconnect_slack", json!({})),
-            ("connect_github", json!({})),
-            ("disconnect_github", json!({})),
-            ("connect_vercel", json!({})),
-            ("disconnect_vercel", json!({})),
-            ("connect_upstash", json!({})),
-            ("disconnect_upstash", json!({})),
-            ("set_box_access", json!({ "access": { "session": { "mode": "fresh" } } })),
-            ("answer_box", json!({ "id": "q1", "allow": true })),
-            ("open_box", json!({ "repo": "acme/site" })),
-            ("extend_box", json!({ "machine": "m1", "extra_usd": 2.0 })),
-            ("pair_code", json!({})),
-            ("revoke_invite", json!({ "id": "i1" })),
-            ("stage", json!({ "connector": "c1", "issue": "uuid-1", "stage": "coding" })),
-            ("slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "On it." })),
-            ("linear_create", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "title": "Fix login", "description": "From Slack." })),
-            ("linear_take", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "issue": "ENG-7" })),
-            ("approve_agent", json!({ "request": "r1", "scopes": ["sessions"], "projects": [{ "machine": "m1", "path": "/w/site" }] })),
-            ("deny_agent", json!({ "request": "r1" })),
-            ("revoke_agent", json!({ "id": "g1" })),
-            ("set_box_claude_token", json!({ "name": "bloom" })),
-            ("remove_box_claude_token", json!({ "name": "bloom" })),
-        ];
-        for (name, args) in sent {
+    /// One test per action P3b wires: its class and side, and that what an agent sends for it
+    /// holds no secret and parses into its own call. A credential action refuses each field the
+    /// user types in the app, and an action that hides fields of its answer shows them as hidden.
+    mod p3b {
+        use super::*;
+
+        fn wired(name: &str, class: Class, on: &str, starts_work: bool, args: Value) {
             let action = find(name).unwrap_or_else(|| panic!("no action {name}"));
-            assert!(action.wired, "{name} is not wired");
+            assert_eq!((action.class, action.wired, action.on(), action.starts_work), (class, true, on, starts_work), "{name}");
             assert_eq!(secret_arg(&args), None, "{name}: an agent sends no secret");
             let cmd = match parse(action, &with_blank_asks(action, &args)) {
                 Ok(Parsed::Node(call)) => cmd_of(&call),
@@ -981,11 +945,82 @@ mod tests {
                 Err(e) => panic!("{e}"),
             };
             assert_eq!(cmd, action.cmd, "{name}");
+            for field in action.asks {
+                let mut sent = args.as_object().cloned().unwrap_or_default();
+                sent.insert(field.to_string(), json!("typed-by-agent"));
+                assert_eq!(secret_arg(&Value::Object(sent.clone())).as_deref(), Some(*field), "{name}: an agent sending {field} is refused");
+                assert!(!summary(&Value::Object(sent)).contains("typed-by-agent"), "{name}: the audit row hides {field}");
+                let blank = Value::Object([(field.to_string(), json!(""))].into_iter().collect());
+                assert_eq!(without_asked(action, &blank), json!({}), "{name}: the confirmation keeps no {field}");
+            }
+            if !action.hides.is_empty() {
+                let answer = Value::Object(action.hides.iter().map(|field| (field.to_string(), json!("only-the-user-sees-this"))).collect());
+                assert!(!redact(answer, action.hides).to_string().contains("only-the-user-sees-this"), "{name}: the agent's answer hides {:?}", action.hides);
+            }
         }
-        let bare = parse(find("connect_upstash").unwrap(), &json!({})).err().unwrap_or_default();
-        assert!(bare.starts_with("connect_upstash: missing field `key`"), "without the blanks the call does not parse: {bare}");
-        let Ok(Parsed::Hub(HubCall::OpenBox { budget_usd, .. })) = parse(find("open_box").unwrap(), &json!({ "repo": "acme/site", "budget_usd": 3.0 })) else { panic!("open_box") };
-        assert_eq!(budget_usd, Some(3.0));
+
+        macro_rules! wired {
+            ($($name:ident: $class:ident on $on:literal => $args:tt;)*) => {
+                $(#[test]
+                fn $name() {
+                    wired(stringify!($name), $class, $on, false, json!($args));
+                })*
+            };
+        }
+
+        wired! {
+            add_account: Confirm on "machine" => { "provider": "claude", "name": "Side" };
+            set_account_key: Confirm on "machine" => { "account": "go" };
+            remove_account: Confirm on "machine" => { "account": "side" };
+            sign_in: Confirm on "machine" => { "account": "work" };
+            device_hub: Write on "machine" => {};
+            device_agents: Write on "machine" => { "allow": true };
+            device: Write on "machine" => { "op": "list" };
+            update_self: Confirm on "machine" => {};
+            read_file: Read on "machine" => { "tab": "tab-1", "path": "src/a.rs" };
+            search: Read on "machine" => { "tab": "tab-1", "query": "fn main" };
+            files: Read on "machine" => { "tab": "tab-1" };
+            diff: Read on "machine" => { "tab": "tab-1", "scope": "uncommitted" };
+            mcp_servers: Read on "machine" => { "path": "/w/site" };
+            connect_linear: Confirm on "hub" => {};
+            disconnect_linear: Confirm on "hub" => {};
+            connect_slack: Confirm on "hub" => {};
+            disconnect_slack: Confirm on "hub" => {};
+            connect_github: Confirm on "hub" => {};
+            disconnect_github: Confirm on "hub" => {};
+            connect_vercel: Confirm on "hub" => {};
+            disconnect_vercel: Confirm on "hub" => {};
+            connect_upstash: Confirm on "hub" => {};
+            disconnect_upstash: Confirm on "hub" => {};
+            set_box_access: Confirm on "hub" => { "access": { "session": { "mode": "fresh" } } };
+            answer_box: Confirm on "hub" => { "id": "q1", "allow": true };
+            extend_box: Confirm on "hub" => { "machine": "m1", "extra_usd": 2.0 };
+            pair_code: Confirm on "hub" => {};
+            revoke_invite: Confirm on "hub" => { "id": "i1" };
+            stage: Write on "hub" => { "connector": "c1", "issue": "uuid-1", "stage": "coding" };
+            slack_reply: Write on "hub" => { "connector": "c1", "channel": "C1", "thread": "1.2", "text": "On it." };
+            linear_create: Write on "hub" => { "connector": "c1", "channel": "C1", "thread": "1.2", "title": "Fix login", "description": "From Slack." };
+            linear_take: Write on "hub" => { "connector": "c1", "channel": "C1", "thread": "1.2", "issue": "ENG-7" };
+            approve_agent: Confirm on "hub" => { "request": "r1", "scopes": ["sessions"], "projects": [{ "machine": "m1", "path": "/w/site" }] };
+            deny_agent: Confirm on "hub" => { "request": "r1" };
+            revoke_agent: Confirm on "hub" => { "id": "g1" };
+            set_box_claude_token: Confirm on "hub" => { "name": "bloom" };
+            remove_box_claude_token: Confirm on "hub" => { "name": "bloom" };
+        }
+
+        #[test]
+        fn open_box() {
+            wired("open_box", Write, "hub", true, json!({ "repo": "acme/site", "budget_usd": 3.0 }));
+            assert!(HUB_LIMITS.contains(&"open_box"), "the hub holds open_box to the box budget and cap");
+            let Ok(Parsed::Hub(HubCall::OpenBox { budget_usd, .. })) = parse(find("open_box").unwrap(), &json!({ "repo": "acme/site", "budget_usd": 3.0 })) else { panic!("open_box") };
+            assert_eq!(budget_usd, Some(3.0));
+        }
+
+        #[test]
+        fn connect_upstash_without_its_blanks_does_not_parse() {
+            let bare = parse(find("connect_upstash").unwrap(), &json!({})).err().unwrap_or_default();
+            assert!(bare.starts_with("connect_upstash: missing field `key`"), "without the blanks the call does not parse: {bare}");
+        }
     }
 
     #[test]

@@ -580,7 +580,7 @@ impl Boxes {
         }
         if let Err(e) = hub.db.reserve_box(&fresh).await {
             if opener.is_some() {
-                let _ = hub.db.forget_agent_box(&fresh.id).await;
+                let _ = hub.db.forget_agent_box(account.id, &fresh.id).await;
             }
             return Err(e);
         }
@@ -1090,7 +1090,7 @@ impl Boxes {
             let mut record = agent_box_record(row, &opener, started, unix_millis(), why);
             record.machine_name = hub.db.machine_name(account.id, opener.machine).await?.unwrap_or_default();
             hub.db.save_task_record(account.id, opener.machine, &record).await?;
-            hub.db.forget_agent_box(&row.id).await
+            hub.db.forget_agent_box(account.id, &row.id).await
         };
         if let Err(e) = recorded.await {
             eprintln!("pinned-server: could not record box {} as its agent's task: {e}", row.id);

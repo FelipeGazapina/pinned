@@ -749,8 +749,8 @@ impl Db {
         }))
     }
 
-    pub async fn forget_agent_box(&self, id: &str) -> Result<(), String> {
-        self.client().await?.execute("delete from agent_boxes where box = $1", &[&id]).await.map_err(err).map(drop)
+    pub async fn forget_agent_box(&self, account: Uuid, id: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
     }
 
     pub async fn delete_box(&self, id: &str) -> Result<(), String> {
@@ -912,10 +912,10 @@ impl Db {
 
     /// Puts a decided confirmation back to waiting, as a credential action whose run failed, so the
     /// user can type another key.
-    pub async fn reopen_confirmation(&self, id: Uuid) -> Result<(), String> {
+    pub async fn reopen_confirmation(&self, account: Uuid, id: Uuid) -> Result<(), String> {
         self.client()
             .await?
-            .execute("update agent_confirmations set decided_at = null, approved = null, outcome = null, result = null where id = $1", &[&id])
+            .execute("update agent_confirmations set decided_at = null, approved = null, outcome = null, result = null where id = $1 and account = $2", &[&id, &account])
             .await
             .map_err(err)
             .map(drop)

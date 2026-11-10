@@ -238,7 +238,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             Err(e) if !action.asks.is_empty() => {
                 let error = hide(&e);
                 trail.ran(AuditOutcome::Failed, &error).await;
-                hub.db.reopen_confirmation(key).await?;
+                hub.db.reopen_confirmation(account.id, key).await?;
                 push_confirmations(hub, account).await;
                 return Err(error);
             }

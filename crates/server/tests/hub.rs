@@ -5123,7 +5123,7 @@ fn an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_
     let accounts = act(&ana.dir, &ana.tab, "list_accounts", json!({})).unwrap()["result"].to_string();
     assert!(!accounts.contains("\"side\""), "{accounts}");
 
-    let typed = [BOX_KEY, typed_key, CLAUDE_TOKEN, bloom, go_key];
+    let typed = [BOX_KEY, typed_key, CLAUDE_TOKEN, bloom, go_key, code.as_str()];
     let trail = trail_of(&mut ana.client);
     for row in &trail {
         for secret in typed {
@@ -5250,11 +5250,25 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     assert_eq!(on(&bob, Some("ana-mini"), "read_file", json!({ "tab": mini_tab, "path": "todo.md" })), none("ana-mini"));
     assert_eq!(on(&bob, Some(mini.as_str()), "files", json!({ "tab": mini_tab })), none(&mini));
     assert_eq!(on(&bob, Some("ana-mini"), "mcp_servers", json!({ "account": "work" })), none("ana-mini"));
-    assert_eq!(on(&bob, Some(ana.machine.as_str()), "device_hub", json!({})), none(&ana.machine));
+    assert_eq!(on(&bob, Some("ana-mini"), "search", json!({ "tab": mini_tab, "query": "form" })), none("ana-mini"));
+    assert_eq!(on(&bob, Some("ana-mini"), "diff", json!({ "tab": mini_tab, "scope": "uncommitted" })), none("ana-mini"));
+    for (action, args) in [
+        ("device_hub", json!({})),
+        ("device_agents", json!({ "allow": true })),
+        ("device", json!({ "op": "list" })),
+        ("list_accounts", json!({})),
+        ("add_account", json!({ "provider": "claude", "name": "Bobs" })),
+        ("set_account_key", json!({ "account": "work" })),
+        ("remove_account", json!({ "account": "work" })),
+        ("sign_in", json!({ "account": "work" })),
+    ] {
+        assert_eq!(on(&bob, Some(ana.machine.as_str()), action, args), none(&ana.machine), "{action}");
+    }
     assert_eq!(on(&bob, Some("ana-vps"), "update_self", json!({})), none("ana-vps"), "a confirm on another account's machine is refused before it waits");
     assert_eq!(act(&bob.dir, &bob.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("the workflow was deleted".into()));
     assert_eq!(act(&bob.dir, &bob.tab, "slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })), Err("the workflow was deleted".into()));
     assert_eq!(act(&bob.dir, &bob.tab, "linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })), Err("the workflow was deleted".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), Err("Linear is not connected: connect it in pinned's Connectors settings".into()), "bob's act runs on his own connections");
     assert_eq!(act(&bob.dir, &bob.tab, "box_status", json!({ "machine": mini })), Err("this machine is no box".into()));
     assert_eq!(act(&bob.dir, &bob.tab, "invites", json!({})).unwrap()["result"]["pending"], json!([]));
     assert_eq!(act(&bob.dir, &bob.tab, "external_agents", json!({})).unwrap()["result"]["agents"], json!([]));
