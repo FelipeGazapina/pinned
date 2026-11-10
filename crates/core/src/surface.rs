@@ -46,6 +46,9 @@ pub struct Action {
     pub about: &'static str,
     /// Fields of its answer an agent never gets, at any depth.
     pub hides: &'static [&'static str],
+    /// Dotted paths of arguments an agent may send though their names read as a key, such as a
+    /// project's `project.key`, which names a repository.
+    pub sends: &'static [&'static str],
     /// Refuses arguments that parse but an agent may not send. Its error is the refusal.
     pub check: Option<fn(&Parsed) -> Result<(), String>>,
 }
@@ -67,6 +70,10 @@ impl Action {
         Action { hides, ..self }
     }
 
+    const fn sends(self, sends: &'static [&'static str]) -> Action {
+        Action { sends, ..self }
+    }
+
     /// Adds the action's argument check, which `parse` runs on the call it built.
     pub const fn checks(self, check: fn(&Parsed) -> Result<(), String>) -> Action {
         Action { check: Some(check), ..self }
@@ -82,11 +89,11 @@ impl Action {
 }
 
 const fn n(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None }
+    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[], sends: &[], check: None }
 }
 
 const fn h(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None }
+    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[], sends: &[], check: None }
 }
 
 use Class::{Confirm, Excluded, Read, Write};
@@ -102,7 +109,7 @@ pub const ACTIONS: &[Action] = &[
     // Sessions on a machine.
     n("tabs", Read, "Every session on the machine as JSON: id, folder, agent account, title, status, role, Claude session id and who started it.").wired(),
     n("open_tab", Write, "Opens a new session tab in the folder path (null: the machine's default folder), not started, and answers its id. Start it with start_claude. bypass runs it with permissions skipped.").wired(),
-    n("open_scratch", Write, "Opens a new session tab in the folder for threads without a project, not started, and answers its id."),
+    n("open_scratch", Write, "Opens a new session tab in the folder for threads without a project, not started, and answers its id.").wired(),
     n("auto_resume", Excluded, "a thread's own switch for continuing after a usage limit, which the user sets"),
     n("start_claude", Write, "Starts the session in tab and answers its folder. It becomes your worker: it counts against its project's workers-at-once limit, is held to the time limit and budget, its first finished turn ends it as a task, and you get its notice. cols and rows size its terminal; 120 and 32 suit.").wired().starts_work(),
     n("set_bypass", Write, "Restarts a session with permissions skipped (on: true) or asked (on: false), resuming its conversation."),
@@ -117,10 +124,10 @@ pub const ACTIONS: &[Action] = &[
     n("project_history", Read, "The saved turns of the project at path, newest first, only one Claude session's when session is given.").wired(),
     n("git_remote", Excluded, GIT),
     n("browse", Excluded, "the folder picker's typeahead: list folders in your own shell"),
-    n("create_project", Write, "Makes a new git repository named after name in ~/pinned, with a first commit, and opens it as a project."),
-    n("publish_project", Write, "Pushes the project at path to a new private GitHub repository and answers its URL."),
+    n("create_project", Write, "Makes a new git repository named after name in ~/pinned, with a first commit, and opens it as a project.").wired(),
+    n("publish_project", Write, "Pushes the project at path to a new private GitHub repository and answers its URL.").wired(),
     n("clone", Excluded, "it takes a GitHub token: the hub's clone action adds the account's own").named("node_clone"),
-    n("make_folder", Write, "Makes the folder path with its parents and answers it, canonical."),
+    n("make_folder", Write, "Makes the folder path with its parents and answers it, canonical.").wired(),
     n("search_threads", Read, "The sessions on the machine whose conversations hold query, prompt matches first.").wired(),
     n("run", Excluded, "the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's"),
     n("deliver", Excluded, "the hub's way into a workflow's session, matched by environment"),
@@ -132,14 +139,14 @@ pub const ACTIONS: &[Action] = &[
     n("add_account", Confirm, "Adds an agent account on the machine. The user enters any API key in the app."),
     n("set_account_key", Confirm, "Replaces an agent account's API key. The user enters it in the app."),
     n("remove_account", Confirm, "Removes an agent account from the machine; its projects fall back to the default account."),
-    n("set_project_account", Write, "Runs the project at path under another agent account, or the default one with null."),
-    n("open_orchestrator", Write, "Opens the Captain tab of the project at path, not started, and answers its id."),
-    n("enqueue", Write, "Hands text to the Captain of the project at path: typed when it is idle, its first prompt when stopped, else queued.").starts_work(),
+    n("set_project_account", Write, "Runs the project at path under another agent account, or the default one with null.").wired(),
+    n("open_orchestrator", Write, "Opens the Captain tab of the project at path, not started, and answers its id.").wired(),
+    n("enqueue", Write, "Hands text to the Captain of the project at path: typed when it is idle, its first prompt when stopped, else queued. It is signed with your own role. Starting a stopped Captain is held to the project's tier, effort and workers-at-once limits.").wired().starts_work(),
     n("orchestrator_report", Excluded, "a Captain's report to the global orchestrator: a Captain calls tell_orchestrator"),
-    n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id."),
+    n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id. Only the global orchestrator's own session may call it.").wired(),
     n("open_taste_chat", Write, "Opens a thread that adjusts a scope's way of working by talking, not started, and answers its id."),
     n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, and its busy and report policies.").wired(),
-    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings."),
+    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
     n("read_session", Read, "A session's state and its last items (20, at most 50) of conversation, read from the end of its transcript, on the session's machine or the one machine names.").named("node_read_session").wired(),
     n("memory_search", Read, "The memories of the project at path that best match query, best first, or the latest for an empty query. Any project of the account: pass machine for one on another machine.").wired(),
     n("memory_save", Write, "Saves a memory in the project at path, any project of the account (pass machine for another machine). With id, replaces that memory. Refused when the project has one with the same title or nearly the same meaning.").wired(),
@@ -148,7 +155,7 @@ pub const ACTIONS: &[Action] = &[
     n("sign_in", Confirm, "Opens the CLI's login for an agent account in a new tab, where the user signs in."),
     n("switch_account", Write, "Moves a session's conversation to another agent account signed in on the machine and resumes it there."),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
-    n("prompt", Write, "Types text into a session as one prompt and submits it."),
+    n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
     n("workspace", Excluded, GIT),
     n("pull_request", Excluded, GIT),
     n("pr_status", Excluded, GIT),
@@ -164,7 +171,7 @@ pub const ACTIONS: &[Action] = &[
     n("files", Excluded, FILES),
     n("skills", Read, "Every skill folder on the machine: personal, project and plugin skills, and where each copy lives.").wired(),
     n("read_skill", Read, "The text of file (SKILL.md when left out) in the skill folder dir that skills lists.").wired(),
-    n("save_skill", Write, "Writes a skill file to each listed copy unchanged since its read, then reloads the sessions that load it."),
+    n("save_skill", Write, "Writes a skill file to each listed copy unchanged since its read, then reloads the sessions that load it.").wired(),
     n("branches", Excluded, GIT),
     n("checkout", Excluded, GIT),
     n("pull_requests", Excluded, GIT),
@@ -173,13 +180,13 @@ pub const ACTIONS: &[Action] = &[
     n("pull_request_files", Excluded, GIT),
     n("token_usage", Read, "The tokens and cost the machine's Claude transcripts record from unix time since on, by model and day.").wired(),
     n("usage_prices", Read, "The model prices and mappings the user set on the machine.").wired(),
-    n("set_usage_prices", Write, "Sets or clears model prices and mappings on the machine."),
+    n("set_usage_prices", Write, "Sets or clears model prices and mappings on the machine.").wired(),
     n("usage_limits", Read, "The account and plan limits Claude's own usage check reports.").wired(),
     n("page_meta", Excluded, "the app's link previews"),
     n("refs", Excluded, GIT),
     n("git", Excluded, GIT),
     n("project_scripts", Read, "The scripts of a session's project, which its header runs.").wired(),
-    n("save_project_scripts", Write, "Replaces the scripts of a session's project."),
+    n("save_project_scripts", Write, "Replaces the scripts of a session's project.").wired(),
     n("checkout_pr", Excluded, GIT),
     n("set_workspace", Write, "Moves a session that has not begun to a worktree of its project, or back to the project's checkout, and restarts it there."),
     n("read_file", Excluded, FILES),
@@ -235,16 +242,16 @@ pub const ACTIONS: &[Action] = &[
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash."),
     h("set_box_access", Confirm, "Sets what the account's boxes may reach."),
     h("answer_box", Confirm, "Allows or refuses a box's pending permission question."),
-    h("clone", Write, "Clones repo on machine with the account's GitHub token, or finds the clone it has, and answers the folder."),
+    h("clone", Write, "Clones repo on machine with the account's GitHub token, or finds the clone it has, and answers the folder.").wired(),
     h("shared_projects", Read, "The account's synced projects, most recently shared first.").wired(),
-    h("share_project", Write, "Offers a project to the account's other machines to clone."),
+    h("share_project", Write, "Offers a project, {key, name, repo}, to the account's other machines to clone.").wired().sends(&["project.key"]),
     h("sync_list", Excluded, SYNC),
     h("sync_push", Excluded, SYNC),
     h("sync_pull", Excluded, SYNC),
     h("sync_mark_executable", Excluded, SYNC),
-    h("save_connector", Write, "Saves a workflow and answers it as stored."),
-    h("delete_connector", Confirm, "Deletes a workflow."),
-    h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model."),
+    h("save_connector", Write, "Saves a workflow (a new one with no id, else the one with that id) and answers it as stored. A workflow with a session that skips permission prompts needs a session that skips them too.").wired(),
+    h("delete_connector", Confirm, "Deletes a workflow.").wired(),
+    h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model.").wired(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo.").starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
     h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine."),
@@ -269,8 +276,8 @@ pub const ACTIONS: &[Action] = &[
     h("overview", Read, "Every project of the account on every machine with its Captain's state, what waits on the user, every machine, and every session.").wired(),
     h("read_captain", Read, "The latest replies of the Captain of the project at path on machine.").wired(),
     h("get_tastes", Read, "The account's way of working: the orchestrator's, the Captains' and each project's, with the delegation limits.").wired(),
-    h("set_taste", Confirm, "Changes fields of one scope of the account's way of working."),
-    h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again."),
+    h("set_taste", Confirm, "Changes fields of one scope of the account's way of working.").wired(),
+    h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again.").wired(),
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
@@ -600,10 +607,29 @@ pub struct Decided {
 /// What the audit row of a call that ran says beyond its arguments: that it loosened a session's
 /// permissions.
 pub fn widening(call: &Parsed) -> Option<String> {
+    if skips_prompts(call) {
+        return Some("loosened permissions: the saved workflow runs a session that skips its permission prompts".into());
+    }
     match call {
         Parsed::Node(Call::SetBypass { tab, on: true, .. }) => Some(format!("loosened permissions: {tab} now skips its permission prompts")),
         Parsed::Node(Call::OpenTab { path, bypass: true }) => Some(format!("loosened permissions: the new tab in {} skips its permission prompts", path.as_deref().unwrap_or("the default folder"))),
         _ => None,
+    }
+}
+
+/// Whether `call` saves a workflow with a session that skips its permission prompts. It runs later,
+/// outside the saving session, so a session that asks for its own prompts may not save one.
+pub fn skips_prompts(call: &Parsed) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && field == "bypassPermissions") || walk(field)),
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    match call {
+        Parsed::Hub(HubCall::SaveConnector { connector }) => serde_json::to_value(connector).is_ok_and(|connector| walk(&connector)),
+        _ => false,
     }
 }
 
@@ -632,14 +658,21 @@ fn secret_name(name: &str, sending: bool) -> bool {
 }
 
 /// The first field of `args`, at any depth, that holds a password, key or token, which an agent
-/// never sends.
-pub fn secret_arg(args: &Value) -> Option<String> {
+/// never sends. `plain` lists the dotted paths an action's arguments may carry under such a name.
+pub fn secret_arg(args: &Value, plain: &[&str]) -> Option<String> {
+    find_secret(args, plain, "")
+}
+
+fn find_secret(args: &Value, plain: &[&str], at: &str) -> Option<String> {
     match args {
-        Value::Object(fields) => fields.iter().find_map(|(name, value)| match value {
-            Value::String(text) if secret_name(name, true) && !text.trim().is_empty() => Some(name.clone()),
-            value => secret_arg(value).map(|inner| format!("{name}.{inner}")),
+        Value::Object(fields) => fields.iter().find_map(|(name, value)| {
+            let path = if at.is_empty() { name.clone() } else { format!("{at}.{name}") };
+            match value {
+                Value::String(text) if secret_name(name, true) && !text.trim().is_empty() && !plain.contains(&path.as_str()) => Some(path),
+                value => find_secret(value, plain, &path),
+            }
         }),
-        Value::Array(items) => items.iter().find_map(secret_arg),
+        Value::Array(items) => items.iter().find_map(|item| find_secret(item, plain, at)),
         _ => None,
     }
 }
@@ -792,7 +825,18 @@ mod tests {
             assert!(!action.about.is_empty(), "{} says nothing", action.name);
         }
         let wired: Vec<&str> = ACTIONS.iter().filter(|a| a.wired && a.class != Read).map(|a| a.name).collect();
-        assert_eq!(wired, ["open_tab", "start_claude", "memory_save", "memory_forget", "rename_machine", "remove_machine", "create_invite"]);
+        assert_eq!(
+            wired,
+            [
+                "open_tab", "open_scratch", "start_claude", "create_project", "publish_project", "make_folder", "set_project_account", "open_orchestrator", "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "memory_save",
+                "memory_forget", "prompt", "save_skill", "set_usage_prices", "save_project_scripts", "clone", "share_project", "save_connector", "delete_connector", "generate_workflow", "rename_machine", "remove_machine", "create_invite",
+                "set_taste", "reset_taste_field"
+            ]
+        );
+        for name in ["set_taste", "reset_taste_field", "delete_connector"] {
+            assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
+        }
+        assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
     }
 
     #[test]
@@ -800,7 +844,7 @@ mod tests {
         let all = listing(None);
         let names: Vec<&str> = all.iter().map(|l| l.name).collect();
         assert!(names.contains(&"tabs") && names.contains(&"remove_machine") && names.contains(&"agent_audit"));
-        assert!(!names.contains(&"write_input") && !names.contains(&"prompt") && !names.contains(&"act"), "excluded or unwired: {names:?}");
+        assert!(!names.contains(&"write_input") && !names.contains(&"device_hub") && !names.contains(&"act"), "excluded or unwired: {names:?}");
         let rename = all.iter().find(|l| l.name == "rename_machine").unwrap();
         assert_eq!((rename.class, rename.on), (Write, "hub"));
         assert_eq!(rename.args["required"], json!(["id", "name"]));
@@ -839,6 +883,24 @@ mod tests {
     }
 
     #[test]
+    fn a_workflow_that_skips_permission_prompts_is_noted_and_one_that_asks_is_not() {
+        let workflow = |mode: &str, step: &str| {
+            json!({
+                "connector": {
+                    "name": "Fix", "enabled": true, "trigger": { "kind": "called" }, "folder": "/w/site", "model": "", "effort": "high", "permissionMode": mode, "worktree": false, "instructions": "",
+                    "graph": { "nodes": [{ "id": "s", "name": "Fix", "position": [0, 0], "type": "session", "permission": step }], "edges": [] }
+                }
+            })
+        };
+        let parsed = |args: Value| parse(find("save_connector").unwrap(), &args).unwrap();
+        assert!(!skips_prompts(&parsed(workflow("acceptEdits", "plan"))));
+        assert!(skips_prompts(&parsed(workflow("bypassPermissions", ""))));
+        assert!(skips_prompts(&parsed(workflow("manual", "bypassPermissions"))), "a step's own setting counts");
+        assert_eq!(widening(&parsed(workflow("bypassPermissions", ""))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"));
+        assert_eq!(widening(&parsed(workflow("auto", ""))), None);
+    }
+
+    #[test]
     fn an_actions_check_refuses_arguments_that_parse() {
         fn no_blank_name(call: &Parsed) -> Result<(), String> {
             match call {
@@ -853,11 +915,16 @@ mod tests {
 
     #[test]
     fn a_key_token_or_password_in_the_arguments_is_named_and_an_empty_one_is_not() {
-        assert_eq!(secret_arg(&json!({ "key": "lin_api_123" })), Some("key".into()));
-        assert_eq!(secret_arg(&json!({ "settings": { "github_token": "x" } })), Some("settings.github_token".into()));
-        assert_eq!(secret_arg(&json!({ "items": [{ "password": "hunter2" }] })), Some("items.password".into()));
-        assert_eq!(secret_arg(&json!({ "key": "", "token": null, "name": "Mini" })), None);
-        assert_eq!(secret_arg(&json!({ "path": "/w/site", "title": "Deploys", "text": "the key is in the vault" })), None);
+        assert_eq!(secret_arg(&json!({ "key": "lin_api_123" }), &[]), Some("key".into()));
+        assert_eq!(secret_arg(&json!({ "settings": { "github_token": "x" } }), &[]), Some("settings.github_token".into()));
+        assert_eq!(secret_arg(&json!({ "items": [{ "password": "hunter2" }] }), &[]), Some("items.password".into()));
+        assert_eq!(secret_arg(&json!({ "key": "", "token": null, "name": "Mini" }), &[]), None);
+        assert_eq!(secret_arg(&json!({ "path": "/w/site", "title": "Deploys", "text": "the key is in the vault" }), &[]), None);
+        let project = json!({ "project": { "key": "github.com/acme/site", "name": "site", "repo": "github.com/acme/site" } });
+        assert_eq!(secret_arg(&project, &[]), Some("project.key".into()));
+        assert_eq!(secret_arg(&project, &["project.key"]), None, "an action may name the paths that hold no secret");
+        assert_eq!(secret_arg(&json!({ "project": { "key": "x" }, "token": "abc" }), &["project.key"]), Some("token".into()));
+        assert_eq!(find("share_project").map(|a| a.sends), Some(&["project.key"][..]));
     }
 
     #[test]

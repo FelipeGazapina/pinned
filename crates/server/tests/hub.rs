@@ -5033,3 +5033,202 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(act(&ana.dir, &ana.tab, "session_marks", json!({})).unwrap(), json!({ "outcome": "done", "result": [] }), "a hub read runs as the app's call");
     drop(bob);
 }
+
+/// `act` on `machine` (a name or id) instead of the session's own.
+fn act_on(dir: &Path, tab: &str, machine: &str, action: &str, args: Value) -> Result<Value, String> {
+    session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }))
+}
+
+/// What `act` ran and answered, which must have run.
+fn ran(answer: Result<Value, String>) -> Value {
+    let answer = answer.unwrap();
+    assert_eq!(answer["outcome"], "done", "{answer}");
+    answer["result"].clone()
+}
+
+/// A git repository at `dir` with one commit, which a clone of it can copy.
+fn source_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    let git = |args: &[&str]| assert!(pinned_core::process::command("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success(), "git {args:?}");
+    git(&["init", "-q"]);
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "first"]);
+}
+
+#[test]
+fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it() {
+    let hub = TestHub::start_with("agent_surface_rest", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let code = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let docs = ana.dir.join("docs").canonicalize().unwrap().display().to_string();
+    let site = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let bobs_docs = bob.dir.join("docs").canonicalize().unwrap().display().to_string();
+    let no_machine = "this account has no machine ana-mac".to_owned();
+
+    let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
+    let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
+    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
+        assert_eq!(class(name).as_deref(), Some(expected), "{name}");
+    }
+    assert!(class("run_workflow").is_none() && class("run").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
+
+    // Workflows: save, edit, list, and a refusal for one that skips permission prompts.
+    let workflow = |name: &str, mode: &str, id: Option<&str>| {
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": site, "model": "", "effort": "high", "permissionMode": mode, "worktree": false, "instructions": "",
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let saved = ran(act(&ana.dir, &ana.tab, "save_connector", workflow("Bugs", "acceptEdits", None)));
+    let workflow_id = saved["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved["name"], "Bugs");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "save_connector", workflow("Bugs v2", "acceptEdits", Some(&workflow_id))))["id"], workflow_id.as_str(), "an id edits the workflow");
+    let settings = ran(act(&ana.dir, &ana.tab, "get_settings", json!({})));
+    let workflows: Vec<(&str, &str)> = settings["connectors"].as_array().unwrap().iter().map(|c| (c["id"].as_str().unwrap(), c["name"].as_str().unwrap())).collect();
+    assert_eq!(workflows, [(workflow_id.as_str(), "Bugs v2")]);
+    assert_eq!(
+        act(&ana.dir, &ana.tab, "save_connector", workflow("Wide", "bypassPermissions", None)),
+        Err("save_connector would run a session that skips its permission prompts, and your own session asks for them".into()),
+        "a workflow outlives the session that saved it, so it never runs wider than that session"
+    );
+    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": "Triage bugs" })), Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": " " })), Err("describe the workflow first".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "run", json!({})), Err("run is not open to agents: the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's".into()));
+
+    // Bob's account holds none of Ana's workflows, and cannot reach, edit or delete one.
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "get_settings", json!({})))["connectors"], json!([]));
+    let bobs = ran(act(&bob.dir, &bob.tab, "save_connector", workflow("Bugs v3", "acceptEdits", Some(&workflow_id))));
+    assert_ne!(bobs["id"], workflow_id.as_str(), "Ana's id edits nothing of Bob's account: it makes a workflow of his own");
+    let ana_sees = |ana: &Agent| ran(act(&ana.dir, &ana.tab, "get_settings", json!({})))["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "Bob's save left Ana's workflow as it was");
+    let bobs_delete = act(&bob.dir, &bob.tab, "delete_connector", json!({ "id": workflow_id })).unwrap();
+    assert_eq!(bobs_delete["outcome"], "pending");
+    let decided = bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_delete["id"], "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done");
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "Bob's approved delete reached his own account's workflows only");
+
+    // Ana's delete is held for her approval, and only her app decides it.
+    let delete = act(&ana.dir, &ana.tab, "delete_connector", json!({ "id": workflow_id })).unwrap();
+    assert_eq!(delete["outcome"], "pending");
+    let delete_id = delete["id"].as_str().unwrap().to_owned();
+    assert_eq!(ana_sees(&ana), ["Bugs v2"], "nothing is deleted before she approves");
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": delete_id, "approve": true })), Err(format!("no confirmation {delete_id} waits")));
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": delete_id, "approve": true })).unwrap()["outcome"], "done");
+    assert!(ana_sees(&ana).is_empty());
+
+    // Projects: clone with the account's own token on its own machine, share, list.
+    let source = ana.dir.join("source");
+    source_repo(&source);
+    let cloned = ana.dir.join("cloned");
+    let source_text = source.display().to_string();
+    let copy = ran(act(&ana.dir, &ana.tab, "clone", json!({ "machine": ana.machine, "repo": source_text, "dest": cloned.display().to_string() })));
+    assert_eq!(copy, json!(cloned.canonicalize().unwrap().display().to_string()), "the hub's clone answers the folder");
+    assert!(cloned.join("README.md").is_file());
+    let bobs_clone = bob.dir.join("stolen");
+    assert_eq!(act(&bob.dir, &bob.tab, "clone", json!({ "machine": ana.machine, "repo": source_text, "dest": bobs_clone.display().to_string() })), Err(format!("this account has no machine {}", ana.machine)));
+    assert!(!bobs_clone.exists());
+    let projects = ran(act(&ana.dir, &ana.tab, "list_projects", json!({})));
+    assert!(projects.as_array().unwrap().iter().any(|p| p["path"] == cloned.canonicalize().unwrap().display().to_string().as_str()), "{projects}");
+
+    let project = json!({ "key": "github.com/acme/site", "name": "site", "repo": "github.com/acme/site" });
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "share_project", json!({ "project": project }))), Value::Null);
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "shared_projects", json!({}))), json!([project]));
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "shared_projects", json!({}))), json!([]), "Bob's account shares nothing of Ana's");
+
+    // Sessions: scratch and Captain tabs open, a session cannot prompt itself or a Captain, and a message waits for the Captain's limits.
+    let scratch = ran(act(&ana.dir, &ana.tab, "open_scratch", json!({ "bypass": false })));
+    assert!(scratch.as_str().is_some_and(|tab| ana.node.machine.view(tab).is_some()));
+    let captain = ran(act(&ana.dir, &ana.tab, "open_orchestrator", json!({ "path": docs })));
+    assert!(ana.node.machine.view(captain.as_str().unwrap()).is_some_and(|view| !view.running));
+    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": ana.tab, "text": "hi" })), Err("prompt types into another session; your own session is the one reading this".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": captain, "text": "hi" })), Err(format!("{} is a Captain: enqueue hands it a message when it is idle", captain.as_str().unwrap())));
+    assert_eq!(act(&ana.dir, &ana.tab, "open_global_orchestrator", json!({})), Err("open_global_orchestrator is for the global orchestrator's own session".into()));
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "search_threads", json!({ "query": "nothing says this" }))), json!([]));
+
+    // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
+    let almirante = ran(act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })));
+    assert_eq!(almirante["name"], "Almirante");
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
+    assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");
+    let prices = ran(act(&ana.dir, &ana.tab, "set_usage_prices", json!({ "prices": { "glm-5.3": { "input": 1.0, "output": 2.0 } }, "aliases": {} })));
+    assert_eq!(prices["prices"]["glm-5.3"]["output"], 2.0);
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "usage_prices", json!({}))), json!({ "prices": {}, "aliases": {} }));
+    assert!(ran(act(&ana.dir, &ana.tab, "skills", json!({}))).is_array());
+    let missing = ran(act(&ana.dir, &ana.tab, "save_skill", json!({ "text": "# x", "copies": [{ "dir": ana.dir.join("no-skill").display().to_string(), "since": "abc" }] })));
+    assert_eq!(missing["copies"][0]["outcome"], "missing");
+    assert!(ran(act(&ana.dir, &ana.tab, "token_usage", json!({ "since": 0 }))).is_object());
+    for (action, args) in [
+        ("list_projects", json!({})),
+        ("project_history", json!({ "path": docs })),
+        ("search_threads", json!({ "query": "deploys" })),
+        ("memory_status", json!({ "path": docs })),
+        ("memory_search", json!({ "path": docs, "query": "deploy" })),
+        ("memory_save", json!({ "path": docs, "title": "Mine", "text": "Not yours." })),
+        ("memory_forget", json!({ "path": docs, "id": 1 })),
+        ("global_orchestrator_settings", json!({})),
+        ("set_global_orchestrator_settings", json!({ "settings": { "name": "Mine" } })),
+        ("usage_prices", json!({})),
+        ("set_usage_prices", json!({ "prices": {}, "aliases": {} })),
+        ("token_usage", json!({ "since": 0 })),
+        ("usage_limits", json!({})),
+        ("skills", json!({})),
+        ("save_skill", json!({ "text": "# x", "copies": [] })),
+        ("make_folder", json!({ "path": bob.dir.join("elsewhere").display().to_string() })),
+        ("create_project", json!({ "name": "stolen" })),
+        ("publish_project", json!({ "path": docs })),
+        ("set_project_account", json!({ "path": docs, "account": null })),
+        ("open_scratch", json!({ "bypass": false })),
+        ("open_orchestrator", json!({ "path": docs })),
+        ("enqueue", json!({ "path": docs, "text": "Ship it.", "request_id": "r-1" })),
+        ("prompt", json!({ "tab": ana.tab, "text": "hi" })),
+        ("save_project_scripts", json!({ "tab": ana.tab, "scripts": [] })),
+    ] {
+        assert_eq!(act_on(&bob.dir, &bob.tab, "ana-mac", action, args), Err(no_machine.clone()), "{action}");
+    }
+    assert_eq!(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": docs })), Err(format!("{docs} is not a project on this machine")), "his own machine has no such folder");
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": bobs_docs })))["count"], 0);
+    assert!(!bob.dir.join("elsewhere").exists());
+
+    // The way of working carries the limits: a change waits for the owner, and lands in his account alone.
+    let tastes = |agent: &Agent| ran(act(&agent.dir, &agent.tab, "get_tastes", json!({})))["captains"]["parallel"].clone();
+    let before = tastes(&ana);
+    assert_eq!(tastes(&bob), before);
+    let change = act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "parallel": 7 } })).unwrap();
+    assert_eq!(change["outcome"], "pending");
+    let reset = act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "parallel" })).unwrap();
+    assert_eq!(reset["outcome"], "pending");
+    assert_eq!(tastes(&ana), before, "nothing changes before she approves");
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": change["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(tastes(&ana), json!(7));
+    assert_eq!(tastes(&bob), before, "Bob's way of working is his own");
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": reset["id"], "approve": true })).unwrap()["outcome"], "done");
+
+    // Delegation stats: the tasks a machine of Ana's recorded are hers alone.
+    let (_, raw_token) = account::register_machine(&url, &ana_token, "ana-raw", "linux").unwrap();
+    let raw = RawMachine::start(&url, &raw_token, |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("ana-mac", true), ("ana-raw", true)]);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now_ms())] })).unwrap();
+    assert_eq!(ran(act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 1);
+    assert_eq!(ran(act(&bob.dir, &bob.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 0);
+
+    // The trail: Ana's acts are hers, a refusal is a row, and Bob's trail has none of hers.
+    let trail = ran(act(&ana.dir, &ana.tab, "agent_audit", json!({ "limit": 200 })));
+    let rows: Vec<(&str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap())).collect();
+    for expected in [("save_connector", "done"), ("save_connector", "refused"), ("delete_connector", "pending"), ("delete_connector", "approved"), ("clone", "done"), ("share_project", "done"), ("set_taste", "pending"), ("set_taste", "approved"), ("run", "refused")] {
+        assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
+    }
+    let bobs = ran(act(&bob.dir, &bob.tab, "agent_audit", json!({ "limit": 200 })));
+    assert!(bobs.as_array().unwrap().iter().all(|r| r["machine"] == bob.machine.as_str()), "{bobs}");
+    drop(raw);
+}

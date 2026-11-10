@@ -26,6 +26,8 @@ struct Caller {
     role: ActorRole,
     session: Option<String>,
     title: String,
+    /// Its session skips its own permission prompts.
+    bypass: bool,
 }
 
 impl Caller {
@@ -38,6 +40,7 @@ impl Caller {
             known: view.is_some(),
             role: view.as_ref().map_or(ActorRole::Session, ActorRole::of),
             session: view.as_ref().and_then(|v| v.session.clone()),
+            bypass: view.as_ref().is_some_and(|v| v.bypass),
             title: view.and_then(|v| v.title.or(v.prompt_title)).unwrap_or_default(),
         })
     }
@@ -162,10 +165,13 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         let class = serde_json::to_value(action.class).ok().and_then(|c| c.as_str().map(str::to_owned)).unwrap_or_default();
         return Err(format!("{name} is a {class} action that is not wired yet"));
     }
-    if let Some(field) = surface::secret_arg(&act.args) {
+    if let Some(field) = surface::secret_arg(&act.args, action.sends) {
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &act.args)?;
+    if surface::skips_prompts(&call) && !caller.bypass {
+        return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
+    }
     let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
     let target = match asked {
         Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
@@ -179,12 +185,18 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
-/// machine, where the origin machine hears which session asked.
+/// machine, where the origin machine hears which session asked. Another machine hears no session
+/// for a call that checks one, which then refuses what needs the asking session's own.
 async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
-            let call = if on_origin { Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? } } else { call };
+            let guarded = matches!(call, Call::Prompt { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+            let call = match (on_origin, guarded) {
+                (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
+                (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
+                (false, false) => call,
+            };
             hub.call_machine(account, target, call, ACT_WAIT).await.map_err(String::from)
         }
     }
