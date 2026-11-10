@@ -1842,6 +1842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn delete_outside_the_worktree() {
         check_bash(&[
             ("rm -rf ~", Some(DeleteOutside)),
@@ -2089,6 +2090,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn write_outside_the_worktree() {
         check_bash(&[
             ("echo x > ~/foo", Some(WriteOutside)),
@@ -2446,6 +2448,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_hit_names_the_first_item_of_the_table() {
         let f = fx();
         let hit = |line: &str| never(&ctx(&f, FOO), &Ask::Bash { command: line }).unwrap();
