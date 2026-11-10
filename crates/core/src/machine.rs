@@ -10062,7 +10062,7 @@ while True:
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
 
         let api = dir.join("api");
@@ -10980,7 +10980,7 @@ while True:
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
+        assert_eq!(args, [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None });
@@ -11022,7 +11022,7 @@ Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
         let cap = "pinned enforces these delegation limits on delegate_task: at most 4 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
         let kept: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
         assert_eq!(kept["projects"], account["projects"], "the hub's answer is kept for when it can't answer");
@@ -11204,7 +11204,7 @@ Have another model review a risky change before it goes ahead.";
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
+        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -12519,7 +12519,7 @@ Have another model review a risky change before it goes ahead.";
                 &path,
                 &config.join("accounts/work").display().to_string(),
                 "--settings",
-                "s",
+                hooks::AGENT_SETTINGS,
                 "--plugin-dir",
                 "p",
                 "--name",
