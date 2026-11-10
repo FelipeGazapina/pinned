@@ -732,14 +732,14 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
 async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
-    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. }) {
+    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
+    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) {
         let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
