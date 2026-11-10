@@ -102,26 +102,31 @@ pub enum Screen {
     Bypass,
 }
 
-/// Words only each screen shows, as `flat` spells them.
-const SCREENS: [(Screen, &[&str]); 5] = [
+/// Words only each screen shows, as `flat` spells them, in Claude Code 2.1. The keys `answer`
+/// types follow that version's menus, where "No, exit" comes first.
+const SCREENS: [(Screen, &[&str]); 4] = [
     (Screen::Theme, &["choosethetextstylethatlooksbestwithyourterminal"]),
     (Screen::Login, &["selectloginmethod"]),
     (Screen::Trust, &["yesitrustthisfolder"]),
-    (Screen::Trust, &["doyoutrustthefilesinthisfolder"]),
     (Screen::Bypass, &["bypasspermissionsmode", "yesiaccept"]),
 ];
 
-/// The first-run screen the session shows now: of those its output drew, the one drawn last.
+/// The banner of the session's own screen, "Claude Code v2.1.322", which follows every first-run
+/// screen once it is answered.
+const STARTED: &str = "claudecodev";
+
+/// The first-run screen the session shows now: of those its output drew, the one drawn last, unless
+/// the session's own screen came after it.
 pub fn showing(screen: &str) -> Option<Screen> {
     let flat = flat(screen);
-    SCREENS
+    let (at, kind) = SCREENS
         .iter()
         .filter_map(|(kind, words)| {
             let at = words.iter().map(|word| flat.rfind(word)).collect::<Option<Vec<_>>>()?;
             Some((at.into_iter().max()?, *kind))
         })
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, kind)| kind)
+        .max_by_key(|(at, _)| *at)?;
+    (flat.rfind(STARTED) < Some(at)).then_some(kind)
 }
 
 /// The keys that answer `screen`, typed one at a time, or why the start can't go on without the
@@ -227,6 +232,24 @@ mod tests {
         assert_eq!(showing(&format!("{trust}{bypass}")), Some(Screen::Bypass));
         assert_eq!(showing(" Select login method: ❯ 1. Claude account"), Some(Screen::Login));
         assert_eq!(showing("❯ \r\n ⏵⏵ bypass permissions on (shift+tab to cycle)"), None, "the prompt line is no first-run screen");
+        assert_eq!(showing(&format!("{trust} Claude Code v2.1.322 ❯")), None, "the session's own screen came after the prompt");
+    }
+
+    /// What Claude Code 2.1.322 drew in a pty, with its folder renamed.
+    #[test]
+    fn real_claude_code_screens_are_told_apart() {
+        let theme = String::from_utf8_lossy(include_bytes!("first_run_screens/theme.txt")).into_owned();
+        let trust = String::from_utf8_lossy(include_bytes!("first_run_screens/trust.txt")).into_owned();
+        let bypass = String::from_utf8_lossy(include_bytes!("first_run_screens/bypass.txt")).into_owned();
+        let repl = String::from_utf8_lossy(include_bytes!("first_run_screens/repl.txt")).into_owned();
+        let answered = String::from_utf8_lossy(include_bytes!("first_run_screens/trust-answered.txt")).into_owned();
+        assert_eq!(showing(&theme), Some(Screen::Theme));
+        assert_eq!(showing(&trust), Some(Screen::Trust));
+        assert_eq!(showing(&bypass), Some(Screen::Bypass));
+        assert_eq!(showing(&repl), None, "a bypass session's prompt is no first-run screen");
+        assert_eq!(showing(&format!("{theme}{trust}")), Some(Screen::Trust));
+        assert_eq!(showing(&format!("{trust}{bypass}{repl}")), None, "a warning answered before the session's screen is past");
+        assert_eq!(showing(&answered), None, "a trust prompt the user answered stays in the buffer, behind the session's screen");
     }
 
     #[test]
