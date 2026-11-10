@@ -125,6 +125,8 @@ const send = (page, key, text) =>
       throw e;
     });
 
+    // The machine reads what each thread waits on from its transcript a moment after the notice.
+    await waitFor("the worker's command and the question in the rows", () => page.evaluate(() => /rm -rf build/.test(document.getElementById("thread-list").innerText) && /Which color\?/.test(document.getElementById("thread-list").innerText)), 20000);
     for (const [size, viewport] of SIZES) {
       const phone = size === "phone";
       const view = phone ? await browser.newContext({ viewport, deviceScaleFactor: 2, colorScheme: "dark", isMobile: phone, hasTouch: phone }) : context;
