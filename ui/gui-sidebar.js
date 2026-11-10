@@ -306,7 +306,7 @@ function markThreadSeen(tab) {
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
 /** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
-function statsLabel(tab) {
+function statsLabel(tab, costOnly = false) {
   const stats = tab?.view.stats;
   const work = tab?.view.work;
   if (!stats && !work) return "";
@@ -315,7 +315,7 @@ function statsLabel(tab) {
   // A thread that delegated shows the cost of the whole piece of work: its own session and its workers.
   const usd = work ? work.usd : stats?.cost_usd;
   const cost = usd == null ? "" : costLabel(usd, work?.unknown);
-  return [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
+  return costOnly ? cost : [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
 }
 /** A cost as `$1.26`, with a `+` when parts of it have no known cost, so it is a floor. */
 const costLabel = (usd, unknown = 0) => `${usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`}${unknown ? "+" : ""}`;
@@ -342,7 +342,8 @@ function statsHtml(tab) {
   const label = statsLabel(tab);
   const work = tab.view.work;
   const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
-  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</span>` : "";
+  // The header on a phone has room for the cost only, so the label comes twice and the style shows one.
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${esc(label)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
 }
 /** A menu on screen is a question, not an approval, when the hooks said the session needs input
  * rather than permission (an AskUserQuestion menu). */
@@ -609,14 +610,51 @@ function renderSidebar() {
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
   for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  manyMachines = projectsOnManyMachines();
   const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
   threadList.replaceChildren(...away.map(machineNote), ...globalSidebarTop(), ...list);
   if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
+  drawSidebarToggle();
   tickDurations();
   scheduleWake();
+}
+
+/** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
+ * threads, as the Orchestrator's row counts them) and whether any thread is working. */
+function sidebarSummary() {
+  let waiting = agentConfirmations.length;
+  let running = false;
+  for (const tab of tabs) {
+    if (waitingKindOf(tab.view)) waiting++;
+    if (["working", "delegating"].includes(phaseOf(tab))) running = true;
+  }
+  return { waiting, running };
+}
+/** The chat header's sidebar toggle with a pill for what waits and a dot while something works. */
+function sidebarToggleHtml({ waiting, running }) {
+  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running" aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
+}
+const sidebarToggleLabel = ({ waiting, running }) => `Toggle sidebar (${MOD_LABEL}B)${waiting ? `, ${waiting} waiting on you` : ""}${running ? ", something is working" : ""}`;
+let sidebarTouched = false;
+let phoneDrawerUntil = 0;
+function drawSidebarToggle() {
+  const summary = sidebarSummary();
+  const toggle = document.getElementById("chat-sidebar-toggle");
+  const html = sidebarToggleHtml(summary);
+  if (toggle.innerHTML !== html) toggle.innerHTML = html;
+  toggle.title = sidebarToggleLabel(summary);
+  toggle.setAttribute("aria-label", toggle.title);
+  // On a phone the first screen is a blank composer, so what waits is shown, not hidden behind the toggle.
+  // It is offered while the machines' threads arrive, until the first few seconds pass or the user moves the sidebar.
+  if (!tabs.length || sidebarTouched) return;
+  phoneDrawerUntil ||= Date.now() + 5000;
+  if (summary.waiting && Date.now() < phoneDrawerUntil && narrow(768) && !ui.sidebarOpen && !shellPage()) {
+    sidebarTouched = true;
+    toggleSidebar(true, true);
+  }
 }
 
 /** Splits `list` into the threads that stand on their own and, by tab key, the threads each one
@@ -735,6 +773,21 @@ function projectRows(list, kids, branch) {
   const captainsFirst = (roots) => [...roots].sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
   return [heading, ...[...groups].flatMap(([key, roots]) => [projectHead(key, roots, kids), ...captainsFirst(roots).flatMap(branch)])];
 }
+/** The machines a project's threads are on, each one whole so a long list breaks between names, never inside one. */
+const projectMachinesHtml = (names) => names.map((name, i) => `<span class="m">${esc(name)}${i < names.length - 1 ? "," : ""}</span>`).join(" ");
+/** The icon that says a card's thread is on another machine. A project on more than one machine
+ * names the machine as text, since a phone has no tooltip to ask. */
+const remoteMark = (name, named) => `<span class="remote${named ? " named" : ""}" title="${esc(name)}">${icon("monitor")}${named ? `<span class="name">${esc(name)}</span>` : ""}</span>`;
+/** The projects whose threads run on more than one machine, by project key. */
+function projectsOnManyMachines() {
+  const machinesOf = new Map();
+  for (const tab of tabs) {
+    const key = projectKeyOf(tab);
+    machinesOf.set(key, (machinesOf.get(key) ?? new Set()).add(tab.machine));
+  }
+  return new Set([...machinesOf].filter(([, on]) => on.size > 1).map(([key]) => key));
+}
+let manyMachines = new Set();
 /** A project's head: its icon and name, how many messages wait for its threads and how many of its
  * workers run, and the machines its threads are on. */
 function projectHead(key, roots, kids) {
@@ -744,13 +797,14 @@ function projectHead(key, roots, kids) {
   const queued = all.reduce((n, t) => n + (t.view.queued ?? 0), 0);
   const running = all.filter((t) => t.view.role === "worker" && ["working", "delegating"].includes(phaseOf(t))).length;
   const states = [queued ? `<span class="state queued">${queued} queued</span>` : "", running ? `<span class="state running">${running} running</span>` : ""].join("");
-  const where = [...new Set(all.map((t) => machineName(t.machine)))].join(", ");
+  const names = [...new Set(all.map((t) => machineName(t.machine)))];
+  const where = names.join(", ");
   const spent = projectCostLabel(roots);
   const name = projectName(roots[0]);
   const head = document.createElement("div");
   head.className = "project-head";
   head.dataset.project = key;
-  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}${spent ? `<span class="state cost" title="What this project's threads and workers cost">${esc(spent)}</span>` : ""}<span class="where" title="${esc(where)}">${esc(where)}</span>`;
+  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}${spent ? `<span class="state cost" title="What this project's threads and workers cost">${esc(spent)}</span>` : ""}<span class="where" title="${esc(where)}">${projectMachinesHtml(names)}</span>`;
   return head;
 }
 
@@ -828,7 +882,7 @@ async function askBusyShells() {
   busyShells = busy;
   renderSidebar();
 }
-setInterval(askBusyShells, 1000);
+visibleInterval(askBusyShells, 1000);
 const busyShellsOf = (tab) => threadShells(tab).filter(({ id }) => busyShells.has(`${tab.machine}:${id}`));
 function terminalPulse(tab) {
   const n = busyShellsOf(tab).length;
@@ -934,7 +988,7 @@ function cardRow(tab) {
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const box = tab.machine !== LOCAL && !scratchMachine && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
   const boxLost = !box && tab.machine !== LOCAL && !scratchMachine && boxDown.has(tab.machine);
-  const remote = box ? boxChipHtml(box) : boxLost ? boxUnavailableHtml() : tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const remote = box ? boxChipHtml(box) : boxLost ? boxUnavailableHtml() : tab.machine !== LOCAL && !scratchMachine ? remoteMark(machineName(tab.machine), manyMachines.has(projectKeyOf(tab))) : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot
@@ -1126,11 +1180,14 @@ function tickDurations() {
   const now = linkDownAt ?? nowS();
   for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
   for (const el of document.querySelectorAll("[data-stats]")) {
-    const text = statsLabel(tabByKey(el.dataset.stats));
-    if (el.textContent !== text) el.textContent = text;
+    const tab = tabByKey(el.dataset.stats);
+    for (const [part, text] of [[".long", statsLabel(tab)], [".usd", statsLabel(tab, true)]]) {
+      const at = el.querySelector(part);
+      if (at && at.textContent !== text) at.textContent = text;
+    }
   }
 }
-setInterval(() => guiOn() && tickDurations(), 1000);
+visibleInterval(() => guiOn() && tickDurations(), 1000);
 
 /** Title, project, branch and PR matches first, then threads whose messages hold the text. */
 function searchRows(list, needle) {
@@ -2177,7 +2234,8 @@ function jumpToRow(n) {
   if (tab) activate(tab);
 }
 
-function toggleSidebar(open = !ui.sidebarOpen) {
+function toggleSidebar(open = !ui.sidebarOpen, auto = false) {
+  if (!auto) sidebarTouched = true;
   ui.sidebarOpen = open;
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
@@ -2227,13 +2285,21 @@ window.addEventListener("blur", () => showJumpHints(false));
  * installs the one found, which restarts the app. */
 const sideUpdate = document.getElementById("side-update");
 let updateBusy = null;
+/** In a browser the footer's control shows only while a machine runs an older pinned than the hub, and opens Machines. */
+const machinesToUpdate = () => (TAURI ? [] : machinesBehind());
+function updateTip(version, behind) {
+  if (version) return `Update ${version} ready to download`;
+  return `${behind.length} ${behind.length === 1 ? "machine runs" : "machines run"} an older pinned: ${behind.map((m) => m.name).join(", ")}`;
+}
 function drawUpdate() {
   const version = document.body.dataset.update;
-  const state = updateBusy ?? (version ? "available" : "idle");
+  const behind = machinesToUpdate();
+  if (!TAURI) sideUpdate.hidden = !behind.length;
+  const state = updateBusy ?? (version || behind.length ? "available" : "idle");
   const [glyph, tip] = {
     idle: ["refresh-cw", "Check for updates"],
     checking: ["refresh-cw", "Checking for updates…"],
-    available: ["download", `Update ${version} ready to download`],
+    available: ["download", updateTip(version, behind)],
     downloading: ["download", "Downloading update"],
   }[state];
   sideUpdate.dataset.state = state;
@@ -2243,6 +2309,7 @@ function drawUpdate() {
   sideUpdate.innerHTML = `<span class="glyph">${icon(glyph, state === "checking" ? "spin" : "")}</span>`;
 }
 sideUpdate.onclick = async () => {
+  if (!TAURI) return openSettings("machines");
   if (updateBusy) return;
   const install = !!document.body.dataset.update;
   updateBusy = install ? "downloading" : "checking";
@@ -2255,6 +2322,10 @@ if (TAURI) {
   sideUpdate.hidden = false;
   drawUpdate();
   new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
+} else {
+  drawUpdate();
+  viewListeners.push(drawUpdate);
+  document.addEventListener("newest-version", drawUpdate);
 }
 
 const sidebarEl = document.getElementById("sidebar");
