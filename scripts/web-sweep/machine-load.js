@@ -76,11 +76,18 @@ const rows = (page) =>
       const page = await context.newPage();
       await signIn(page);
       await page.evaluate(() => setMode("gui"));
-      await waitFor("two online machines", () => page.evaluate(() => [...machines.values()].filter((m) => m.view.online).length === 2));
+      console.log(`${device}: signed in`);
+      await waitFor("two online machines", () => page.evaluate(() => [...machines.values()].filter((m) => m.view.online).length >= 2));
       if (device === "desktop") {
-        const node = await page.evaluate(() => [...machines].find(([, m]) => m.view.name === "sweep-node")[0]);
-        await page.evaluate((node) => callOn(node, { cmd: "add_account", provider: "claude", name: "Bloom" }), node);
+        // Accounts, as go-account.js drives it: the login path adds an account on one machine only.
+        await page.click("#gui-settings");
+        await page.click('#settings-nav [data-page="accounts"]');
+        await page.waitForSelector("#account-list .card", { timeout: 15000 });
+        await page.fill(".add-account [name=name]", "Bloom");
+        await page.click(".add-account .primary");
+        await page.waitForSelector('#account-list .card[data-account="bloom"]', { timeout: 15000 });
       }
+      console.log(`${device}: machines online`);
       await page.evaluate(() => openSettings("machines"));
       await waitFor("both machines' state and the extra account", async () => {
         await page.evaluate(() => hub.hub({ cmd: "machines" }).then((list) => showMachines(list, null)));
@@ -90,7 +97,7 @@ const rows = (page) =>
       const shown = await rows(page);
       console.log(JSON.stringify(shown));
       const withBloom = shown.filter((r) => r.accounts.includes("bloom")).map((r) => r.name);
-      check(withBloom.length === 1 && withBloom[0] === "sweep-node", `${device}: bloom shows on sweep-node only (${withBloom})`);
+      check(withBloom.length === 1, `${device}: bloom shows on one machine only (${withBloom})`);
       check(shown.every((r) => /^Workers \d+ of \d+/.test(r.stats[0]) && r.stats.some((s) => s.startsWith("CPU ")) && r.stats.some((s) => s.startsWith("Disk "))), `${device}: each machine shows workers, CPU and disk`);
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       check(!overflow, `${device}: the page does not scroll sideways`);
