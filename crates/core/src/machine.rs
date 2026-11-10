@@ -8935,7 +8935,7 @@ while True:
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
-        m.record_event(hook(&tab, AgentStatus::Done));
+        m.record_event(AgentEvent { reply: Some("Shipped.".into()), ..hook(&tab, AgentStatus::Done) });
         let both = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r\x1b[200~[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
