@@ -48,7 +48,7 @@ create table if not exists invites (id uuid primary key, code_hash bytea unique 
   created_at timestamptz not null default now(), expires_at timestamptz,
   used_by uuid references accounts on delete set null, used_at timestamptz);
 alter table invites alter column expires_at drop not null;
-update invites set expires_at = null where used_at is null;
+update invites set expires_at = null where used_at is null and expires_at is not null;
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
   path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
   primary key (account, project, path));
