@@ -225,6 +225,19 @@ async function fetchHistory(tab) {
 
 const statusBeforeRender = new Map();
 
+/** Every render reads every tab's screen, so a screen the reader trips on reads as nothing, logged
+ * once per tab, and never stops the other tabs from drawing. */
+const screenTrips = new WeakSet();
+function screenRead(tab, read) {
+  try {
+    return read(tab);
+  } catch (e) {
+    if (!screenTrips.has(tab)) console.warn(`Couldn't read ${tab.key}'s screen`, e);
+    screenTrips.add(tab);
+    return null;
+  }
+}
+
 function renderGui() {
   for (const tab of tabs) {
     const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
@@ -244,12 +257,12 @@ function renderGui() {
       t.watching = true;
       watchMenu(tab);
     }
-    tab.menu = tab.answering ? null : terminalMenu(tab);
+    tab.menu = tab.answering ? null : screenRead(tab, terminalMenu);
     if (terminalOnly(tab)) {
       if (tab.view.program !== "sign-in" && !threadOf(tab).loaded) fetchThread(tab);
       continue;
     }
-    tab.dialog = tab.menu || tab.answering ? null : terminalDialog(tab);
+    tab.dialog = tab.menu || tab.answering ? null : screenRead(tab, terminalDialog);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     if (tab === active && !t.history) fetchHistory(tab);
