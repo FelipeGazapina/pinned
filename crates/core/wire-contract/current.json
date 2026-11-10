@@ -1145,6 +1145,36 @@
                 ]
               },
               {
+                "description": "`auto_archive::Settings` of this machine: when it archives a finished session.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `auto_archive::Settings` saved, answered as saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_auto_archive_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
                 "type": "object",
                 "properties": {
@@ -3939,6 +3969,36 @@
               }
             ]
           },
+          "AutoArchiveSettings": {
+            "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+            "type": "object",
+            "properties": {
+              "workers": {
+                "description": "Worker threads, the tabs a `delegate_task` started.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 30
+              },
+              "sessions": {
+                "description": "Every other session, the ones the user opened.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "workers",
+              "sessions"
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -6211,6 +6271,23 @@
                 "required": [
                   "cmd",
                   "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "`marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`\ndoes it. Only the machine that runs the tab sends it, from its auto-archive check, and the\nhub keeps a pinned thread, an orchestrator and a working one open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
                   "tab"
                 ]
               },
@@ -10180,6 +10257,36 @@
                 ]
               },
               {
+                "description": "`auto_archive::Settings` of this machine: when it archives a finished session.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `auto_archive::Settings` saved, answered as saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_auto_archive_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
                 "type": "object",
                 "properties": {
@@ -12928,6 +13035,32 @@
               }
             ]
           },
+          "AutoArchiveSettings": {
+            "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+            "type": "object",
+            "properties": {
+              "workers": {
+                "description": "Worker threads, the tabs a `delegate_task` started.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 30
+              },
+              "sessions": {
+                "description": "Every other session, the ones the user opened.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": null
+              }
+            }
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -15173,6 +15306,23 @@
                 "required": [
                   "cmd",
                   "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "`marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`\ndoes it. Only the machine that runs the tab sends it, from its auto-archive check, and the\nhub keeps a pinned thread, an orchestrator and a working one open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
                   "tab"
                 ]
               },
@@ -20592,6 +20742,23 @@
                 "required": [
                   "cmd",
                   "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "`marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`\ndoes it. Only the machine that runs the tab sends it, from its auto-archive check, and the\nhub keeps a pinned thread, an orchestrator and a working one open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
                   "tab"
                 ]
               },
@@ -26454,6 +26621,23 @@
                 ]
               },
               {
+                "description": "`marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`\ndoes it. Only the machine that runs the tab sends it, from its auto-archive check, and the\nhub keeps a pinned thread, an orchestrator and a working one open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive"
+                  },
+                  "tab": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`Target`: the new tab, on the archived conversation's machine, that resumes it with its name\nand pin back.",
                 "type": "object",
                 "properties": {
@@ -30387,6 +30571,68 @@
               "approved",
               "denied"
             ]
+          }
+        }
+      }
+    },
+    "AutoArchiveSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AutoArchiveSettings",
+        "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+        "type": "object",
+        "properties": {
+          "workers": {
+            "description": "Worker threads, the tabs a `delegate_task` started.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 30
+          },
+          "sessions": {
+            "description": "Every other session, the ones the user opened.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": null
+          }
+        },
+        "required": [
+          "workers",
+          "sessions"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AutoArchiveSettings",
+        "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+        "type": "object",
+        "properties": {
+          "workers": {
+            "description": "Worker threads, the tabs a `delegate_task` started.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 30
+          },
+          "sessions": {
+            "description": "Every other session, the ones the user opened.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": null
           }
         }
       }
@@ -51232,6 +51478,36 @@
                 ]
               },
               {
+                "description": "`auto_archive::Settings` of this machine: when it archives a finished session.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `auto_archive::Settings` saved, answered as saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_auto_archive_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
                 "type": "object",
                 "properties": {
@@ -54026,6 +54302,36 @@
               }
             ]
           },
+          "AutoArchiveSettings": {
+            "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+            "type": "object",
+            "properties": {
+              "workers": {
+                "description": "Worker threads, the tabs a `delegate_task` started.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 30
+              },
+              "sessions": {
+                "description": "Every other session, the ones the user opened.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "workers",
+              "sessions"
+            ]
+          },
           "PrAction": {
             "oneOf": [
               {
@@ -56354,6 +56660,36 @@
                   },
                   "settings": {
                     "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
+                "description": "`auto_archive::Settings` of this machine: when it archives a finished session.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "auto_archive_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `auto_archive::Settings` saved, answered as saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_auto_archive_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/AutoArchiveSettings"
                   }
                 },
                 "required": [
@@ -59109,6 +59445,32 @@
                 "const": "tool_only"
               }
             ]
+          },
+          "AutoArchiveSettings": {
+            "description": "When this machine archives a finished session. A grace period is in minutes, and null is never.",
+            "type": "object",
+            "properties": {
+              "workers": {
+                "description": "Worker threads, the tabs a `delegate_task` started.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 30
+              },
+              "sessions": {
+                "description": "Every other session, the ones the user opened.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": null
+              }
+            }
           },
           "PrAction": {
             "oneOf": [

@@ -455,6 +455,15 @@ impl Tab {
         }
     }
 
+    /// Between turns, for `auto_archive`: a live session that `notice_idle` finds idle, or one
+    /// with no live session that no turn was cut off in and the user types nothing into.
+    fn idle_for_archive(&self) -> bool {
+        if self.session.is_some() {
+            return self.notice_idle();
+        }
+        self.status != Some(AgentStatus::Working) && !self.interrupted && self.turn_pending.is_none() && self.draft.empty()
+    }
+
     fn notice_idle(&self) -> bool {
         if self.session.is_none() || self.turn_pending.is_some() || !self.draft.empty() {
             return false;
@@ -559,6 +568,11 @@ pub struct Machine {
     /// A session start already waited for the link to load the MCP servers.
     mcp_waited: AtomicBool,
     global: Mutex<global::Settings>,
+    /// When this machine archives a finished session on its own.
+    auto_archive: Mutex<crate::auto_archive::Settings>,
+    /// The sessions the hub or their folders kept open, and when: they are not looked at again
+    /// for `auto_archive::RETRY_SECS`.
+    auto_archive_kept: Mutex<HashMap<String, Instant>>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
@@ -688,7 +702,7 @@ impl Machine {
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
-        Arc::new_cyclic(|me| Machine {
+        let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
             scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
@@ -736,6 +750,8 @@ impl Machine {
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
+            auto_archive: Mutex::new(crate::auto_archive::Settings::load(dir.as_deref())),
+            auto_archive_kept: Mutex::default(),
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
@@ -748,7 +764,9 @@ impl Machine {
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
             hub_name: Mutex::default(),
-        })
+        });
+        machine.start_auto_archive();
+        machine
     }
 
     pub fn launch(&self) -> &Launch {
@@ -1000,6 +1018,8 @@ impl Machine {
             Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
+            Call::AutoArchiveSettings => json(self.auto_archive_settings()),
+            Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
@@ -2372,6 +2392,72 @@ impl Machine {
         settings.save(self.orchestration_dir.as_deref())?;
         *self.global.lock().unwrap() = settings.clone();
         Ok(settings)
+    }
+
+    pub fn auto_archive_settings(&self) -> crate::auto_archive::Settings {
+        *self.auto_archive.lock().unwrap()
+    }
+
+    pub fn set_auto_archive_settings(&self, settings: crate::auto_archive::Settings) -> Result<crate::auto_archive::Settings, String> {
+        let settings = settings.cleaned();
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.auto_archive.lock().unwrap() = settings;
+        self.auto_archive_kept.lock().unwrap().clear();
+        Ok(settings)
+    }
+
+    /// Asks the hub to archive each finished session whose work is over, its report delivered, and
+    /// which idled for the grace period the settings give its kind. See `auto_archive::keeps`. The
+    /// tabs are read in one pass and git, which runs in each folder, only for a tab nothing else
+    /// keeps. Archived: the hub closes the tab and keeps the conversation to unarchive.
+    fn auto_archive_tick(&self, now: u64) -> Vec<String> {
+        use crate::auto_archive::{keeps, unpushed, Facts, RETRY_SECS};
+        let settings = self.auto_archive_settings();
+        if settings.workers.is_none() && settings.sessions.is_none() {
+            return vec![];
+        }
+        let candidates: Vec<(TabView, bool)> = {
+            let turns = self.turns.lock().unwrap().clone();
+            let queued = self.delegates.queued();
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued), t.idle_for_archive())).collect()
+        };
+        let looked = Instant::now();
+        {
+            let mut kept = self.auto_archive_kept.lock().unwrap();
+            kept.retain(|tab, at| candidates.iter().any(|(view, _)| view.id == *tab) && looked.duration_since(*at) < Duration::from_secs(RETRY_SECS));
+        }
+        let mut archived = vec![];
+        for (view, idle) in candidates {
+            if self.auto_archive_kept.lock().unwrap().contains_key(&view.id) {
+                continue;
+            }
+            let tasks = self.delegates.thread_ends(&view.id);
+            let children = self.delegates.working_for(&format!("tab:{}", view.id));
+            if keeps(&Facts { tab: &view, idle, tasks: &tasks, children, now }, &settings).is_some() {
+                continue;
+            }
+            // Git first, so a folder with work nobody has never reaches the hub.
+            let kept = unpushed(Path::new(&view.cwd), self.launch.path_env.as_deref()).map(|keeps| keeps.to_string()).or_else(|| self.call_hub(HubCall::AutoArchive { tab: view.id.clone() }).err());
+            if kept.is_some() {
+                self.auto_archive_kept.lock().unwrap().insert(view.id, looked);
+                continue;
+            }
+            eprintln!("pinned: auto-archived {} ({})", view.id, view.title.as_deref().or(view.prompt_title.as_deref()).unwrap_or("untitled"));
+            archived.push(view.id);
+        }
+        if !archived.is_empty() {
+            self.emit_tabs();
+        }
+        archived
+    }
+
+    /// Starts the check that archives finished sessions, every `auto_archive::CHECK_SECS`.
+    fn start_auto_archive(&self) {
+        self.every(Duration::from_secs(crate::auto_archive::CHECK_SECS), |machine| {
+            let now = crate::connectors::unix_millis() / 1000;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| machine.auto_archive_tick(now)));
+        });
     }
 
     /// Hands `text` from the global orchestrator `sender` to the Capitão of the project at `path`,
@@ -9874,6 +9960,169 @@ while True:
         wait_for("the report", || typed().len() >= expected.len());
         assert_eq!(typed(), expected);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A machine whose hub archives are the ones `archived` lists, with a worker thread on a
+    /// project at `folder`. The worker's task ended and its result went to its parent.
+    fn archiving_machine(name: &str, folder: &Path) -> (Arc<Machine>, String, Arc<Mutex<Vec<String>>>, PathBuf) {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent, Thread};
+        let dir = temp(name);
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let archived = Arc::new(Mutex::new(vec![]));
+        let seen = archived.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::AutoArchive { tab } => {
+                seen.lock().unwrap().push(tab);
+                Ok(Value::Null)
+            }
+            _ => Err("the hub was asked something else".into()),
+        }));
+        let parent = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("parent".into()));
+        let worker = m.add_tab(folder.to_owned(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, folder), false, Some("s1".into()));
+        m.tab(&worker, |t| {
+            t.status = Some(AgentStatus::Done);
+            t.updated = Some(1000);
+        })
+        .unwrap();
+        let ask = NewTask {
+            parent: Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder.to_owned(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(task) = m.delegates.claim(ask, None) else { panic!("the task was not new") };
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        m.delegates.settle_thread(&task.id, Some("Fixed.".into()), None, None, vec![], None);
+        assert!(m.delegates.claim_notice(&parent).is_some(), "the report goes to the parent");
+        (m, worker, archived, dir)
+    }
+
+    const LATER: u64 = 4_000_000_000;
+
+    #[test]
+    fn a_finished_worker_is_archived_through_the_hub_after_its_grace_period() {
+        let (m, worker, archived, dir) = archiving_machine("auto-archive", &temp("auto-archive-folder"));
+        let now = crate::connectors::unix_millis() / 1000;
+        assert_eq!(m.auto_archive_tick(now), Vec::<String>::new(), "it ended just now");
+        assert_eq!(m.auto_archive_tick(now + 29 * 60), Vec::<String>::new(), "29 minutes");
+        assert_eq!(m.auto_archive_tick(now + 31 * 60), [worker.clone()]);
+        assert_eq!(*archived.lock().unwrap(), [worker]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_archive_stays_off_where_the_setting_says_never() {
+        let (m, _, archived, dir) = archiving_machine("auto-archive-off", &temp("auto-archive-off-folder"));
+        let off = crate::auto_archive::Settings { workers: None, sessions: None };
+        assert_eq!(m.call(Call::SetAutoArchiveSettings { settings: off }), Ok(json!({ "workers": null, "sessions": null })));
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
+        assert_eq!(m.call(Call::AutoArchiveSettings), Ok(json!({ "workers": null, "sessions": null })));
+        drop(m);
+        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(again.auto_archive_settings(), off, "it survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worker_with_a_task_still_running_is_not_archived() {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent};
+        let folder = temp("auto-archive-child-folder");
+        let (m, worker, archived, dir) = archiving_machine("auto-archive-child", &folder);
+        let ask = NewTask {
+            parent: Parent::Tab(worker.clone()),
+            tool: None,
+            title: "Sub".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder,
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{worker}"),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(child) = m.delegates.claim(ask, None) else { panic!("the child was not new") };
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "its own child still works");
+        m.delegates.cancel(&crate::delegate::Caller { tab: Some(worker.clone()), task: None }, &child.id, "test", None).unwrap();
+        assert_eq!(m.auto_archive_tick(LATER), [worker], "the child ended");
+        assert_eq!(archived.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worker_whose_report_has_not_been_delivered_is_not_archived() {
+        use crate::delegate::{Access, Claim, Mode, NewTask, Parent, Thread};
+        let folder = temp("auto-archive-undelivered-folder");
+        let (m, _, archived, dir) = archiving_machine("auto-archive-undelivered", &folder);
+        let worker = m.add_tab(folder.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &folder), false, Some("s2".into()));
+        m.tab(&worker, |t| t.updated = Some(1000)).unwrap();
+        let ask = NewTask {
+            parent: Parent::Tab("gone".into()),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: folder,
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:gone".into(),
+            client_request_id: None,
+            role: None,
+        };
+        let Claim::Fresh(task) = m.delegates.claim(ask, None) else { panic!("the task was not new") };
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        m.delegates.settle_thread(&task.id, Some("Fixed.".into()), None, None, vec![], None);
+        let first = m.auto_archive_tick(LATER);
+        assert!(!first.contains(&worker), "the result has not reached anyone");
+        assert_eq!(archived.lock().unwrap().len(), first.len());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_worktree_with_unpushed_work_is_kept_and_looked_at_again_only_after_a_while() {
+        let folder = temp("auto-archive-git-folder");
+        git(&folder, &["init", "-q", "-b", "main"]);
+        git(&folder, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        std::fs::write(folder.join("draft.txt"), "x").unwrap();
+        let (m, worker, archived, dir) = archiving_machine("auto-archive-git", &folder);
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "an untracked file is work nobody has");
+        std::fs::remove_file(folder.join("draft.txt")).unwrap();
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "kept sessions are not looked at again at once");
+        m.auto_archive_kept.lock().unwrap().clear();
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new(), "clean now, but its one commit is on no remote");
+        assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
+        assert!(m.auto_archive_kept.lock().unwrap().contains_key(&worker));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hub_that_keeps_the_thread_open_is_asked_again_only_after_a_while() {
+        let (m, worker, _, dir) = archiving_machine("auto-archive-refused", &temp("auto-archive-refused-folder"));
+        let asked = Arc::new(Mutex::new(0));
+        let count = asked.clone();
+        m.set_hub(Arc::new(move |_| {
+            *count.lock().unwrap() += 1;
+            Err("it is pinned".into())
+        }));
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(m.auto_archive_tick(LATER), Vec::<String>::new());
+        assert_eq!(*asked.lock().unwrap(), 1, "a pinned thread is not asked about every minute");
+        assert!(m.auto_archive_kept.lock().unwrap().contains_key(&worker));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

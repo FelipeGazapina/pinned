@@ -384,6 +384,8 @@ pub struct Task {
     pub newest_text: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
+    /// Unix seconds `delivered` was set, when it was set since this was recorded.
+    pub delivered_at: Option<u64>,
     /// This task's folder is a worktree `new_worktree` made.
     pub isolated: bool,
     /// `tab:<id>` or `task:<id>` of the session that started it. Idempotency and ownership use it.
