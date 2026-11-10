@@ -3730,6 +3730,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -5530,6 +5537,40 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it\nwould start, by the account's placement policy. `repo` is the project's origin, `need` the\naccount and model the worker runs on, and `exclude` the machines that refused it already.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "place"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "need": {
+                    "$ref": "#/$defs/Need",
+                    "default": {}
+                  },
+                  "exclude": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo",
+                  "need",
+                  "exclude"
                 ]
               },
               {
@@ -8042,6 +8083,30 @@
               "to"
             ]
           },
+          "Need": {
+            "description": "What a worker needs from the machine that runs it.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "driver_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "Stage": {
             "description": "Where a connector's session is in its work on an issue. Each stage maps to a Linear column.",
             "oneOf": [
@@ -8320,6 +8385,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -8385,6 +8461,53 @@
               "enabled"
             ]
           },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            },
+            "required": [
+              "prefer",
+              "avoid",
+              "heavy"
+            ]
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -8403,7 +8526,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "placement"
             ]
           },
           "Tastes": {
@@ -8481,12 +8605,22 @@
                   "$ref": "#/$defs/TastePatch"
                 },
                 "default": {}
+              },
+              "placement": {
+                "description": "Where the account's heavy delegated work runs.",
+                "$ref": "#/$defs/Placement",
+                "default": {
+                  "prefer": [],
+                  "avoid": [],
+                  "heavy": "worktree"
+                }
               }
             },
             "required": [
               "orchestrator",
               "captains",
-              "projects"
+              "projects",
+              "placement"
             ]
           },
           "Taste": {
@@ -12931,6 +13065,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -14684,6 +14825,37 @@
                   "cmd": {
                     "type": "string",
                     "const": "machine_states"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it\nwould start, by the account's placement policy. `repo` is the project's origin, `need` the\naccount and model the worker runs on, and `exclude` the machines that refused it already.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "place"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "need": {
+                    "$ref": "#/$defs/Need",
+                    "default": {}
+                  },
+                  "exclude": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
                   }
                 },
                 "required": [
@@ -17140,6 +17312,30 @@
               "to"
             ]
           },
+          "Need": {
+            "description": "What a worker needs from the machine that runs it.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "driver_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "Stage": {
             "description": "Where a connector's session is in its work on an issue. Each stage maps to a Linear column.",
             "oneOf": [
@@ -17414,6 +17610,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -17479,6 +17686,48 @@
               "enabled"
             ]
           },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            }
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -17497,7 +17746,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "placement"
             ]
           },
           "Tastes": {
@@ -17575,6 +17825,15 @@
                   "$ref": "#/$defs/TastePatch"
                 },
                 "default": {}
+              },
+              "placement": {
+                "description": "Where the account's heavy delegated work runs.",
+                "$ref": "#/$defs/Placement",
+                "default": {
+                  "prefer": [],
+                  "avoid": [],
+                  "heavy": "worktree"
+                }
               }
             }
           },
@@ -20201,6 +20460,40 @@
                 ]
               },
               {
+                "description": "From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it\nwould start, by the account's placement policy. `repo` is the project's origin, `need` the\naccount and model the worker runs on, and `exclude` the machines that refused it already.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "place"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "need": {
+                    "$ref": "#/$defs/Need",
+                    "default": {}
+                  },
+                  "exclude": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "repo",
+                  "need",
+                  "exclude"
+                ]
+              },
+              {
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -22719,6 +23012,30 @@
               "to"
             ]
           },
+          "Need": {
+            "description": "What a worker needs from the machine that runs it.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "driver_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "Stage": {
             "description": "Where a connector's session is in its work on an issue. Each stage maps to a Linear column.",
             "oneOf": [
@@ -23104,6 +23421,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -23200,6 +23528,53 @@
               "max"
             ]
           },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            },
+            "required": [
+              "prefer",
+              "avoid",
+              "heavy"
+            ]
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -23218,7 +23593,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "placement"
             ]
           },
           "Tastes": {
@@ -23296,12 +23672,22 @@
                   "$ref": "#/$defs/TastePatch"
                 },
                 "default": {}
+              },
+              "placement": {
+                "description": "Where the account's heavy delegated work runs.",
+                "$ref": "#/$defs/Placement",
+                "default": {
+                  "prefer": [],
+                  "avoid": [],
+                  "heavy": "worktree"
+                }
               }
             },
             "required": [
               "orchestrator",
               "captains",
-              "projects"
+              "projects",
+              "placement"
             ]
           },
           "Taste": {
@@ -23512,6 +23898,13 @@
               "client_request_id": {
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               }
@@ -26210,6 +26603,37 @@
                 ]
               },
               {
+                "description": "From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it\nwould start, by the account's placement policy. `repo` is the project's origin, `need` the\naccount and model the worker runs on, and `exclude` the machines that refused it already.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "place"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "need": {
+                    "$ref": "#/$defs/Need",
+                    "default": {}
+                  },
+                  "exclude": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -28668,6 +29092,30 @@
               "to"
             ]
           },
+          "Need": {
+            "description": "What a worker needs from the machine that runs it.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "driver_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "Stage": {
             "description": "Where a connector's session is in its work on an issue. Each stage maps to a Linear column.",
             "oneOf": [
@@ -29047,6 +29495,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -29143,6 +29602,48 @@
               "max"
             ]
           },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            }
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
+          },
           "TasteField": {
             "description": "One knob of a `Taste`, named as its JSON field.",
             "type": "string",
@@ -29161,7 +29662,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "placement"
             ]
           },
           "Tastes": {
@@ -29239,6 +29741,15 @@
                   "$ref": "#/$defs/TastePatch"
                 },
                 "default": {}
+              },
+              "placement": {
+                "description": "Where the account's heavy delegated work runs.",
+                "$ref": "#/$defs/Placement",
+                "default": {
+                  "prefer": [],
+                  "avoid": [],
+                  "heavy": "worktree"
+                }
               }
             }
           },
@@ -29433,6 +29944,13 @@
               "client_request_id": {
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               }
@@ -43916,12 +44434,22 @@
               "$ref": "#/$defs/TastePatch"
             },
             "default": {}
+          },
+          "placement": {
+            "description": "Where the account's heavy delegated work runs.",
+            "$ref": "#/$defs/Placement",
+            "default": {
+              "prefer": [],
+              "avoid": [],
+              "heavy": "worktree"
+            }
           }
         },
         "required": [
           "orchestrator",
           "captains",
-          "projects"
+          "projects",
+          "placement"
         ],
         "$defs": {
           "Taste": {
@@ -44286,8 +44814,66 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
+          },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            },
+            "required": [
+              "prefer",
+              "avoid",
+              "heavy"
+            ]
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
           }
         }
       },
@@ -44368,6 +44954,15 @@
               "$ref": "#/$defs/TastePatch"
             },
             "default": {}
+          },
+          "placement": {
+            "description": "Where the account's heavy delegated work runs.",
+            "$ref": "#/$defs/Placement",
+            "default": {
+              "prefer": [],
+              "avoid": [],
+              "heavy": "worktree"
+            }
           }
         },
         "$defs": {
@@ -44716,8 +45311,61 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "placement": {
+                "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Placement"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
+          },
+          "Placement": {
+            "description": "An account's placement policy, in Settings › Way of working.",
+            "type": "object",
+            "properties": {
+              "prefer": {
+                "description": "Machine ids, best first.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "avoid": {
+                "description": "Machine ids never chosen by rank. One runs a worker only as the machine that asked, when\nnothing else fits.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "heavy": {
+                "$ref": "#/$defs/HeavyRule",
+                "default": "worktree"
+              }
+            }
+          },
+          "HeavyRule": {
+            "description": "Which workers the policy places.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "all_workers"
+                ]
+              },
+              {
+                "description": "Workers with `isolation: \"worktree\"`. A shared worker works in the caller's checkout, and\nanother machine would not see its uncommitted changes.",
+                "type": "string",
+                "const": "worktree"
+              }
+            ]
           }
         }
       }
@@ -54813,6 +55461,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -60055,6 +60710,13 @@
               "client_request_id": {
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "heavy": {
+                "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               }
