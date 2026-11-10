@@ -170,14 +170,18 @@ pub struct Spec {
 
 /// The secret values of a server, by name: never in an answer, a list, an audit row or an error.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
-pub struct Values {
+pub struct Secrets {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
 }
 
-impl Values {
+impl Secrets {
+    pub fn is_empty(&self) -> bool {
+        self.env.is_empty() && self.headers.is_empty()
+    }
+
     fn of(&self, kind: &str) -> &BTreeMap<String, String> {
         if kind == "env" { &self.env } else { &self.headers }
     }
@@ -198,7 +202,7 @@ pub struct Entry {
 pub struct Load {
     pub server: Spec,
     #[serde(default)]
-    pub values: Values,
+    pub secrets: Secrets,
 }
 
 /// What `Call::McpImportable` finds in a Claude account's config: a server with the names of its
@@ -269,7 +273,7 @@ impl Spec {
 
     /// Refuses a value for a name the server doesn't declare, and a declared name with no value in
     /// `values` or among the `kept` names, which the server already has one for.
-    pub fn check_values(&self, values: &Values, kept: &[String]) -> Result<(), String> {
+    pub fn check_secrets(&self, values: &Secrets, kept: &[String]) -> Result<(), String> {
         let name = &self.name;
         let (kind, names) = self.transport.secrets();
         let other = if kind == "env" { &values.headers } else { &values.env };
@@ -305,12 +309,12 @@ pub fn session_config(loads: &[&Load]) -> Value {
         .map(|load| {
             let config = match &load.server.transport {
                 Reach::Stdio { command, args, env } => {
-                    let env: Map<String, Value> = env.iter().filter_map(|n| Some((n.clone(), Value::String(load.values.env.get(n)?.clone())))).collect();
+                    let env: Map<String, Value> = env.iter().filter_map(|n| Some((n.clone(), Value::String(load.secrets.env.get(n)?.clone())))).collect();
                     json!({ "type": "stdio", "command": command, "args": args, "env": env })
                 }
                 Reach::Http { url, headers } | Reach::Sse { url, headers } => {
                     let kind = if matches!(load.server.transport, Reach::Http { .. }) { "http" } else { "sse" };
-                    let headers: Map<String, Value> = headers.iter().filter_map(|n| Some((n.clone(), Value::String(load.values.headers.get(n)?.clone())))).collect();
+                    let headers: Map<String, Value> = headers.iter().filter_map(|n| Some((n.clone(), Value::String(load.secrets.headers.get(n)?.clone())))).collect();
                     json!({ "type": kind, "url": url, "headers": headers })
                 }
             };
@@ -449,6 +453,34 @@ pub fn run(args: &[String]) -> Result<String, String> {
     }
 }
 
+/// The MCP server names a Codex `config.toml` defines, as `[mcp_servers.<name>]` tables,
+/// `mcp_servers.<name>.` keys, or `<name> = {…}` under `[mcp_servers]`, so a pinned server of the
+/// same name doesn't merge into one of them.
+pub fn codex_servers(config: &str) -> Vec<String> {
+    fn first_key(text: &str) -> Option<String> {
+        let name = match text.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next()?,
+            None => text.split(['.', ']', ' ', '=']).next()?,
+        };
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+    let mut table = String::new();
+    let mut names = vec![];
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            table = header.trim_start_matches('[').split(']').next().unwrap_or_default().trim().to_owned();
+            names.extend(table.strip_prefix("mcp_servers.").and_then(first_key));
+        } else if table.is_empty() {
+            names.extend(line.strip_prefix("mcp_servers.").and_then(first_key));
+        } else if table == "mcp_servers" && line.contains('=') {
+            names.extend(first_key(line));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// What can be imported from the account whose home is `claude`, in the folder `path`: each
 /// server `servers` lists, with its command, arguments and URL, and the names of its environment
 /// and headers.
@@ -554,9 +586,9 @@ mod tests {
         Spec { name: name.into(), project: None, transport: Reach::Http { url: format!("https://{name}.example.com/mcp"), headers: headers.iter().map(|h| h.to_string()).collect() } }
     }
 
-    fn values(env: &[(&str, &str)], headers: &[(&str, &str)]) -> Values {
+    fn values(env: &[(&str, &str)], headers: &[(&str, &str)]) -> Secrets {
         let map = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        Values { env: map(env), headers: map(headers) }
+        Secrets { env: map(env), headers: map(headers) }
     }
 
     #[test]
@@ -588,27 +620,27 @@ mod tests {
     }
 
     #[test]
-    fn values_cover_each_secret_name_and_nothing_else() {
+    fn secrets_cover_each_name_and_nothing_else() {
         let spec = stdio("ctx", None, &["API_KEY", "REGION"]);
-        assert_eq!(spec.check_values(&values(&[("API_KEY", "k"), ("REGION", "eu")], &[]), &[]), Ok(()));
-        assert_eq!(spec.check_values(&values(&[("API_KEY", "k")], &[]), &[]), Err("ctx needs a value for REGION, which the user types in the app".into()));
-        assert_eq!(spec.check_values(&values(&[("API_KEY", " ")], &[]), &["API_KEY".into(), "REGION".into()]), Ok(()), "a blank value keeps the stored one");
-        assert_eq!(spec.check_values(&values(&[("OTHER", "x")], &[]), &["API_KEY".into(), "REGION".into()]), Err("ctx has no OTHER to set".into()));
-        assert_eq!(spec.check_values(&values(&[], &[("Authorization", "x")]), &["API_KEY".into(), "REGION".into()]), Err("ctx has no Authorization to set".into()));
+        assert_eq!(spec.check_secrets(&values(&[("API_KEY", "k"), ("REGION", "eu")], &[]), &[]), Ok(()));
+        assert_eq!(spec.check_secrets(&values(&[("API_KEY", "k")], &[]), &[]), Err("ctx needs a value for REGION, which the user types in the app".into()));
+        assert_eq!(spec.check_secrets(&values(&[("API_KEY", " ")], &[]), &["API_KEY".into(), "REGION".into()]), Ok(()), "a blank value keeps the stored one");
+        assert_eq!(spec.check_secrets(&values(&[("OTHER", "x")], &[]), &["API_KEY".into(), "REGION".into()]), Err("ctx has no OTHER to set".into()));
+        assert_eq!(spec.check_secrets(&values(&[], &[("Authorization", "x")]), &["API_KEY".into(), "REGION".into()]), Err("ctx has no Authorization to set".into()));
     }
 
-    fn load(spec: Spec, values: Values) -> Load {
-        Load { server: spec, values }
+    fn load(spec: Spec, values: Secrets) -> Load {
+        Load { server: spec, secrets: values }
     }
 
     #[test]
     fn a_session_loads_every_projects_servers_and_its_own_projects_and_leaves_the_accounts_own_names() {
         let loads = [
-            load(stdio("ctx", None, &[]), Values::default()),
-            load(stdio("db", None, &[]), Values::default()),
-            load(stdio("db", Some("github.com/acme/site"), &[]), Values::default()),
-            load(stdio("docs", Some("github.com/acme/other"), &[]), Values::default()),
-            load(http("linear", &[]), Values::default()),
+            load(stdio("ctx", None, &[]), Secrets::default()),
+            load(stdio("db", None, &[]), Secrets::default()),
+            load(stdio("db", Some("github.com/acme/site"), &[]), Secrets::default()),
+            load(stdio("docs", Some("github.com/acme/other"), &[]), Secrets::default()),
+            load(http("linear", &[]), Secrets::default()),
         ];
         let names = |picked: Vec<&Load>| picked.iter().map(|l| (l.server.name.clone(), l.server.project.clone())).collect::<Vec<_>>();
         assert_eq!(
@@ -629,7 +661,7 @@ mod tests {
         let loads = [
             load(stdio("ctx", None, &["API_KEY"]), values(&[("API_KEY", "ctx-secret-1")], &[])),
             load(http("lin", &["Authorization"]), values(&[], &[("Authorization", "Bearer lin-secret-2")])),
-            load(Spec { transport: Reach::Sse { url: "http://localhost:8080/sse".into(), headers: vec![] }, ..http("ev", &[]) }, Values::default()),
+            load(Spec { transport: Reach::Sse { url: "http://localhost:8080/sse".into(), headers: vec![] }, ..http("ev", &[]) }, Secrets::default()),
         ];
         assert!(SessionFiles::write(&[]).unwrap().is_none(), "no servers, no file");
         let files = SessionFiles::write(&loads.iter().collect::<Vec<_>>()).unwrap().unwrap();
@@ -652,11 +684,11 @@ mod tests {
                 "-c".to_owned(),
                 "mcp_servers.ctx.command=\"/opt/pinned/bin/pinned\"".to_owned(),
                 "-c".to_owned(),
-                format!("mcp_servers.ctx.args=[\"mcp-run\",\"{file}\",\"ctx\"]"),
+                format!("mcp_servers.ctx.args=[\"mcp-run\",{},\"ctx\"]", crate::delegate::toml_str(&file)),
                 "-c".to_owned(),
                 "mcp_servers.lin.url=\"https://lin.example.com/mcp\"".to_owned(),
                 "-c".to_owned(),
-                format!("mcp_servers.lin.http_headers_helper=\"'/opt/pinned/bin/pinned' 'mcp-headers' '{file}' 'lin'\""),
+                format!("mcp_servers.lin.http_headers_helper={}", crate::delegate::toml_str(&format!("'/opt/pinned/bin/pinned' 'mcp-headers' '{file}' 'lin'"))),
             ]
         );
         assert!(!flags.concat().contains("secret"), "no secret in Codex's arguments: {flags:?}");
@@ -708,5 +740,12 @@ mod tests {
         for secret in ["lin_api_secret", "hunter2", "hunter3"] {
             assert!(!found.to_string().contains(secret), "{secret} in {found}");
         }
+    }
+
+    #[test]
+    fn codex_servers_are_read_in_each_way_toml_writes_them() {
+        let config = "model = \"gpt-6\"\nmcp_servers.top.command = \"a\"\n\n[mcp_servers.docs]\ncommand = \"docs\"\n[mcp_servers.\"my-db\".env]\nX = \"1\"\n[mcp_servers]\ninline = { command = \"i\" }\n[profiles.fast]\nmodel = \"x\"\n";
+        assert_eq!(codex_servers(config), ["docs", "inline", "my-db", "top"]);
+        assert_eq!(codex_servers(""), Vec::<String>::new());
     }
 }

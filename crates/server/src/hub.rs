@@ -24,6 +24,8 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+/// How long importing an MCP server waits for the machine to read its account's config.
+const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
 /// A run may clone a large repository before its session starts.
 pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -557,6 +559,23 @@ impl Hub {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
                 return json(self.db.audit_rows(account.id, before, limit).await?);
             }
+            HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
+            HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
+            HubCall::EnableMcpServer { id, enabled } => return json(c().await?.enable_mcp_server(&id, enabled)?),
+            HubCall::RemoveMcpServer { id } => {
+                c().await?.remove_mcp_server(&id)?;
+                return Ok(Value::Null);
+            }
+            HubCall::ImportMcpServer { machine, account: agent_account, name, path, project, secrets } => {
+                let (target, machine_name) = crate::remote::resolve(self, account, &machine).await?;
+                let read = Call::McpImportable { account: Some(agent_account.clone()), path };
+                let found = self.call_machine(account, &target, read, MCP_IMPORT_WAIT).await.map_err(String::from)?;
+                let found: Vec<pinned_core::mcp::Found> = serde_json::from_value(found).map_err(|e| format!("{machine_name} answered servers that did not read: {e}"))?;
+                let found = found.into_iter().find(|f| f.server.name == name).ok_or_else(|| format!("Claude Code account {agent_account} on {machine_name} has no MCP server {name}"))?;
+                let server = pinned_core::mcp::Spec { project, ..found.server };
+                return json(c().await?.save_mcp_server(None, server, &secrets)?);
+            }
+            HubCall::LoadMcpServers => return Err("only a machine loads the account's MCP servers into the sessions it starts".into()),
         };
         if changed {
             self.watch(account).await?;

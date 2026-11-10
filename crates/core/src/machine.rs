@@ -39,6 +39,12 @@ const NOT_LINKED: &str = "this machine is not linked to a hub";
 const TASTE_WAIT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TASTE_WAIT: Duration = Duration::from_millis(500);
+/// How long a session's start waits for the account's MCP servers before it loads the ones the
+/// hub last handed this machine.
+#[cfg(not(test))]
+const MCP_WAIT: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const MCP_WAIT: Duration = Duration::from_millis(500);
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
@@ -116,7 +122,8 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf]) -> CommandBuilder {
+    #[allow(clippy::too_many_arguments)]
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
@@ -131,10 +138,11 @@ impl Launch {
         match program {
             Program::Agent => {
                 if spec.harness {
-                    if let Some(mcp_config) = &self.mcp_config {
+                    let configs: Vec<&Path> = self.mcp_config.iter().map(PathBuf::as_path).chain(mcp.map(|files| files.file.as_path())).collect();
+                    if !configs.is_empty() {
                         // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
                         cmd.arg("--mcp-config");
-                        cmd.arg(mcp_config);
+                        cmd.args(configs);
                     }
                     cmd.arg("--settings");
                     cmd.arg(&self.settings);
@@ -147,6 +155,9 @@ impl Launch {
                 } else if provider == Provider::Codex {
                     if self.mcp_config.is_some() {
                         cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
+                    }
+                    if let Some(files) = mcp {
+                        cmd.args(files.codex_flags(&self.exe));
                     }
                     let home = env
                         .iter()
@@ -297,6 +308,8 @@ struct Tab {
     account: Account,
     program: Program,
     session: Option<pty::Session>,
+    /// The running session's own MCP config, removed when the session ends or is replaced.
+    mcp: Option<mcp::SessionFiles>,
     starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -518,6 +531,9 @@ pub struct Machine {
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
     tastes_shared: Arc<AtomicBool>,
+    /// The account's enabled MCP servers as the hub last handed them, secrets and all, kept in
+    /// memory only, for a session that starts while the hub is slow to answer.
+    mcp_loaded: Mutex<Option<Vec<mcp::Load>>>,
     global: Mutex<global::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
@@ -682,6 +698,7 @@ impl Machine {
             meters: Mutex::default(),
             meter_rates: Mutex::default(),
             tastes_shared: Arc::default(),
+            mcp_loaded: Mutex::default(),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
@@ -840,6 +857,14 @@ impl Machine {
                     return Err(format!("{} runs {}, and mcp_servers reads Claude Code's MCP servers", account.id, account.provider.spec().name));
                 }
                 json(mcp::servers(&self.accounts.home(&account), path.as_deref()))
+            }
+            Call::McpImportable { account, path } => {
+                let path = path.map(PathBuf::from);
+                let account = self.account_for(account.as_deref(), path.as_deref().unwrap_or(Path::new("")))?;
+                if account.provider != Provider::Claude {
+                    return Err(format!("{} runs {}, and import reads Claude Code's MCP servers", account.id, account.provider.spec().name));
+                }
+                json(mcp::importable(&self.accounts.home(&account), path.as_deref()))
             }
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
@@ -1657,8 +1682,9 @@ impl Machine {
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs);
-        if let Err(error) = self.spawn(tab, cmd, pty::size(cols, rows)) {
+        let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
+        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
             let _ = self.tab(tab, |t| t.starting = false);
             return Err(error);
         }
@@ -1823,7 +1849,13 @@ impl Machine {
         self.relaunch(tab, cols, rows)
     }
 
+    #[cfg(test)]
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
+        self.spawn_with(tab, cmd, size, None)
+    }
+
+    /// `spawn`, keeping the session's own MCP config `mcp` until the session ends.
+    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, mcp: Option<mcp::SessionFiles>) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| {
             t.held.clear();
             (t.session.take(), t.screen.clone())
@@ -1846,6 +1878,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.mcp = mcp;
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
@@ -3043,6 +3076,46 @@ impl Machine {
 
     pub(crate) fn set_hub(&self, hub: Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync>) {
         *self.hub.lock().unwrap() = Some(hub);
+        *self.mcp_loaded.lock().unwrap() = None;
+    }
+
+    /// The account's enabled MCP servers: the hub's answer within `MCP_WAIT`, else the ones it
+    /// last handed this machine. None while this machine is not linked to a hub.
+    fn mcp_loads(&self) -> Option<Vec<mcp::Load>> {
+        let hub = self.hub.lock().unwrap().clone()?;
+        let (answer, answered) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let read = hub(HubCall::LoadMcpServers).and_then(|value| serde_json::from_value::<Vec<mcp::Load>>(value).map_err(|e| e.to_string()));
+            let _ = answer.send(read);
+        });
+        match answered.recv_timeout(MCP_WAIT) {
+            Ok(Ok(loads)) => {
+                *self.mcp_loaded.lock().unwrap() = Some(loads.clone());
+                Some(loads)
+            }
+            _ => self.mcp_loaded.lock().unwrap().clone(),
+        }
+    }
+
+    /// The account's MCP servers a session of `account` in `cwd` loads, in a config only its user
+    /// reads, or None when there are none. Cursor reads MCP servers only from its own files.
+    fn session_mcp(&self, account: &Account, cwd: &Path) -> Option<mcp::SessionFiles> {
+        if account.provider == Provider::Cursor {
+            return None;
+        }
+        let loads = self.mcp_loads().filter(|loads| !loads.is_empty())?;
+        let repo = git_remote(&history::project_of(cwd)).and_then(|remote| repo_key(&remote));
+        let taken: Vec<String> = match account.provider {
+            Provider::Claude => mcp::servers(&self.accounts.home(account), Some(cwd)).into_iter().map(|s| s.name).collect(),
+            _ => mcp::codex_servers(&std::fs::read_to_string(self.accounts.home(account).join("config.toml")).unwrap_or_default()),
+        };
+        match mcp::SessionFiles::write(&mcp::for_session(&loads, repo.as_deref(), &taken)) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("pinned: a session in {} starts without the account's MCP servers: {e}", cwd.display());
+                None
+            }
+        }
     }
 
     /// Remembers this machine's id and name from the hub's hello, so a project named by it is
@@ -3894,6 +3967,7 @@ impl Machine {
             }
             self.watch_thread(child, account.clone());
         }
+        let mcp = self.session_mcp(&account, &cwd);
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
@@ -3902,6 +3976,7 @@ impl Machine {
                 effort: effort.as_deref(),
                 access,
                 mcp_config: self.launch.mcp_config.as_deref(),
+                session_mcp: mcp.as_ref(),
                 exe: &self.launch.exe,
                 sock: &self.launch.sock,
                 task_id: &task.id,
@@ -3921,6 +3996,8 @@ impl Machine {
         let pid = match spawn(
             ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &strip },
             move |event| {
+                // The child's MCP config lives as long as its output does, which ends with it.
+                let _ = &mcp;
                 let Some(machine) = me.upgrade() else { return };
                 if let Some(tab) = machine.delegates.apply(&id, event, path_env.as_deref()) {
                     machine.maybe_deliver(&tab);
@@ -4338,6 +4415,7 @@ impl Machine {
             account,
             program: Program::Agent,
             session: None,
+            mcp: None,
             starting: false,
             started: None,
             launch,
@@ -4391,7 +4469,7 @@ impl Machine {
             return;
         }
         self.end_session(tab);
-        let _ = self.tab(tab, |t| (t.session, t.background_wait) = (None, None));
+        let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
         if let Some(task) = self.thread_task(tab, true) {
             self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
         }
@@ -5546,6 +5624,124 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A hub that hands out `loads` as the account's MCP servers until `down` is set, and fails
+    /// every other call.
+    fn mcp_hub(loads: Value, down: Arc<AtomicBool>) -> Arc<dyn Fn(HubCall) -> Result<Value, String> + Send + Sync> {
+        Arc::new(move |call| match call {
+            HubCall::LoadMcpServers if !down.load(Ordering::SeqCst) => Ok(loads.clone()),
+            _ => Err("the hub is away".into()),
+        })
+    }
+
+    fn mcp_loads() -> Value {
+        json!([
+            { "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } }, "secrets": { "env": { "API_KEY": "ctx-secret-1" } } },
+            { "server": { "name": "linear", "transport": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": ["Authorization"] } }, "secrets": { "headers": { "Authorization": "Bearer pinned-linear-2" } } },
+            { "server": { "name": "docs", "project": "github.com/acme/other", "transport": { "type": "http", "url": "https://docs.example.com/mcp" } } },
+        ])
+    }
+
+    /// The arguments a fake CLI printed as `a|b|c|`, split.
+    fn printed_args(seen: &Mutex<Vec<u8>>) -> Vec<String> {
+        text(seen).trim_end().trim_end_matches('|').split('|').map(str::to_owned).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_session_loads_the_accounts_mcp_servers_from_a_config_of_its_own_that_goes_with_it() {
+        let root = temp("mcp-session");
+        let claude = root.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let launch = Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), mcp_config: Some(root.join("pinned-mcp.json")), ..launch() };
+        let m = Machine::new(launch, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp"}}}"#).unwrap();
+        let down = Arc::new(AtomicBool::new(false));
+        m.set_hub(mcp_hub(mcp_loads(), down.clone()));
+        let site = root.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let tab = m.add_tab(site.clone(), m.accounts.get("work").unwrap(), vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        let args = printed_args(&seen);
+        assert_eq!(args[..2], ["--mcp-config".to_owned(), root.join("pinned-mcp.json").display().to_string()]);
+        assert_eq!(args[3..], ["--settings", "s", "--plugin-dir", "p"].map(str::to_owned), "{args:?}");
+        let file = PathBuf::from(&args[2]);
+        assert_eq!(
+            serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+            json!({ "mcpServers": { "ctx": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": { "API_KEY": "ctx-secret-1" } } } }),
+            "the account's own linear keeps its name and another project's docs stays out"
+        );
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
+        assert!(!text(&seen).contains("ctx-secret-1"), "no secret in claude's arguments");
+
+        down.store(true, Ordering::SeqCst);
+        seen.lock().unwrap().clear();
+        m.restart_claude(&tab, 80, 24).unwrap();
+        wait_for("the restart's arguments", || text(&seen).ends_with("\r\n"));
+        let again = PathBuf::from(&printed_args(&seen)[2]);
+        assert!(again != file && again.exists(), "a hub that doesn't answer leaves the servers it last handed out: {again:?}");
+        assert!(!file.parent().unwrap().exists(), "the replaced session's config is gone");
+        assert_eq!(m.call(Call::CloseTab { tab }), Ok(Value::Null));
+        wait_for("the closed session's config to go", || !again.parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_session_reads_its_servers_through_pinned_with_no_secret_in_its_arguments() {
+        let root = temp("mcp-codex");
+        let codex = root.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: [(Provider::Codex, codex)].into_iter().collect(), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
+        let account = m.accounts.get("side").unwrap();
+        std::fs::write(m.accounts.home(&account).join("config.toml"), "[mcp_servers.ctx]\ncommand = \"own-ctx\"\n").unwrap();
+        m.set_hub(mcp_hub(mcp_loads(), Arc::default()));
+        let tab = m.add_tab(root.clone(), account, vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("codex's arguments", || text(&seen).ends_with("\r\n"));
+        let args = printed_args(&seen);
+        let at = args.iter().position(|a| a.starts_with("mcp_servers.linear.url=")).unwrap_or_else(|| panic!("no linear in {args:?}"));
+        let helper = args[at + 2].strip_prefix("mcp_servers.linear.http_headers_helper=").unwrap_or_else(|| panic!("{args:?}"));
+        let file = helper.split('\'').nth(5).unwrap().to_owned();
+        assert_eq!(&args[at - 1..at + 3], ["-c", "mcp_servers.linear.url=\"https://mcp.linear.app/mcp\"", "-c", &format!("mcp_servers.linear.http_headers_helper=\"'/opt/pinned/bin/pinned' 'mcp-headers' '{file}' 'linear'\"")]);
+        assert!(!args.iter().any(|a| a.starts_with("mcp_servers.ctx.")), "the account's own ctx stays its own: {args:?}");
+        assert!(!text(&seen).contains("ctx-secret-1") && !text(&seen).contains("pinned-linear-2"), "no secret in codex's arguments");
+        assert_eq!(mcp::headers(&[file.clone(), "linear".into()]), Ok(r#"{"Authorization":"Bearer pinned-linear-2"}"#.into()));
+        assert_eq!(m.call(Call::CloseTab { tab }), Ok(Value::Null));
+        wait_for("the closed session's config to go", || !Path::new(&file).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_machine_without_a_hub_starts_sessions_with_pinneds_server_alone() {
+        let m = machine();
+        assert!(m.session_mcp(&Account::builtin(Provider::Claude), Path::new("/repo")).is_none());
+        m.set_hub(mcp_hub(json!([]), Arc::default()));
+        assert!(m.session_mcp(&Account::builtin(Provider::Claude), Path::new("/repo")).is_none(), "an account with no servers writes no config");
+        m.set_hub(mcp_hub(mcp_loads(), Arc::default()));
+        assert!(m.session_mcp(&Account::builtin(Provider::Cursor), Path::new("/repo")).is_none(), "cursor-agent reads only its own files");
+    }
+
+    #[test]
+    fn the_machine_reads_a_claude_accounts_servers_in_full_for_the_apps_import() {
+        let root = temp("mcp-importable");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"ctx":{"command":"npx","args":["@acme/ctx"],"env":{"API_KEY":"ctx-secret-1"}}}}"#).unwrap();
+        let found = m.call(Call::McpImportable { account: Some("work".into()), path: None }).unwrap();
+        assert_eq!(found, json!([{ "scope": "user", "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } } }]));
+        assert_eq!(m.call(Call::McpImportable { account: Some("codex".into()), path: None }), Err("codex runs Codex, and import reads Claude Code's MCP servers".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
         let root = temp(name);
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
@@ -6479,7 +6675,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[]);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -6491,7 +6687,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin));
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);

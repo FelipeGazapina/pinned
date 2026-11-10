@@ -697,6 +697,14 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// `Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and
+    /// the names of their environment and headers, never their values, for the app to import.
+    McpImportable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -793,6 +801,7 @@ impl Call {
                 | Call::MemoryStatus { .. }
                 | Call::UpdateSelf
                 | Call::McpServers { .. }
+                | Call::McpImportable { .. }
         )
     }
 }
@@ -1144,6 +1153,40 @@ pub enum HubCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
     },
+    /// `Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads
+    /// while enabled, each with the names of its secrets and never their values.
+    ListMcpServers,
+    /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
+    /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
+    /// value the server has, and a new name needs one.
+    SaveMcpServer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        server: crate::mcp::Spec,
+        #[serde(default, skip_serializing_if = "crate::mcp::Secrets::is_empty")]
+        secrets: crate::mcp::Secrets,
+    },
+    /// `mcp::Entry`: turns a server of the account's list on or off for the sessions started next.
+    EnableMcpServer { id: String, enabled: bool },
+    /// Removes a server and its secrets from the account's list.
+    RemoveMcpServer { id: String },
+    /// `mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`
+    /// configures (`Call::McpImportable`), for every project or for `project` (a repository),
+    /// with `secrets` typed in the app for each of its names.
+    ImportMcpServer {
+        machine: MachineId,
+        account: AccountId,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "crate::mcp::Secrets::is_empty")]
+        secrets: crate::mcp::Secrets,
+    },
+    /// From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to
+    /// load into the sessions it starts.
+    LoadMcpServers,
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1882,6 +1925,22 @@ mod tests {
         round_trip(Call::McpServers { account: None, path: None }, json!({ "cmd": "mcp_servers" }));
         round_trip(Call::McpServers { account: Some("work".into()), path: Some("/w/site".into()) }, json!({ "cmd": "mcp_servers", "account": "work", "path": "/w/site" }));
         assert!(Call::McpServers { account: None, path: None }.may_wait());
+        round_trip(Call::McpImportable { account: Some("work".into()), path: None }, json!({ "cmd": "mcp_importable", "account": "work" }));
+        assert!(Call::McpImportable { account: None, path: None }.may_wait());
+        use crate::mcp::{Reach, Secrets, Spec};
+        let server = Spec { name: "ctx".into(), project: None, transport: Reach::Stdio { command: "npx".into(), args: vec![], env: vec!["API_KEY".into()] } };
+        let wire_server = json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx", "env": ["API_KEY"] } });
+        round_trip(HubCall::ListMcpServers, json!({ "cmd": "list_mcp_servers" }));
+        round_trip(HubCall::SaveMcpServer { id: None, server: server.clone(), secrets: Secrets::default() }, json!({ "cmd": "save_mcp_server", "server": wire_server }));
+        let typed = Secrets { env: [("API_KEY".to_owned(), "k".to_owned())].into(), headers: BTreeMap::new() };
+        round_trip(HubCall::SaveMcpServer { id: Some("s1".into()), server, secrets: typed.clone() }, json!({ "cmd": "save_mcp_server", "id": "s1", "server": wire_server, "secrets": { "env": { "API_KEY": "k" } } }));
+        round_trip(HubCall::EnableMcpServer { id: "s1".into(), enabled: false }, json!({ "cmd": "enable_mcp_server", "id": "s1", "enabled": false }));
+        round_trip(HubCall::RemoveMcpServer { id: "s1".into() }, json!({ "cmd": "remove_mcp_server", "id": "s1" }));
+        round_trip(
+            HubCall::ImportMcpServer { machine: "m1".into(), account: "claude".into(), name: "linear".into(), path: None, project: Some("github.com/a/b".into()), secrets: Secrets::default() },
+            json!({ "cmd": "import_mcp_server", "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/a/b" }),
+        );
+        round_trip(HubCall::LoadMcpServers, json!({ "cmd": "load_mcp_servers" }));
     }
 
     #[test]

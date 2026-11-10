@@ -31,6 +31,12 @@ const CLAUDE_TOKEN: &str = "claude-oauth-token";
 fn named_claude_key(name: &str) -> String {
     format!("{CLAUDE_TOKEN}:{name}")
 }
+
+/// Where the value of an MCP server's environment variable or header is kept, sealed like the
+/// integrations' keys: `kind` is `env` or `headers`.
+fn mcp_key(id: &str, kind: &str, name: &str) -> String {
+    format!("mcp:{id}:{kind}:{name}")
+}
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -740,6 +746,9 @@ struct Store {
     box_asks: Vec<BoxAsk>,
     #[serde(default)]
     box_grants: Vec<BoxGrant>,
+    /// The account's own MCP servers, with the names of their secrets; the values are keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mcp_servers: Vec<crate::mcp::Entry>,
     connectors: Vec<Connector>,
 }
 
@@ -3673,6 +3682,97 @@ impl Connectors {
         Ok(store.box_claude_tokens.clone())
     }
 
+    /// The account's own MCP servers, as the app and agents see them: never a secret's value.
+    pub fn mcp_servers(&self) -> Vec<crate::mcp::Entry> {
+        self.store.lock().unwrap().mcp_servers.clone()
+    }
+
+    /// Adds `server`, enabled, or with `id` changes that one. A secret `secrets` leaves out or
+    /// blank keeps its stored value, a new name needs one, and a name the server no longer has
+    /// loses its value.
+    pub fn save_mcp_server(&self, id: Option<&str>, server: crate::mcp::Spec, secrets: &crate::mcp::Secrets) -> Result<crate::mcp::Entry, String> {
+        use crate::mcp::Entry;
+        server.check()?;
+        let mut store = self.store.lock().unwrap();
+        let at = match id {
+            Some(id) => Some(store.mcp_servers.iter().position(|e| e.id == id).ok_or_else(|| format!("the account has no MCP server {id}"))?),
+            None => None,
+        };
+        if let Some(twin) = store.mcp_servers.iter().enumerate().find(|(i, e)| Some(*i) != at && e.server.name == server.name && e.server.project == server.project) {
+            let scope = server.project.as_deref().map_or_else(|| "every project".to_owned(), |p| format!("project {p}"));
+            return Err(format!("the account has an MCP server named {} for {scope} already ({})", server.name, twin.1.id));
+        }
+        let old = at.map(|i| store.mcp_servers[i].clone());
+        let (kind, names) = server.transport.secrets();
+        let stored = |entry: &Entry| -> Vec<(&'static str, String)> {
+            let (kind, names) = entry.server.transport.secrets();
+            names.iter().filter(|n| self.storage.key(&mcp_key(&entry.id, kind, n)).is_some()).map(|n| (kind, n.clone())).collect()
+        };
+        let had = old.as_ref().map(stored).unwrap_or_default();
+        let kept: Vec<String> = had.iter().filter(|(k, _)| *k == kind).map(|(_, n)| n.clone()).collect();
+        server.check_secrets(secrets, &kept)?;
+        let id = match &old {
+            Some(old) => old.id.clone(),
+            None => {
+                let mut stamp = unix_millis();
+                while store.mcp_servers.iter().any(|e| e.id == format!("mcp-{stamp:x}")) {
+                    stamp += 1;
+                }
+                format!("mcp-{stamp:x}")
+            }
+        };
+        let typed = if kind == "env" { &secrets.env } else { &secrets.headers };
+        for (name, value) in typed.iter().filter(|(_, v)| !v.trim().is_empty()) {
+            self.storage.write_key(&mcp_key(&id, kind, name), value.trim())?;
+        }
+        for (old_kind, name) in had.iter().filter(|(k, n)| !(*k == kind && names.contains(n))) {
+            self.storage.remove_key(&mcp_key(&id, old_kind, name));
+        }
+        let entry = Entry { id, enabled: old.as_ref().is_none_or(|old| old.enabled), server };
+        match at {
+            Some(i) => store.mcp_servers[i] = entry.clone(),
+            None => store.mcp_servers.push(entry.clone()),
+        }
+        self.save(&store)?;
+        Ok(entry)
+    }
+
+    pub fn enable_mcp_server(&self, id: &str, enabled: bool) -> Result<crate::mcp::Entry, String> {
+        let mut store = self.store.lock().unwrap();
+        let entry = store.mcp_servers.iter_mut().find(|e| e.id == id).ok_or_else(|| format!("the account has no MCP server {id}"))?;
+        entry.enabled = enabled;
+        let entry = entry.clone();
+        self.save(&store)?;
+        Ok(entry)
+    }
+
+    pub fn remove_mcp_server(&self, id: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let at = store.mcp_servers.iter().position(|e| e.id == id).ok_or_else(|| format!("the account has no MCP server {id}"))?;
+        let entry = store.mcp_servers.remove(at);
+        let (kind, names) = entry.server.transport.secrets();
+        for name in names {
+            self.storage.remove_key(&mcp_key(id, kind, name));
+        }
+        self.save(&store)
+    }
+
+    /// The enabled servers with their secrets, for a machine to load into the sessions it starts.
+    pub fn load_mcp_servers(&self) -> Vec<crate::mcp::Load> {
+        let store = self.store.lock().unwrap();
+        store
+            .mcp_servers
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| {
+                let (kind, names) = e.server.transport.secrets();
+                let values: BTreeMap<String, String> = names.iter().filter_map(|n| Some((n.clone(), self.storage.key(&mcp_key(&e.id, kind, n))?))).collect();
+                let secrets = if kind == "env" { crate::mcp::Secrets { env: values, ..Default::default() } } else { crate::mcp::Secrets { headers: values, ..Default::default() } };
+                crate::mcp::Load { server: e.server.clone(), secrets }
+            })
+            .collect()
+    }
+
     pub fn remove_box_claude_token(&self, name: &str) -> Result<BTreeMap<String, String>, String> {
         let mut store = self.store.lock().unwrap();
         if store.box_claude_tokens.remove(name).is_none() {
@@ -3937,6 +4037,7 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
+        imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         *current = imported;
         self.save(&current)?;
         self.wake.notify_one();
@@ -3965,6 +4066,110 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-connectors-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Keys in memory, as the hub's sealed store keeps them, so a test sees every name written.
+    #[derive(Clone, Default)]
+    struct MemStorage {
+        store: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+        keys: std::sync::Arc<Mutex<BTreeMap<String, String>>>,
+    }
+
+    impl Storage for MemStorage {
+        fn load(&self) -> Option<Vec<u8>> {
+            self.store.lock().unwrap().clone()
+        }
+        fn save(&self, store: &[u8]) -> Result<(), String> {
+            *self.store.lock().unwrap() = Some(store.to_vec());
+            Ok(())
+        }
+        fn key(&self, name: &str) -> Option<String> {
+            self.keys.lock().unwrap().get(name).cloned()
+        }
+        fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+            self.keys.lock().unwrap().insert(name.into(), key.into());
+            Ok(())
+        }
+        fn remove_key(&self, name: &str) {
+            self.keys.lock().unwrap().remove(name);
+        }
+        fn load_runs(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn save_runs(&self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    mod mcp_servers {
+        use super::*;
+        use crate::mcp::{Reach, Secrets, Spec};
+
+        fn ctx(env: &[&str]) -> Spec {
+            Spec { name: "ctx".into(), project: None, transport: Reach::Stdio { command: "npx".into(), args: vec!["@acme/ctx".into()], env: env.iter().map(|e| e.to_string()).collect() } }
+        }
+
+        fn env(pairs: &[(&str, &str)]) -> Secrets {
+            Secrets { env: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), ..Secrets::default() }
+        }
+
+        #[test]
+        fn a_server_keeps_its_secrets_as_sealed_keys_and_lists_only_their_names() {
+            let storage = MemStorage::default();
+            let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+            assert_eq!(connectors.save_mcp_server(None, ctx(&["API_KEY"]), &Secrets::default()), Err("ctx needs a value for API_KEY, which the user types in the app".into()));
+            let added = connectors.save_mcp_server(None, ctx(&["API_KEY"]), &env(&[("API_KEY", " ctx-secret-1 ")])).unwrap();
+            assert!(added.enabled && added.id.starts_with("mcp-"), "{added:?}");
+            let id = added.id.clone();
+            assert_eq!(*storage.keys.lock().unwrap(), BTreeMap::from([(format!("mcp:{id}:env:API_KEY"), "ctx-secret-1".to_owned())]));
+            let stored = String::from_utf8(storage.store.lock().unwrap().clone().unwrap()).unwrap();
+            assert!(stored.contains("API_KEY") && !stored.contains("ctx-secret-1"), "the store keeps the name, the key keeps the value: {stored}");
+            assert_eq!(serde_json::to_value(connectors.mcp_servers()).unwrap(), json!([{ "id": id, "enabled": true, "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "args": ["@acme/ctx"], "env": ["API_KEY"] } } }]));
+            assert_eq!(connectors.save_mcp_server(None, ctx(&[]), &Secrets::default()).unwrap_err(), format!("the account has an MCP server named ctx for every project already ({id})"));
+            let reloaded = Connectors::new(storage.clone(), "/bin/pinned".into());
+            assert_eq!(reloaded.mcp_servers(), vec![added], "the list survives a restart of the hub");
+        }
+
+        #[test]
+        fn an_edit_keeps_values_left_blank_needs_new_ones_and_drops_names_it_loses() {
+            let storage = MemStorage::default();
+            let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+            let id = connectors.save_mcp_server(None, ctx(&["API_KEY", "REGION"]), &env(&[("API_KEY", "k1"), ("REGION", "eu")])).unwrap().id;
+            connectors.enable_mcp_server(&id, false).unwrap();
+            assert_eq!(connectors.save_mcp_server(Some(&id), ctx(&["API_KEY", "TEAM"]), &env(&[("API_KEY", "")])), Err("ctx needs a value for TEAM, which the user types in the app".into()));
+            let edited = connectors.save_mcp_server(Some(&id), ctx(&["API_KEY", "TEAM"]), &env(&[("TEAM", "core")])).unwrap();
+            assert!(!edited.enabled, "an edit keeps it off");
+            assert_eq!(*storage.keys.lock().unwrap(), BTreeMap::from([(format!("mcp:{id}:env:API_KEY"), "k1".to_owned()), (format!("mcp:{id}:env:TEAM"), "core".to_owned())]));
+            let http = Spec { name: "ctx".into(), project: None, transport: Reach::Http { url: "https://ctx.example.com/mcp".into(), headers: vec!["Authorization".into()] } };
+            connectors.save_mcp_server(Some(&id), http, &Secrets { headers: [("Authorization".into(), "Bearer h1".into())].into(), ..Secrets::default() }).unwrap();
+            assert_eq!(*storage.keys.lock().unwrap(), BTreeMap::from([(format!("mcp:{id}:headers:Authorization"), "Bearer h1".to_owned())]), "a server that became a URL keeps no environment");
+            assert_eq!(connectors.save_mcp_server(Some("nope"), ctx(&[]), &Secrets::default()), Err("the account has no MCP server nope".into()));
+        }
+
+        #[test]
+        fn a_machine_loads_the_enabled_servers_with_their_values_and_a_removed_one_leaves_no_key() {
+            let storage = MemStorage::default();
+            let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+            let on = connectors.save_mcp_server(None, ctx(&["API_KEY"]), &env(&[("API_KEY", "k1")])).unwrap();
+            let off = connectors.save_mcp_server(None, Spec { name: "off".into(), ..ctx(&["X"]) }, &env(&[("X", "x1")])).unwrap();
+            connectors.enable_mcp_server(&off.id, false).unwrap();
+            let loads = connectors.load_mcp_servers();
+            assert_eq!(serde_json::to_value(&loads).unwrap(), json!([{ "server": on.server, "secrets": { "env": { "API_KEY": "k1" } } }]));
+            connectors.remove_mcp_server(&on.id).unwrap();
+            connectors.remove_mcp_server(&off.id).unwrap();
+            assert!(storage.keys.lock().unwrap().is_empty() && connectors.mcp_servers().is_empty());
+            assert_eq!(connectors.remove_mcp_server(&on.id), Err(format!("the account has no MCP server {}", on.id)));
+            assert_eq!(connectors.enable_mcp_server(&on.id, true), Err(format!("the account has no MCP server {}", on.id)));
+        }
+
+        #[test]
+        fn an_apps_first_import_of_its_connectors_keeps_the_accounts_mcp_servers() {
+            let storage = MemStorage::default();
+            let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+            connectors.save_mcp_server(None, ctx(&[]), &Secrets::default()).unwrap();
+            assert_eq!(connectors.import(json!({ "connectors": [] }), Keys::default()), Ok(true));
+            assert_eq!(connectors.mcp_servers().len(), 1);
+        }
     }
 
     fn stored(name: &str, connectors: Vec<Connector>) -> (Connectors, PathBuf) {

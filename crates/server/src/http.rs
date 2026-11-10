@@ -679,6 +679,15 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
+    // The account's MCP servers with their secrets, which only its machines get, to load into
+    // the sessions they start.
+    if matches!(call, HubCall::LoadMcpServers) {
+        let result = hub.connectors(&account).await.and_then(|c| serde_json::to_value(c.load_mcp_servers()).map_err(|e| e.to_string()));
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine} could not load the account's MCP servers: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     if let HubCall::RecordTasks { records } = call {
         let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
         if let Err(e) = &result {
