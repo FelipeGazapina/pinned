@@ -58,7 +58,7 @@ try {
 const isFolded = (tab) => foldedThreads.has(threadKey(tab));
 const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
 onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
-Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
+Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", offersOpen: load("gui-offers-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
 /** What ⌘⇧T brings back, newest last, as T3 Code's closed views: `{ thread }` for a closed thread and
@@ -354,36 +354,69 @@ function globalSidebarTop() {
     row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
     top.push(row);
   }
-  if (!waiting.length) return top;
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "waiting-head";
-  head.dataset.shelf = "waiting";
-  head.setAttribute("aria-expanded", ui.waitingOpen);
-  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-  return [...top, head, ...(ui.waitingOpen ? waiting : [])];
+  const offers = globalOfferRows();
+  if (!waiting.length && !offers.length) return top;
+  const sections = [];
+  if (waiting.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head";
+    head.dataset.shelf = "waiting";
+    head.setAttribute("aria-expanded", ui.waitingOpen);
+    head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.waitingOpen ? waiting : []));
+  }
+  if (offers.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head offers-head";
+    head.dataset.shelf = "offers";
+    head.setAttribute("aria-expanded", ui.offersOpen);
+    head.innerHTML = `${icon("message-circle")}<span>Asked in its last reply</span><span class="count">${offers.length}</span>${icon(ui.offersOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.offersOpen ? offers : []));
+  }
+  return [...top, ...sections];
 }
 
-/** What each `waitingKindOf` answer reads as, and the tone of its dot. */
-const WAITING_LOOKS = { needs_input: ["Question", "question"], failed: ["Failed", "failed"] };
+/** What each `waitingKindOf` answer reads as, its tone, and the dot's tone. The label is the text
+ * that names the kind on the row, so colour is never the only sign. */
+const WAITING_LOOKS = { needs_input: ["Needs input", "question"], failed: ["Failed", "failed"] };
 
-/** Every thread on every machine that waits on Felipe, newest first: a question or a failure, each
- * with its title, where it is and since when. */
+/** One row of the waiting area: a dot, the thread's title, and under it the kind in words, where the
+ * thread is and since when. Clicking it opens the thread. */
+function waitingRow(tab, label, tone, extra = "") {
+  const row = document.createElement("div");
+  row.className = `waiting-row${extra}`;
+  row.dataset.waiting = tab.key;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
+  row.tabIndex = 0;
+  const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
+  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+  return row;
+}
+
+/** Every thread on every machine that is blocked on Felipe, newest first: a question or an approval
+ * pending, or a failure, each with its title, where it is and since when. */
 function globalWaitingRows() {
   return tabs
     .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
-    .map(({ tab, kind }) => {
-      const [label, tone] = WAITING_LOOKS[kind] ?? [kind, "other"];
-      const row = document.createElement("div");
-      row.className = "waiting-row";
-      row.dataset.waiting = tab.key;
-      row.setAttribute("role", "button");
-      row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
-      row.tabIndex = 0;
-      const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
-      row.innerHTML = `<span class="dot ${tone}" title="${esc(label)}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+    .map(({ tab, kind }) => waitingRow(tab, ...(WAITING_LOOKS[kind] ?? [kind, "other"])));
+}
+
+/** The threads whose finished turn ended asking something, newest first, greyed: they wait on
+ * nobody, and the question is the row's tooltip. */
+function globalOfferRows() {
+  const now = nowS();
+  return tabs
+    .map((tab) => ({ tab, offer: offerOf(tab.view, now) }))
+    .filter((o) => o.offer)
+    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
+    .map(({ tab, offer }) => {
+      const row = waitingRow(tab, "Asked", "offer", " offer");
+      row.title = offer;
       return row;
     });
 }

@@ -55,16 +55,28 @@ function speechTextOf(text) {
 }
 
 /** Why a thread waits on the user, as the orchestrator's `waiting()` counts it
- * (`global_orchestrator::waiting_kind`): `needs_input` for a question or an approval mid-turn, or a
- * finished turn whose last reply asked the user something (`question`), and `failed` for a failure.
- * Claude Code's idle notice alone asks nothing, and the global orchestrator's own tab never waits.
+ * (`global_orchestrator::waiting_kind`): `needs_input` for a question or an approval pending
+ * mid-turn, and `failed` for a failure. A finished turn that ended asking something blocks nobody;
+ * that is `offerOf`. The global orchestrator's own tab never waits.
  * `crates/core/src/waiting_cases.json` holds the cases both follow. */
 function waitingKindOf(view) {
   if (!view || view.orchestrator_global) return null;
   if (view.status === "failed") return "failed";
   if (view.status === "needs-input" && view.running && view.interrupted) return "needs_input";
-  if (view.status === "working") return null;
-  return view.question ? "needs_input" : null;
+  return null;
+}
+
+/** How long a finished turn's question stays an offer, in seconds (`global_orchestrator::OFFER_SECS`). */
+const OFFER_SECS = 24 * 60 * 60;
+
+/** What the thread's finished turn asked in its last paragraph, while that still stands at `nowS`:
+ * its session runs, its turn is over, it is no worker (whose result already went up to the thread
+ * that started it) and under 24 hours passed. Null otherwise (`global_orchestrator::offer_of`). */
+function offerOf(view, nowS) {
+  if (!view || view.orchestrator_global || !view.question || !view.running || view.role === "worker") return null;
+  if (view.status === "working" || view.status === "failed" || (view.status === "needs-input" && view.interrupted)) return null;
+  if (view.updated != null && nowS - view.updated >= OFFER_SECS) return null;
+  return view.question;
 }
 
 /** The settings as the contracts default them; a machine's answer or a save only overrides what
