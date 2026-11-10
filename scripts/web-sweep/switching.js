@@ -115,6 +115,13 @@ async function launch() {
     const p = await context.newPage();
     p.name = name;
     p.on("pageerror", (e) => errors.push(`${name}: ${e.message}`));
+    // On v0.17.22 claude's menu reader throws inside every render once a screen holds "Settings › Archive",
+    // so a call that renders throws too: that counts as the page's exception, and the sweep goes on.
+    const evaluate = p.evaluate.bind(p);
+    p.evaluate = (fn, arg) => evaluate(fn, arg).catch((e) => {
+      if (!/terminal-menu\.js/.test(e.stack ?? e.message)) throw e;
+      errors.push(`${name}: ${e.message.split("\n")[0]}`);
+    });
     p.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && errors.push(`${name} console: ${m.text()}`));
     return p;
   };
@@ -208,6 +215,22 @@ async function scrollBack(page, away, to) {
   return { left, back: await firstTurn() };
 }
 
+/** A device that opens the session after claude asked: a fresh page signs in, picks `key` in its
+ * sidebar, and returns the card claude's menu shows there. */
+async function lateCard(newPage, phone, key) {
+  const late = await newPage(phone ? "late phone" : "late desktop", phone);
+  await signIn(late);
+  await late.evaluate((k) => {
+    toggleSidebar(true);
+    document.activeElement?.blur();
+    document.querySelector(`#thread-list .thread-row[data-tab="${k}"]`).click();
+  }, key);
+  await waitFor("the permission card", () => late.evaluate(() => !approval.hidden), 5000).catch(() => {});
+  return { page: late, ...(await cardOf(late)) };
+}
+const cardOf = (page) => page.evaluate(() => ({ shown: !approval.hidden, kind: approval.dataset.kind ?? null, buttons: [...approval.querySelectorAll("button")].map((b) => b.innerText.trim()).filter(Boolean) }));
+const asksPermission = (card) => card.shown && card.kind === "approval" && card.buttons.includes("Approve") && card.buttons.includes("Decline");
+
 /** Runs `how` in the page to switch to `key`, then waits for the thread to be drawn. Returns how
  * long the handler ran, how long until the thread's turns were on screen, and what the switch asked
  * the hub for in the next 600ms. */
@@ -217,8 +240,12 @@ async function timedSwitch(page, key, how, expect) {
     const counts = { ...__sw.count };
     const times = { ...__sw.time };
     const t0 = performance.now();
-    // eslint-disable-next-line no-new-func
-    new Function("key", how)(key);
+    let threw = null;
+    try {
+      new Function("key", how)(key);
+    } catch (e) {
+      threw = String(e);
+    }
     const handler = performance.now() - t0;
     const drawn = () => active?.key === key && threadView.dataset.tab === key && (!expect || threadView.innerText.includes(expect));
     let shown = null;
@@ -237,7 +264,7 @@ async function timedSwitch(page, key, how, expect) {
     const asked = __sw.frames.slice(frames).filter((f) => f.t - t0 < 600).map((f) => f.cmd ?? f.type);
     const drew = Object.fromEntries(Object.entries(__sw.count).map(([k, v]) => [k, v - (counts[k] ?? 0)]));
     const spent = Object.fromEntries(Object.entries(__sw.time).map(([k, v]) => [k, Math.round((v - (times[k] ?? 0)) * 10) / 10]));
-    return { handler, shown, asked, drew, spent };
+    return { handler, shown, asked, drew, spent, threw };
   }, { key, how, expect });
   return r;
 }
@@ -340,7 +367,6 @@ async function shoot(page, name) {
       await refreshTabs(node);
     }, { node, beta });
 
-    // 1. Each kind of thread, picked from the sidebar, back and forth with the loose thread.
     // A press on a row takes the focus off the prompt, which a synthetic click does not, so each click blurs first.
     const rowClick = `const row = document.querySelector('#thread-list .thread-row[data-tab="' + key + '"]'); if (!row) throw new Error('no row for ' + key); document.activeElement?.blur(); row.click();`;
     const globalClick = `document.activeElement?.blur(); document.querySelector('#thread-list [data-global-open]').click();`;
@@ -371,13 +397,11 @@ async function shoot(page, name) {
       const r = await timedSwitch(page, named[name], rowClick, markers[name]);
       results.timings.push({ size: "desktop", via: "first visit", kind: name, handler: r.handler, shown: r.shown, sidebar: r.spent.renderSidebar, thread: r.spent.renderThread, asked: r.asked, drew: r.drew });
     }
-    // The projects page's Captain chip.
     await page.evaluate(() => openGlobalProjects());
     await waitFor("the projects page", () => page.evaluate(() => !!document.querySelector(".gp-machine:not([disabled])")));
     const chip = await timedSwitch(page, captain, `document.querySelector('.gp-machine:not([disabled])').click();`, markers.captain);
     check(chip.shown != null, "desktop: the projects page's Captain chip opens the Captain", JSON.stringify({ shown: chip.shown }));
 
-    // 2. The Waiting on you row and the command palette.
     await page.evaluate((k) => activate(tabByKey(k)), loose);
     const waitingRun = await timedSwitch(page, asking, `ui.waitingOpen = true; renderSidebar(); document.querySelector('#thread-list .waiting-row[data-waiting="' + key + '"]').click();`, markers.asking);
     check(waitingRun.shown != null, "desktop: the Waiting on you row opens beta's question thread", JSON.stringify(waitingRun));
@@ -385,12 +409,10 @@ async function shoot(page, name) {
     const paletteRun = await timedSwitch(page, worker, `openPalette({ query: threadTitle(tabByKey(key)) }); runPaletteItem(palette.shown.find((i) => i.title === esc(threadTitle(tabByKey(key))) && i.icon === "message-square"));`, markers.worker).catch((e) => ({ error: String(e) }));
     check(paletteRun.shown != null, "desktop: the palette opens the worker", JSON.stringify(paletteRun));
 
-    // 3. Back to a thread scrolled up keeps its place.
     const kept = await scrollBack(page, captain, worker);
     check(kept.left && kept.back === kept.left, "desktop: switching away and back keeps the Captain scrolled where it was", `left at ${kept.left}, came back to ${kept.back}`);
     await shoot(page, "desktop-scroll-back");
 
-    // 4. Drafts stay with their thread, and the prompt has the focus after a switch.
     await page.evaluate((k) => activate(tabByKey(k)), captain);
     await page.fill("#prompt", "draft for the Captain");
     await page.evaluate((k) => {
@@ -415,7 +437,6 @@ async function shoot(page, name) {
       prompt.dispatchEvent(new Event("input"));
     });
 
-    // 5. A→B→A before B loads: B's late answer must not take the screen.
     const race = await page.evaluate(async ({ a, b }) => {
       const tb = tabByKey(b);
       threads.delete(tb.key);
@@ -429,7 +450,6 @@ async function shoot(page, name) {
     }, { a: captain, b: held });
     check(race.active === captain && race.drawn === captain && race.text.includes(markers.captain) && !race.text.includes(markers.held), "desktop: A→B→A before B loads ends on A's transcript", `${race.active} drew ${race.drawn}`);
 
-    // 6. Listeners and hub subscriptions after 40 switches.
     const cdp = await page.context().newCDPSession(page);
     const listeners = async () => {
       const out = {};
@@ -458,7 +478,6 @@ async function shoot(page, name) {
     check(JSON.stringify(before) === JSON.stringify(after), "desktop: 40 switches leave the listeners and hub subscriptions as they were", `${JSON.stringify(before)} → ${JSON.stringify(after)}`);
     results.notes.push({ what: "hub calls during 40 switches", by: watched });
 
-    // 7. The phone: the sidebar closes on select, and each kind shows its own thread.
     const phone = await newPage("phone", true);
     await signIn(phone);
     for (const name of ["captain", "worker", "loose", "far"]) {
@@ -494,13 +513,31 @@ async function shoot(page, name) {
     check(viaPalette.active === captain && viaPalette.sidebar === "closed", "phone: a thread picked in the palette is not left under the open sidebar", `sidebar ${viaPalette.sidebar}`);
     await shoot(phone, "phone-palette");
 
-    // 8. The Captain's report in the global orchestrator's thread opens the Captain.
     await page.evaluate((k) => activate(tabByKey(k)), global);
     await waitFor("the report row", () => page.evaluate(() => !!threadView.querySelector("[data-report-tab]")));
     const report = await timedSwitch(page, captain, `threadView.querySelector('[data-report-tab]').click();`, markers.captain);
     check(report.shown != null, "desktop: the Captain report row opens the Captain", JSON.stringify(report));
 
-    // 9. The node restarts: every tab comes back under a new id, the thread on screen stays on screen.
+    // The worker's worker asks to run a command while another thread's answer shows "Settings › Archive",
+    // a line v0.17.22's menu reader threw on in every render.
+    await sendTo(grandchild, "/ask");
+    await waitFor("the worker's worker to ask", () => page.evaluate((k) => /permission/.test(tabByKey(k).view.message ?? ""), grandchild));
+    await sendTo(loose, "Settings › Archive");
+    await waitFor("the line on the thread's screen", () => page.evaluate((k) => screenLines(tabByKey(k)).some((l) => l.includes("echo: Settings › Archive")), loose));
+    for (const phoneSize of [false, true]) {
+      const late = await lateCard(newPage, phoneSize, grandchild);
+      check(asksPermission(late), `${phoneSize ? "phone" : "desktop"}: a permission prompt opened from the sidebar after it was asked shows Approve and Decline`, JSON.stringify(late));
+      await shoot(late.page, `${phoneSize ? "phone" : "desktop"}-permission-late`);
+      await late.page.context().close();
+    }
+    for (const [size, at] of [["desktop", page], ["phone", phone]]) {
+      await at.evaluate((k) => activate(tabByKey(k)), captain);
+      await timedSwitch(at, grandchild, `toggleSidebar(true); ${rowClick}`, markers.grandchild);
+      const card = await cardOf(at);
+      check(asksPermission(card), `${size}: the permission card is there after switching away and back`, JSON.stringify(card));
+      await shoot(at, `${size}-permission-switch-back`);
+    }
+
     await page.evaluate((k) => activate(tabByKey(k)), worker);
     await phone.evaluate((k) => {
       activate(tabByKey(k));
@@ -533,6 +570,12 @@ async function shoot(page, name) {
       check(r.shown != null, `desktop restart: ${name} shows its transcript under its new id`, JSON.stringify({ shown: r.shown }));
     }
     const nested = await page.evaluate((r) => ({ worker: tabByKey(r.worker).view.spawned_by === tabByKey(r.captain).view.id, grandchild: tabByKey(r.grandchild).view.spawned_by === tabByKey(r.worker).view.id }), renamed);
+    await sendTo(renamed.grandchild, "/ask");
+    await waitFor("the restored worker's worker to ask", () => page.evaluate((k) => /permission/.test(tabByKey(k).view.message ?? ""), renamed.grandchild));
+    await phone.evaluate((k) => activate(tabByKey(k)), renamed.loose);
+    await timedSwitch(phone, renamed.grandchild, `toggleSidebar(true); ${rowClick}`, markers.grandchild);
+    check(asksPermission(await cardOf(phone)), "phone restart: the permission card shows on the worker's worker under its new id", JSON.stringify(await cardOf(phone)));
+    await shoot(phone, "phone-permission-after-restart");
     check(nested.worker && nested.grandchild, "restart: the workers still nest under their new parents' ids", JSON.stringify(nested));
     await page.evaluate((k) => activate(tabByKey(k)), renamed.global);
     await waitFor("the report row after the restart", () => page.evaluate(() => !!threadView.querySelector("[data-report-tab]")));
@@ -549,7 +592,6 @@ async function shoot(page, name) {
     await sleep(2500);
     await shoot(phone, "phone-report-after-restart");
 
-    // 10. Archive the loose thread, then bring it back from Settings › Archive.
     await page.evaluate(async (k) => {
       sideSettings.confirmArchive = false;
       await archiveThread(tabByKey(k));
