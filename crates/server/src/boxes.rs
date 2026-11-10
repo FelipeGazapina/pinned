@@ -13,6 +13,7 @@ use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{BoxStatus, Call, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
+use pinned_core::taste::TasteScope;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -237,6 +238,15 @@ enum Boot {
 }
 
 /// Whether a running row's session has ended. Every end rule lives here.
+/// What a box for `repo` may spend: `asked`, at most the Box budget of the account's tastes for
+/// that project, which is also the default. A box with no repo, or one no project names, takes the
+/// Captains' budget.
+pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked: Option<f64>) -> Result<Option<f64>, String> {
+    let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
+    let scope = repo.and_then(machine::repo_key).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo });
+    tastes.resolve(&scope).limits().box_budget_usd(asked)
+}
+
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
 fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
@@ -426,6 +436,7 @@ impl Boxes {
             return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
         }
         let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
+        let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
         if let Some(budget) = budget_usd {
             if !(budget >= BOX_USD_PER_HOUR) {
                 return Err(format!("name at least ${BOX_USD_PER_HOUR:.2}, an hour on a box"));
@@ -487,7 +498,9 @@ impl Boxes {
         if matches!(row.phase, Phase::Ending(_)) {
             return Err("this box is already ending".into());
         }
-        hub.db.set_box_budget(&row.id, row.spec.budget_usd.unwrap_or(0.0) + extra_usd).await?;
+        let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
+        box_budget(hub, account, row.spec.repo.as_deref(), Some(total)).await?;
+        hub.db.set_box_budget(&row.id, total).await?;
         self.box_status(hub, account, machine).await
     }
 
@@ -576,6 +589,13 @@ impl Boxes {
         }
         let mut spec = run.spec();
         spec.token = None;
+        spec.budget_usd = match box_budget(hub, account, spec.repo.as_deref(), spec.budget_usd).await {
+            Ok(budget) => budget,
+            Err(e) => {
+                self.give_back(hub, account, claimed.as_deref()).await;
+                return Err(format!("Upstash Box: {e}"));
+            }
+        };
         let fresh = BoxRow {
             id: claimed.clone().unwrap_or_else(new_row_id),
             account: account.id,

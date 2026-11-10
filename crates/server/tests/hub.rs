@@ -843,17 +843,18 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
     let opus = json!({ "model": "claude-opus-5-5" });
     let aggressive = json!({
-        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 6, "autonomy": "report_at_end",
+        "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
+        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
     });
-    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive);
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": true } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5, "review_diffs": true } }));
-    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 9 } })), Err("parallel workers go from 1 to 8".into()));
+    assert_eq!(client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 101 } })), Err("parallel workers go from 1 to 100".into()));
     let reset = client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "parallel" })).unwrap();
     assert_eq!(reset["projects"], json!({ "github.com/acme/site": { "review_diffs": true } }));
     client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": { "parallel": 1, "context": ["Releases go out on Fridays."] } })).unwrap();
@@ -2159,7 +2160,11 @@ struct BoxAccount {
 
 impl BoxAccount {
     fn new(hub: &TestHub) -> BoxAccount {
-        let (token, account) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+        BoxAccount::named(hub, "ana@acme.dev")
+    }
+
+    fn named(hub: &TestHub, email: &str) -> BoxAccount {
+        let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
         let mut client = Client::connect(&hub.url, &token);
         client.wait("hello", |f| f["type"] == "hello");
         assert_eq!(
@@ -4026,6 +4031,40 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     for (who, client) in [("ana", &mut ana), ("bob", &mut bob)] {
         assert!(!client.hub(json!({ "cmd": "get_tastes" })).unwrap().to_string().contains("github.com/acme/other"), "carol's import landed in {who}'s tastes");
     }
+}
+
+#[test]
+fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
+    let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    for client in [&mut ana.client, &mut bob.client] {
+        client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    }
+    let limits = json!({ "box_budget_cents": 100, "tier": "mid", "time_limit_min": 60 });
+    let anas = ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": limits })).unwrap();
+    assert_eq!((anas["captains"]["box_budget_cents"].as_u64(), anas["captains"]["tier"].as_str()), (Some(100), Some("mid")));
+    let bobs = bob.client.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(
+        (bobs["captains"]["box_budget_cents"].as_u64(), bobs["captains"]["tier"].as_str(), bobs["captains"]["time_limit_min"].as_u64()),
+        (Some(0), Some("high"), Some(480)),
+        "ana's limits never show in bob's tastes"
+    );
+
+    let open = |client: &mut Client, budget: Option<f64>| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": budget }));
+    assert_eq!(open(&mut ana.client, Some(5.0)), Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()));
+    let anas_box = open(&mut ana.client, None).unwrap();
+    assert_eq!(anas_box["budget_usd"].as_f64(), Some(1.0), "a box with no budget named gets the account's box budget");
+    let bobs_box = open(&mut bob.client, Some(5.0)).unwrap();
+    assert_eq!(bobs_box["budget_usd"].as_f64(), Some(5.0), "ana's box budget never bounds bob's box");
+    let machine = anas_box["machine"].as_str().unwrap();
+    assert_eq!(
+        ana.client.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "adding funds stops at the box budget too"
+    );
+    let bobs_machine = bobs_box["machine"].as_str().unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "extend_box", "machine": bobs_machine, "extra_usd": 1.0 })).unwrap()["budget_usd"].as_f64(), Some(6.0));
 }
 
 /// Opens a tab in `path` on `machine` and starts its claude, which here is `cat`.

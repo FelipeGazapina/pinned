@@ -137,3 +137,5 @@ button.taste-card:hover { background: var(--g-hover); }
   .taste-seg button, .taste-icon, .taste-stepper button { min-width: 36px; min-height: 36px; }
   .taste select, .taste-note-form input { font-size: 16px; }
 }
+.taste-limit-pair { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.taste-limits select { text-transform: capitalize; }

@@ -81,6 +81,8 @@ pub struct NewTask {
 pub enum Claim {
     Fresh(Box<Task>),
     Existing(String),
+    /// This many workers already work in the task's project, the most it allows at once.
+    Full(usize),
 }
 
 impl Delegates {
@@ -97,11 +99,10 @@ impl Delegates {
         delegates
     }
 
-    /// How many tasks are still working. The orchestrator's global worker cap counts these
-    /// plus its live worker threads.
-    /// A child with a thread is counted as that worker tab instead.
-    pub fn active_count(&self) -> usize {
-        self.tasks.lock().unwrap().iter().filter(|task| task.state == WorkState::Working && task.thread.is_none()).count()
+    /// The folder of each task still at work.
+    #[cfg(test)]
+    pub fn working_cwds(&self) -> Vec<PathBuf> {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal()).map(|task| task.cwd.clone()).collect()
     }
 
     /// Ties the task to the pinned thread that shows it.
@@ -144,14 +145,29 @@ impl Delegates {
         ready
     }
 
-    /// The same caller and `clientRequestId` returns the task already started.
-    pub fn claim(&self, new: NewTask) -> Claim {
+    /// The task the caller already started with this `clientRequestId`.
+    pub fn requested(&self, caller_key: &str, request_id: Option<&str>) -> Option<String> {
+        let request_id = request_id?;
+        self.tasks.lock().unwrap().iter().find(|task| task.caller_key == caller_key && task.client_request_id.as_deref() == Some(request_id)).map(|task| task.id.clone())
+    }
+
+    /// The same caller and `clientRequestId` returns the task already started. Otherwise a new
+    /// task starts unless `at_once` tasks already work in its project, counted under the same lock
+    /// so two callers can't both take the last place.
+    pub fn claim(&self, new: NewTask, at_once: Option<u32>) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(request_id) = new.client_request_id.as_deref() {
             if let Some(existing) = tasks.iter().find(|task| {
                 task.caller_key == new.caller_key && task.client_request_id.as_deref() == Some(request_id)
             }) {
                 return Claim::Existing(existing.id.clone());
+            }
+        }
+        if let Some(most) = at_once {
+            let project = crate::history::project_of(&new.cwd);
+            let working = tasks.iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count();
+            if working >= most as usize {
+                return Claim::Full(working);
             }
         }
         let task = fresh(new);
@@ -162,9 +178,10 @@ impl Delegates {
     }
 
     pub fn begin(&self, new: NewTask) -> Task {
-        match self.claim(new) {
+        match self.claim(new, None) {
             Claim::Fresh(task) => *task,
             Claim::Existing(id) => self.tasks.lock().unwrap().iter().find(|task| task.id == id).unwrap().clone(),
+            Claim::Full(_) => unreachable!("begin sets no limit"),
         }
     }
 
@@ -189,6 +206,34 @@ impl Delegates {
             task.run.limit_ms = limit_ms;
         }
         self.persist();
+    }
+
+    /// The delegation limits the task runs under, which its own children inherit.
+    pub fn hold_to(&self, id: &str, limits: crate::taste::Limits) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.limits = limits;
+        }
+        self.persist();
+    }
+
+    /// Records what each working task used, and stops the ones past their budget.
+    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], path: Option<&str>) {
+        let over: Vec<(String, String)> = {
+            let mut tasks = self.tasks.lock().unwrap();
+            used.iter()
+                .filter_map(|(id, usage)| {
+                    let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
+                    task.usage = *usage;
+                    task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
+                })
+                .collect()
+        };
+        for (id, reason) in &over {
+            self.stop_tree(id, reason, path);
+        }
+        if !over.is_empty() {
+            self.persist();
+        }
     }
 
     pub fn enforce_limits(&self, now: Instant, path: Option<&str>) {
@@ -745,6 +790,7 @@ impl Delegates {
             model: task.model.clone(),
             cwd: task.cwd.clone(),
             access: task.access,
+            limits: task.limits,
         })
     }
 
@@ -924,6 +970,7 @@ pub struct Lineage {
     pub model: Option<String>,
     pub cwd: PathBuf,
     pub access: Access,
+    pub limits: crate::taste::Limits,
 }
 
 impl Task {
@@ -1037,6 +1084,7 @@ fn status_json(task: &Task) -> Value {
         "elapsedSecs": end.saturating_sub(task.started) / 1000,
         "budgetSecs": task.run.budget_ms / 1000,
         "limitSecs": task.run.limit_ms / 1000,
+        "usage": crate::usage::TaskUsage { wall_ms: end.saturating_sub(task.started), ..task.usage },
         "background": task.run.background.iter().map(|work| work.description.as_str()).collect::<Vec<_>>(),
         "endedBy": task.ended_by,
         "conversationId": task.conversation,
@@ -1249,6 +1297,8 @@ fn fresh(new: NewTask) -> Task {
         ended_by: None,
         run: Run::default(),
         thread: None,
+        limits: crate::taste::Limits::default(),
+        usage: crate::usage::TaskUsage::default(),
     }
 }
 
@@ -1303,6 +1353,10 @@ struct SavedTask {
     budget_ms: u64,
     #[serde(default = "default_limit")]
     limit_ms: u64,
+    #[serde(default)]
+    limits: crate::taste::Limits,
+    #[serde(default)]
+    usage: crate::usage::TaskUsage,
 }
 
 impl SavedTask {
@@ -1339,6 +1393,8 @@ impl SavedTask {
             ended_by: task.ended_by.clone(),
             budget_ms: task.run.budget_ms,
             limit_ms: task.run.limit_ms,
+            limits: task.limits,
+            usage: task.usage,
         }
     }
 
@@ -1376,6 +1432,8 @@ impl SavedTask {
             ended_by: self.ended_by,
             run: Run { budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
             thread: None,
+            limits: self.limits,
+            usage: self.usage,
         }
     }
 }

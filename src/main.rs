@@ -194,16 +194,6 @@ fn get_usage(machine: State<Arc<Machine>>) -> std::collections::BTreeMap<String,
     machine.usage()
 }
 
-#[tauri::command]
-fn get_orchestration(machine: State<Arc<Machine>>) -> pinned_core::orchestration::Orchestration {
-    machine.orchestration()
-}
-
-#[tauri::command]
-fn set_orchestration(machine: State<Arc<Machine>>, max_workers: u32) -> Result<pinned_core::orchestration::Orchestration, String> {
-    machine.set_orchestration(max_workers)
-}
-
 /// The tastes of a signed-out app, as `HubCall::GetTastes` answers a signed-in one.
 #[tauri::command]
 fn get_tastes(machine: State<Arc<Machine>>) -> Tastes {
@@ -420,8 +410,6 @@ fn main() {
             install_update,
             get_opacity,
             get_usage,
-            get_orchestration,
-            set_orchestration,
             get_tastes,
             set_taste,
             reset_taste_field,

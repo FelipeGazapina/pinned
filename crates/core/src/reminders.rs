@@ -295,7 +295,7 @@ fn delegation_tools() -> Vec<Value> {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values." },
+                                            "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values. Left out, the project's default effort applies; above its most effort, the call is refused." },
                                             "reasoning_effort": { "type": "string", "description": "Same as effort." },
                                         },
                                     },
@@ -317,8 +317,8 @@ fn delegation_tools() -> Vec<Value> {
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
-                    "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of limitMs when that is shorter. It must be below limitMs. Time counts only while the machine is awake." },
-                    "limitMs": { "type": "number", "description": "When pinned cancels the child, in milliseconds. The default is 28800000, eight hours, whatever budgetMs is. Time counts only while the machine is awake." },
+                    "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
+                    "limitMs": { "type": "number", "description": "When pinned cancels the child, in milliseconds. The default and the most is the project's time limit in Settings › Way of working, eight hours unless changed; a longer one is cut to it. Time counts only while the machine is awake." },
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["inherit", "full-access", "auto"], "description": "How wide the child may act. inherit, or omitting it, keeps this session's mode. Anything wider than this session is rejected. A bypassed session can hand the child auto." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
@@ -489,7 +489,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 14] {
         })),
         (Audience::TasteChat, serde_json::json!({
             "name": "taste_set",
-            "description": "Change the fields patch names in one scope of the account's way of working, keeping the rest, and answer taste_get of the scope. A project's field set to the Captains' value inherits again. A change that leaves no model on the ladder or parallel outside 1 to 8 changes nothing and fails. The Way of working page shows the change at once, and sessions started afterwards get it.",
+            "description": "Change the fields patch names in one scope of the account's way of working, keeping the rest, and answer taste_get of the scope. A project's field set to the Captains' value inherits again. A change that leaves no model on the ladder, parallel outside 1 to 100, a time limit outside 1 to 10080 minutes, or a default effort above the most effort changes nothing and fails. The Way of working page shows the change at once, and sessions started afterwards get it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -500,12 +500,18 @@ fn project_tools() -> [(Audience, serde_json::Value); 14] {
                             "strategy": { "type": "string", "enum": ["cheap_with_guidance", "escalate_on_failure", "strongest_first"], "description": "How a worker climbs the ladder: the cheapest rung with a detailed brief, the cheapest rung moving up after two failures, or the hard-work model from the start." },
                             "ladder": { "type": "array", "items": model, "description": "The models a worker climbs, cheapest first, at least one." },
                             "hard_model": model,
-                            "parallel": { "type": "integer", "minimum": 1, "maximum": 8, "description": "Workers at once." },
+                            "parallel": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Workers at once in a project; delegate_task refuses one more." },
                             "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
                             "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
                             "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
+                            "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
+                            "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none." },
+                            "max_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The most effort a call may ask for." },
+                            "budget_cents": { "type": "integer", "minimum": 0, "description": "What one worker may spend, in US cents; 0 sets no cap." },
+                            "time_limit_min": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Minutes a worker runs before pinned stops it." },
+                            "box_budget_cents": { "type": "integer", "minimum": 0, "description": "A box's budget in US cents, its default and its most; 0 sets neither." },
                         },
                     },
                 },
@@ -519,7 +525,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 14] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents"] },
                 },
                 "required": ["scope", "field"],
             },
