@@ -297,7 +297,7 @@ function tasteRender() {
   }
   const scope = tasteUi.scope;
   const t = tasteShown();
-  const catalog = tasteCatalog(CLAUDE_MODELS, OPENCODE_GO_MODELS);
+  const catalog = tasteCatalog(claudeModels(), OPENCODE_GO_MODELS);
   const names = new Map(catalog.flatMap((group) => group.models.map((m) => [m.slug, m.name])));
   const repos = [...Object.keys(tasteUi.draft.projects ?? {}), ...(scope.kind === "project" ? [scope.repo] : [])];
   const tabs = [

@@ -260,6 +260,9 @@ pub enum Call {
     ReadImage { path: String },
     /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
     ListAccounts,
+    /// `Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's
+    /// /model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.
+    LearnModelMenu { lines: Vec<String> },
     /// The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`
     /// when `key` is an OpenCode Go API key.
     AddAccount {

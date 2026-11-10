@@ -722,6 +722,26 @@
                 ]
               },
               {
+                "description": "`Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's\n/model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "learn_model_menu"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "lines"
+                ]
+              },
+              {
                 "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
@@ -8683,6 +8703,26 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's\n/model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "learn_model_menu"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "lines"
                 ]
               },
               {
@@ -42698,6 +42738,26 @@
                 ]
               },
               {
+                "description": "`Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's\n/model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "learn_model_menu"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "lines"
+                ]
+              },
+              {
                 "description": "The new account's `accounts::View`. Its id is a slug of `name`. `auth` is `opencode-go`\nwhen `key` is an OpenCode Go API key.",
                 "type": "object",
                 "properties": {
@@ -47395,6 +47455,26 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<claude_models::ClaudeModel>`: Claude's models after keeping the rows of claude's\n/model menu that `lines`, a tab's screen, shows. Refused when the menu isn't on it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "learn_model_menu"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "lines"
                 ]
               },
               {

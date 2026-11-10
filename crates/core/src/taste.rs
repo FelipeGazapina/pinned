@@ -441,14 +441,15 @@ impl Limits {
 
     /// The effort a worker on `model` runs at: the one asked for, or the default. Refuses a model
     /// above the tier, a call that names no model under a tier cap, and an effort above the most.
+    /// `claude` is the machine's Claude models, so a model its claude's menu added has its tier.
     /// An effort outside the five levels, such as Cursor's `fast`, passes unranked.
-    pub fn admit(&self, model: Option<&str>, effort: Option<&str>) -> Result<Option<String>, String> {
+    pub fn admit(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
         if self.tier < Tier::High {
             let tier = self.tier.name();
             let Some(model) = model else {
                 return Err(format!("name a model: this project allows models up to the {tier} tier, and a worker without one runs on its account's default. Pick a {tier} model from orchestrator_capabilities, or raise Tier {RAISE}"));
             };
-            let cost = crate::delegate::cost_of(model);
+            let cost = crate::delegate::cost_in(claude, model);
             if cost > self.tier {
                 return Err(format!("{model} is a {}-tier model; this project allows up to {tier}. Pick a {tier} model or raise Tier {RAISE}", cost.name()));
             }
@@ -1146,13 +1147,29 @@ Deploys go through the VPS."
 
     #[test]
     fn admit_checks_the_tier_and_the_effort_and_fills_the_default() {
+        let known = crate::claude_models::known();
         let limits = Limits { tier: Tier::Mid, default_effort: Some(Effort::Medium), max_effort: Effort::High, ..Limits::default() };
-        assert_eq!(limits.admit(Some("glm-5.3"), None), Ok(Some("medium".into())));
-        assert_eq!(limits.admit(Some("deepseek-v4.1-flash"), Some("high")), Ok(Some("high".into())));
-        assert_eq!(limits.admit(Some("composer-2.5"), Some("fast")), Ok(Some("fast".into())), "a level outside the five passes");
-        assert_eq!(limits.admit(Some("kimi-k3.1-pro"), None), Err("kimi-k3.1-pro is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
-        assert_eq!(limits.admit(Some("glm-5.3"), Some("xhigh")), Err("effort xhigh is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working".into()));
-        assert_eq!(Limits::default().admit(None, None), Ok(None), "with no tier cap a call may leave the model and the effort to the account");
+        assert_eq!(limits.admit(Some("glm-5.3"), None, &known), Ok(Some("medium".into())));
+        assert_eq!(limits.admit(Some("deepseek-v4.1-flash"), Some("high"), &known), Ok(Some("high".into())));
+        assert_eq!(limits.admit(Some("composer-2.5"), Some("fast"), &known), Ok(Some("fast".into())), "a level outside the five passes");
+        assert_eq!(limits.admit(Some("kimi-k3.1-pro"), None, &known), Err("kimi-k3.1-pro is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(limits.admit(Some("glm-5.3"), Some("xhigh"), &known), Err("effort xhigh is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working".into()));
+        assert_eq!(Limits::default().admit(None, None, &known), Ok(None), "with no tier cap a call may leave the model and the effort to the account");
+    }
+
+    #[test]
+    fn the_tier_cap_sees_a_model_claudes_menu_added_at_its_familys_tier() {
+        use crate::claude_models::{known, merged, MenuRow};
+        let menu = [MenuRow { menu: "Fable".into(), version: "5.3".into() }, MenuRow { menu: "Haiku".into(), version: "5.5".into() }];
+        let learned = merged(known(), &menu);
+        let low = Limits { tier: Tier::Low, ..Limits::default() };
+        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Err("claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(Limits { tier: Tier::Mid, ..Limits::default() }.admit(Some("claude-fable-5-3"), None, &learned), Ok(None));
+
+        let mut cheap_fable = known();
+        cheap_fable.iter_mut().filter(|m| m.slug.starts_with("claude-fable-")).for_each(|m| m.cost = crate::delegate::Cost::Low);
+        let learned = merged(cheap_fable, &menu);
+        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Ok(None), "the family's tier, not the words of the id, which say mid");
     }
 
     #[test]

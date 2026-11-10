@@ -997,11 +997,20 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(
             listed,
             vec![
+                ("claude-fable-5-2", "Fable 5.2", "mid"),
                 ("claude-opus-5-5", "Opus 5.5", "high"),
                 ("claude-sonnet-5-5", "Sonnet 5.5", "mid"),
-                ("claude-fable-5-2", "Fable 5.2", "mid"),
                 ("claude-haiku-5-5", "Haiku 5.5", "low"),
                 ("claude-fable-5-1", "Fable 5.1 (legacy)", "mid"),
+                ("claude-fable-5", "Fable 5 (legacy)", "mid"),
+                ("claude-opus-5", "Opus 5 (legacy)", "high"),
+                ("claude-opus-4-8", "Opus 4.8 (legacy)", "high"),
+                ("claude-opus-4-7", "Opus 4.7 (legacy)", "high"),
+                ("claude-opus-4-6", "Opus 4.6 (legacy)", "high"),
+                ("claude-opus-4-5", "Opus 4.5 (legacy)", "high"),
+                ("claude-sonnet-5", "Sonnet 5 (legacy)", "mid"),
+                ("claude-sonnet-4-6", "Sonnet 4.6 (legacy)", "mid"),
+                ("claude-haiku-4-5", "Haiku 4.5 (legacy)", "low"),
             ]
         );
         let ids = |search| {
@@ -1012,7 +1021,7 @@ grok-4.7-high - Grok 4.7  High
                 .map(|m| m["id"].as_str().unwrap().to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids("fable"), ["claude-fable-5-2", "claude-fable-5-1"]);
+        assert_eq!(ids("fable"), ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]);
         assert_eq!(ids("claude-fable-5-1"), ["claude-fable-5-1"]);
     }
 
