@@ -585,7 +585,7 @@ mod tests {
         assert!(first["text"].as_str().unwrap().len() <= READ_BYTES);
         let asked_more = look(&top, &RepoLook::Read { file: "big.txt".into(), rev: None, from_line: Some(19_900), lines: Some(5000) }).unwrap();
         assert_eq!((asked_more["to_line"].as_u64(), asked_more["next_line"].as_u64()), (Some(20_000), None));
-        let long: String = (0..2000).map(|i| format!("{i:040}\n")).collect();
+        let long: String = (0..2000).map(|i| format!("{i:080}\n")).collect();
         std::fs::write(top.join("wide.txt"), &long).unwrap();
         let wide = read(&top, "wide.txt").unwrap();
         assert!(wide["text"].as_str().unwrap().len() <= READ_BYTES && wide["to_line"].as_u64() < Some(400), "24 KB first: {}", wide["to_line"]);

@@ -4721,6 +4721,107 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
     assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
 }
 
+/// A committed checkout at `dir` whose origin is `remote`, with a source file that holds a token
+/// line and a `.env` beside it.
+fn repo_with_secrets(dir: &Path, remote: &str) {
+    origin(dir, remote);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn needle() {}\nconst KEY: &str = \"ghp_notarealtoken\";\n").unwrap();
+    std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://u:p@db/x\n").unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "Run the tests before pushing.\n").unwrap();
+    let git = |args: &[&str]| assert!(pinned_core::process::command("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success());
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "first"]);
+}
+
+#[test]
+fn the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited() {
+    let fleet = Fleet::start("repo_look");
+    let app = fleet.mac_dir.join("app");
+    repo_with_secrets(&app, "git@github.com:acme/app.git");
+    fleet.mac.machine.open_project(app);
+    let (mini_dir, global) = (fleet.mini_dir.clone(), fleet.global.clone());
+    let tool = |t: Value| session_tool(&mini_dir, &global, t);
+    let read = json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "src/lib.rs" });
+    assert_eq!(tool(read.clone()), Err(pinned_server::relay::INSIGHT_OFF.into()), "off until the account turns it on");
+    assert_eq!(fleet.client.hub(json!({ "cmd": "get_settings" })).unwrap().get("repo_insight"), None, "off is the default, and absent on the wire");
+    assert_eq!(fleet.client.hub(json!({ "cmd": "set_repo_insight", "settings": { "on": true } })).unwrap(), json!({ "on": true }));
+    assert_eq!(fleet.client.hub(json!({ "cmd": "get_settings" })).unwrap()["repo_insight"], json!({ "on": true }));
+
+    let out = tool(read).unwrap();
+    assert_eq!((out["machine"].as_str(), out["machine_name"].as_str(), out["project"].as_str()), (Some(fleet.mac_id.as_str()), Some("mac"), Some("github.com/acme/app")), "{out}");
+    assert!(out["branch"].is_string() && out["sha"].is_string(), "the answer names what it read: {out}");
+    assert_eq!((out["text"].as_str(), out["redacted"].as_u64()), (Some("pub fn needle() {}\n[redacted]\n"), Some(1)));
+    let found = tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "query": "needle" })).unwrap();
+    assert_eq!(found["hits"], json!([{ "path": "src/lib.rs", "line": 1, "text": "pub fn needle() {}" }]));
+    assert!(tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "query": "DATABASE_URL" })).unwrap()["hits"].as_array().unwrap().is_empty(), ".env is never searched");
+    assert!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": ".env" })).unwrap_err().contains("secrets"));
+    assert!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "../../etc/passwd" })).unwrap_err().contains("not a path inside the project"));
+    let card = tool(json!({ "name": "repo_overview", "project": "github.com/acme/app" })).unwrap();
+    assert_eq!(card["docs"]["AGENTS.md"]["text"], "Run the tests before pushing.\n");
+    assert_eq!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "src/lib.rs", "machine": "mini" })), Err("mini has no project github.com/acme/app".into()));
+    assert_eq!(tool(json!({ "name": "repo_read", "project": "github.com/acme/other", "path": "a" })), Err("no online machine of this account has project github.com/acme/other".into()));
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    let asked = HubCall::RepoLook { tab: "tab-x".into(), project: "github.com/acme/app".into(), machine: None, look: pinned_core::repo_look::RepoLook::Overview };
+    assert_eq!(mac_link.call_hub(asked), Err("mac does not host the global orchestrator (mini does), so it can't read a repository".into()));
+
+    let audit = fleet.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["action"].as_str().is_some_and(|a| a.starts_with("repo_"))).collect();
+    assert_eq!(rows.len(), 9, "one row per call that reached the hub's checks: {audit}");
+    assert!(rows.iter().all(|r| r["role"] == "global_orchestrator" && r["tab"] == global.as_str()), "{rows:?}");
+    let text = serde_json::to_string(&rows).unwrap();
+    assert!(!text.contains("pub fn") && !text.contains("ghp_") && !text.contains("postgres://"), "no file text on the trail: {text}");
+    let outcomes = |action: &str, outcome: &str| rows.iter().filter(|r| r["action"] == action && r["outcome"] == outcome).count();
+    assert_eq!((outcomes("repo_read", "refused"), outcomes("repo_read", "done"), outcomes("repo_read", "failed")), (1, 1, 4));
+    let done = rows.iter().find(|r| r["action"] == "repo_read" && r["outcome"] == "done").unwrap();
+    assert!(done["args"].as_str().unwrap().contains("src/lib.rs") && done["detail"] == "mac: src/lib.rs, lines 1-2 of 2, 1 redacted", "{done}");
+
+    // 8 reads went through the rate so far; the 31st in the minute is refused and audited.
+    for n in 9..=30 {
+        tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "glob": "src/*" })).unwrap_or_else(|e| panic!("read {n}: {e}"));
+    }
+    let slow = tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "glob": "src/*" }));
+    assert_eq!(slow, Err("slow down: 30 repo reads in the last minute; ask the Captain to explore instead".into()));
+    let audit = fleet.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let refused = audit.as_array().unwrap().iter().filter(|e| e["action"] == "repo_search" && e["outcome"] == "refused").count();
+    assert_eq!(refused, 1, "the refused read is on the trail");
+}
+
+#[test]
+fn the_global_orchestrator_reads_no_repo_of_another_account() {
+    let hub = TestHub::start("iso_repo");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_dir, bob_dir) = (temp("iso_repo-ana"), temp("iso_repo-bob"));
+    let (ana_node, ana_m, _) = hosting_node(&url, &mut ana, "ana-mini", &ana_dir);
+    let (bob_node, bob_m, bob_global) = hosting_node(&url, &mut bob, "bob-mac", &bob_dir);
+    repo_with_secrets(&ana_dir.join("shared"), "git@github.com:acme/shared.git");
+    std::fs::write(ana_dir.join("shared/src/lib.rs"), "pub fn anas_unreleased_pricing() {}\n").unwrap();
+    repo_with_secrets(&ana_dir.join("only-ana"), "git@github.com:acme/only-ana.git");
+    repo_with_secrets(&bob_dir.join("shared"), "git@github.com:acme/shared.git");
+    for p in ["shared", "only-ana"] {
+        ana_node.machine.open_project(ana_dir.join(p));
+    }
+    bob_node.machine.open_project(bob_dir.join("shared"));
+    for client in [&mut ana, &mut bob] {
+        client.hub(json!({ "cmd": "set_repo_insight", "settings": { "on": true } })).unwrap();
+    }
+    let bob_tool = |t: Value| session_tool(&bob_dir, &bob_global, t);
+    let unknown = |m: &str| Err(format!("this account has no machine {m}"));
+    for machine in [ana_m.as_str(), "ana-mini"] {
+        assert_eq!(bob_tool(json!({ "name": "repo_read", "project": "github.com/acme/shared", "path": "src/lib.rs", "machine": machine })), unknown(machine));
+        assert_eq!(bob_tool(json!({ "name": "repo_search", "project": "github.com/acme/shared", "query": "pricing", "machine": machine })), unknown(machine));
+    }
+    let own = bob_tool(json!({ "name": "repo_read", "project": "github.com/acme/shared", "path": "src/lib.rs" })).unwrap();
+    assert_eq!((own["machine"].as_str(), own["text"].as_str()), (Some(bob_m.as_str()), Some("pub fn needle() {}\n[redacted]\n")), "bob reads his own checkout of the same repo");
+    let searched = bob_tool(json!({ "name": "repo_search", "project": "github.com/acme/shared", "query": "pricing" })).unwrap();
+    assert_eq!(searched["total"], 0, "nothing of ana's checkout: {searched}");
+    assert_eq!(bob_tool(json!({ "name": "repo_overview", "project": "github.com/acme/only-ana" })), Err("no online machine of this account has project github.com/acme/only-ana".into()));
+    let ana_path = format!("{ana_m}:{}", ana_dir.join("only-ana").display());
+    assert_eq!(bob_tool(json!({ "name": "repo_overview", "project": ana_path })), Err(format!("no online machine of this account has project {ana_path}")));
+}
+
 // delegate_task on another machine or in an Upstash Box.
 
 const SITE: &str = "https://github.com/acme/site.git";

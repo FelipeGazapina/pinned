@@ -272,8 +272,9 @@ async fn checkout(hub: &Hub, account: &Account, host: &str, project: &str, machi
     };
     let mut found = vec![];
     for m in machines.iter().filter(|m| named.is_none_or(|n| n.id == m.id) && keyed_machine.is_none_or(|k| k == m.id)) {
+        // An online machine lists its projects now, so one added since the last overview is found.
         let mut listed = account.last_listed(&m.id);
-        if listed.is_empty() && m.online {
+        if m.online {
             if let Ok(projects) = hub.call_machine(account, &m.id, Call::ListProjects, LOOK_WAIT).await.and_then(|v| serde_json::from_value::<Vec<ProjectView>>(v).map_err(|e| Unanswered::Refused(e.to_string()))) {
                 account.listed(&m.id, projects.clone());
                 listed = projects;
