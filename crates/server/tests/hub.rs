@@ -148,6 +148,13 @@ fn admin_on(database: &str, sql: &str) {
     });
 }
 
+/// A fresh folder for one node of one test. Parallel tests reuse machine names, so a counter
+/// keeps two nodes named alike from sharing a config folder.
+fn node_dir(name: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    temp(&format!("{name}-{}", NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pinned-server-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -4879,7 +4886,7 @@ struct Agent {
 fn agent_of(url: &str, token: &str, email: &str, name: &str) -> Agent {
     let mut client = Client::connect(url, token);
     client.wait("hello", |f| f["type"] == "hello");
-    let dir = temp(&format!("surface-{name}"));
+    let dir = node_dir(&format!("surface-{name}"));
     let (machine, machine_token) = account::register_machine(url, token, name, "macos").unwrap();
     let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
     creds.save(&dir).unwrap();
@@ -5152,7 +5159,7 @@ fn an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_
 
 /// Another machine of an account, running a node with one tab in its folder `notes`, which holds `todo.md`.
 fn notes_machine(url: &str, token: &str, email: &str, name: &str) -> (Node, PathBuf, String, String) {
-    let dir = temp(&format!("surface-{name}"));
+    let dir = node_dir(&format!("surface-{name}"));
     let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
     let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
     creds.save(&dir).unwrap();
