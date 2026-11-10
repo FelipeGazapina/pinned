@@ -181,6 +181,7 @@ async function signIn(page) {
     await settle();
     let text = await page.evaluate(sidebarText);
     console.log(`offline:\n  ${text.join("\n  ")}`);
+    console.log(JSON.stringify(await page.evaluate(() => ({ seen: threadsSeen, machines: [...machines.entries()].map(([id, m]) => [id.slice(0, 4), m.view.name, m.view.online, m.view.last_seen, tabs.filter((t) => t.machine === id).length]) }))));
     check(text.some((t) => /^sweep-node-2 offline · seen/.test(t)), `${size}: the offline machine is named with when it was seen`);
     check(!text.some((t) => /^sweep-node offline/.test(t)), `${size}: the online machine is not named`);
     check(await page.evaluate(() => !!document.querySelector(".thread-row")), `${size}: the other machine's threads stay`);
