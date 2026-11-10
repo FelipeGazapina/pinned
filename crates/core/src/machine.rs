@@ -3823,7 +3823,6 @@ impl Machine {
         // A thread's own session runs the child, so its steps are in the thread's transcript.
         if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
-            status["waiting"] = serde_json::json!(self.thread_ask(&thread.tab));
         }
         Ok(status.to_string())
     }
@@ -4238,6 +4237,7 @@ impl Machine {
         let mut status = self.delegates.status(&caller, &id)?;
         if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+            status["waiting"] = serde_json::json!(self.thread_ask(&thread.tab));
         }
         Ok(status)
     }
