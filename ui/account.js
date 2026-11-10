@@ -234,6 +234,7 @@ function lastSeen(unix) {
 
 function showMachinesAndRecheckSync() {
   showMachinesPage();
+  pollMachineLoad();
   for (const [id, m] of machines) if (id === LOCAL ? m.hubView : m.view.online) refreshSyncStopped(id);
 }
 
@@ -266,6 +267,47 @@ function showMachinesPage() {
   field?.select();
 }
 
+let machinesPoll = null;
+
+/** While Settings › Machines is open, asks the hub every 15 s for the machines, so the load shown keeps up:
+ * the hub pushes the list when a machine comes or goes, not when its load moves. */
+function pollMachineLoad() {
+  clearInterval(machinesPoll);
+  machinesPoll = setInterval(() => {
+    if (!settingsOpen() || page !== "machines" || !hub) return clearInterval(machinesPoll);
+    hub.hub({ cmd: "machines" }).then((list) => showMachines(list, null), console.warn);
+  }, 15000);
+}
+
+const gigabytes = (mb) => (mb >= 100 * 1024 ? `${Math.round(mb / 1024)} GB` : `${(mb / 1024).toFixed(1)} GB`);
+
+/** How busy a machine is and which accounts it can run a worker with, as it last reported them:
+ * workers against its Workers at once, CPU, free memory and free disk, then one chip per account.
+ * A stat turns amber or red where a worker sent there would struggle (the placement floors: 90% CPU,
+ * 2 GB of memory, 10 GB of disk). */
+function machineStateHtml(view) {
+  if (!view.online) return "";
+  const state = view.state;
+  if (!state) return `<span class="hint">Load and accounts show once this machine runs a pinned that reports them.</span>`;
+  const load = state.load ?? {};
+  const full = state.workers_at_once > 0 && state.workers >= state.workers_at_once;
+  const stat = (label, value, tail = "", level = "") =>
+    `<span class="stat"${level ? ` data-level="${level}"` : ""}>${label} <b>${esc(value)}</b>${esc(tail)}</span>`;
+  const stats = [
+    stat("Workers", String(state.workers ?? 0), state.workers_at_once ? ` of ${state.workers_at_once}${full ? " · full" : ""}` : "", full ? "warn" : ""),
+    load.cpu_percent != null && stat("CPU", `${load.cpu_percent}%`, "", load.cpu_percent >= 90 ? "hot" : ""),
+    load.mem_available_mb != null && stat("Memory", gigabytes(load.mem_available_mb), " free", load.mem_available_mb < 2048 ? "warn" : ""),
+    load.disk_free_mb != null && stat("Disk", gigabytes(load.disk_free_mb), " free", load.disk_free_mb < 10 * 1024 ? "warn" : ""),
+  ].filter(Boolean);
+  const chip = (account) => {
+    const note = !account.can_run_child_task ? " · not ready" : account.limited ? " · limited" : "";
+    const stateName = !account.can_run_child_task ? "off" : account.limited ? "limited" : "ready";
+    return `<span class="acct" data-state="${stateName}" title="driver: ${esc(account.driver_kind)}">${esc(account.id + note)}</span>`;
+  };
+  const accounts = (state.accounts ?? []).map(chip).join("");
+  return `<div class="machine-load">${stats.join("")}</div>${accounts ? `<div class="machine-accounts">${accounts}</div>` : ""}`;
+}
+
 function machineEntryHtml(id, view) {
   if (!view) return "";
   const local = id === LOCAL;
@@ -294,7 +336,7 @@ function machineEntryHtml(id, view) {
     : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
-      <div class="who">${name}<span class="hint">${esc(where)}</span>${status ? `<span class="hint">${esc(status)}</span>` : ""}</div>
+      <div class="who">${name}<span class="hint">${esc(where)}</span>${status ? `<span class="hint">${esc(status)}</span>` : ""}${machineStateHtml(view)}</div>
       ${updateId && machinesUi.renaming !== id ? `<button class="secondary" data-action="update-machine">Update</button>` : ""}
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
