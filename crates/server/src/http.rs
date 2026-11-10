@@ -755,6 +755,11 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
+    // A machine archives only its own tabs, found finished by its own check.
+    if let HubCall::AutoArchive { tab } = call {
+        let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     if let HubCall::RecordTasks { records } = call {
         let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
         if let Err(e) = &result {
