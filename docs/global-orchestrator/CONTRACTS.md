@@ -548,7 +548,7 @@ Unit P2, branches `parity/session-marks` (storage) and `parity/session-actions` 
 
 ### 13.11 Only the owner approves
 
-The desktop app keeps its login in `account.json`, and the web app keeps its login in `localStorage`. Any process of the same OS user can read both, so a login alone does not prove that the owner is there. The password proves it, because nothing stores it.
+The web app keeps its login in `localStorage`, and a desktop app older than 0.17.23 keeps it in `account.json`. Any process of the same OS user can read both, so a login alone does not prove that the owner is there. The password proves it, because nothing stores it.
 
 - `ClientFrame::Auth { token, lock?, unlock? }`. An app that sends `lock: true` locks its login for good (`logins.locked`). An older app leaves it out and keeps every call it had.
 - `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`.
@@ -559,6 +559,15 @@ The desktop app keeps its login in `account.json`, and the web app keeps its log
 - A hub that stopped between a decision and its outcome leaves the confirmation decided with no outcome. When a hub starts, and again 5 minutes later, it gives every such confirmation decided more than 5 minutes earlier an outcome: `denied`, or `failed: the hub restarted before it could tell whether this ran; check before asking again` with a `failed` audit row. A younger one may still be running on the hub that a deploy replaces, so the hub leaves it alone. The session gets its notice at once, or when its machine connects.
 
 A login read off a disk still runs every other client call: it reads sessions, types into tabs and starts sessions on the account's machines. After this change, the machine that runs the desktop app is the only one that keeps a login.
+
+### 13.12 The app's login in the OS credential store (0.17.23, #126)
+
+- `login_store::LoginStore` is the store's interface: `get`, `set` and `delete` by account. `login_store::system()` answers the macOS Keychain or the Windows Credential Manager, and `None` on other systems, where `account.json` keeps the login as before.
+- On macOS the login is a generic password in the login keychain: service `dev.personal-harness.pinned.hub-login`, account `<hub URL> <account email>` (`Credentials::login_account`). The app creates it with the default access list, so another program reads it only through the user's password prompt. `docs/release/developer-id.md` says what changes once the app is signed with a Developer ID.
+- `Credentials::load_app` moves a login an older app left in `account.json` into the store: it writes it, reads it back, and only then rewrites the file without it. A move that fails or stops halfway leaves the file's login in place for the next start.
+- `Credentials::save_app` puts a new sign-in's login in the store and every other field in `account.json`. A store that refuses it leaves the login in the file.
+- Signing out, or signing in over another login, removes `account.json` first, then the store's entry, then ends the login at the hub.
+- Nodes are unchanged: they keep only the machine token (13.11).
 
 ## 14. The account's MCP servers (0.17.22)
 
