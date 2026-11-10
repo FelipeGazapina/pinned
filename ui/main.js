@@ -19,6 +19,22 @@ const tabList = document.getElementById("tab-list");
 const terms = document.getElementById("terms");
 const picker = document.getElementById("projects");
 
+/** An interval that runs only while the page is visible. It stops when the page hides, and when the page shows
+ * again it runs once at once and then keeps its beat, so what it keeps on screen is not left stale. Work that
+ * matters while the page is hidden, such as running a settle script, stays on a plain `setInterval`. */
+const visibleTimers = new Set();
+function visibleInterval(fn, ms) {
+  const timer = { fn, ms, id: document.hidden ? null : setInterval(fn, ms) };
+  visibleTimers.add(timer);
+}
+document.addEventListener("visibilitychange", () => {
+  for (const timer of visibleTimers) {
+    clearInterval(timer.id);
+    timer.id = document.hidden ? null : setInterval(timer.fn, timer.ms);
+    if (!document.hidden) setTimeout(timer.fn);
+  }
+});
+
 const machines = new Map();
 const viewListeners = [];
 let account = null;
@@ -1166,7 +1182,7 @@ function renderUsage() {
     .map(([key, , name]) => `${name}: ${+usage[key].used_percentage.toFixed(1)}% used, ${resetsText(usage[key].resets_at)}`)
     .join("\n");
 }
-setInterval(renderUsage, 60 * 1000);
+visibleInterval(renderUsage, 60 * 1000);
 
 // set_view resizes the native window. The panel is hidden before the window shrinks and shown
 // after it grows, so it is never laid out in a window too small for it: the terminals would fit

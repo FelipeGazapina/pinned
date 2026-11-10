@@ -137,7 +137,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     SHELL_PAGES: {},
     pageView: { addEventListener: (type, fn) => (listeners[type] = fn) },
     viewListeners: [],
-    setInterval: () => 0,
+    visibleInterval: () => 0,
     shellPage: () => "global-projects",
     setPage: (html) => pages.push(html),
     headHtml: (title, rest = "") => `<h1>${title}</h1>${rest}`,

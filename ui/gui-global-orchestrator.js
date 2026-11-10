@@ -230,7 +230,7 @@ pageView.addEventListener("click", (e) => {
 // The page reads tabs and machines, which change without a page event of their own: machine views
 // notify through viewListeners, and a captain's turn moves on a timer while the page is shown.
 viewListeners.push(() => shellPage() === "global-projects" && renderGlobalProjectsPage());
-setInterval(() => !document.hidden && shellPage() === "global-projects" && renderGlobalProjectsPage(), 30000);
+visibleInterval(() => shellPage() === "global-projects" && renderGlobalProjectsPage(), 30000);
 
 /** Opens the global memory: the host machine's orchestrator folder, as the memory panel of its
  * global tab. The panel reads and writes through the tab, so it lands there first. */
