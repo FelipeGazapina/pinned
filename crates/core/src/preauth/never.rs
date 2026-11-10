@@ -28,6 +28,10 @@ pub struct AskCtx<'a> {
     /// `main` usually.
     pub default_branch: &'a str,
     pub current_branch: Option<&'a str>,
+    /// Folders outside the worktree a worker writes to on purpose: the main checkout's
+    /// `.claude/research`, the session's Claude memory dir. Writes there are fine. Deletes are not,
+    /// and every other item (secrets, self-grant) still binds inside them.
+    pub extra_writes: &'a [PathBuf],
 }
 
 #[derive(Debug, Clone)]
@@ -1025,6 +1029,7 @@ struct Scan<'c, 'a> {
     ctx: &'c AskCtx<'a>,
     work: PathBuf,
     scratch: Option<PathBuf>,
+    extra: Vec<PathBuf>,
     hits: Vec<NeverHit>,
     tagged: bool,
     pushed: bool,
@@ -1034,9 +1039,10 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, extra: vec![], hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
+        scan.extra = ctx.extra_writes.iter().map(|d| walk(&scan.abs(d))).collect();
         scan
     }
 
@@ -1054,6 +1060,10 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn outside(&self, p: &Path) -> bool {
         !(p.starts_with(&self.work) || self.scratch.as_ref().is_some_and(|s| p.starts_with(s)))
+    }
+
+    fn write_outside(&self, p: &Path) -> bool {
+        self.outside(p) && !self.extra.iter().any(|d| p.starts_with(d))
     }
 
     fn home(&self) -> String {
@@ -1264,7 +1274,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         if self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p))) {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
-        if unresolved || path.as_deref().is_some_and(|p| self.outside(p)) {
+        if unresolved || path.as_deref().is_some_and(|p| self.write_outside(p)) {
             self.hit(NeverItem::WriteOutside, format!("writes {}", short(shown)));
         }
     }
@@ -1760,7 +1770,7 @@ mod tests {
     }
 
     fn ctx<'a>(f: &'a Fx, branch: Option<&'a str>) -> AskCtx<'a> {
-        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, cwd: &f.work, default_branch: "main", current_branch: branch }
+        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, cwd: &f.work, default_branch: "main", current_branch: branch, extra_writes: &[] }
     }
 
     fn item(f: &Fx, branch: Option<&str>, ask: &Ask) -> Option<NeverItem> {
@@ -1783,6 +1793,52 @@ mod tests {
             (got != *want).then(|| format!("{line:?}: wanted {want:?}, got {got:?}"))
         }).collect();
         assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
+    /// A worker writes notes into the main checkout's `.claude/research` and memories into its
+    /// Claude memory dir, both outside its worktree. Writes there pass; deletes, secrets and
+    /// self-grants there are still held.
+    #[test]
+    fn extra_write_dirs_take_writes_and_nothing_else() {
+        let f = fx();
+        let research = f.elsewhere.join("main/.claude/research");
+        let memory = f.home.join(".claude/projects/-main/memory");
+        for d in [&research, &memory] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let extra = [research.clone(), memory.clone()];
+        let ctx = AskCtx { extra_writes: &extra, ..ctx(&f, FOO) };
+        let r = research.display();
+        let m = memory.display();
+        let rows: Vec<(String, Option<NeverItem>)> = vec![
+            (format!("echo note > {r}/0.17.24/hook/NOTES.md"), None),
+            (format!("mkdir -p {r}/0.17.24/hook && tee {r}/0.17.24/hook/NOTES.md"), None),
+            (format!("cp NOTES.md {m}/fact.md"), None),
+            (format!("echo x > {r}/.claude/settings.local.json"), Some(SelfGrant)),
+            (format!("cp hook.sh {m}/.git/hooks/pre-commit"), Some(SelfGrant)),
+            (format!("cat {r}/.env"), Some(Secrets)),
+            (format!("cp {m}/id_ed25519 ."), Some(Secrets)),
+            (format!("rm {r}/old.md"), Some(DeleteOutside)),
+            (format!("rm -rf {m}"), Some(DeleteOutside)),
+            (format!("echo x > {r}-sibling/a"), Some(WriteOutside)),
+            (format!("echo x > {}/main/src/lib.rs", f.elsewhere.display()), Some(WriteOutside)),
+        ];
+        let bad: Vec<String> = rows
+            .iter()
+            .filter_map(|(line, want)| {
+                let got = never(&ctx, &Ask::Bash { command: line }).map(|h| h.item);
+                (got != *want).then(|| format!("{line:?}: wanted {want:?}, got {got:?}"))
+            })
+            .collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+        let edit = |p: PathBuf| never(&ctx, &Ask::Edit { path: &p }).map(|h| h.item);
+        assert_eq!(edit(research.join("0.17.24/hook/NOTES.md")), None);
+        assert_eq!(edit(memory.join("MEMORY.md")), None);
+        assert_eq!(edit(research.join("x/.env")), Some(Secrets), "a secret stays a secret in a notes dir");
+        assert_eq!(edit(research.join(".claude/settings.json")), Some(SelfGrant), "a settings file is a self-grant in a notes dir too");
+        assert_eq!(edit(f.elsewhere.join("main/README.md")), Some(WriteOutside), "only the named dirs, not the whole main checkout");
+        let plain = ctx(&f, FOO);
+        assert_eq!(never(&plain, &Ask::Edit { path: &research.join("n.md") }).map(|h| h.item), Some(WriteOutside), "without the extra dirs the same write is held");
     }
 
     #[test]
