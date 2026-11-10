@@ -125,6 +125,7 @@ test("opening the Machines page asks every online machine again", () => {
     ]),
     settingsSection: (section) => sections.push(section),
     showMachinesPage: () => drawn.push("machines page"),
+    pollMachineLoad: () => {},
     refreshSyncStopped: (machine) => asked.push(machine),
   });
   assert.equal(sections.length, 1);
@@ -143,6 +144,7 @@ function entry(syncStopped) {
     machines: new Map([["box", { view: { id: "box", name: "box" }, syncStopped }]]),
     rowUpdate: () => "",
     lastSeen: () => "",
+    machineStateHtml: () => "",
   }).machineEntryHtml("box", { id: "box", name: "box", os: "linux", online: true });
 }
 

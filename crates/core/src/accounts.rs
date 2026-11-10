@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,8 @@ pub const ACCOUNT_ENV: &str = "PINNED_ACCOUNT";
 pub const DEFAULT: &str = "claude";
 /// A status check that takes longer than this counts as signed out.
 const STATUS_WAIT: Duration = Duration::from_secs(10);
+/// How long the 20 s machine report trusts a status the CLI gave, before it asks again.
+pub const STATUS_FRESH: Duration = Duration::from_secs(300);
 const FILE: &str = "accounts.json";
 
 pub fn default_account() -> AccountId {
@@ -145,6 +149,61 @@ pub struct Status {
     pub email: Option<String>,
     pub org: Option<String>,
     pub plan: Option<String>,
+}
+
+/// The last status each account's CLI gave, so the machine report never runs a CLI itself. A
+/// report reads what is here; a refresh, off the report's path, fills it in.
+#[derive(Default)]
+pub struct StatusCache {
+    known: Mutex<HashMap<AccountId, Known>>,
+    next_ticket: AtomicU64,
+}
+
+struct Known {
+    seen: Option<(Instant, Status)>,
+    /// The refresh that is asking the CLI now. A forgotten account drops its ticket, so that
+    /// refresh's answer, asked before the change, is thrown away.
+    asking: Option<u64>,
+}
+
+impl StatusCache {
+    /// The last status of `id`, however old.
+    pub fn get(&self, id: &str) -> Option<Status> {
+        self.known.lock().unwrap().get(id)?.seen.as_ref().map(|(_, status)| status.clone())
+    }
+
+    /// Keeps what a live read just found.
+    pub fn put(&self, id: &str, status: Status) {
+        let mut known = self.known.lock().unwrap();
+        let entry = known.entry(id.to_owned()).or_insert(Known { seen: None, asking: None });
+        entry.seen = Some((Instant::now(), status));
+    }
+
+    /// Drops `id`: its sign-in changed, or it is gone.
+    pub fn forget(&self, id: &str) {
+        self.known.lock().unwrap().remove(id);
+    }
+
+    /// A ticket to refresh `id` with, when nothing is asking its CLI and its status is missing or
+    /// at least `fresh` old. At most one refresh per account runs at a time.
+    pub fn claim(&self, id: &str, fresh: Duration) -> Option<u64> {
+        let mut known = self.known.lock().unwrap();
+        let entry = known.entry(id.to_owned()).or_insert(Known { seen: None, asking: None });
+        if entry.asking.is_some() || entry.seen.as_ref().is_some_and(|(at, _)| at.elapsed() < fresh) {
+            return None;
+        }
+        let ticket = self.next_ticket.fetch_add(1, Ordering::SeqCst);
+        entry.asking = Some(ticket);
+        Some(ticket)
+    }
+
+    /// Keeps the answer of the refresh `ticket`, unless `id` was forgotten while it asked.
+    pub fn finish(&self, id: &str, ticket: u64, status: Status) {
+        let mut known = self.known.lock().unwrap();
+        if let Some(entry) = known.get_mut(id).filter(|entry| entry.asking == Some(ticket)) {
+            *entry = Known { seen: Some((Instant::now(), status)), asking: None };
+        }
+    }
 }
 
 /// An account as a client lists it.

@@ -147,6 +147,10 @@ pub struct TabView {
     /// news and the global orchestrator's requests.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: u32,
+    /// What the thread and the workers it delegated cost so far, on the thread that delegated
+    /// them. Workers are not counted again under it: its card is the one place the total shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::delegate::WorkTotal>,
     /// The tab was opened from the Way of working page to adjust the account's tastes by talking,
     /// and its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -698,6 +702,9 @@ pub enum Call {
     UpdateSelf,
     /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
     SyncStopped,
+    /// `load::MachineState`: the machine's load and accounts now, which the hub asks for before it
+    /// refuses a delegation on what the machine reported earlier.
+    State,
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
@@ -758,6 +765,7 @@ impl Call {
         matches!(
             self,
             Call::Run { .. }
+                | Call::State
                 | Call::RunNow { .. }
                 | Call::PullRequest { .. }
                 | Call::PrStatus { .. }
@@ -955,6 +963,9 @@ pub enum MachineEvent {
     SkillsChanged { scopes: Vec<crate::skills::Scope> },
     /// A taste chat's session changed the account's tastes. An open Way of working page reads them again.
     TastesChanged,
+    /// The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`
+    /// and passes it to no client.
+    State { state: crate::load::MachineState },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -1037,6 +1048,9 @@ pub enum HubCall {
     ExtendBox { machine: MachineId, extra_usd: f64 },
     /// `Vec<MachineView>`.
     Machines,
+    /// From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for
+    /// `orchestrator_capabilities`.
+    MachineStates,
     RenameMachine { id: MachineId, name: String },
     RemoveMachine { id: MachineId },
     /// `PairCode`.
@@ -1319,6 +1333,10 @@ pub struct MachineView {
     /// The phase the machine last reported. Absent until it reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateStatus>,
+    /// How busy the machine is and which accounts it has, as it last told the hub. Absent while it
+    /// is offline, and until a machine that reports it has connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::load::MachineState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1550,6 +1568,7 @@ mod tests {
             taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
+            work: None,
             question: None,
             ask_detail: None,
         }
@@ -1924,7 +1943,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None, state: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -1984,7 +2003,7 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
         round_trip(
@@ -2047,7 +2066,7 @@ mod tests {
         assert_eq!(old.version, "");
         assert_eq!(old.update, None);
         round_trip(
-            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }) },
+            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }), state: None },
             json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
     }

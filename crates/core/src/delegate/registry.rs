@@ -8,7 +8,7 @@ struct Cache {
 }
 
 pub struct Delegates {
-    tasks: Mutex<Vec<Task>>,
+    pub(super) tasks: Mutex<Vec<Task>>,
     agents: Arc<Mutex<HashMap<String, Agent>>>,
     reports: Mutex<Vec<Report>>,
     /// The notices this machine took, oldest first: a hub that sends one again gets `true` and nothing is queued.
@@ -2343,7 +2343,7 @@ fn chain_ready(tasks: &[Task], id: &str) -> bool {
     false
 }
 
-fn allows(tasks: &[Task], id: &str, caller: &Caller) -> bool {
+pub(super) fn allows(tasks: &[Task], id: &str, caller: &Caller) -> bool {
     let Some(task) = tasks.iter().find(|task| task.id == id) else { return false };
     if caller.key() == task.caller_key || task.thread.as_ref().is_some_and(|thread| caller.tab.as_deref() == Some(thread.tab.as_str())) {
         return true;
