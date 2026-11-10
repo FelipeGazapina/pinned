@@ -511,7 +511,9 @@ Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (a
 
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
 
-Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is excluded (agents archive or delete a thread through P2's actions). `update_self` (it stops the machine's sessions), `extend_box` (it raises a spending cap), `pair_code` (it adds a machine; `hides: ["code", "command"]`), `set_taste` and `reset_taste_field` (they carry the limits workers run under) are confirm.
+Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is excluded (agents archive or delete a thread through P2's actions). `update_self` (it stops the machine's sessions), `pair_code` (it adds a machine; `hides: ["code", "command"]`), `set_taste` and `reset_taste_field` (they carry the limits workers run under) are confirm.
+
+Since 0.17.23 a box follows only its access setting and the Box budget, never the password. `extend_box` is a write: the hub refuses a budget past the account's Box budget for the box's project, whoever asks. `answer_box` is excluded: the box path files its own question on the Upstash card, and only the user answers it there, with a plain click. An agent's `open_box` under Ask first files a question for its session, `sessions of <machine> <tab>`, as a worker's box does for its tab.
 
 ### 13.8a What `parity/surface-rest-a` wires
 
@@ -551,7 +553,7 @@ Unit P2, branches `parity/session-marks` (storage) and `parity/session-actions` 
 The desktop app keeps its login in `account.json`, and the web app keeps its login in `localStorage`. Any process of the same OS user can read both, so a login alone does not prove that the owner is there. The password proves it, because nothing stores it.
 
 - `ClientFrame::Auth { token, lock?, unlock? }`. An app that sends `lock: true` locks its login for good (`logins.locked`). An older app leaves it out and keeps every call it had.
-- `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`.
+- `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`. `answer_box` and `extend_box` are not `confirm` (13.8), so a box question and a box's budget need no password; `set_box_access`, `connect_upstash`, `disconnect_upstash`, `set_box_claude_token` and `remove_box_claude_token` still do.
 - `HubCall::Unlock { password }` comes from a signed-in client only. The manifest excludes it, and a machine is refused. The hub checks the password, at most 10 tries per login and 100 per account in 15 minutes, and answers `Unlocked { token, until }`. The connection counts as the owner until `until`, 12 hours later. The app keeps `token` in memory and sends it in `Auth.unlock` after a reconnect. The token works only with the login it was taken on. A hub restart forgets it, and the app asks for the password again.
 - `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
 - `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.

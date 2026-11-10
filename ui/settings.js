@@ -340,7 +340,7 @@ function boxAccess() {
 function boxAskRows() {
   return (settings.box_asks || []).map((ask) => {
     const issue = ask.subject.issue;
-    const what = ask.connector === "delegate" || ask.connector === "captain" ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
+    const what = ["delegate", "captain", "session"].includes(ask.connector) ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
     return `<p class="hint">Allow a box for ${esc(what)}?
       <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
       <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
@@ -358,7 +358,7 @@ function boxPermissionsHtml() {
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows, workers, and Captains follow this now. Sessions keep the choice and follow it in the next update.</p>
+    <p class="hint">Workflows, workers and Captains follow this. A session an agent opens follows Off and Ask first; one you open asks you its budget. A yes or no here needs no password.</p>
     ${boxAsksHtml()}`;
 }
 

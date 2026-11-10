@@ -259,7 +259,7 @@ pub const ACTIONS: &[Action] = &[
     h("connect_upstash", Confirm, "Connects Upstash for boxes. The user enters the keys in the app; an agent never sends one.").wired().asks(&["key", "claude_token"]),
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
     h("set_box_access", Confirm, "Sets what the account's boxes may reach.").wired(),
-    h("answer_box", Confirm, "Allows or refuses a box's pending permission question.").wired(),
+    h("answer_box", Excluded, "the user's yes or no to a box's question, which only they give, on the Upstash card in the app"),
     h("clone", Write, "Clones repo on machine with the account's GitHub token, or finds the clone it has, and answers the folder.").wired(),
     h("shared_projects", Read, "The account's synced projects, most recently shared first.").wired(),
     h("share_project", Write, "Offers a project, {key, name, repo}, to the account's other machines to clone.").wired().sends(&["project.key"]),
@@ -273,7 +273,7 @@ pub const ACTIONS: &[Action] = &[
     h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
-    h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine.").wired(),
+    h("extend_box", Write, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project.").wired(),
     h("machines", Read, "Every machine of the account: id, name, OS, whether it is online, when it was last seen, its pinned version and update, and its box.").wired(),
     h("rename_machine", Write, "Renames the account's machine id to name.").wired(),
     h("remove_machine", Confirm, "Removes a machine from the account: its sessions stop showing, and a box's machine is deleted with its box.").wired(),
@@ -962,6 +962,10 @@ mod tests {
         assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
         assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
         assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
+        assert!(!needs(Side::Hub, "answer_box", true) && !needs(Side::Hub, "extend_box", true), "a box follows its access setting and Box budget, never the password");
+        for cmd in ["set_box_access", "connect_upstash", "disconnect_upstash", "set_box_claude_token", "remove_box_claude_token"] {
+            assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
+        }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
         assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
@@ -1004,7 +1008,7 @@ mod tests {
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
-                "disconnect_upstash", "set_box_access", "answer_box", "clone", "share_project", "save_connector", "delete_connector",
+                "disconnect_upstash", "set_box_access", "clone", "share_project", "save_connector", "delete_connector",
                 "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
@@ -1125,8 +1129,7 @@ mod tests {
             connect_upstash: Confirm on "hub" => {};
             disconnect_upstash: Confirm on "hub" => {};
             set_box_access: Confirm on "hub" => { "access": { "session": { "mode": "fresh" } } };
-            answer_box: Confirm on "hub" => { "id": "q1", "allow": true };
-            extend_box: Confirm on "hub" => { "machine": "m1", "extra_usd": 2.0 };
+            extend_box: Write on "hub" => { "machine": "m1", "extra_usd": 2.0 };
             pair_code: Confirm on "hub" => {};
             revoke_invite: Confirm on "hub" => { "id": "i1" };
             stage: Write on "hub" => { "connector": "c1", "issue": "uuid-1", "stage": "coding" };

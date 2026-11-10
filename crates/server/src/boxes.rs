@@ -538,14 +538,21 @@ impl Boxes {
     }
 
     /// An interactive session on a new box cloning `repo`. The client polls `box_status` until it
-    /// runs, then opens its tab. The budget dialog is the session permission's ask; a session
-    /// permission of off refuses.
+    /// runs, then opens its tab. The user's own budget dialog is the session permission's ask; a
+    /// session permission of off refuses.
     /// An agent's `open_box` passes its `opener`, so the box is that session's task once it ends.
+    /// Its ask is a question on the Upstash card for that session, which only the user answers.
     pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        if matches!(connectors.box_access().session, BoxPermission::Off) {
-            return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
+        match (connectors.box_access().session, &opener) {
+            (BoxPermission::Off, _) => return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()),
+            (BoxPermission::Ask, Some(opener)) => {
+                let name = account.name_of(&opener.machine.to_string()).unwrap_or_else(|| opener.machine.to_string());
+                let asked = Subject::LinearIssue { issue: format!("sessions of {name} {}", opener.tab) };
+                allowed(&connectors, BoxPermission::Ask, "Sessions", INTERACTIVE_CONNECTOR, &asked).await?;
+            }
+            _ => {}
         }
         let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
         let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
