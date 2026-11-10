@@ -562,6 +562,8 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 .add-account .row { flex-wrap: wrap; }
 @media (max-width: 639px) { #settings .add-account .row select, #settings .add-account .row input { flex: 1 1 100%; max-width: none; } }
 .add-account [name=key] { flex: 1 1 240px; }
+.limit-note { margin: 0 0 8px; color: var(--needs-input, #ffad33); font-size: 13px; }
+.pill.limited { margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: color-mix(in srgb, var(--needs-input, #ffad33) 16%, transparent); color: var(--needs-input, #ffad33); }
 .replace-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .replace-key input { flex: 1 1 240px; }
 .replace-key .error { flex-basis: 100%; margin: 0; }

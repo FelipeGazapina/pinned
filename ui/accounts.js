@@ -58,6 +58,12 @@ function drawAccountList() {
   input?.focus();
 }
 
+/** What stopped a limited account, and when it lifts when the provider said. */
+function limitText(a) {
+  const when = a.limit_resume_at ? new Date(a.limit_resume_at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  return `Limited: ${a.limit_reason || "a usage limit stopped this account"}${when ? `. Resumes ${when}.` : ". pinned tries it again soon."} Delegated tasks go to the next model on the ladder.`;
+}
+
 function accountCardHtml(a) {
   const go = a.auth === "opencode-go";
   const status = !a.signed_in ? "Not signed in" : a.email ? `Signed in as ${[a.email, a.org, a.plan].filter(Boolean).join(" · ")}` : "Signed in";
@@ -78,10 +84,12 @@ function accountCardHtml(a) {
   const action = go
     ? `<button class="secondary" data-action="replace-account-key">Replace key</button>`
     : `<button class="${a.signed_in ? "secondary" : "primary"}" data-action="sign-in-account">${a.signed_in ? "Sign in again" : "Sign in"}</button>`;
+  const limit = a.limited ? `<p class="limit-note" data-limit>${esc(limitText(a))}</p>` : "";
   return `<div class="card" data-account="${esc(a.id)}">
       <div class="card-head"><span class="logo ${go ? "opencode" : esc(a.provider)}">${go ? icon("opencode") : a.provider === "codex" ? "◎" : a.provider === "cursor" ? "▸" : "✳"}</span>
-        <div><b>${esc(a.name)}</b><div class="hint">${esc(a.provider_name)}${a.builtin ? " · built in" : ""}</div></div></div>
+        <div><b>${esc(a.name)}</b><div class="hint">${esc(a.provider_name)}${a.builtin ? " · built in" : ""}</div></div>${a.limited ? `<span class="pill limited">Limited</span>` : ""}</div>
       <p>${esc(status)}</p>
+      ${limit}
       <div class="actions start">${action}
         ${a.builtin ? "" : `<button class="secondary danger" data-action="remove-account">Remove</button>`}</div>
       ${replace}
