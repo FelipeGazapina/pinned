@@ -482,6 +482,16 @@ body[data-empty="true"] :is(#actions-edge, #actions), #projects:not([hidden]) ~ 
   border-radius: 8px; background: rgb(var(--s-ink-rgb, 255 255 255) / 0.02); }
 .machine-row .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .machine-row .who > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-row .who > :is(.machine-load, .machine-accounts) { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; overflow: visible; white-space: normal; text-overflow: clip; }
+.machine-load .stat { color: var(--muted); font-size: 12px; }
+.machine-load .stat b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+#settings .machine-load .stat[data-level="warn"] b { color: #d9822b; }
+#settings .machine-load .stat[data-level="hot"] b { color: #e5484d; }
+.machine-row .who > .machine-accounts { gap: 4px 6px; }
+.acct { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; color: var(--fg); }
+.acct[data-state="limited"] { color: #d9822b; border-color: rgb(217 130 43 / 0.4); }
+.acct[data-state="off"] { color: var(--muted); border-style: dashed; }
+@media (max-width: 600px) { .machine-row { flex-wrap: wrap; } .machine-row .who { flex-basis: calc(100% - 20px); } .machine-row > button { flex: 1 1 auto; } }
 .confirm, .sync-stopped { padding: 8px 10px; border: 1px solid #e5484d; border-radius: 8px; line-height: 1.45; }
 :is(.confirm, .sync-stopped) .actions { margin-top: 6px; }
 .sync-stopped .hint { display: block; margin: 4px 0; overflow-wrap: anywhere; }

@@ -343,6 +343,7 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .project-head .name { flex: 0 1 auto; min-width: 48px; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-head :is(.state, .where) { flex: none; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--g-side-muted); white-space: nowrap; }
 .project-head .state.running { color: var(--g-success); }
+.thread-row .remote.box.unavailable { color: var(--g-warning, rgb(var(--g-side-muted-rgb) / 0.7)); gap: 4px; font-size: 11px; white-space: nowrap; }
 .project-head .where { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* A machine that dropped: one line per machine at the top of the list, and the orchestrator's row

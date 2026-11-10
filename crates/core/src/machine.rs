@@ -432,7 +432,7 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
         TabView {
             id: id.to_owned(),
@@ -464,6 +464,7 @@ impl Tab {
             orchestrator_global: global::is_global(&self.env),
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
+            work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
             ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
         }
@@ -512,6 +513,17 @@ impl Tab {
     }
 }
 
+/// How much a summary of the accounts asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// What the 20 s report knows: no CLI runs, and no allowance is fetched.
+    Reported,
+    /// Each account's CLI is asked now.
+    Now,
+    /// As `Now`, and the OpenCode Go Console is asked for an allowance too.
+    Full,
+}
+
 pub struct Machine {
     launch: Launch,
     default_cwd: PathBuf,
@@ -527,6 +539,8 @@ pub struct Machine {
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
+    /// What each account's CLI last said about its sign-in, which the 20 s report reads instead of asking.
+    statuses: accounts::StatusCache,
     /// One file of finished turns per project.
     history_dir: Option<PathBuf>,
     /// Files clients attached, saved for sessions to read.
@@ -732,6 +746,7 @@ impl Machine {
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
+            statuses: Default::default(),
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
@@ -914,6 +929,7 @@ impl Machine {
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
+            Call::State => json(self.state()),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
                     sync::set_aside_unreadable(file)?;
@@ -996,11 +1012,14 @@ impl Machine {
                         let _ = self.accounts.remove(&account.id);
                         return Err(error);
                     }
+                    self.statuses.forget(&account.id);
                     json(self.view_account(account))
                 } else if key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
                     Err("only an OpenCode Go account takes an API key".into())
                 } else {
-                    json(self.view_account(self.accounts.add(provider, &name, auth)?))
+                    let account = self.accounts.add(provider, &name, auth)?;
+                    self.statuses.forget(&account.id);
+                    json(self.view_account(account))
                 }
             }
             Call::SetAccountKey { account, key } => {
@@ -1022,7 +1041,9 @@ impl Machine {
                 if self.tabs.lock().unwrap().values().any(|t| t.account.id == account) {
                     return Err(format!("close the tabs that run under {account} before removing it"));
                 }
-                json(self.accounts.remove(&account)?)
+                let removed = self.accounts.remove(&account)?;
+                self.statuses.forget(&account);
+                json(removed)
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
@@ -1420,7 +1441,8 @@ impl Machine {
     pub fn tabs(&self) -> Vec<TabView> {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued)).collect();
+        let work = self.delegates.work_costs();
+        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
@@ -1428,7 +1450,8 @@ impl Machine {
     pub fn view(&self, tab: &str) -> Result<TabView, String> {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
-        self.tab(tab, |t| t.view(tab, &turns, &queued))
+        let work = self.delegates.work_costs();
+        self.tab(tab, |t| t.view(tab, &turns, &queued, &work))
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -1525,8 +1548,63 @@ impl Machine {
         Ok(self.claude_models())
     }
 
+    /// Asks the account's CLI now, and keeps the answer for the report.
     fn status(&self, account: &Account) -> accounts::Status {
-        self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref())
+        let status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        self.statuses.put(&account.id, status.clone());
+        status
+    }
+
+    /// What the machine report knows of the account's sign-in, without running a CLI. None until
+    /// a refresh has asked once. A Go account's key is a file, so it is always read.
+    fn reported_status(&self, account: &Account) -> Option<accounts::Status> {
+        if account.auth == Auth::OpenCodeGo {
+            return Some(self.status(account));
+        }
+        self.statuses.get(&account.id)
+    }
+
+    /// Asks the CLI of each account whose status is missing or five minutes old, each on a thread of
+    /// its own so the report that called this does not wait. The next report has the answer.
+    pub fn refresh_statuses(&self) {
+        for account in self.accounts.list() {
+            self.refresh_status(account, accounts::STATUS_FRESH);
+        }
+    }
+
+    /// Asks, and waits for, each account that has no status yet, all at once. The link calls it once
+    /// when it connects, so the first report lists every account. A reconnect asks nobody again.
+    pub fn warm_statuses(&self) {
+        std::thread::scope(|scope| {
+            for account in self.accounts.list().into_iter().filter(|account| account.auth != Auth::OpenCodeGo && self.statuses.get(&account.id).is_none()) {
+                if let Some(ticket) = self.statuses.claim(&account.id, accounts::STATUS_FRESH) {
+                    scope.spawn(move || self.ask_status(&account, ticket));
+                }
+            }
+        });
+    }
+
+    fn refresh_status(&self, account: Account, fresh: Duration) {
+        if account.auth == Auth::OpenCodeGo {
+            return;
+        }
+        let Some(ticket) = self.statuses.claim(&account.id, fresh) else { return };
+        let Some(machine) = self.me.upgrade() else { return };
+        std::thread::spawn(move || machine.ask_status(&account, ticket));
+    }
+
+    fn ask_status(&self, account: &Account, ticket: u64) {
+        let status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        self.statuses.finish(&account.id, ticket, status);
+    }
+
+    /// An account's sign-in changed or the account is gone: what was kept is wrong, so the next
+    /// report gets an answer asked after the change.
+    fn sign_in_changed(&self, id: &str) {
+        self.statuses.forget(id);
+        if let Some(account) = self.accounts.get(id) {
+            self.refresh_status(account, Duration::ZERO);
+        }
     }
 
     /// Adds a tab in the folder kept for threads without a project, which no project lists, and
@@ -2438,7 +2516,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
         };
         let looked = Instant::now();
         {
@@ -2880,6 +2958,9 @@ impl Machine {
         match tool {
             ProjectTool::Agents if global => Err(NO_PROJECT_WORK.into()),
             ProjectTool::Agents => Ok(self.workers(tab, &self.orchestrated(tab)?)),
+            ProjectTool::WorkCost { .. } if global => Err(NO_PROJECT_WORK.into()),
+            ProjectTool::WorkCost { task: Some(id) } => text_json(self.delegates.work_cost_of_task(&Self::caller(Some(tab.to_owned()), None), &id)?),
+            ProjectTool::WorkCost { task: None } => text_json(self.work_cost(tab)?),
             ProjectTool::Projects => {
                 only_global()?;
                 // The sessions tool lists them; here they would bury the projects.
@@ -3261,10 +3342,16 @@ impl Machine {
         }
     }
 
+    /// What the thread in `tab` cost: its own session and every worker it delegated, theirs in turn included.
+    fn work_cost(&self, tab: &str) -> Result<crate::delegate::WorkCost, String> {
+        let own = self.tab(tab, |t| t.tally.stats().cost_usd)?;
+        Ok(self.delegates.work_cost_of_tab(tab).with_own(own))
+    }
+
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new())).collect();
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -4524,7 +4611,8 @@ impl Machine {
         let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
         let account = self.account_for(None, &cwd)?;
         // The caller's limits, held no looser than this machine's own for the project.
-        let limits = origin.limits.narrow(self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits());
+        let own = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
+        let limits = origin.limits.narrow(own);
         (request.target.machine, request.target.boxed) = (None, None);
         let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
         let side = ChildParent {
@@ -4539,12 +4627,19 @@ impl Machine {
             cwd,
             ceiling: origin.access,
             limits,
-            // The caller's machine counted it against Workers at once.
-            parallel: None,
+            // The caller counted it against its own Workers at once, and this machine counts its own.
+            parallel: Some(own.parallel),
             delegator: origin.delegator.clone(),
             origin: Some(origin),
         };
         self.launch_child(side, None, request)
+    }
+
+    /// What a machine that is full answers a worker another machine sent it.
+    fn remote_full(&self, working: usize, most: u32) -> String {
+        let (_, name) = self.machine_ids();
+        let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
+        format!("{name} is full: {working} in this project there, and its Workers at once allows {most}. Wait for one to finish, raise Workers at once in Settings › Way of working, or pick another machine.")
     }
 
     /// Moves a task off an account a usage limit stopped. It goes to the next rung of the
@@ -4647,6 +4742,7 @@ impl Machine {
             role: request.role.clone(),
         }, parallel) {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Full(working) if origin.is_some() => return Err(self.remote_full(working, parallel.unwrap_or_default())),
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
@@ -5065,6 +5161,11 @@ impl Machine {
     /// account in `delegates.limits()`, which stands in for the providers that report no windows.
     fn standing(&self, account: &Account) -> Option<(crate::delegate::Limit, bool)> {
         self.fetch_go_usage(account);
+        self.standing_known(account)
+    }
+
+    /// `standing` from what is already known, which asks no Console. The 20 s report uses it.
+    fn standing_known(&self, account: &Account) -> Option<(crate::delegate::Limit, bool)> {
         let limits = self.delegates.limits();
         let now = limits.now();
         let usage = self.usage.lock().unwrap().get(&account.id).copied().unwrap_or_default();
@@ -5092,7 +5193,7 @@ impl Machine {
     }
 
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, Access, Inherited, LimitNote, ListedAccount};
+        use crate::delegate::{capabilities, Access, Inherited};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -5102,12 +5203,68 @@ impl Machine {
             (Account::builtin(Provider::Claude), None, Access::Auto)
         };
         let parent = Inherited { account: account.id, model, access };
-        let listed = self
-            .accounts
+        let listed = self.listed_accounts(Look::Full);
+        let search = (!search.is_empty()).then_some(search);
+        let mut answer = capabilities(&parent, &listed, search);
+        answer["machines"] = self.machines_listed();
+        Ok(answer.to_string())
+    }
+
+    /// Every machine of the account with the summary it last reported, for `orchestrator_capabilities`.
+    /// This machine's own entry is read live. While the hub can't answer, it is the only entry.
+    fn machines_listed(&self) -> Value {
+        let (id, name) = self.machine_ids();
+        let own = self.state();
+        let mut views = match self.call_hub(HubCall::MachineStates).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
+            Ok(views) => views,
+            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None }],
+        };
+        for view in views.iter_mut().filter(|view| view.id == id) {
+            view.state = Some(own.clone());
+        }
+        crate::load::machines_json(&views, Some(&id))
+    }
+
+    /// The summary this machine reports to the hub every 20 s. It runs no agent CLI: an account's
+    /// sign-in is what the last refresh found, and an account nobody asked yet is left out until the
+    /// refresh this starts has finished. The hub rechecks with `state` before it refuses a worker.
+    pub fn report_state(&self) -> crate::load::MachineState {
+        let state = self.summary(Look::Reported);
+        self.refresh_statuses();
+        state
+    }
+
+    /// The summary as of now, asking each account's CLI. The hub asks for it before it refuses a worker.
+    pub fn state(&self) -> crate::load::MachineState {
+        self.summary(Look::Now)
+    }
+
+    fn summary(&self, look: Look) -> crate::load::MachineState {
+        let tabs = self.tabs();
+        let listed = self.listed_accounts(look);
+        // A task held for a machine elsewhere runs there, so it is not this machine's load.
+        let working = self.delegates.running().iter().filter(|id| self.delegates.get(id).is_some_and(|task| task.remote.is_none())).count() as u32;
+        let worker_tabs = tabs.iter().filter(|tab| tab.running && tab.role == Some(Role::Worker)).count() as u32;
+        crate::load::MachineState {
+            load: crate::load::sample(&home()),
+            accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
+            sessions: tabs.iter().filter(|tab| tab.running).count() as u32,
+            workers: working.max(worker_tabs),
+            // The account's tastes as last kept on disk: asking the hub for them could stall the report.
+            workers_at_once: self.local_tastes().resolve(&TasteScope::Captains).limits().parallel,
+            reported_at: 0,
+        }
+    }
+
+    /// This machine's accounts as a delegated child sees them, by how much `look` asks for.
+    fn listed_accounts(&self, look: Look) -> Vec<crate::delegate::ListedAccount> {
+        use crate::delegate::{LimitNote, ListedAccount};
+        let fresh = look == Look::Full;
+        self.accounts
             .list()
             .into_iter()
-            .map(|account| {
-                let status = self.status(&account);
+            .filter_map(|account| {
+                let status = if look == Look::Reported { self.reported_status(&account)? } else { self.status(&account) };
                 let found = self.launch.bin(account.provider).is_file();
                 let (models, mut constraints) = self.catalog_of(&account, found);
                 if !status.signed_in {
@@ -5116,17 +5273,15 @@ impl Machine {
                 if !found {
                     constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
                 }
-                let standing = self.standing(&account);
+                let standing = if fresh { self.standing(&account) } else { self.standing_known(&account) };
                 if let Some((limit, blocked)) = &standing {
                     constraints.push(if *blocked { limit.note() } else { format!("{} A task may try it now.", limit.note()) });
                 }
                 let limited = standing.as_ref().is_some_and(|(_, blocked)| *blocked);
                 let limit = standing.filter(|(_, blocked)| *blocked).map(|(limit, _)| LimitNote { reason: limit.reason, resume_at: limit.resume_at, retry_at: Some(limit.retry_at).filter(|_| limit.resume_at.is_none()) });
-                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints }
+                Some(ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints })
             })
-            .collect::<Vec<_>>();
-        let search = (!search.is_empty()).then_some(search);
-        Ok(capabilities(&parent, &listed, search).to_string())
+            .collect()
     }
 
     /// Opens a finished delegated task's conversation as a thread nested under `tab`, its owner.
@@ -5268,9 +5423,12 @@ impl Machine {
     }
 
     fn exited(&self, tab: &str, session: u64) {
-        let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
+        let Ok((screen, signing_in)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()))) else { return };
         if screen.lock().unwrap().session != session {
             return;
+        }
+        if let Some(account) = signing_in {
+            self.sign_in_changed(&account);
         }
         self.end_session(tab);
         let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
@@ -6193,6 +6351,82 @@ pub(crate) mod tests {
         assert_eq!(view.session.as_deref(), Some("s1"));
         assert!(view.running);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn work_cost_adds_the_captain_and_every_worker_it_started_here_elsewhere_and_in_a_box() {
+        use crate::delegate::{NewTask, Parent, RemoteEnd, RemoteTarget};
+        use crate::usage::TaskUsage;
+        let dir = temp("work-cost");
+        let sock = dir.join("pinned.sock");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        m.tab(&captain, |t| t.tally.costs.insert(1, 0.84)).unwrap();
+        let start = |parent: Parent, title: &str, provider: Provider, model: &str| {
+            m.delegates
+                .begin(NewTask {
+                    parent,
+                    tool: None,
+                    title: title.into(),
+                    account: "claude".into(),
+                    provider,
+                    model: Some(model.into()),
+                    cwd: dir.clone(),
+                    mode: crate::delegate::Mode::Async,
+                    access: crate::delegate::Access::Auto,
+                    isolated: false,
+                    caller_key: format!("tab:{captain}"),
+                    client_request_id: None,
+                    role: None,
+                })
+                .id
+        };
+        let usage = |cost: Option<f64>, tokens: (u64, u64), box_usd: Option<f64>| TaskUsage { tokens_in: tokens.0, tokens_out: tokens.1, cost_usd: cost, wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 1_800_000) };
+        let local = start(Parent::Tab(captain.clone()), "Local suite", Provider::Claude, "claude-sonnet-5-5");
+        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], None);
+        let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
+        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
+        let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
+        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None });
+        let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
+        assert!(m.delegates.settle_remote(&remote, &captain, "m-mini", &end(usage(Some(0.30), (2000, 800), None))).is_some());
+        let boxed = start(Parent::Tab(captain.clone()), "Box suite", Provider::Claude, "claude-sonnet-5-5");
+        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None });
+        assert!(m.delegates.settle_remote(&boxed, &captain, "m-box", &end(usage(Some(0.10), (500, 250), Some(0.05)))).is_some());
+        let cursor = start(Parent::Tab(captain.clone()), "Cursor review", Provider::Cursor, "composer-2.5");
+
+        // The Captain asks the way its MCP tool does: over the socket, as its tab.
+        let ask_cost = |args: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{captain}","tool":{{"name":"work_cost"{args}}}}}"#)).map(|body| serde_json::from_str::<Value>(&body).unwrap());
+        let cost = ask_cost("").unwrap();
+        let cents = |v: &Value| (v.as_f64().unwrap() * 100.0).round() as i64;
+        assert_eq!(cents(&cost["total_usd"]), 179, "0.84 own + 0.42 + 0.08 + 0.30 + 0.10 agents + 0.05 box: {cost}");
+        assert_eq!((cents(&cost["own_usd"]), cents(&cost["agents_usd"]), cents(&cost["box_usd"])), (84, 90, 5));
+        assert_eq!((cost["workers"].as_u64(), cost["unknown"].as_u64()), (Some(5), Some(1)), "the Cursor worker is unknown, not zero: {cost}");
+        assert_eq!((cost["tokens_in"].as_u64(), cost["tokens_out"].as_u64()), (Some(3700), Some(1650)));
+        let tasks = cost["tasks"].as_array().unwrap();
+        let row = |id: &str| tasks.iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} missing: {cost}")).clone();
+        assert_eq!((row(&local)["machine"].as_str(), row(&local)["depth"].as_u64(), cents(&row(&local)["cost_usd"])), (Some("this machine"), Some(0), 42));
+        assert_eq!((row(&grandchild)["depth"].as_u64(), row(&grandchild)["model"].as_str()), (Some(1), Some("claude-haiku-5-5")));
+        assert_eq!((row(&remote)["machine"].as_str(), row(&remote)["state"].as_str(), cents(&row(&remote)["cost_usd"])), (Some("mini"), Some("result_available"), 30));
+        assert_eq!((row(&boxed)["machine"].as_str(), cents(&row(&boxed)["box_usd"])), (Some("box-1"), 5));
+        let unknown = row(&cursor);
+        assert_eq!((unknown["cost_usd"].is_null(), unknown["state"].as_str(), unknown["model"].as_str()), (true, Some("working"), Some("composer-2.5")), "no cost is reported as none: {unknown}");
+        assert!(!unknown.as_object().unwrap().contains_key("cost_usd"));
+
+        let one = ask_cost(&format!(r#","taskId":"{local}""#)).unwrap();
+        assert_eq!((cents(&one["total_usd"]), one["workers"].as_u64(), one["own_usd"].is_null()), (50, Some(2), true), "a task and the worker under it: {one}");
+        assert!(ask_cost(r#","taskId":"task-nope""#).is_err());
+
+        // The Captain's card reads the same sum, its own session included.
+        let work = m.view(&captain).unwrap().work.unwrap();
+        assert_eq!((work.usd * 100.0).round() as i64, 179);
+        assert_eq!((work.workers, work.unknown), (5, 1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -13166,6 +13400,157 @@ Have another model review a risky change before it goes ahead.";
         assert!(personal["constraints"].as_array().unwrap().iter().any(|c| c.as_str().unwrap().contains("weekly usage at 100%") && c.as_str().unwrap().contains("It resumes at")), "{personal}");
         let shown = m.list_accounts().into_iter().find(|a| a.account.id == "personal").unwrap();
         assert_eq!((shown.limited, shown.limit_resume_at), (true, Some(reset)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    #[cfg(unix)]
+    fn a_machine_that_is_full_refuses_a_worker_another_machine_sent_and_takes_it_once_one_ends() {
+        let (m, dir, captain) = limited_captain("remote-full", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        let project = dir.join("app");
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&project).status().unwrap().success());
+        }
+        m.set_hub_id("m-mini".into(), "mac-mini".into());
+        let local = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let sent = |task: &str| {
+            let origin = crate::delegate::Origin { machine: "m-book".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), task: task.into(), access: crate::delegate::Access::Auto, delegator: Default::default(), limits: Default::default() };
+            let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+            m.call(Call::Delegate { origin, request: Box::new(request), repo: Some("https://github.com/acme/app.git".into()), token: None })
+        };
+        assert_eq!(
+            sent("t1"),
+            Err("mac-mini is full: 1 worker already runs in this project there, and its Workers at once allows 1. Wait for one to finish, raise Workers at once in Settings › Way of working, or pick another machine.".into()),
+            "the caller's machine had room, and this one counts its own"
+        );
+        m.task_cancel(Some(captain.clone()), None, local["taskId"].as_str().unwrap(), "not needed").unwrap();
+        assert_eq!(sent("t2").unwrap()["workState"], "working", "an ended worker frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_machine_reports_its_accounts_workers_and_workers_at_once_and_never_a_token_or_email() {
+        let (m, dir, captain) = limited_captain("reports-state", TastePatch { parallel: Some(4), ..TastePatch::default() });
+        delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let state = m.state();
+        let work_account = state.accounts.iter().find(|account| account.id == "work").expect("the added account is listed");
+        assert_eq!((work_account.driver_kind.as_str(), state.workers_at_once, state.workers), ("claude", 4, 1));
+        assert!(state.sessions >= 1, "{state:?}");
+        assert!(state.load.cpus.is_some_and(|cpus| cpus > 0) && state.load.disk_free_mb.is_some(), "{:?}", state.load);
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(!text.contains('@') && !text.contains("token"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A claude that logs in while `$0.in` exists and writes a line to `$0.runs` for each status asked.
+    #[cfg(unix)]
+    fn counting_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo run >> \"$0.runs\"; if [ -e \"$0.in\" ]; then echo '{\"loggedIn\":true}'; else echo '{\"loggedIn\":false}'; fi; exit 0; fi\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn status_runs(claude: &Path) -> usize {
+        std::fs::read_to_string(format!("{}.runs", claude.display())).map_or(0, |text| text.lines().count())
+    }
+
+    #[cfg(unix)]
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < until, "waited for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_20_second_report_runs_each_accounts_status_cli_once_however_many_reports_go_out() {
+        let dir = temp("report-cached");
+        let claude = counting_claude(&dir);
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let after_add = status_runs(&claude);
+        assert_eq!(after_add, 1, "adding the account asked its CLI once, to show it");
+
+        let first = m.report_state();
+        assert!(first.accounts.iter().any(|a| a.id == "work" && a.can_run_child_task), "{first:?}");
+        assert!(!first.accounts.iter().any(|a| a.id == "claude"), "the built-in account was never asked: {first:?}");
+        wait_until("the first refresh", || m.statuses.get("claude").is_some());
+        for _ in 0..8 {
+            let state = m.report_state();
+            assert!(state.accounts.iter().any(|a| a.id == "claude" && a.can_run_child_task), "{state:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(status_runs(&claude) - after_add, 1, "nine reports ran the built-in account's CLI once and the added account's never");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn warming_before_the_first_report_lists_every_account_and_a_second_warm_asks_nobody() {
+        let dir = temp("report-warm");
+        let claude = counting_claude(&dir);
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.warm_statuses();
+        assert_eq!(status_runs(&claude), 1, "the built-in Claude account was asked once");
+        for _ in 0..3 {
+            m.warm_statuses();
+            let state = m.report_state();
+            assert!(state.accounts.iter().any(|a| a.id == "claude" && a.can_run_child_task), "{state:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(status_runs(&claude), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_status_older_than_the_window_is_asked_again_off_the_report_and_the_old_one_is_reported_meanwhile() {
+        let dir = temp("report-stale");
+        let claude = counting_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let before = status_runs(&claude);
+        let work = m.accounts.get("work").unwrap();
+        assert!(m.statuses.claim("work", accounts::STATUS_FRESH).is_none(), "a status just read is fresh");
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        m.refresh_status(work, Duration::ZERO);
+        wait_until("the refresh", || m.statuses.get("work").is_some_and(|s| s.signed_in));
+        assert_eq!(status_runs(&claude) - before, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_state_asked_for_directly_reads_the_cli_live_while_the_report_keeps_the_cached_one() {
+        let dir = temp("report-live");
+        let claude = counting_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let signed_in = |state: &crate::load::MachineState| state.accounts.iter().any(|a| a.id == "work" && a.can_run_child_task);
+        assert!(!signed_in(&m.report_state()), "signed out when the account was added");
+        std::fs::write(format!("{}.in", claude.display()), "").unwrap();
+        assert!(!signed_in(&m.report_state()), "the report still has the cached answer");
+        assert!(signed_in(&m.state()), "the recheck before a refusal reads it live");
+        assert!(signed_in(&m.report_state()), "and the live read is what the report has afterwards");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capabilities_list_this_machine_under_machines_while_no_hub_answers() {
+        let (m, dir, captain) = limited_captain("caps-machines", TastePatch::default());
+        let caps: Value = serde_json::from_str(&m.capabilities(Some(&captain), None, "").unwrap()).unwrap();
+        let machines = caps["machines"].as_array().unwrap();
+        assert_eq!(machines.len(), 1, "{caps}");
+        assert_eq!((&machines[0]["isThisMachine"], &machines[0]["online"], &machines[0]["reported"]), (&json!(true), &json!(true), &json!(true)));
+        assert!(machines[0]["providers"].as_array().unwrap().iter().any(|p| p["providerInstanceId"] == "work" && p["driverKind"] == "claude"), "{caps}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
