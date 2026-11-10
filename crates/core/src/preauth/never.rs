@@ -1831,7 +1831,8 @@ mod tests {
             ("env X=1 rm -rf ~", Some(DeleteOutside)),
             ("timeout 30 rm -rf ~", Some(DeleteOutside)),
             ("time rm -rf ~", Some(DeleteOutside)),
-            ("rm -rf $'\\x2f'", None),
+            // `$'\x2f'` is a slash.
+            ("rm -rf $'\\x2f'", Some(DeleteOutside)),
             ("bash <<'EOF'\nrm -rf ~\nEOF", Some(DeleteOutside)),
             ("cat <<EOF\n$(rm -rf ~)\nEOF", Some(DeleteOutside)),
         ]);
@@ -2351,7 +2352,7 @@ mod tests {
         assert_eq!(edit("out2/new/deep.rs"), Some(WriteOutside));
         assert_eq!(edit("in/new/deep.rs"), None);
         assert_eq!(edit("in/../new.rs"), None, "in/.. is the worktree: the link resolves before the ..");
-        assert_eq!(edit("out/../new.rs"), None, "out/.. is the worktree: the link resolves before the ..");
+        assert_eq!(edit("out/../new.rs"), Some(WriteOutside), "out/.. is the parent of the link's target, not of the link");
         assert_eq!(edit("missing/../../x.rs"), Some(WriteOutside));
 
         assert_eq!(bash(&f, FOO, "cat ssh-link/id_ed25519"), Some(Secrets));
@@ -2387,7 +2388,7 @@ mod tests {
         assert_eq!((both.item, both.why.as_str()), (ForcePush, "git push --force"));
         assert_eq!(hit("git push -f; sudo ls").item, ForcePush);
         assert_eq!(hit("sudo ls; rm -rf ~").item, DeleteOutside);
-        assert_eq!(hit("rm -rf ~").why, "rm ~");
+        assert!(hit("rm -rf ~").why.starts_with("rm /"), "{:?}", hit("rm -rf ~").why);
         assert_eq!(ForcePush.label(), "force-push");
         let labels: std::collections::HashSet<_> = [DeleteOutside, ForcePush, PushToMain, Release, Deploy, Production, Secrets, Payment, WriteOutside, SelfGrant, NetworkInstall, MachineWide].map(NeverItem::label).into();
         assert_eq!(labels.len(), 12);
