@@ -4966,11 +4966,11 @@ fn a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mi
 }
 
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
-fn raw_caller(hub: &TestHub, client: &mut Client, name: &str) -> RawMachine {
+fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
     let creds = account::pair(&hub.url, code["code"].as_str().unwrap(), name, "linux").unwrap();
     let raw = RawMachine::start(&hub.url, &creds.machine_token, |_| RawReply::Ok(Value::Null));
-    client.wait_machines(&[(name, true)]);
+    client.wait_machines(machines);
     raw
 }
 
@@ -4987,7 +4987,7 @@ fn a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second() {
     ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
     ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-bloomtoken" })).unwrap();
     hub.boxes.state.lock().unwrap().hanging = true;
-    let caller = raw_caller(&hub, &mut ana.client, "caller");
+    let caller = raw_caller(&hub, &mut ana.client, "caller", &[("caller", true)]);
     let to_box = json!({ "box": { "size": "small", "repo": "acme/site" }, "providerInstanceId": "bloom" });
 
     let first = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
@@ -5008,7 +5008,7 @@ fn a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker(
     origin(&fleet.mini_dir.join("site"), SITE);
     fleet.mini.machine.open_project(fleet.mini_dir.join("site"));
     fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
-    let caller = raw_caller(&fleet.hub, &mut fleet.client, "caller");
+    let caller = raw_caller(&fleet.hub, &mut fleet.client, "caller", &[("mac", true), ("mini", true), ("caller", true)]);
     let to_mini = json!({ "machine": fleet.mini_id, "providerInstanceId": "work" });
     let answers: Vec<Value> = std::thread::scope(|scope| {
         let asks: Vec<_> = (0..3).map(|_| scope.spawn(|| caller.ask(delegate_call("task-1", to_mini.clone(), SITE)).unwrap())).collect();
