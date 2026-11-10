@@ -713,7 +713,8 @@ function show(tab) {
   }
   refit(tab);
   render();
-  if (!pickerOpen() && !settingsOpen()) focusInput();
+  // On a phone the prompt's focus raises the keyboard over the thread just picked.
+  if (!pickerOpen() && !settingsOpen() && !(guiOn() && touchComposer())) focusInput();
   markSeen(tab);
 }
 
