@@ -190,6 +190,19 @@ impl Delegates {
         }
     }
 
+    /// Notes where task `id` runs and who chose that.
+    pub fn set_placement(&self, id: &str, placed: crate::placement::Placed) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.placement = Some(placed);
+        }
+    }
+
+    /// Forgets task `id`, which no machine took: placement sends its worker to another machine.
+    pub fn discard(&self, id: &str) {
+        self.tasks.lock().unwrap().retain(|task| task.id != id);
+        self.persist();
+    }
+
     pub fn get(&self, id: &str) -> Option<Task> {
         self.tasks.lock().unwrap().iter().find(|task| task.id == id).cloned()
     }
@@ -761,6 +774,7 @@ impl Delegates {
                     "next": next_line(task),
                 });
                 with_moved(&mut body, task);
+                with_placement(&mut body, task);
                 body
             }
         };
@@ -1489,6 +1503,7 @@ fn status_json(task: &Task) -> Value {
         body["stoppedByLimit"] = json!(limit);
     }
     with_moved(&mut body, task);
+    with_placement(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
@@ -1520,6 +1535,13 @@ fn status_json(task: &Task) -> Value {
 fn with_moved(body: &mut Value, task: &Task) {
     if let Some(moved) = &task.moved {
         body["movedFrom"] = json!({ "providerInstanceId": moved.account, "model": moved.model, "reason": moved.reason });
+    }
+}
+
+/// Names the machine a task runs on and who chose it.
+fn with_placement(body: &mut Value, task: &Task) {
+    if let Some(placed) = &task.placement {
+        body["placement"] = json!(placed);
     }
 }
 
@@ -1733,6 +1755,7 @@ fn fresh(new: NewTask) -> Task {
         review: None,
         thread_tab: None,
         recorded: false,
+        placement: None,
     }
 }
 

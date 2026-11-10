@@ -429,6 +429,8 @@ pub struct Task {
     pub thread_tab: Option<String>,
     /// The hub holds this task's record as it is now.
     pub recorded: bool,
+    /// Where it runs and who chose that, for a task this machine's caller delegated.
+    pub placement: Option<crate::placement::Placed>,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.

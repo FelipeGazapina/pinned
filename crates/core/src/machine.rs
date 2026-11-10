@@ -291,6 +291,16 @@ struct ChildParent {
     /// Workers at once in the project, when this machine counts them.
     parallel: Option<u32>,
     delegator: crate::delegate::Delegator,
+    /// Where the caller's `delegate_task` placed it, when the caller is here.
+    placed: Option<crate::placement::Placed>,
+}
+
+/// How a start sent to another machine went.
+enum Sent {
+    /// The `delegate_task` answer.
+    Started(String),
+    /// That machine refused it, and the task is gone, so placement may try another.
+    Refused(String),
 }
 
 /// `delegate_task`'s answer when the project already runs as many workers as it allows.
@@ -3189,15 +3199,24 @@ impl Machine {
     /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
     /// is a worker.
     fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
+        self.caller_limits_from(&self.tastes(), tab)
+    }
+
+    /// `caller_limits` under tastes already read.
+    fn caller_limits_from(&self, tastes: &Tastes, tab: &str) -> Result<taste::Limits, String> {
         let cwd = self.tab(tab, |t| t.cwd.clone())?;
-        Ok(self.limits_in(tab, &history::project_of(&cwd)))
+        Ok(self.limits_from(tastes, tab, &history::project_of(&cwd)))
     }
 
     /// The limits for starting a session in `project` on behalf of `tab`: the project's, narrowed by
     /// the limits of the task `tab` itself runs, when it is a worker here.
     fn limits_in(&self, tab: &str, project: &Path) -> taste::Limits {
+        self.limits_from(&self.tastes(), tab, project)
+    }
+
+    fn limits_from(&self, tastes: &Tastes, tab: &str, project: &Path) -> taste::Limits {
         let own_task = self.tab(tab, |t| t.task.clone()).ok().flatten();
-        let limits = self.tastes().resolve(&captain_scope(project)).limits();
+        let limits = tastes.resolve(&captain_scope(project)).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
         outer.map_or(limits, |outer| limits.narrow(outer))
     }
@@ -4073,9 +4092,11 @@ impl Machine {
         Ok(body.to_string())
     }
 
-    /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
-    /// machine keeps the task, under its own id, for the caller's `task_status` and notice.
-    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+    /// `delegate_task` with `target.machine` or `target.box`, or placed on another machine: the hub
+    /// runs it there, and this machine keeps the task, under its own id, for the caller's
+    /// `task_status` and notice. With `may_refuse`, a machine that refuses it leaves no task, so
+    /// placement can try another.
+    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed, may_refuse: bool) -> Result<Sent, String> {
         use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
         let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
         let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
@@ -4086,7 +4107,7 @@ impl Machine {
         }
         let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
         let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
-        let place = request.target.machine.clone().unwrap_or_else(|| "an Upstash Box".into());
+        let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
         let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
@@ -4108,10 +4129,11 @@ impl Machine {
             client_request_id: request.client_request_id.clone(),
             role: request.role.clone(),
         }, Some(limits.parallel)) {
-            Claim::Existing(id) => return self.remote_started(&id),
+            Claim::Existing(id) => return self.remote_started(&id).map(Sent::Started),
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        self.delegates.set_placement(&task.id, placed);
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         self.delegates.hold_to(&task.id, held);
         self.delegates.describe(&task.id, delegator.clone(), effort);
@@ -4122,12 +4144,16 @@ impl Machine {
         match self.call_hub(asked.clone()) {
             Ok(answer) => {
                 self.remote_answered(&task.id, &answer);
-                self.remote_started(&task.id)
+                self.remote_started(&task.id).map(Sent::Started)
             }
             // The hub may still be starting it: a failed task here would let a retry start a second one.
             Err(error) if crate::link::is_unanswered(&error) => {
                 self.finish_start(tab, task.id.clone(), asked, begun);
-                self.remote_started(&task.id)
+                self.remote_started(&task.id).map(Sent::Started)
+            }
+            Err(error) if may_refuse => {
+                self.delegates.discard(&task.id);
+                Ok(Sent::Refused(needs_update(error)))
             }
             Err(error) => {
                 let error = needs_update(error);
@@ -4142,6 +4168,9 @@ impl Machine {
         let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
         let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
         let tab = answer["tabId"].as_str().map(str::to_owned);
+        if let Some(placed) = self.delegates.get(id).and_then(|task| task.placement) {
+            self.delegates.set_placement(id, crate::placement::Placed { machine: machine.clone(), machine_name: name.clone(), ..placed });
+        }
         self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
         self.arm_delegate_pass();
     }
@@ -4369,7 +4398,7 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::Parent;
+        use crate::placement::{By, Placed, Route};
         let caller = Self::require_caller(tab, parent_task)?;
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
@@ -4382,22 +4411,88 @@ impl Machine {
         if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
             return self.remote_started(&id);
         }
-        let limits = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
-        if request.target.machine.is_some() || request.target.boxed.is_some() {
-            return self.delegate_elsewhere(&caller, tool, request, limits);
+        let tastes = self.tastes();
+        let limits = self.caller_limits_from(&tastes, caller.tab.as_deref().unwrap_or_default())?;
+        match crate::placement::route(&tastes.placement, &request) {
+            Route::Explicit => {
+                let placed = Placed { machine: String::new(), machine_name: String::new(), by: By::Explicit, reason: "the request names it".into(), skipped: vec![] };
+                match self.delegate_elsewhere(&caller, tool, request, limits, placed, false)? {
+                    Sent::Started(body) => Ok(body),
+                    Sent::Refused(error) => Err(error),
+                }
+            }
+            Route::Here(by, reason) => {
+                let (machine, machine_name) = self.machine_ids();
+                self.start_here(&caller, tool, request, limits, Placed { machine, machine_name, by, reason, skipped: vec![] })
+            }
+            Route::Ask => self.place_and_start(&caller, tool, request, limits),
         }
-        let delegator = self.delegator(&caller);
+    }
+
+    /// Starts a worker on this machine for `caller`, placed as `placed` says.
+    fn start_here(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed) -> Result<String, String> {
+        use crate::delegate::Parent;
+        request.target.machine = None;
+        let delegator = self.delegator(caller);
         let parallel = Some(limits.parallel);
+        let placed = Some(placed);
         let side = if let Some(tab) = caller.tab.clone() {
             let (account, model, provider, auth, cwd, ceiling) = self.tab(&tab, |t| (t.account.id.clone(), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?;
-            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator }
+            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator, placed }
         } else {
             let id = caller.task.clone().unwrap_or_default();
             let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
             let auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
-            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator }
+            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator, placed }
         };
         self.launch_child(side, tool, request)
+    }
+
+    /// Asks the hub where a heavy worker runs, and starts it there. A machine that refuses it is
+    /// left out of one more ask; when that one refuses too, or the hub can't place it, the worker
+    /// runs here. Placing never fails the task.
+    fn place_and_start(&self, caller: &crate::delegate::Caller, tool: Option<String>, request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+        use crate::placement::{By, Need, Placed, Skip, Why};
+        let (own, own_name) = self.machine_ids();
+        let here = |reason: &str, skipped: Vec<Skip>| Placed { machine: own.clone(), machine_name: own_name.clone(), by: By::Fallback, reason: reason.to_owned(), skipped };
+        let Some(tab) = caller.tab.clone() else {
+            return self.start_here(caller, tool, request, limits, here("a worker's own worker runs on its machine", vec![]));
+        };
+        let Some(repo) = git_remote(&self.tab(&tab, |t| t.cwd.clone())?) else {
+            return self.start_here(caller, tool, request, limits, here("this thread's folder has no git origin, so no other machine can find its project", vec![]));
+        };
+        let need = Need { account: request.target.account.clone().filter(|id| !id.is_empty()), driver_kind: request.target.driver_kind.clone(), model: request.target.model.clone() };
+        let mut refused: Vec<Skip> = vec![];
+        loop {
+            let asked = HubCall::Place { repo: Some(repo.clone()), need: need.clone(), exclude: refused.iter().map(|skip| skip.machine.clone()).collect() };
+            let mut placed = match self.call_hub(asked).and_then(|answer| serde_json::from_value::<Placed>(answer).map_err(|e| e.to_string())) {
+                Ok(placed) => placed,
+                Err(e) => {
+                    eprintln!("pinned: the hub did not place a worker: {e}");
+                    here("the hub could not be reached to place it", refused.clone())
+                }
+            };
+            // The hub knows that a machine refused, and this machine knows why.
+            for skip in placed.skipped.iter_mut().filter(|skip| skip.why == Why::Refused) {
+                if let Some(why) = refused.iter().find(|done| done.machine == skip.machine) {
+                    skip.detail.clone_from(&why.detail);
+                }
+            }
+            if placed.machine == own {
+                return self.start_here(caller, tool, request, limits, placed);
+            }
+            let mut sent = request.clone();
+            sent.target.machine = Some(placed.machine.clone());
+            match self.delegate_elsewhere(caller, tool.clone(), sent, limits, placed.clone(), true)? {
+                Sent::Started(body) => return Ok(body),
+                Sent::Refused(error) => refused.push(Skip { machine: placed.machine, machine_name: placed.machine_name, why: Why::Refused, detail: error }),
+            }
+            if refused.len() > 1 {
+                let names: Vec<&str> = refused.iter().map(|skip| skip.machine_name.as_str()).collect();
+                let reason = format!("{} refused it, so it runs on the machine that asked", names.join(" and "));
+                return self.start_here(caller, tool, request, limits, here(&reason, refused));
+            }
+        }
     }
 
     /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
@@ -4432,6 +4527,7 @@ impl Machine {
             parallel: Some(own.parallel),
             delegator: origin.delegator.clone(),
             origin: Some(origin),
+            placed: None,
         };
         self.launch_child(side, None, request)
     }
@@ -4500,7 +4596,7 @@ impl Machine {
 
     fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
-        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator } = side;
+        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator, placed } = side;
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
         } else if let Some(id) = account_id {
@@ -4547,6 +4643,9 @@ impl Machine {
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        if let Some(placed) = placed {
+            self.delegates.set_placement(&task.id, placed);
+        }
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         if let Some(moved) = moved {
             self.delegates.set_moved(&task.id, moved);
