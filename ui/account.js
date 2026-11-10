@@ -82,8 +82,8 @@ async function loadInvites() {
   if (settingsOpen() && page === "account") showAccount();
 }
 
-const inviteDate = (unix) => new Date(unix * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
-const clockTime = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const inviteDate = (unix) => new Date(unix * 1000).toLocaleDateString(APP_LOCALE, { month: "short", day: "numeric" });
+const clockTime = (unix) => new Date(unix * 1000).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
 
 function invitesHtml() {
   if (invitesUi.signup !== "invite") return "";
@@ -229,7 +229,7 @@ function lastSeen(unix) {
   if (minutes < 1) return "seen just now";
   if (minutes < 60) return `seen ${minutes} min ago`;
   if (minutes < 24 * 60) return `seen ${Math.round(minutes / 60)} h ago`;
-  return `seen ${new Date(unix * 1000).toLocaleDateString()}`;
+  return `seen ${new Date(unix * 1000).toLocaleDateString(APP_LOCALE)}`;
 }
 
 function showMachinesAndRecheckSync() {

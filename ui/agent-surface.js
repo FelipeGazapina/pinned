@@ -237,7 +237,7 @@ function agentAuditRowHtml(entry) {
   const when = new Date(entry.at * 1000);
   const who = [agentWords(entry.role), entry.tab, entry.machine_name || "removed machine"].join(" · ");
   return `<div class="agent-audit-row">
-    <div class="head"><b>${esc(agentActionTitle(entry.action, entry.args, entry.machine))}</b><span class="badge agent-outcome" data-tone="${AGENT_OUTCOME_TONES[entry.outcome] ?? "muted"}">${esc(entry.outcome)}</span><time class="meta" datetime="${when.toISOString()}">${esc(when.toLocaleString())}</time></div>
+    <div class="head"><b>${esc(agentActionTitle(entry.action, entry.args, entry.machine))}</b><span class="badge agent-outcome" data-tone="${AGENT_OUTCOME_TONES[entry.outcome] ?? "muted"}">${esc(entry.outcome)}</span><time class="meta" datetime="${when.toISOString()}">${esc(when.toLocaleString(APP_LOCALE))}</time></div>
     <span class="meta">${esc(who)}</span>
     <code class="args">${esc(entry.args)}</code>
     ${entry.detail ? `<p class="detail">${esc(entry.detail)}</p>` : ""}

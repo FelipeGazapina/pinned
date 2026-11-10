@@ -1070,7 +1070,7 @@ function markUnread(tab) {
 }
 
 function snoozePresets(now = new Date()) {
-  const time = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const time = (d) => d.toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" });
   const at = (days, hour) => {
     const d = new Date(now);
     d.setDate(d.getDate() + days);
@@ -1082,7 +1082,7 @@ function snoozePresets(now = new Date()) {
   const tomorrow = at(1, 9);
   list.push(["Tomorrow", tomorrow]);
   const monday = at((1 - now.getDay() + 7) % 7 || 7, 9);
-  if (+monday !== +tomorrow) list.push(["Next week", monday, `${monday.toLocaleDateString([], { weekday: "short" })} ${time(monday)}`]);
+  if (+monday !== +tomorrow) list.push(["Next week", monday, `${monday.toLocaleDateString(APP_LOCALE, { weekday: "short" })} ${time(monday)}`]);
   return list.map(([label, date, when]) => ({ label, when: when ?? time(date), until: date / 1000 }));
 }
 

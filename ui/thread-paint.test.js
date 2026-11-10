@@ -84,6 +84,7 @@ const sandbox = {
     },
   },
   callOn: async () => null,
+  APP_LOCALE: "en-US",
 };
 vm.createContext(sandbox);
 

@@ -108,9 +108,9 @@ function duration(ms) {
 /** A running turn's clock counts whole seconds, as T3 Code's does. */
 const ticking = (ms) => (ms < 60_000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : duration(Math.floor(ms / 1000) * 1000));
 
-const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const shortDate = new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric" });
-const longDate = new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric", year: "numeric" });
+const clock = new Intl.DateTimeFormat(APP_LOCALE, { hour: "numeric", minute: "2-digit" });
+const shortDate = new Intl.DateTimeFormat(APP_LOCALE, { month: "numeric", day: "numeric" });
+const longDate = new Intl.DateTimeFormat(APP_LOCALE, { month: "numeric", day: "numeric", year: "numeric" });
 const monthName = new Intl.DateTimeFormat("en-US", { month: "long" });
 const dateOf = (at) => {
   const d = new Date(at || NaN);

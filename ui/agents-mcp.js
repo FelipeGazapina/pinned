@@ -39,7 +39,7 @@ const agentHost = (uri) => {
     return uri;
   }
 };
-const agentWhen = (secs) => (secs ? new Date(secs * 1000).toLocaleString() : "never");
+const agentWhen = (secs) => (secs ? new Date(secs * 1000).toLocaleString(APP_LOCALE) : "never");
 
 /** Every project of the account's online machines, as the consent card offers them. */
 async function agentProjectChoices() {

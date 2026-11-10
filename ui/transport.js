@@ -1,3 +1,6 @@
+/** The app is written in English, so its dates and times are too, whatever the browser's language is. */
+const APP_LOCALE = "en-US";
+
 const TAURI = window.__TAURI__ ?? null;
 document.documentElement.dataset.shell = TAURI ? "app" : "web";
 if (!TAURI && "serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
