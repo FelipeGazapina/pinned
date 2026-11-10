@@ -3761,7 +3761,7 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
     assert_eq!((raw.calls("list_projects"), raw.calls("global_orchestrator_settings"), raw.calls("tabs")), (1, 1, 1), "the hub asked for the tabs only of the machine that never reported them");
     let mac_link = fleet.mac.link.as_ref().unwrap();
     assert_eq!(mac_link.call_hub(HubCall::Overview), Err("mac does not host the global orchestrator (mini does), so it can't list the account's projects".into()));
-    let signed_in = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let signed_in = without_load(fleet.client.hub(json!({ "cmd": "overview" })).unwrap());
     let signed_in_site = signed_in["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site");
     assert_eq!(signed_in_site, Some(&site(true)), "a signed-in client reads it too");
 
@@ -7518,7 +7518,7 @@ fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
     wait_for("the node reports its load", || state_of(&mut client, &id).is_some());
 
     let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
-    let checkout = overview["projects"][0]["checkouts"].as_array().unwrap().iter().find(|c| c["path"] == json!(path)).unwrap_or_else(|| panic!("{overview}")).clone();
+    let checkout = overview["projects"].as_array().unwrap().iter().flat_map(|p| p["checkouts"].as_array().unwrap()).find(|c| c["path"] == json!(path)).unwrap_or_else(|| panic!("{overview}")).clone();
     assert!(checkout["load"]["disk_free_mb"].as_u64().is_some() && checkout["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "the checkout shows its machine's load: {checkout}");
     let machine = &overview["machines"][0];
     assert_eq!(machine["name"], "book");
