@@ -23,6 +23,7 @@ pub mod linear;
 pub mod link;
 pub mod machine;
 pub mod marks;
+pub mod mcp;
 pub mod memory;
 pub mod model2vec;
 pub mod opencode_go;

@@ -687,6 +687,16 @@ pub enum Call {
         text: String,
         id: String,
     },
+    /// `Vec<mcp::Server>`: the MCP servers Claude Code sessions here load under `account`, else the
+    /// account of the project at `path`, else the default one. User and local scope come from that
+    /// account's `.claude.json`, project scope from `path`'s `.mcp.json`. Each names its program or
+    /// its URL's origin only, never its arguments, environment or headers.
+    McpServers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -782,6 +792,7 @@ impl Call {
                 | Call::MemoryForget { .. }
                 | Call::MemoryStatus { .. }
                 | Call::UpdateSelf
+                | Call::McpServers { .. }
         )
     }
 }
@@ -1115,8 +1126,15 @@ pub enum HubCall {
     /// then the last 20 decided, newest first.
     Confirmations,
     /// From a signed-in client: `surface::Decided`. Approving runs the action for the session that
-    /// asked; either way the session gets a notice.
-    DecideConfirmation { id: String, approve: bool },
+    /// asked; either way the session gets a notice. `entered` holds what the user typed in the app
+    /// for a credential action's asked fields (`surface::Action::asks`); a credential action whose
+    /// run fails waits again, so the user can type another.
+    DecideConfirmation {
+        id: String,
+        approve: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        entered: BTreeMap<String, String>,
+    },
     /// `Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`
     /// rows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of
     /// its boundary second, which the client drops by id.
@@ -1854,6 +1872,16 @@ mod tests {
             json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
         );
         round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
+    }
+
+    #[test]
+    fn a_decision_without_typed_fields_keeps_its_old_shape_and_mcp_servers_takes_both_fields_as_optional() {
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: BTreeMap::new() }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true }));
+        let typed = BTreeMap::from([("key".to_owned(), "lin_api_x".to_owned())]);
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: typed }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true, "entered": { "key": "lin_api_x" } }));
+        round_trip(Call::McpServers { account: None, path: None }, json!({ "cmd": "mcp_servers" }));
+        round_trip(Call::McpServers { account: Some("work".into()), path: Some("/w/site".into()) }, json!({ "cmd": "mcp_servers", "account": "work", "path": "/w/site" }));
+        assert!(Call::McpServers { account: None, path: None }.may_wait());
     }
 
     #[test]
