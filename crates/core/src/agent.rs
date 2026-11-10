@@ -69,6 +69,12 @@ pub fn role_env(role: Role, project: &Path) -> Vec<(String, String)> {
 #[serde(tag = "name", rename_all = "snake_case")]
 pub enum ProjectTool {
     Agents,
+    /// What the thread's work cost: its own session, the workers it delegated and their boxes.
+    /// With `task`, that task and the workers under it instead.
+    WorkCost {
+        #[serde(default, rename = "taskId", skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
     MemorySearch {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -18692,6 +18692,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "work": {
+                "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkTotal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "taste_chat": {
                 "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
                 "type": "boolean"
@@ -18840,6 +18851,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           },
           "AgentEvent": {
@@ -24428,6 +24467,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "work": {
+                "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkTotal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "taste_chat": {
                 "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
                 "type": "boolean"
@@ -24569,6 +24619,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           },
           "AgentEvent": {
@@ -41066,6 +41144,17 @@
             "format": "uint32",
             "minimum": 0
           },
+          "work": {
+            "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTotal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "taste_chat": {
             "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
             "type": "boolean"
@@ -41214,6 +41303,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           }
         }
@@ -41407,6 +41524,17 @@
             "format": "uint32",
             "minimum": 0
           },
+          "work": {
+            "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTotal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "taste_chat": {
             "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
             "type": "boolean"
@@ -41548,6 +41676,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           }
         }
@@ -42945,6 +43101,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "work": {
+                "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkTotal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "taste_chat": {
                 "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
                 "type": "boolean"
@@ -43093,6 +43260,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           },
           "Reply": {
@@ -45808,6 +46003,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "work": {
+                "description": "What the thread and the workers it delegated cost so far, on the thread that delegated\nthem. Workers are not counted again under it: its card is the one place the total shows.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkTotal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "taste_chat": {
                 "description": "The tab was opened from the Way of working page to adjust the account's tastes by talking,\nand its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.",
                 "type": "boolean"
@@ -45949,6 +46155,34 @@
                 "type": "string",
                 "const": "worker"
               }
+            ]
+          },
+          "WorkTotal": {
+            "description": "What a thread's card shows of its rollup: the cost of its own session and its workers, added up.",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "description": "The known costs, the thread's own session, agents and boxes together.",
+                "type": "number",
+                "format": "double"
+              },
+              "unknown": {
+                "description": "Parts whose cost is not known, which `usd` leaves out.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "workers": {
+                "description": "Workers under the thread, theirs in turn included.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "unknown",
+              "workers"
             ]
           },
           "Reply": {

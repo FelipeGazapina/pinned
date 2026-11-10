@@ -187,9 +187,17 @@ function runningWorkers() {
   return by;
 }
 
+/** What each project's threads and workers cost, as `$1.26 · 2 workers`, by project slug. */
+function projectCosts() {
+  const by = new Map();
+  for (const group of projectGroups(true)) by.set(tagSlug(group.name), projectCostLabel(spawnTree(group.tabs).roots));
+  return by;
+}
+
 function renderGlobalProjectsPage() {
   const catalog = globalProjectsCatalog();
   const workers = runningWorkers();
+  const costs = projectCosts();
   const rows = catalog.projects.map((p) => {
     const state = captainState(p.machines.map((m) => m.captain));
     const counts = workers.get(p.slug) ?? new Map();
@@ -204,7 +212,7 @@ function renderGlobalProjectsPage() {
     const running = [...counts.values()].reduce((n, c) => n + c, 0);
     return `<div class="gp-row">
       <div class="gp-main"><span class="gp-name">${esc(p.name)}</span><span class="gp-state ${state}">${CAPTAIN_STATE_LABELS[state]}</span><span class="gp-repo">${esc(p.repo || "no remote")}</span></div>
-      <div class="gp-side">${machinesHtml}<span class="gp-workers">${running ? workersLabel(running) : "—"}</span></div>
+      <div class="gp-side">${machinesHtml}${costs.get(p.slug) ? `<span class="gp-cost" title="What this project's threads and workers cost">${esc(costs.get(p.slug))}</span>` : ""}<span class="gp-workers">${running ? workersLabel(running) : "—"}</span></div>
     </div>`;
   });
   setPage(

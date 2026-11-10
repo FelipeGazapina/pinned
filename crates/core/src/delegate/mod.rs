@@ -541,6 +541,7 @@ mod limited;
 mod metrics;
 mod registry;
 mod request;
+mod rollup;
 
 pub use catalog::*;
 pub use drivers::*;
@@ -548,6 +549,7 @@ pub use limited::*;
 pub use metrics::*;
 pub use registry::*;
 pub use request::*;
+pub use rollup::*;
 
 #[cfg(test)]
 pub(crate) use drivers::{driver, replay};
