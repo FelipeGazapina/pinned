@@ -259,9 +259,12 @@ function statsHtml(tab) {
   const label = statsLabel(tab);
   return label ? `<span class="stats" data-stats="${esc(tab.key)}">${esc(label)}</span>` : "";
 }
+/** A menu on screen is a question, not an approval, when the hooks said the session needs input
+ * rather than permission (an AskUserQuestion menu). */
+const menuIsQuestion = (tab) => tab.view.status === "needs-input" && askOf(tab.view).kind === "question";
 function statusSlot(tab) {
   const phase = phaseOf(tab);
-  if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
+  if (phase === "asking") return menuIsQuestion(tab) ? { icon: "message-circle-question", text: "Question", tone: "input" } : { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
   if (phase === "delegating") {
     // The card's slot is narrow, so it says "2 working" beside the bot icon and keeps the full count in the title.
@@ -383,11 +386,11 @@ function globalSidebarTop() {
 const WAITING_LOOKS = { approval: ["Approval", "approval"], question: ["Question", "question"], failed: ["Failed", "failed"] };
 
 /** The kind a blocked thread's row shows. `waitingKindOf` says it waits; a `needs_input` is an
- * approval or a question by `askOf`; and a thread whose card shows a permission menu is an approval,
- * whatever status the hooks last set, so the card and the list never disagree. */
+ * approval or a question by `askOf`; and a thread the hooks call failed whose card shows a
+ * permission menu is an approval, as its card says, so the card and the list never disagree. */
 function waitingLookOf(tab, kind) {
-  if (phaseOf(tab) === "asking") return "approval";
-  return kind === "needs_input" ? askOf(tab.view).kind : kind;
+  if (kind === "failed") return phaseOf(tab) === "asking" && !menuIsQuestion(tab) ? "approval" : "failed";
+  return askOf(tab.view).kind;
 }
 
 /** What the thread is blocked on, as the row's third line: the tool and the command an approval

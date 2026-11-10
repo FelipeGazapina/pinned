@@ -29,7 +29,7 @@ function sidebar(tabs, asking = []) {
   vm.runInContext(read("global-chat.js").match(/function waitingKindOf[\s\S]*?\n}\n/)[0], context);
   vm.runInContext(read("global-chat.js").match(/function askOf[\s\S]*?\n}\n/)[0], context);
   vm.runInContext(
-    [line(settingsSrc, "const esc = "), line(sidebarSrc, "const WAITING_LOOKS = "), fn(sidebarSrc, "waitingLookOf"), fn(sidebarSrc, "askedOf"), fn(sidebarSrc, "waitingRow"), fn(sidebarSrc, "globalWaitingRows")].join("\n"),
+    [line(settingsSrc, "const esc = "), line(sidebarSrc, "const WAITING_LOOKS = "), line(sidebarSrc, "const menuIsQuestion = "), fn(sidebarSrc, "waitingLookOf"), fn(sidebarSrc, "askedOf"), fn(sidebarSrc, "waitingRow"), fn(sidebarSrc, "globalWaitingRows")].join("\n"),
     context,
   );
   return context;
@@ -71,4 +71,10 @@ test("threads that wait on nobody are left out", () => {
   const working = tab("mini:tab-8", "mini", "Busy", { status: "working" });
   const idle = tab("mini:tab-9", "mini", "Idle notice", { interrupted: false, message: "Claude is waiting for your input" });
   assert.deepEqual(sidebar([working, idle]).globalWaitingRows(), []);
+});
+
+test("a question whose menu is on screen still reads Question, as its card does", () => {
+  const question = tab("mini:tab-5", "mini", "Pick who opens the PR", { message: "Claude needs your input", ask_detail: "Which one should open the PR?" });
+  const [row] = sidebar([question], ["mini:tab-5"]).globalWaitingRows();
+  assert.equal(words(row), "Pick who opens the PR Question · alpha · Mac mini · 1m Which one should open the PR?");
 });

@@ -146,7 +146,7 @@ const send = (page, key, text) =>
       await shot.screenshot({ path: path.join(SCREENS, `real-${size === "phone" ? "390x844" : "1440x900"}.png`) });
       if (!phone) {
         const text = rows.join("\n");
-        check(/Approval · alpha · sweep-mini[\s\S]*Bash rm -rf build/.test(rows.find((r) => /sweep-mini/.test(r)) ?? ""), `the worker's approval reads Approval, names sweep-mini and shows Bash rm -rf build: ${rows.find((r) => /sweep-mini/.test(r))}`);
+        check(/Approval · alpha · sweep-mini · \w+Bash\s?rm -rf build/.test(rows.find((r) => /sweep-mini/.test(r)) ?? ""), `the worker's approval reads Approval, names sweep-mini and shows Bash rm -rf build: ${rows.find((r) => /sweep-mini/.test(r))}`);
         check(/Question · alpha · sweep-node/.test(text), "the question reads Question and names its machine");
         check(/Failed · alpha · sweep-node/.test(text), "the failure reads Failed and names its machine");
       }
