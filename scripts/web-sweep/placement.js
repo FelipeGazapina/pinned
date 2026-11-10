@@ -46,7 +46,7 @@ function pairMini() {
   execFileSync(SERVER, ["login", HUB, EMAIL, "--name", "sweep-mini", "--config-dir", path.join(DIR, "node2")], { env, stdio: "ignore" });
   const node = spawn(SERVER, ["node", "--config-dir", path.join(DIR, "node2")], {
     env: { ...env, SHELL: path.join(DIR, "bin", "shell"), PATH: `${path.join(DIR, "bin")}:${process.env.PATH}` },
-    stdio: ["ignore", fs.openSync(path.join(DIR, "node2.log"), "w"), "inherit"],
+    stdio: ["ignore", fs.openSync(path.join(DIR, "node2.log"), "w"), fs.openSync(path.join(DIR, "node2.log"), "a")],
     detached: true,
   });
   node.unref();
