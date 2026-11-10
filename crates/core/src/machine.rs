@@ -10640,7 +10640,9 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn a_worker_host_that_restarts_keeps_reporting_its_end_to_the_machine_that_asked() {
-        let (m, dir, captain) = limited_captain("restart-host", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let (m, dir, _captain) = limited_captain("restart-host", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        git(&dir.join("app"), &["init", "-q"]);
+        git(&dir.join("app"), &["remote", "add", "origin", "git@github.com:acme/app.git"]);
         let origin = crate::delegate::Origin {
             machine: "m-mac".into(),
             machine_name: "mac".into(),
@@ -10654,7 +10656,6 @@ Have another model review a risky change before it goes ahead.";
         let started: Value = serde_json::from_str(&m.start_for_origin(origin, request, Some("git@github.com:acme/app.git".into()), None).unwrap_or_else(|e| panic!("{e}"))).unwrap();
         let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
         m.record_event(reports(&worker, "s-host", AgentStatus::Working, None));
-        let _ = captain;
         m.quit();
         drop(m);
         let after = restarted(&dir);
