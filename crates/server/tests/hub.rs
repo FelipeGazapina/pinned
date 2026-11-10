@@ -10,12 +10,13 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall};
+use pinned_core::wire::{Call, HubCall, MachineView};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -4968,6 +4969,7 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
 
     let invite = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap();
     let invite_id = invite["id"].as_str().unwrap().to_owned();
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": invite_id, "approve": true })).unwrap();
     assert_eq!((&decided["decision"], &decided["outcome"]), (&json!("approved"), &json!("done")));
     let code = decided["result"]["code"].as_str().unwrap().to_owned();
@@ -4983,6 +4985,7 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(act(&bob.dir, &bob.tab, "rename_machine", json!({ "id": ana.machine, "name": "mine" })), Err(format!("this account has no machine {}", ana.machine)));
     assert_eq!(session_tool(&bob.dir, &bob.tab, json!({ "name": "act", "action": "memory_search", "args": { "path": docs, "query": "deploy" }, "machine": "ana-mac" })), Err("this account has no machine ana-mac".into()));
     let bobs_remove = act(&bob.dir, &bob.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
+    bob.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err(format!("no confirmation {remove_id} waits")), "bob's app can't decide ana's");
     assert_eq!(machine_result(&url, &bob_spare_token, json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err("only the account's owner decides, in the app".into()));
     let bobs_list = machine_result(&url, &bob_spare_token, json!({ "cmd": "confirmations" })).unwrap();
@@ -5093,7 +5096,7 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
     let hub = TestHub::start_with("owner_only", Signup::Invite);
     let url = hub.url.clone();
     let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-laptop");
     let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
     let mut app = Client::app(&url, &ana_token);
     let asked = act(&ana.dir, &ana.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
@@ -5112,13 +5115,100 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
         assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
     }
     assert_eq!(logins, 1, "the app's login is the one login on the machine");
-    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mac", "ana-spare"], "nothing ran");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-laptop", "ana-spare"], "nothing ran");
+
+    let status = |r: Result<(MachineView, String), String>| r.map(|(m, _)| m.name);
+    assert_eq!(status(account::register_machine(&url, &ana_token, "rogue", "linux")), Err("this login adds no machine: pair it with a code from the app".into()));
+    assert_eq!(app.hub(json!({ "cmd": "unlock", "password": "correct hors" })), Err("that is not this account's password".into()));
 
     assert_eq!(app.hub(decide.clone()), Err(LOCKED.into()), "the app asks for the password before it decides");
     let unlocked = app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let unlock = unlocked["token"].as_str().unwrap().to_owned();
-    assert!(!readable_on(&ana.dir).contains(&unlock), "the unlock lives in the app's memory only");
+    let until = unlocked["until"].as_i64().unwrap() - now_ms() as i64 / 1000;
+    assert!((12 * 3600 - 60..=12 * 3600).contains(&until), "it holds for 12 hours: {until}s");
+    let found = readable_on(&ana.dir);
+    assert!(!found.contains(&unlock), "the unlock lives in the app's memory only");
+    for secret in &found {
+        let mut agent = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "unlock": secret })).signed_in().unwrap();
+        assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()), "nothing on the disk unlocks");
+    }
     let approved = app.hub(decide.clone()).unwrap();
     assert_eq!((&approved["decision"], &approved["outcome"]), (&json!("approved"), &json!("done")));
-    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mac"]);
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-laptop"]);
+    let mut reconnected = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "lock": true, "unlock": unlock })).signed_in().unwrap();
+    assert!(reconnected.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].is_string(), "the app's own unlock holds across its reconnect");
+
+    let (older, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut older_app = Client::connect(&url, &older).signed_in().unwrap();
+    assert!(older_app.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].is_string(), "an app older than the lock keeps its calls");
+    let waiting = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(older_app.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(LOCKED.into()), "but decides only once unlocked");
+
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&older_app.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned())).unwrap();
+    let mut bob = Client::app(&url, &bob_token);
+    let bobs_unlock = bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap()["token"].as_str().unwrap().to_owned();
+    let mut agent = Client::auth(&url, json!({ "type": "auth", "token": ana_token, "unlock": bobs_unlock })).signed_in().unwrap();
+    assert_eq!(agent.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(LOCKED.into()), "another login's unlock counts for nothing here");
+    let mut bob_with_anas = Client::auth(&url, json!({ "type": "auth", "token": bob_token, "unlock": unlock })).signed_in().unwrap();
+    assert_eq!(bob_with_anas.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()), "nor ana's unlock on bob's login");
+    assert_eq!(bob.hub(json!({ "cmd": "decide_confirmation", "id": waiting, "approve": true })), Err(format!("no confirmation {waiting} waits")), "bob, unlocked, still decides none of ana's");
+
+    let mut guessing = Client::connect(&url, &ana_token).signed_in().unwrap();
+    for _ in 0..10 {
+        let _ = guessing.hub(json!({ "cmd": "unlock", "password": "guess" }));
+    }
+    assert_eq!(guessing.hub(json!({ "cmd": "unlock", "password": "correct horse" })), Err("too many wrong passwords; try again in 15 minutes".into()), "guessing with the login off the disk locks out that login");
+    let (phone, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    let unlocked = Client::app(&url, &phone).hub(json!({ "cmd": "unlock", "password": "correct horse" }));
+    assert!(unlocked.is_ok(), "the owner's phone still unlocks: {unlocked:?}");
 }
+
+const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
+
+#[test]
+fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
+    let hub = TestHub::start("node_login");
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let dir = temp("node-login");
+    let config = dir.to_str().unwrap();
+    let login = std::process::Command::new(BIN).args(["login", &url, "ana@acme.dev", "--name", "ana-mini", "--config-dir", config]).env("PINNED_PASSWORD", "correct horse").output().unwrap();
+    assert!(login.status.success(), "{}", String::from_utf8_lossy(&login.stderr));
+    let creds = Credentials::load(&dir).unwrap();
+    let machine_token = creds.machine_token.clone();
+    assert_eq!(creds.user_token, "", "the machine keeps its own token only");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mini"]);
+    assert!(readable_on(&dir).iter().all(|secret| Client::connect(&url, secret).signed_in().is_none()), "no login is left on the machine");
+
+    let (older, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    Credentials { user_token: older.clone(), ..creds }.save(&dir).unwrap();
+    let shell = dir.join("shell");
+    std::fs::write(&shell, "#!/bin/sh\nprintf '\\n__PINNED_PATH__/usr/bin:/bin__PINNED_PATH__\\n'\n").unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let node = std::process::Command::new(BIN)
+        .args(["node", "--config-dir", config])
+        .env("HOME", &dir)
+        .env("SHELL", &shell)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(dir.join("stderr")).unwrap())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = node.id();
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for("the node to forget the login", || Credentials::load(&dir).unwrap().user_token.is_empty());
+        wait_for("the hub to end it", || Client::connect(&url, &older).signed_in().is_none());
+        app.wait_machines(&[("ana-mini", true)]);
+    }));
+    let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+    let mut node = node;
+    let _ = node.wait();
+    if let Err(panic) = ended {
+        eprintln!("{}", std::fs::read_to_string(dir.join("stderr")).unwrap_or_default());
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(Credentials::load(&dir).unwrap().machine_token, machine_token, "the machine token stays");
+}
+

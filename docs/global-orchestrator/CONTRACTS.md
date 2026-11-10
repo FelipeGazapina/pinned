@@ -464,7 +464,7 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 | Wire | From | Answer |
 |---|---|---|
 | `HubCall::Confirmations` | a client or a machine | `Vec<Confirmation>`: every waiting one, oldest first, then the last 20 decided, newest first. |
-| `HubCall::DecideConfirmation { id, approve }` | a signed-in client only. A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
+| `HubCall::DecideConfirmation { id, approve }` | a signed-in client only, on a connection the owner unlocked with the password (13.10). A machine gets `only the account's owner decides, in the app`. The manifest excludes it. | `Decided`: `{"decision":"approved","outcome":"done","result":<unredacted answer>}` or `{"decision":"denied","outcome":"denied"}`. Error `no confirmation <id> waits` for an unknown, decided or other account's id. |
 | `ToClient::Confirmations { items }` | hub to client | The waiting ones, after `Hello` and after every change. An older app ignores the frame. |
 | `HubCall::AgentAudit { before?, limit? }` | a client, or an agent through `act` | `Vec<AuditEntry>` as 13.8 says. |
 
@@ -511,6 +511,19 @@ Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is
 ### 13.9 Account isolation
 
 Every new query filters on the account of the socket that asked: `agent_actions`, `agent_confirmations`, `Confirmations`, `DecideConfirmation`, `AgentAudit`. `crates/server/tests/hub.rs` proves that account B's agent can't read A's audit rows or confirmations, act on A's machines, or decide A's confirmations, and that B's client can't either.
+
+### 13.10 Only the owner approves
+
+The desktop app keeps its login in `account.json`, and the web app keeps its login in `localStorage`. Any process of the same OS user can read both, so a login alone does not prove that the owner is there. The password proves it, because nothing stores it.
+
+- `ClientFrame::Auth { token, lock?, unlock? }`. An app that sends `lock: true` locks its login for good (`logins.locked`). An older app leaves it out and keeps every call it had.
+- `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`.
+- `HubCall::Unlock { password }` comes from a signed-in client only. The manifest excludes it, and a machine is refused. The hub checks the password, at most 10 tries per login and 100 per account in 15 minutes, and answers `Unlocked { token, until }`. The connection counts as the owner until `until`, 12 hours later. The app keeps `token` in memory and sends it in `Auth.unlock` after a reconnect. The token works only with the login it was taken on. A hub restart forgets it, and the app asks for the password again.
+- `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
+- `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.
+- A node keeps only its machine token. `pinned-server login` ends the login after it adds the machine. A node that finds a login an older pinned kept in `account.json` removes it from the file and ends it at the hub.
+
+A login read off a disk still runs every other client call: it reads sessions, types into tabs and starts sessions on the account's machines. After this change, the machine that runs the desktop app is the only one that keeps a login.
 
 ## PR
 

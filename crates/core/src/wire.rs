@@ -1114,6 +1114,9 @@ pub enum HubCall {
     /// From a signed-in client: `surface::Decided`. Approving runs the action for the session that
     /// asked; either way the session gets a notice.
     DecideConfirmation { id: String, approve: bool },
+    /// From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its
+    /// `until`, this connection runs the calls only the owner makes.
+    Unlock { password: String },
     /// `Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`
     /// rows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of
     /// its boundary second, which the client drops by id.
@@ -1271,12 +1274,22 @@ impl Reply {
 
 /// Client to hub. The first frame must be `Auth` with a login token.
 ///
-/// `{"type":"auth","token":"…"}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
+/// `{"type":"auth","token":"…","lock":true}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
 /// `{"type":"hub","id":2,"call":{"cmd":"get_settings"}}`, `{"type":"attach","machine":"m1","tab":"tab-1"}`
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
-    Auth { token: String },
+    Auth {
+        token: String,
+        /// The app asks for the password before a call only the account's owner makes
+        /// (`surface::owner_only`), so from now on the login alone, which the app keeps on disk,
+        /// runs none. An older app leaves it out and keeps every call it had.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lock: bool,
+        /// The token `HubCall::Unlock` answered this app, sent again after a reconnect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unlock: Option<String>,
+    },
     /// Forwarded to the machine; the reply comes back as `ToClient::Reply` with this id.
     Call { id: u64, machine: MachineId, call: Call },
     /// Answered by the hub itself.
@@ -1750,7 +1763,8 @@ mod tests {
 
     #[test]
     fn client_frames_are_tagged_by_type() {
-        round_trip(ClientFrame::Auth { token: "t0k".into() }, json!({ "type": "auth", "token": "t0k" }));
+        round_trip(ClientFrame::Auth { token: "t0k".into(), lock: false, unlock: None }, json!({ "type": "auth", "token": "t0k" }));
+        round_trip(ClientFrame::Auth { token: "t0k".into(), lock: true, unlock: Some("u-1".into()) }, json!({ "type": "auth", "token": "t0k", "lock": true, "unlock": "u-1" }));
         round_trip(
             ClientFrame::Call { id: 1, machine: "m1".into(), call: Call::CloseTab { tab: "tab-2".into() } },
             json!({ "type": "call", "id": 1, "machine": "m1", "call": { "cmd": "close_tab", "tab": "tab-2" } }),

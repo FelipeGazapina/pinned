@@ -36,6 +36,9 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   name text not null, os text not null, token_hash bytea unique not null,
   created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
 alter table machines add column if not exists version text not null default '';
+-- Set once an app that asks for the password signs in with the login: the login alone then runs
+-- no call only the account's owner makes (`surface::owner_only`).
+alter table logins add column if not exists locked boolean not null default false;
 -- Null until the account first sets or imports its tastes.
 alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
@@ -205,6 +208,12 @@ pub struct Audit<'a> {
     pub outcome: AuditOutcome,
     pub detail: &'a str,
     pub request_id: Option<&'a str>,
+}
+
+/// A login token's account, and whether an app locked it (`Db::login`).
+pub struct Login {
+    pub account: Uuid,
+    pub locked: bool,
 }
 
 /// A confirmation as the hub keeps it: what the user sees, and the Claude session that asked,
@@ -535,18 +544,18 @@ impl Db {
         Ok(token.text)
     }
 
-    /// The account a login token belongs to, marking the login used.
-    pub async fn login(&self, token: &str) -> Result<Option<Uuid>, String> {
+    /// The login `token` opens, marking it used, and locked from now on when `lock`.
+    pub async fn login(&self, token: &str, lock: bool) -> Result<Option<Login>, String> {
         let row = self
             .client().await?
             .query_opt(
-                "update logins set last_used = now() where token_hash = $1 \
-                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account",
-                &[&hash(token), &LOGIN_IDLE_DAYS],
+                "update logins set last_used = now(), locked = locked or $3 where token_hash = $1 \
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account, locked",
+                &[&hash(token), &LOGIN_IDLE_DAYS, &lock],
             )
             .await
             .map_err(err)?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(row.map(|r| Login { account: r.get(0), locked: r.get(1) }))
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), String> {
