@@ -762,7 +762,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::ImportTastes { .. }
                 | HubCall::GetTastes
                 | HubCall::DelegationStats { .. }
-                | HubCall::Machines
+                | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
                 | HubCall::SyncList { .. }
                 | HubCall::SyncPush { .. }

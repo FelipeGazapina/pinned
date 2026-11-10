@@ -868,6 +868,7 @@ impl Machine {
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
+            Call::State => json(self.state()),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
                     sync::set_aside_unreadable(file)?;
@@ -4725,7 +4726,7 @@ impl Machine {
     fn machines_listed(&self) -> Value {
         let (id, name) = self.machine_ids();
         let own = self.state();
-        let mut views = match self.call_hub(HubCall::Machines).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
+        let mut views = match self.call_hub(HubCall::MachineStates).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
             Ok(views) => views,
             Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None }],
         };

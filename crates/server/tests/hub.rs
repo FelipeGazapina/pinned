@@ -3688,7 +3688,17 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
         overview["projects"].as_array_mut().unwrap().sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
         overview
     };
-    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(by_key);
+    // The summaries move with the machine's real load, so this test compares the rest.
+    let without_load = |mut overview: Value| {
+        for machine in overview["machines"].as_array_mut().unwrap() {
+            machine.as_object_mut().unwrap().remove("state");
+        }
+        for checkout in overview["projects"].as_array_mut().unwrap().iter_mut().flat_map(|p| p["checkouts"].as_array_mut().unwrap().iter_mut()) {
+            checkout.as_object_mut().unwrap().remove("load");
+        }
+        overview
+    };
+    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(without_load).map(by_key);
     let checkout = |machine: &str, name: &str, online: bool, version: &str, path: &str| {
         json!({ "machine": machine, "machine_name": name, "online": online, "version": version, "path": path, "captain": "nenhum", "workers": 0 })
     };

@@ -444,7 +444,7 @@ impl Hub {
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
-            HubCall::Machines => return json(self.machines(account).await?),
+            HubCall::Machines | HubCall::MachineStates => return json(self.machines(account).await?),
             HubCall::RenameMachine { id, name } => {
                 let name = name.trim();
                 if name.is_empty() {
@@ -893,6 +893,14 @@ impl Account {
     /// What the online `machine` last reported about its load and accounts.
     pub fn state_of(&self, machine: &str) -> Option<pinned_core::load::MachineState> {
         self.live.lock().unwrap().machines.get(machine)?.state.clone()
+    }
+
+    /// Keeps `state`, which the online `machine` just answered, as its latest report.
+    pub fn note_state(&self, machine: &str, state: pinned_core::load::MachineState) {
+        let reported_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        if let Some(online) = self.live.lock().unwrap().machines.get_mut(machine) {
+            online.state = Some(pinned_core::load::MachineState { reported_at, ..state });
+        }
     }
 
     pub fn dedicated(&self, machine: &str) -> bool {

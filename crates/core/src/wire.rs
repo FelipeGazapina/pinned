@@ -681,6 +681,9 @@ pub enum Call {
     UpdateSelf,
     /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
     SyncStopped,
+    /// `load::MachineState`: the machine's load and accounts now, which the hub asks for before it
+    /// refuses a delegation on what the machine reported earlier.
+    State,
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
@@ -741,6 +744,7 @@ impl Call {
         matches!(
             self,
             Call::Run { .. }
+                | Call::State
                 | Call::RunNow { .. }
                 | Call::PullRequest { .. }
                 | Call::PrStatus { .. }
@@ -1023,6 +1027,9 @@ pub enum HubCall {
     ExtendBox { machine: MachineId, extra_usd: f64 },
     /// `Vec<MachineView>`.
     Machines,
+    /// From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for
+    /// `orchestrator_capabilities`.
+    MachineStates,
     RenameMachine { id: MachineId, name: String },
     RemoveMachine { id: MachineId },
     /// `PairCode`.
