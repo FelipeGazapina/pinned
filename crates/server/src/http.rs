@@ -410,6 +410,11 @@ fn close_behind() -> Message {
     Message::Close(Some(CloseFrame { code: 1013, reason: "fell behind".into() }))
 }
 
+/// Resolves once the hub is told to stop. It doesn't hand out the watch's guard, which can't be held across an await.
+async fn hub_going_away(away: &mut tokio::sync::watch::Receiver<bool>) {
+    let _ = away.wait_for(|away| *away).await;
+}
+
 /// 1001, going away: the hub is stopping, and the peer reconnects at once to whichever hub follows.
 fn close_going_away() -> Message {
     Message::Close(Some(CloseFrame { code: GOING_AWAY, reason: "the hub is restarting".into() }))
@@ -498,7 +503,7 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
                     break;
                 }
             },
-            _ = going_away.wait_for(|away| *away) => {
+            _ = hub_going_away(&mut going_away) => {
                 let _ = sink.send(close_going_away()).await;
                 break;
             }
@@ -627,7 +632,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
                 None => break,
             },
-            _ = going_away.wait_for(|away| *away) => {
+            _ = hub_going_away(&mut going_away) => {
                 let _ = sink.send(close_going_away()).await;
                 break;
             }
