@@ -28,7 +28,8 @@ const waitFor = async (what, fn, timeout = 20000) => {
 
 async function accountPage(page) {
   await page.evaluate(async () => {
-    await toggleSettings();
+    if (settingsOpen()) settings = await connectorCall("get_settings");
+    else await toggleSettings();
     showPage("account");
   });
   await page.waitForSelector("#repo-insight", { state: "attached", timeout: 15000 });
