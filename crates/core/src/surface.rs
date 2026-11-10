@@ -1102,7 +1102,7 @@ mod tests {
         let all = listing(None);
         let names: Vec<&str> = all.iter().map(|l| l.name).collect();
         assert!(names.contains(&"tabs") && names.contains(&"remove_machine") && names.contains(&"agent_audit"));
-        assert!(!names.contains(&"write_input") && !names.contains(&"device_hub") && !names.contains(&"act"), "excluded or unwired: {names:?}");
+        assert!(!names.contains(&"write_input") && !names.contains(&"open_taste_chat") && !names.contains(&"act"), "excluded or unwired: {names:?}");
         let rename = all.iter().find(|l| l.name == "rename_machine").unwrap();
         assert_eq!((rename.class, rename.on), (Write, "hub"));
         assert_eq!(rename.args["required"], json!(["id", "name"]));
