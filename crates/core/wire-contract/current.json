@@ -5127,6 +5127,39 @@
                   "cmd",
                   "days"
                 ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_marks"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change\nlanded in order. One left with only its id has no mark. The account's clients hear the same\nas `ToClient::SessionMarks`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mark_sessions"
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/MarkChange"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes"
+                ]
               }
             ]
           },
@@ -7349,6 +7382,259 @@
             "enum": [
               "accepted",
               "redone"
+            ]
+          },
+          "MarkChange": {
+            "description": "`{\"session\":\"5f1c…\",\"mark\":{\"title\":\"Fix login\"}}`",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "mark": {
+                "$ref": "#/$defs/Mark"
+              }
+            },
+            "required": [
+              "session",
+              "mark"
+            ]
+          },
+          "Mark": {
+            "description": "One change to one mark. `{\"title\":\"Fix login\"}`, `{\"pin\":null}`, `\"clear\"`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "pin": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "pin"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "order": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "order"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "settled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "settled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "unsettled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "unsettled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "snoozed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Snooze"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "snoozed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "seen": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "seen"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "no_auto_settle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "no_auto_settle"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "archived": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Archived"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "archived"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "Drops every mark of the session.",
+                "type": "string",
+                "const": "clear"
+              }
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
             ]
           },
           "Target2": {
@@ -12406,6 +12692,39 @@
                   "cmd",
                   "days"
                 ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_marks"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change\nlanded in order. One left with only its id has no mark. The account's clients hear the same\nas `ToClient::SessionMarks`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mark_sessions"
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/MarkChange"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes"
+                ]
               }
             ]
           },
@@ -14547,6 +14866,259 @@
             "enum": [
               "accepted",
               "redone"
+            ]
+          },
+          "MarkChange": {
+            "description": "`{\"session\":\"5f1c…\",\"mark\":{\"title\":\"Fix login\"}}`",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "mark": {
+                "$ref": "#/$defs/Mark"
+              }
+            },
+            "required": [
+              "session",
+              "mark"
+            ]
+          },
+          "Mark": {
+            "description": "One change to one mark. `{\"title\":\"Fix login\"}`, `{\"pin\":null}`, `\"clear\"`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "pin": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "pin"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "order": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "order"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "settled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "settled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "unsettled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "unsettled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "snoozed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Snooze"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "snoozed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "seen": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "seen"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "no_auto_settle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "no_auto_settle"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "archived": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Archived"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "archived"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "Drops every mark of the session.",
+                "type": "string",
+                "const": "clear"
+              }
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
             ]
           },
           "Target2": {
@@ -16767,6 +17339,39 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_marks"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change\nlanded in order. One left with only its id has no mark. The account's clients hear the same\nas `ToClient::SessionMarks`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mark_sessions"
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/MarkChange"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes"
                 ]
               }
             ]
@@ -19107,6 +19712,259 @@
               "accepted",
               "redone"
             ]
+          },
+          "MarkChange": {
+            "description": "`{\"session\":\"5f1c…\",\"mark\":{\"title\":\"Fix login\"}}`",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "mark": {
+                "$ref": "#/$defs/Mark"
+              }
+            },
+            "required": [
+              "session",
+              "mark"
+            ]
+          },
+          "Mark": {
+            "description": "One change to one mark. `{\"title\":\"Fix login\"}`, `{\"pin\":null}`, `\"clear\"`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "pin": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "pin"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "order": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "order"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "settled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "settled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "unsettled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "unsettled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "snoozed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Snooze"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "snoozed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "seen": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "seen"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "no_auto_settle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "no_auto_settle"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "archived": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Archived"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "archived"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "Drops every mark of the session.",
+                "type": "string",
+                "const": "clear"
+              }
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
+            ]
           }
         }
       },
@@ -21146,6 +22004,39 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_marks"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change\nlanded in order. One left with only its id has no mark. The account's clients hear the same\nas `ToClient::SessionMarks`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mark_sessions"
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/MarkChange"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes"
                 ]
               }
             ]
@@ -23402,6 +24293,259 @@
             "enum": [
               "accepted",
               "redone"
+            ]
+          },
+          "MarkChange": {
+            "description": "`{\"session\":\"5f1c…\",\"mark\":{\"title\":\"Fix login\"}}`",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "mark": {
+                "$ref": "#/$defs/Mark"
+              }
+            },
+            "required": [
+              "session",
+              "mark"
+            ]
+          },
+          "Mark": {
+            "description": "One change to one mark. `{\"title\":\"Fix login\"}`, `{\"pin\":null}`, `\"clear\"`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "pin": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "pin"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "order": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "order"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "settled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "settled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "unsettled": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "unsettled"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "snoozed": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Snooze"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "snoozed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "seen": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "seen"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "no_auto_settle": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "no_auto_settle"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "archived": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Archived"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "archived"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "description": "Drops every mark of the session.",
+                "type": "string",
+                "const": "clear"
+              }
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
             ]
           }
         }
@@ -29615,6 +30759,348 @@
         }
       }
     },
+    "SessionMarks": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SessionMarks",
+        "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "title": {
+            "description": "The name the user gave it, shown in place of the session's own title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pin": {
+            "description": "Its place among pinned threads, lowest first.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "order": {
+            "description": "Its place among active threads the user dragged into an order, lowest first.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "settled": {
+            "description": "Unix seconds the user settled it. It stays settled until a later prompt.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "unsettled": {
+            "description": "Unix seconds the user un-settled it, which restarts auto-settle's count.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "snoozed": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Snooze"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seen": {
+            "description": "Unix seconds of the last activity the user saw. Unset, a finished turn shows as unread.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "no_auto_settle": {
+            "description": "Auto-settle leaves it where it is.",
+            "type": "boolean"
+          },
+          "archived": {
+            "description": "The user archived it: its tab closed, and Settings › Archive lists it to bring back.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Archived"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "$defs": {
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SessionMarks",
+        "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "title": {
+            "description": "The name the user gave it, shown in place of the session's own title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pin": {
+            "description": "Its place among pinned threads, lowest first.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "order": {
+            "description": "Its place among active threads the user dragged into an order, lowest first.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "settled": {
+            "description": "Unix seconds the user settled it. It stays settled until a later prompt.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "unsettled": {
+            "description": "Unix seconds the user un-settled it, which restarts auto-settle's count.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "snoozed": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Snooze"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seen": {
+            "description": "Unix seconds of the last activity the user saw. Unset, a finished turn shows as unread.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "no_auto_settle": {
+            "description": "Auto-settle leaves it where it is.",
+            "type": "boolean"
+          },
+          "archived": {
+            "description": "The user archived it: its tab closed, and Settings › Archive lists it to bring back.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Archived"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "$defs": {
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
+            ]
+          }
+        }
+      }
+    },
     "Settings": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -34718,6 +36204,26 @@
               "type",
               "settings"
             ]
+          },
+          {
+            "description": "Conversations whose marks changed, as they are now. One with only its id has no mark left.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "session_marks"
+              },
+              "marks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SessionMarks"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "marks"
+            ]
           }
         ],
         "$defs": {
@@ -37129,6 +38635,172 @@
               "connector",
               "subject"
             ]
+          },
+          "SessionMarks": {
+            "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "title": {
+                "description": "The name the user gave it, shown in place of the session's own title.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pin": {
+                "description": "Its place among pinned threads, lowest first.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "order": {
+                "description": "Its place among active threads the user dragged into an order, lowest first.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "settled": {
+                "description": "Unix seconds the user settled it. It stays settled until a later prompt.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "unsettled": {
+                "description": "Unix seconds the user un-settled it, which restarts auto-settle's count.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "snoozed": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Snooze"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seen": {
+                "description": "Unix seconds of the last activity the user saw. Unset, a finished turn shows as unread.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "no_auto_settle": {
+                "description": "Auto-settle leaves it where it is.",
+                "type": "boolean"
+              },
+              "archived": {
+                "description": "The user archived it: its tab closed, and Settings › Archive lists it to bring back.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Archived"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "session"
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
+            ]
           }
         }
       },
@@ -37251,6 +38923,26 @@
             "required": [
               "type",
               "settings"
+            ]
+          },
+          {
+            "description": "Conversations whose marks changed, as they are now. One with only its id has no mark left.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "session_marks"
+              },
+              "marks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SessionMarks"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "marks"
             ]
           }
         ],
@@ -39582,6 +41274,172 @@
               "id",
               "connector",
               "subject"
+            ]
+          },
+          "SessionMarks": {
+            "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
+            "type": "object",
+            "properties": {
+              "session": {
+                "type": "string"
+              },
+              "title": {
+                "description": "The name the user gave it, shown in place of the session's own title.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pin": {
+                "description": "Its place among pinned threads, lowest first.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "order": {
+                "description": "Its place among active threads the user dragged into an order, lowest first.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "settled": {
+                "description": "Unix seconds the user settled it. It stays settled until a later prompt.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "unsettled": {
+                "description": "Unix seconds the user un-settled it, which restarts auto-settle's count.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "snoozed": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Snooze"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seen": {
+                "description": "Unix seconds of the last activity the user saw. Unset, a finished turn shows as unread.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "no_auto_settle": {
+                "description": "Auto-settle leaves it where it is.",
+                "type": "boolean"
+              },
+              "archived": {
+                "description": "The user archived it: its tab closed, and Settings › Archive lists it to bring back.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Archived"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "session"
+            ]
+          },
+          "Snooze": {
+            "type": "object",
+            "properties": {
+              "until": {
+                "description": "Unix seconds it comes back to the inbox.",
+                "type": "number",
+                "format": "double"
+              },
+              "at": {
+                "description": "Unix seconds it was snoozed.",
+                "type": "number",
+                "format": "double"
+              },
+              "limit": {
+                "description": "The usage limit's `resume_at` this snooze waits out, when it snoozed a limited thread.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "until",
+              "at"
+            ]
+          },
+          "Archived": {
+            "description": "What Unarchive needs to start the conversation again, and what the Archive page shows.",
+            "type": "object",
+            "properties": {
+              "machine": {
+                "description": "The machine whose tab it was, which resumes it.",
+                "type": "string"
+              },
+              "cwd": {
+                "description": "The tab's folder, where the session resumes.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The thread's title when it was archived.",
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was archived.",
+                "type": "number",
+                "format": "double"
+              },
+              "created": {
+                "description": "Unix seconds of its first message.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "title": {
+                "description": "The name the user had given it, back on the thread when it is unarchived.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pinned": {
+                "description": "It was pinned, and is pinned again when it is unarchived.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "machine",
+              "cwd",
+              "name",
+              "project",
+              "at"
             ]
           }
         }
