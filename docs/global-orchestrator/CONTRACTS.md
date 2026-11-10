@@ -385,7 +385,7 @@ pub struct Action {
 - An action is named by its wire `cmd`. Where a `Call` and a `HubCall` share a `cmd`, the `HubCall` keeps the name and the `Call` is `node_<cmd>`. Today that is `clone` / `node_clone` and `read_session` / `node_read_session`.
 - Arguments are the variant's fields, as the wire enum's schemars schema describes them, without `cmd`. `act` builds `{"cmd": <cmd>, ...args}` and parses it into the `Call` or `HubCall`. A new action needs no hand-written argument schema.
 - `surface::tests::every_wire_call_has_one_action` reads the `cmd` of every variant from the schemars schemas of `Call` and `HubCall` and fails when one has no entry, or when an entry names no variant. A new variant does not pass the tests until its unit decides its class.
-- Other tests: names are unique, an excluded action is never wired, every `read` action is wired, and a `HubCall` with `starts_work` is never wired (the hub has no limits path yet).
+- Other tests: names are unique, an excluded action is never wired, every `read` action is wired, and a `HubCall` with `starts_work` is wired only when `surface::HUB_LIMITS` names it, because the server's `act` runs each of those through its own limits path (`open_box`, `run_workflow`).
 
 **Adding or wiring an action.** Add the variant, then its entry. To wire one: make it work through `act`, prove it with a test that calls `act` as an agent does, then set `wired: true`. An action that starts work also needs its limits path (13.6) before it is wired.
 
@@ -523,7 +523,7 @@ Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is
 | Settings | `set_global_orchestrator_settings`, `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. |
 | Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. |
 
-There is no "Run now" in the app: the `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and a workflow run starts from its trigger (Linear, Slack) alone. An agent has no `run_workflow` until a manual run has a subject and trigger input of its own.
+The `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and stay excluded. 0.17.23 adds a manual run, for the app and for agents (13.12).
 
 ### 13.9 Account isolation
 
@@ -625,3 +625,34 @@ Claude Code keeps an MCP server's OAuth login in the same secure store as the Cl
 ## PR
 
 https://github.com/FelipeGazapina/pinned/pull/84
+
+### 13.12 Run now (0.17.23)
+
+Issue #127. A saved workflow runs now, from Settings › Workflows or from an agent's `run_workflow`, with no Linear issue or Slack thread behind it.
+
+| Wire | From | Answer |
+|---|---|---|
+| `HubCall::RunWorkflow { id }` | a signed-in client; an agent through `act` | `RunStarted { workflow, machine, machine_name, tab }` (outbound root), or the refusal. Another account's id reads as `this account has no workflow <id>`. |
+| `Call::RunNow { run: RunSpec, title }` | the hub only (excluded as `run_now`) | The new tab's id, with claude running. Refused past the limits. |
+
+**What a Run now opens.** `Connectors::run_now(id, by)` builds the session a triggered run would open: the workflow's model, effort, permission mode, worktree (`--worktree=run-now-<ms>`), account, folder, repo and machine. A graph workflow walks from its trigger's outgoing edges, as a run does, to its first `talk` or `session` step, whose setup and text the session takes; a `call` step hands the walk to the called workflow, which then owns the session. On the way, steps that act on the trigger's issue or thread (`stage-picked`, `move-column`, `reply`, `page`, `file-issue`, `take-issue`) have nothing to act on and are passed by their `out` port, and so is a classify or switch that has one. A classify that branches only on its answers, and a `stop`, refuse: `workflow "<name>" branches at "<step>" on what its trigger found, and Run now has no Linear issue or Slack thread to read, so it can't pick a branch`. The prompt is the instructions, the proof and box notes the workflow would add, then `Run now by <who>, at <YYYY-MM-DD HH:MM UTC>.` and a note that `pinned stage`, `pinned slack reply` and `pinned linear` have nothing to act on, then the step's text. `<who>` is `the account's owner, from Settings › Workflows`, or `the Captain "<title>" through run_workflow` (the caller's role and title). The tab is named `<workflow> · Run now`.
+
+**Trigger kinds.** `linear-label` and `slack-mention` run with no subject. `slack-message` and `called` are refused, since neither has a session to start without a thread: `workflow "<name>" sorts new Slack messages into other workflows and has no session of its own, so Run now has nothing to start`, and `workflow "<name>" answers only the Slack threads another workflow hands it, so Run now has no thread to give it`. A disabled workflow still runs now: the switch turns its trigger off, and a Run now is asked for by hand.
+
+**Subject.** The session's environment carries `PINNED_CONNECTOR` and a subject `Subject::LinearIssue { issue: "run-now:<workflow>:<ms>" }` (`connectors::is_run_now`). It names no issue: it keeps one run apart from the next, so a machine that gets the same run again after a lost answer answers with the session it started, and the hub's box and placement paths work unchanged. `pinned stage` answers `Run now started this session, which has no Linear issue to move`.
+
+**Machine choice.** The user's Run now goes through `Hub::open_placed`, the path a triggered run takes: the workflow's machine when online, else the account's other machines (most recently connected first), or its Upstash Box. The hub sends `Call::RunNow` instead of `Call::Run` for a Run now subject (`hub::run_call`), on the pool and to a box. Under the `ask` box permission the user's Run now click is the yes, since nothing would run it again after a yes in Connectors; `off` still refuses. A machine whose pinned predates `run_now` reads as `<name> runs an older pinned that has no Run now: update it in Settings › Machines`. The signed-out desktop app runs it on its own machine through the Tauri command `run_workflow`.
+
+**Limits and metrics.** `Machine::run_now` opens the tab, then holds the run as a task under the limits of the project it opens in (`captain_scope` of its folder): `Limits::admit` on the session's `--model` and `--effort`, then `Delegates::claim` under workers-at-once, with the time limit and budget set as `start_claude`'s are. A refusal closes the tab and answers the limit's own text (the same as `delegate_task`'s). The tab is the task's thread (`runs: true`); its first finished turn ends the task, also for a tab with no worker role, and the task's `TaskRecord` goes to the hub's metrics, titled `<workflow> · Run now`. For the user the task's parent is its own tab (`delegator.kind` `session`, no `tab`), and a task whose parent is the tab that shows it is never told its own end (`registry::announces`).
+
+**Agents.** `run_workflow` is `write` with `starts_work`, and in `HUB_LIMITS`. It is write, not confirm, for the reason `start_claude`, `enqueue` and `open_box` are: the limits hold the work it starts (tier, effort, workers at once, time, budget), every run is audited, and a confirm would put the owner in the loop for each run an agent is trusted to start within those limits. `surface::limited` runs it:
+
+1. It builds the run as above, with `<who>` the caller.
+2. The run starts only on the caller's own machine, as every `starts_work` act: a workflow set to another machine or to an Upstash Box answers `run_workflow starts work only on this session's own machine for now, and this workflow runs on <machine | an Upstash Box>`.
+3. A workflow whose session skips permission prompts is refused for a caller whose own session asks for them: `run_workflow would run a session that skips its permission prompts, and your own session asks for them`. The machine checks it again (`the workflow's session runs with full access, wider than your session's auto`).
+4. The hub sends `Call::ActFor { caller, call: RunNow }` to the origin machine. `act_for` runs it with the caller's limits (`limits_in`, narrowed by the caller's own task); the task's parent is the caller, which gets its notice, and its record names the caller as delegator.
+5. The audit row is `done`, or `failed` with the refusal.
+
+**App.** Each card in Settings › Workflows has a Run now button between its text and its switch. While the call runs it reads `Starting…`, disabled. Then a line under the card says `Started on <machine>. Open session` (which reveals the tab), or `Didn't start: <the refusal>`. A `slack-message` or `called` workflow, or one with an unknown trigger, shows the button disabled with the reason as its tooltip.
+
+**Not like a triggered run.** A Run now opens the first session only. Graph steps after it (more talks, replies, issue moves) need the trigger's subject and are not walked, and `{{trigger.*}}` spans in its text stay as written. Triggered runs themselves still open with `Call::Run`, outside the delegation limits and metrics, as before.

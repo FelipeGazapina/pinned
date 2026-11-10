@@ -511,7 +511,7 @@ impl Boxes {
 
     /// `Hub::open` for a box run. The account's workflow permission decides what happens.
     /// `Fresh` gives the issue or thread its own box. `Fixed` reuses one box for every run.
-    /// `Ask` opens nothing until the user says yes. `Off`, and a disconnected Upstash, open nothing.
+    /// `Ask` opens nothing until the user says yes; the user's own Run now counts as that yes. `Off`, and a disconnected Upstash, open nothing.
     /// A run whose issue or thread already has a box goes to it. On failure the row ends, and the
     /// answer says why, which reaches the workflow's check line.
     pub async fn open(&self, hub: &Hub, account: &Arc<Account>, run: Run, step: BoxStep) -> Result<Placement, String> {
@@ -519,6 +519,8 @@ impl Boxes {
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         match connectors.box_access().workflow {
             BoxPermission::Off => return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()),
+            // The owner's own Run now click is the yes: an agent's never opens a box.
+            BoxPermission::Ask if pinned_core::connectors::is_run_now(&run.subject) => {}
             BoxPermission::Ask => match connectors.box_grant(&run.connector, &run.subject) {
                 Some(true) => {}
                 Some(false) => return Err("Upstash Box: you said no to a box for this, so none was opened".into()),
@@ -1030,7 +1032,7 @@ impl Boxes {
         }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-        let value = hub.call_machine(account, machine, Call::Run { run: spec }, RUN_WAIT).await.map_err(String::from)?;
+        let value = hub.call_machine(account, machine, crate::hub::run_call(spec, subject), RUN_WAIT).await.map_err(String::from)?;
         let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the box started the session without a tab id".to_owned())?;
         Ok(Placement { machine: machine.to_owned(), tab })
     }

@@ -252,6 +252,11 @@ pub enum Call {
     /// The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation
     /// for an agent this way, which then starts it with `start_claude`, under the limits.
     OpenRun { run: RunSpec },
+    /// The new tab's id, with claude already running, for a workflow's Run now: a task held to the
+    /// limits of the project it runs in, whose first finished turn ends it and goes to the
+    /// delegation metrics. Refused past the limits. Only the hub sends it, for `run_workflow`;
+    /// inside `ActFor` the asking session's own task narrows the limits and hears when it ends.
+    RunNow { run: RunSpec, title: String },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
     /// The absolute path the file was saved under, in a private folder of the machine, for a
@@ -730,6 +735,7 @@ impl Call {
         matches!(
             self,
             Call::Run { .. }
+                | Call::RunNow { .. }
                 | Call::PullRequest { .. }
                 | Call::PrStatus { .. }
                 | Call::Favicon { .. }
@@ -875,6 +881,15 @@ pub struct RunSpec {
     pub budget_usd: Option<f64>,
 }
 
+/// The session a workflow's Run now started.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct RunStarted {
+    pub workflow: String,
+    pub machine: MachineId,
+    pub machine_name: String,
+    pub tab: TabId,
+}
+
 /// An interactive Upstash Box session: its phase, age and budget, for its cost display.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct BoxStatus {
@@ -980,6 +995,9 @@ pub enum HubCall {
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
+    /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
+    /// on the machine the workflow names and under the limits of its project there.
+    RunWorkflow { id: String },
     /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
