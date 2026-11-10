@@ -5061,14 +5061,14 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     let hub = TestHub::start_with("agent_surface_rest", Signup::Invite);
     let url = hub.url.clone();
     let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "rest-ana");
     let code = ana.client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
     let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
-    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "rest-bob");
     let docs = ana.dir.join("docs").canonicalize().unwrap().display().to_string();
     let site = ana.dir.join("site").canonicalize().unwrap().display().to_string();
     let bobs_docs = bob.dir.join("docs").canonicalize().unwrap().display().to_string();
-    let no_machine = "this account has no machine ana-mac".to_owned();
+    let no_machine = "this account has no machine rest-ana".to_owned();
 
     let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
     let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
@@ -5195,7 +5195,7 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
         ("prompt", json!({ "tab": ana.tab, "text": "hi" })),
         ("save_project_scripts", json!({ "tab": ana.tab, "scripts": [] })),
     ] {
-        assert_eq!(act_on(&bob.dir, &bob.tab, "ana-mac", action, args), Err(no_machine.clone()), "{action}");
+        assert_eq!(act_on(&bob.dir, &bob.tab, "rest-ana", action, args), Err(no_machine.clone()), "{action}");
     }
     assert_eq!(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": docs })), Err(format!("{docs} is not a project on this machine")), "his own machine has no such folder");
     assert_eq!(ran(act(&bob.dir, &bob.tab, "memory_status", json!({ "path": bobs_docs })))["count"], 0);
@@ -5218,7 +5218,7 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     // Delegation stats: the tasks a machine of Ana's recorded are hers alone.
     let (_, raw_token) = account::register_machine(&url, &ana_token, "ana-raw", "linux").unwrap();
     let raw = RawMachine::start(&url, &raw_token, |_| RawReply::Ok(Value::Null));
-    ana.client.wait_machines(&[("ana-mac", true), ("ana-raw", true)]);
+    ana.client.wait_machines(&[("rest-ana", true), ("ana-raw", true)]);
     raw.ask(json!({ "cmd": "record_tasks", "records": [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now_ms())] })).unwrap();
     assert_eq!(ran(act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 1);
     assert_eq!(ran(act(&bob.dir, &bob.tab, "delegation_stats", json!({ "days": 1 })))["totals"]["runs"], 0);
