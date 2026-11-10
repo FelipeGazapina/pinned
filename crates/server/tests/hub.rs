@@ -7388,7 +7388,7 @@ fn capabilities_of(home: &Path) -> Value {
 }
 
 /// A delegate call as the origin machine sends it for `target`.
-fn delegate_call(id: u64, target: Value) -> Value {
+fn machine_delegate_call(id: u64, target: Value) -> Value {
     let args = json!({ "task": "Fix the parser.", "title": "Parser", "target": target });
     let request = pinned_core::delegate::parse_request(&args).unwrap();
     json!({ "type": "call", "id": id, "call": { "cmd": "delegate", "tab": "tab-1", "task": "t-1", "request": request, "repo": "github.com/acme/app", "access": "auto" } })
@@ -7456,11 +7456,11 @@ fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_
     client.wait_machines(&[("book", true), ("mac-mini", true)]);
     wait_for("the hub keeps the mini's summary", || machine_rows(&mut client).iter().any(|row| row["name"] == "mac-mini" && row.get("state").is_some()));
 
-    origin.send(delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
+    origin.send(machine_delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
     assert_eq!(reply_to(&mut origin, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
-    origin.send(delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
+    origin.send(machine_delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
     assert_eq!(reply_to(&mut origin, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
-    origin.send(delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
+    origin.send(machine_delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
     assert_eq!(reply_to(&mut origin, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
     while let Some(frame) = mini.try_text() {
         assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
@@ -7494,7 +7494,7 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("grok-4.7") && !machines.to_string().contains("ana-mini"), "{machines}");
     let (raw_creds, _) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-raw");
     let mut origin = MachineSock::connect(&url, &raw_creds.machine_token, "0.17.24");
-    origin.send(delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
+    origin.send(machine_delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
     assert_eq!(reply_to(&mut origin, 3)["err"], "this account has no machine ana-mini");
     bruno_client.pump();
     let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && f.to_string().contains(&ana_id)).collect();
