@@ -18,7 +18,7 @@ function element() {
 
 /** The app signed in on a locked login, with a hub that answers LOCKED to a confirm call until the
  * user types the password, and `answers[cmd]` to the rest. */
-function app(answers = {}) {
+function app(answers = {}, world = {}) {
   const calls = [];
   const prompts = [];
   let unlocked = false;
@@ -57,6 +57,7 @@ function app(answers = {}) {
     agentAskingHtml: () => "",
     askOwnerPassword: async (error) => (prompts.push(error), "correct horse"),
     document: { body: { dataset: {} }, getElementById() { return element(); }, querySelector() { return element(); }, querySelectorAll() { return []; } },
+    ...world,
   };
   context.globalThis = context;
   vm.createContext(context);
@@ -65,7 +66,8 @@ function app(answers = {}) {
     var hub = new Hub("https://hub.example", "login", { locked: askOwnerPassword });
     globalThis.__card = upstashCardHtml;
     globalThis.__settings = settings;
-    globalThis.__actions = actions;`, context);
+    globalThis.__actions = actions;
+    globalThis.__loadBoxLogins = loadBoxLogins;`, context);
   const ws = WebSocket.last;
   ws.onopen();
   ws.onmessage({ data: JSON.stringify({ type: "hello", tabs: {} }) });
@@ -92,4 +94,59 @@ test("changing who may use a box still asks for the password on the same app", a
   await context.hub.hub({ cmd: "set_box_access", access: { worker: { mode: "fresh" } } });
   assert.deepEqual(prompts, [""], "one password prompt");
   assert.deepEqual(here(calls).map((c) => c.cmd), ["set_box_access", "set_box_access"], "sent again once unlocked");
+});
+
+/** This Mac and a Mac mini, online, with the accounts each machine's `list_accounts` answers. */
+function twoMachines() {
+  const listed = {
+    local: [
+      { id: "claude", provider: "claude", auth: "login", signed_in: true, email: "felipe@home.dev", plan: "max" },
+      { id: "codex", provider: "codex", auth: "login", signed_in: true },
+      { id: "go", provider: "claude", auth: "opencode-go", signed_in: true, plan: "OpenCode Go" },
+    ],
+    "mini-id": [
+      { id: "claude", provider: "claude", auth: "login", signed_in: true, email: "felipe@home.dev", plan: "max" },
+      { id: "bloom", provider: "claude", auth: "login", signed_in: true, email: "felipe@bloom.dev", plan: "team", org: "Bloom" },
+      { id: "spare", provider: "claude", auth: "login", signed_in: false },
+    ],
+  };
+  const machines = new Map([
+    ["local", { view: { name: "MacBook", online: true } }],
+    ["mini-id", { view: { name: "Mac mini", online: true } }],
+    ["box-id", { view: { name: "Box · site", online: true, upstash_box: "b1" } }],
+  ]);
+  return {
+    LOCAL: "local",
+    machines,
+    account: { email: "ana@acme.dev", machine_id: "mac-id" },
+    onlineMachines: () => [...machines.entries()].filter(([, m]) => m.view.online).map(([id]) => id),
+    machineName: (id) => (id === "local" ? "This Mac" : machines.get(id).view.name),
+    accountsOf: async (id) => listed[id] ?? [],
+  };
+}
+
+test("the Upstash card lists each Claude account signed in on a machine with its email and plan", async () => {
+  const { context } = app({}, twoMachines());
+  context.__settings.upstash = { key_hint: "…a1b2", claude_hint: "…9f3c" };
+  context.__settings.box_claude_tokens = { bloom: "…oken" };
+  await context.__loadBoxLogins();
+  const rows = [...context.__card().matchAll(/<div class="row box-login"><span>([\s\S]*?)<\/span>/g)].map(([, row]) => row.replace(/<\/?b>/g, ""));
+  assert.deepEqual(rows, ["claude felipe@home.dev · max · on This Mac", "bloom felipe@bloom.dev · team · Bloom · on Mac mini"]);
+  const card = context.__card();
+  assert.match(card, /data-action="use-for-boxes" data-account="claude" data-machine="mac-id">Use for boxes</);
+  assert.match(card, /<span class="hint">Used for boxes<\/span>\s*<button class="secondary" data-action="use-for-boxes" data-account="bloom" data-machine="mini-id">Renew</);
+});
+
+test("Use for boxes needs the password on a locked app, then keeps the token the machine mints", async () => {
+  const { context, calls, prompts } = app({ mint_box_claude_token: { bloom: "…oken" } }, twoMachines());
+  context.__settings.upstash = { key_hint: "…a1b2", claude_hint: "…9f3c" };
+  await context.__loadBoxLogins();
+  await context.__actions["use-for-boxes"]({ dataset: { account: "bloom", machine: "mini-id" } });
+  assert.deepEqual(prompts, [""], "one password prompt");
+  assert.deepEqual(here(calls), [
+    { cmd: "mint_box_claude_token", machine: "mini-id", account: "bloom" },
+    { cmd: "mint_box_claude_token", machine: "mini-id", account: "bloom" },
+  ]);
+  assert.deepEqual(here(context.__settings.box_claude_tokens), { bloom: "…oken" }, "the app gets the hint, never the token");
+  assert.match(context.__card(), /data-account="bloom" data-machine="mini-id">Renew</);
 });

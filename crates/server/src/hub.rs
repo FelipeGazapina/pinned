@@ -25,6 +25,8 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+/// Longer than a machine's `claude setup-token` waits for the user's approval in the browser.
+const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.as_secs() + 30);
 /// How long importing an MCP server waits for the machine to read its account's config.
 const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
@@ -425,6 +427,16 @@ impl Hub {
         }
     }
 
+    /// A machine whose pinned predates Use for boxes can't read the call: say so, instead of its parse error.
+    fn too_old_to_mint(&self, account: &Account, machine: &str, refused: Unanswered) -> String {
+        let refused = String::from(refused);
+        if !pinned_core::link::is_unknown_command(&refused) {
+            return refused;
+        }
+        let name = account.name_of(machine).unwrap_or_else(|| machine.to_owned());
+        format!("{name} runs an older pinned that can't mint a Claude token for boxes: update it in Settings › Machines")
+    }
+
     /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
@@ -558,6 +570,18 @@ impl Hub {
             }
             HubCall::SetBoxClaudeToken { name, token } => (json(c().await?.set_box_claude_token(&name, &token)?), true),
             HubCall::RemoveBoxClaudeToken { name } => (json(c().await?.remove_box_claude_token(&name)?), true),
+            HubCall::MintBoxClaudeToken { machine, account: name } => {
+                let connectors = c().await?;
+                if connectors.box_keys().is_none() {
+                    return Err("connect Upstash Box first".into());
+                }
+                let minted = self.call_machine(account, &machine, Call::SetupToken { account: name.clone() }, MINT_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e))?;
+                let token = minted.as_str().ok_or("the machine answered no token")?;
+                (json(connectors.set_box_claude_token(&name, token)?), true)
+            }
+            HubCall::CancelBoxClaudeToken { machine, account: name } => {
+                return self.call_machine(account, &machine, Call::CancelSetupToken { account: name }, MACHINE_CALL_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e));
+            }
             HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }

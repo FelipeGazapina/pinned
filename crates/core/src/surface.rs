@@ -169,6 +169,8 @@ pub const ACTIONS: &[Action] = &[
     n("memory_forget", Write, "Removes the memory id of the project at path, any project of the account.").wired(),
     n("memory_status", Read, "How many memories the project at path has and whether search also matches by meaning.").wired(),
     n("sign_in", Confirm, "Opens the CLI's login for an agent account in a new tab, where the user signs in.").wired(),
+    n("setup_token", Excluded, "the hub's way to have a machine mint a Claude token for boxes, which only the hub may receive: call mint_box_claude_token"),
+    n("cancel_setup_token", Excluded, "the hub's way to stop a machine's claude setup-token: call cancel_box_claude_token"),
     n("switch_account", Write, "Moves a session's conversation to another agent account signed in on the machine and resumes it there.").wired(),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
     n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
@@ -306,6 +308,8 @@ pub const ACTIONS: &[Action] = &[
     h("remote_ended", Excluded, "a machine's way to report a remote worker's end"),
     h("set_box_claude_token", Confirm, "Keeps a Claude token for boxes that run as a pinned account. The user enters the token in the app; an agent never sends one.").wired().asks(&["token"]),
     h("remove_box_claude_token", Confirm, "Forgets the Claude token kept for boxes that run as a pinned account.").wired(),
+    h("mint_box_claude_token", Confirm, "Has machine run claude setup-token for its Claude account account, and keeps the long-lived token it prints for the boxes that run as that account. The user approves it twice: here, then in the browser that opens on that machine, signed in as that account. The token reaches no agent and no app.").wired(),
+    h("cancel_box_claude_token", Write, "Stops a mint_box_claude_token that still waits on machine for account's approval in the browser.").wired(),
     h("session_marks", Read, "How the user filed each conversation of the account, by Claude session id: title (the name shown in place of its own), pin and order (places, lowest first), settled, unsettled and seen (unix seconds; no seen shows a finished turn as unread), snoozed (until and at, unix seconds), no_auto_settle, and archived.").wired(),
     h("mark_sessions", Write, "Changes marks of conversations, by Claude session id, in order, and answers the rows it touched. Each change is {session, mark}, mark one of {\"title\": \"Fix login\"} or {\"title\": null} to rename, {\"pin\": 0} or {\"pin\": null}, {\"order\": n}, {\"settled\": <unix s>} or null, {\"snoozed\": {\"until\": <unix s>, \"at\": <unix s>}} or null, {\"seen\": null} to mark unread, {\"no_auto_settle\": true}. Every device of the account sees it at once.").wired().checks(crate::marks::agent_check),
     h("archive_session", Write, "Archives the conversation in tab on machine: its tab closes, and Settings › Archive keeps it with its name and pin to bring back. Refused while its turn runs: stop_turn first.").wired(),
@@ -1011,7 +1015,7 @@ mod tests {
                 "disconnect_upstash", "set_box_access", "clone", "share_project", "save_connector", "delete_connector",
                 "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
-                "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
+                "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
             ]
@@ -1141,6 +1145,8 @@ mod tests {
             revoke_agent: Confirm on "hub" => { "id": "g1" };
             set_box_claude_token: Confirm on "hub" => { "name": "bloom" };
             remove_box_claude_token: Confirm on "hub" => { "name": "bloom" };
+            mint_box_claude_token: Confirm on "hub" => { "machine": "m1", "account": "bloom" };
+            cancel_box_claude_token: Write on "hub" => { "machine": "m1", "account": "bloom" };
         }
 
         #[test]

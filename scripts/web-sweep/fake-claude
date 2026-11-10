@@ -8,6 +8,15 @@ const path = require("path");
 const args = process.argv.slice(2);
 // An account's home is CLAUDE_CONFIG_DIR, signed in once `auth login` ran there; the default home always is.
 const home = process.env.CLAUDE_CONFIG_DIR ?? path.join(process.env.HOME, ".claude");
+// `setup-token` opens the browser and waits there for the user's approval, which a sweep gives by
+// writing `approve-setup-token` into the account's home. Then it prints a long-lived token.
+if (args[0] === "setup-token") {
+  console.log("Opening https://claude.com/cai/oauth/authorize?code=true&scope=user%3Ainference");
+  const approve = path.join(home, "approve-setup-token");
+  while (!fs.existsSync(approve)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  console.log(`\n✓ Long-lived authentication token created successfully!\n\nYour OAuth token (valid for 1 year):\n\nsk-ant-oat01-sweep-${path.basename(home)}-0123456789abcdefghijklmnopqrstuvwxyz\n\nStore this token securely.`);
+  process.exit(0);
+}
 if (args[0] === "auth") {
   const signedIn = !process.env.CLAUDE_CONFIG_DIR || fs.existsSync(path.join(home, "signed-in"));
   if (args[1] === "status") {

@@ -6747,6 +6747,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "box_budget_cents" })),
         ("set_box_claude_token", json!({ "name": "bloom" })),
         ("remove_box_claude_token", json!({ "name": "bloom" })),
+        ("mint_box_claude_token", json!({ "machine": machine, "account": "bloom" })),
         ("delete_session", json!({ "machine": machine, "tab": "tab-1" })),
         ("save_mcp_server", json!({ "server": server })),
         ("remove_mcp_server", json!({ "id": "s1" })),
@@ -6887,4 +6888,92 @@ fn another_accounts_project_account_never_picks_this_accounts_box_tokens() {
     assert_eq!(open_box(&mut ana.client).unwrap()["phase"], "creating", "ana's site runs on claude on her own machine, whatever bob's maps it to");
     wait_for("ana's box", || box_tokens(&hub.boxes).len() == 1);
     assert_eq!(box_tokens(&hub.boxes), [CLAUDE_TOKEN]);
+}
+
+const MINTED: &str = "sk-ant-oat01-MintedOnMac0123456789abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOP_qrstuv";
+
+/// A claude whose `setup-token` prints the browser's address and then a token, as the real one
+/// does once the user approves, or keeps waiting while `claude.hang` exists. It notes its pid and
+/// the account home it ran with.
+fn minting_claude() -> String {
+    format!(
+        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true,\"email\":\"felipe@bloom.dev\",\"subscriptionType\":\"team\"}}'; exit 0; }}\n\
+         if [ \"$1\" = setup-token ]; then\n  echo $$ > \"$0.pid\"\n  echo \"$CLAUDE_CONFIG_DIR\" >> \"$0.ran\"\n\
+           printf 'Opening https://claude.com/cai/oauth/authorize?code=true&scope=user%%3Ainference\\n'\n  [ -f \"$0.hang\" ] && exec sleep 60\n\
+           printf '\\033[32mLong-lived authentication token created successfully!\\033[39m\\n\\nYour OAuth token (valid for 1 year):\\n\\n{MINTED}\\n\\nStore this token securely.\\n'\n  exit 0\nfi\nexec cat\n"
+    )
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+#[test]
+fn use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_it() {
+    let hub = TestHub::start_with_boxes("box_mint", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mac_dir = temp("mint-mac");
+    let (mac, mac_id, site) = machine_with_site(&hub.url, &mut ana, "ana@acme.dev", "mac", &mac_dir, "bloom");
+    let claude = mac_dir.join("claude");
+    std::fs::write(&claude, minting_claude()).unwrap();
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    let session = mac.machine.open_tab(Some(site.clone()), false).unwrap();
+    ana.client.wait("the session's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == session.as_str()));
+    let tabs_before = mac.machine.tabs().len();
+    let mut app = Client::app(&hub.url, &ana.token);
+    let mint = json!({ "cmd": "mint_box_claude_token", "machine": mac_id, "account": "bloom" });
+    let ran = || std::fs::read_to_string(mac_dir.join("claude.ran")).unwrap_or_default();
+
+    assert_eq!(
+        app.call(&mac_id, json!({ "cmd": "setup_token", "account": "bloom" })),
+        Err("only the hub asks a machine for a Claude token: use Use for boxes on the Upstash Box card".into()),
+        "an app never gets a token from the machine"
+    );
+    assert_eq!(app.hub(mint.clone()), Err(LOCKED.into()), "keeping a credential still needs the password");
+    assert_eq!(act(&mac_dir, &session, "setup_token", json!({ "account": "bloom" })), Err("setup_token is not open to agents: the hub's way to have a machine mint a Claude token for boxes, which only the hub may receive: call mint_box_claude_token".into()));
+    assert_eq!(act(&mac_dir, &session, "mint_box_claude_token", json!({ "machine": mac_id, "account": "bloom" })).unwrap()["outcome"], "pending", "an agent only asks, and the owner approves");
+    assert_eq!(ran(), "", "nothing ran before the owner's password");
+
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(app.hub(mint.clone()), Ok(json!({ "bloom": "…stuv" })), "the app gets the hint");
+    assert!(ran().trim().ends_with("/accounts/bloom"), "setup-token ran with bloom's home: {}", ran());
+    assert_eq!(mac.machine.tabs().len(), tabs_before, "in no tab");
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 })).unwrap()["phase"], "creating");
+    wait_for("the box signed in", || box_tokens(&hub.boxes).len() == 1);
+    assert_eq!(box_tokens(&hub.boxes), [MINTED], "a box of bloom's project signs in with the minted token");
+    let audit = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap().to_string();
+    let seen = format!("{:?}{:?}{audit}", app.frames, ana.client.frames);
+    assert!(!seen.contains("MintedOnMac"), "no app frame, event or audit row carries the token");
+    let stored = hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_one("select secrets::text || store::text from accounts where email = 'ana@acme.dev'", &[]).await.unwrap().get::<_, String>(0)
+    });
+    assert!(stored.contains("sealed:") && !stored.contains("MintedOnMac"), "the hub keeps it sealed");
+
+    std::fs::write(mac_dir.join("claude.hang"), "").unwrap();
+    std::fs::remove_file(mac_dir.join("claude.pid")).unwrap();
+    let (url, login, waiting_mint) = (hub.url.clone(), ana.token.clone(), mint.clone());
+    let waiting = std::thread::spawn(move || {
+        let mut other = Client::app(&url, &login);
+        other.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        other.hub(waiting_mint)
+    });
+    wait_for("setup-token waiting on the browser", || mac_dir.join("claude.pid").exists());
+    let pid = std::fs::read_to_string(mac_dir.join("claude.pid")).unwrap().trim().to_owned();
+    assert!(alive(&pid));
+    assert_eq!(app.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Ok(json!(true)));
+    assert_eq!(waiting.join().unwrap(), Err("claude setup-token was cancelled".into()));
+    assert!(!alive(&pid), "the recorded process is gone");
+    assert_eq!(app.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Ok(json!(false)), "nothing waits any more");
+
+    let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
+    let runs = ran().lines().count();
+    assert_eq!(bob.client.hub(mint.clone()), Err(format!("this account has no machine {mac_id}")), "bob can't make ana's machine mint");
+    assert_eq!(bob.client.hub(json!({ "cmd": "cancel_box_claude_token", "machine": mac_id, "account": "bloom" })), Err(format!("this account has no machine {mac_id}")));
+    assert_eq!(ran().lines().count(), runs, "ana's machine ran nothing for bob");
+    let bobs = bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_claude_tokens"].clone();
+    assert!(bobs.as_object().is_none_or(|kept| kept.is_empty()), "and bob keeps no token of ana's: {bobs}");
 }
