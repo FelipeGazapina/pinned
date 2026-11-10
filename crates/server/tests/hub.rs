@@ -5036,7 +5036,7 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     let ana_raw = RawMachine::start(&url, &ana_creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
         "delegate" => RawReply::Ok(json!({ "taskId": "task-a", "tabId": "tab-w", "workState": "working" })),
         "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
-        "remote_ended" => RawReply::Ok(json!(true)),
+        "remote_ended" | "remote_asked" => RawReply::Ok(json!(true)),
         _ => RawReply::Ok(Value::Null),
     });
     let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
@@ -5054,11 +5054,35 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a" })), none, "bob can't read ana's remote task");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a", "cancel": "mine now" })), none, "nor cancel it");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_ended", "to": ana_m, "tab": "tab-1", "task": "task-a", "end": { "state": "failed", "error": "forged" } })), none, "nor end it");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_asked", "to": ana_m, "tab": "tab-1", "task": "task-a", "ask": { "kind": "approval", "ask": "forged", "since": 1 } })), none, "nor tell it what its worker waits on");
     assert_eq!(bob.hub(delegate(json!({ "machine": bob_machine.id }))), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client delegates only through a thread");
     assert_eq!(bob.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-x" })), Err("connect Upstash Box first".into()));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
+    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended"), ana_raw.calls("remote_asked")), (0, 0, 0, 0), "ana's machine heard none of bob's");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
+}
+
+#[test]
+fn a_remote_workers_ask_reaches_the_machine_that_delegated_it_stamped_with_the_machine_that_sent_it() {
+    let hub = TestHub::start("remote_asked");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
+    let mac_raw = RawMachine::start(&url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_asked" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    let mini_raw = RawMachine::start(&url, &mini_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true), ("ana-mini", true)]);
+    let ask = json!({ "kind": "approval", "tool": "Bash", "ask": "git push origin main", "since": 1794239000 });
+
+    let taken = mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a", "ask": ask }));
+    assert_eq!(taken, Ok(json!(true)), "the machine that delegated it took it");
+    assert_eq!(mac_raw.calls.lock().unwrap().clone(), vec![json!({ "cmd": "remote_asked", "from": mini.id, "tab": "tab-1", "task": "task-a", "ask": ask })], "stamped with the machine whose socket sent it");
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Ok(json!(true)), "no ask says it waits on nothing now");
+    assert_eq!(mac_raw.calls.lock().unwrap().last().unwrap().get("ask"), None);
+    assert_eq!(ana.hub(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client can't report for a machine");
 }
 
 fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {

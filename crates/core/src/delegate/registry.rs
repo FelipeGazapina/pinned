@@ -20,6 +20,9 @@ pub struct Delegates {
     limits: ProviderLimits,
 }
 
+/// What the news that a remote worker waits on the user says between the worker and the ask.
+pub const ASK_NOTICE: &str = " waits on the user for ";
+
 /// How many taken notices a machine remembers: a hub resends only those decided in the last week.
 const NOTICES_KEPT: usize = 4000;
 
@@ -962,6 +965,38 @@ impl Delegates {
         }
         self.queue_report(tab, session, text);
         true
+    }
+
+    /// Queues the news that task `id`'s remote worker waits on the user, as `queue_notice` does, tied
+    /// to the task so it is dropped when the task ends and `withdraw_ask` can take it back.
+    pub fn queue_ask(&self, key: &str, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        {
+            let mut notices = self.notices.lock().unwrap();
+            if notices.iter().any(|taken| taken == key) {
+                return false;
+            }
+            notices.push(key.to_owned());
+            if notices.len() > NOTICES_KEPT {
+                let extra = notices.len() - NOTICES_KEPT;
+                notices.drain(..extra);
+            }
+        }
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: Some(id.to_owned()), request: None });
+        true
+    }
+
+    /// Takes back the news `queue_ask` queued for task `id` and no tab typed yet: the worker was
+    /// answered since, so telling the tab it waits would be stale.
+    pub fn withdraw_ask(&self, id: &str) {
+        let before = {
+            let mut reports = self.reports.lock().unwrap();
+            let before = reports.len();
+            reports.retain(|report| report.claimed || report.task.as_deref() != Some(id) || !report.text.contains(ASK_NOTICE));
+            before - reports.len()
+        };
+        if before > 0 {
+            self.persist();
+        }
     }
 
     fn push_report(&self, report: Report) {

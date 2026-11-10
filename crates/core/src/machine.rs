@@ -4086,8 +4086,10 @@ impl Machine {
     /// to wait. False when `tab` has no such working task on `from`.
     fn apply_remote_ask(&self, tab: &str, id: &str, from: &str, ask: Option<crate::delegate::RemoteAsk>) -> bool {
         let Some(changed) = self.delegates.set_remote_waiting(id, tab, from, ask.clone()) else { return false };
-        if let (true, Some(ask)) = (changed, &ask) {
-            self.tell_asked(tab, id, ask);
+        match (changed, &ask) {
+            (true, Some(ask)) => self.tell_asked(tab, id, ask),
+            (true, None) => self.delegates.withdraw_ask(id),
+            _ => {}
         }
         if changed {
             self.emit_tabs();
@@ -4106,11 +4108,13 @@ impl Machine {
             (kind, _) => kind.word().to_owned(),
         };
         let line = format!(
-            "[pinned] Worker \"{}\" on {place} waits on the user for {what}: {}. The user answers in its thread on {place}; it keeps its place, so do not cancel it for that.",
-            task.title, ask.ask
+            "[pinned] Worker \"{}\" on {place}{}{what}: {}. The user answers in its thread on {place}; it keeps its place, so do not cancel it for that.",
+            task.title,
+            crate::delegate::ASK_NOTICE,
+            ask.ask
         );
         let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
-        if self.delegates.queue_notice(&format!("ask:{id}:{}", ask.since), tab, session, line) {
+        if self.delegates.queue_ask(&format!("ask:{id}:{}", ask.since), tab, session, line, id) {
             self.arm_delegate_pass();
         }
     }
