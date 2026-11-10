@@ -14,6 +14,7 @@ use pinned_core::delegate::TaskRecord;
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
+use pinned_core::surface::{ActorRole, AuditEntry, AuditOutcome, Confirmation, Decision};
 use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -80,6 +81,19 @@ create table if not exists delegation_tasks (account uuid not null references ac
   machine uuid not null, id text not null, ended bigint not null, record jsonb not null,
   primary key (account, machine, id));
 create index if not exists delegation_tasks_ended on delegation_tasks (account, ended);
+-- What agents did as the user: one row per act, refusal, or decision on a confirmation.
+create table if not exists agent_actions (id uuid primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, role text not null, action text not null, args text not null,
+  outcome text not null, detail text not null default '', request_id text, at timestamptz not null default now());
+create index if not exists agent_actions_at on agent_actions (account, at desc);
+create index if not exists agent_actions_request on agent_actions (account, request_id) where request_id is not null;
+-- A confirm act that waits on the user's approval in the app, then what they decided and it came to.
+-- `notified` turns true once the session that asked has the notice.
+create table if not exists agent_confirmations (id uuid primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, tab text not null, session text, role text not null, title text not null default '',
+  action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
+  decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
+  target text, result jsonb, unique (account, request_id));
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -170,6 +184,55 @@ pub enum Invited {
     NoInvite,
     /// The code is good but the email is taken. The code stays unused.
     EmailTaken,
+}
+
+/// An audit row as an act writes it.
+pub struct Audit<'a> {
+    pub account: Uuid,
+    pub machine: Uuid,
+    pub tab: &'a str,
+    pub role: ActorRole,
+    pub action: &'a str,
+    pub args: &'a str,
+    pub outcome: AuditOutcome,
+    pub detail: &'a str,
+    pub request_id: Option<&'a str>,
+}
+
+/// A confirmation as the hub keeps it: what the user sees, and the Claude session that asked,
+/// which finds its tab after a restart.
+pub struct Held {
+    pub confirmation: Confirmation,
+    pub session: Option<String>,
+    /// What running it answered, as the agent may see it.
+    pub result: Value,
+}
+
+const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result";
+
+fn held(r: &tokio_postgres::Row) -> Held {
+    let role: String = r.get(6);
+    let action: String = r.get(7);
+    let decided_at: Option<i64> = r.get(11);
+    let confirmation = Confirmation {
+        id: r.get::<_, Uuid>(0).to_string(),
+        at: r.get(1),
+        machine: r.get::<_, Uuid>(2).to_string(),
+        machine_name: r.get(3),
+        tab: r.get(4),
+        title: r.get(5),
+        role: serde_json::from_value(Value::String(role)).unwrap_or(ActorRole::Session),
+        about: pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned()),
+        action,
+        args: r.get(8),
+        target: r.get(14),
+        request_id: r.get(9),
+        decision: decided_at.and(r.get::<_, Option<bool>>(10)).map(|approved| if approved { Decision::Approved } else { Decision::Denied }),
+        decided_at,
+        outcome: r.get(12),
+    };
+    Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null) }
 }
 
 pub struct MachineRow {
@@ -684,6 +747,131 @@ impl Db {
             .await
             .map_err(err)?;
         Ok(NewInvite { id: id.to_string(), code, expires_at: row.get(0) })
+    }
+
+    /// Writes one row of the account's audit trail.
+    pub async fn audit(&self, row: &Audit<'_>) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The account's audit rows, newest first: `limit` of them from before unix time `before`.
+    pub async fn audit_rows(&self, account: Uuid, before: Option<i64>, limit: i64) -> Result<Vec<AuditEntry>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select a.id, extract(epoch from a.at)::bigint, a.machine, coalesce(m.name, ''), a.tab, a.role, a.action, a.args, a.outcome, a.detail, a.request_id
+                 from agent_actions a left join machines m on m.id = a.machine and m.account = a.account
+                 where a.account = $1 and ($2::bigint is null or a.at < to_timestamp($2)) order by a.at desc limit $3",
+                &[&account, &before, &limit],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows
+            .iter()
+            .map(|r| AuditEntry {
+                id: r.get::<_, Uuid>(0).to_string(),
+                at: r.get(1),
+                machine: r.get::<_, Uuid>(2).to_string(),
+                machine_name: r.get(3),
+                tab: r.get(4),
+                role: serde_json::from_value(Value::String(r.get(5))).unwrap_or(ActorRole::Session),
+                action: r.get(6),
+                args: r.get(7),
+                outcome: AuditOutcome::parse(r.get(8)).unwrap_or(AuditOutcome::Failed),
+                detail: r.get(9),
+                request_id: r.get(10),
+            })
+            .collect())
+    }
+
+    /// What the account's first act with `request_id` came to, and when.
+    pub async fn audited(&self, account: Uuid, request_id: &str) -> Result<Option<(AuditOutcome, i64)>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select outcome, extract(epoch from at)::bigint from agent_actions where account = $1 and request_id = $2 order by at limit 1", &[&account, &request_id])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| (AuditOutcome::parse(r.get(0)).unwrap_or(AuditOutcome::Failed), r.get(1))))
+    }
+
+    /// Holds a confirm act for the user and answers its id, or the id of the account's confirmation
+    /// already held under the same `request_id`, with false.
+    pub async fn hold_confirmation(&self, account: Uuid, machine: Uuid, session: Option<&str>, asked: &Confirmation) -> Result<(Uuid, bool), String> {
+        let client = self.client().await?;
+        let id = Uuid::new_v4();
+        let request_id = asked.request_id.as_deref();
+        let inserted = client
+            .query_opt(
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 on conflict (account, request_id) do nothing returning id",
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
+            )
+            .await
+            .map_err(err)?;
+        if inserted.is_some() {
+            return Ok((id, true));
+        }
+        let row = client.query_one("select id from agent_confirmations where account = $1 and request_id = $2", &[&account, &request_id]).await.map_err(err)?;
+        Ok((row.get(0), false))
+    }
+
+    /// The account's confirmation `id`.
+    pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
+        let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");
+        Ok(self.client().await?.query_opt(&query, &[&account, &id]).await.map_err(err)?.as_ref().map(held))
+    }
+
+    /// The account's confirmations that wait, oldest first, then its last 20 decided, newest first.
+    pub async fn confirmations(&self, account: Uuid) -> Result<Vec<Confirmation>, String> {
+        let query = format!(
+            "(select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+               where c.account = $1 and c.decided_at is null order by c.created_at)
+             union all
+             (select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+               where c.account = $1 and c.decided_at is not null order by c.decided_at desc limit 20)"
+        );
+        Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
+    }
+
+    /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
+    /// account's, or decided already.
+    pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
+        let client = self.client().await?;
+        let taken = client
+            .execute("update agent_confirmations set decided_at = now(), approved = $3 where account = $1 and id = $2 and decided_at is null", &[&account, &id, &approved])
+            .await
+            .map_err(err)?;
+        if taken == 0 {
+            return Ok(None);
+        }
+        self.confirmation(account, id).await
+    }
+
+    pub async fn finish_confirmation(&self, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set outcome = $2, result = $3 where id = $1", &[&id, &outcome, result]).await.map_err(err).map(drop)
+    }
+
+    /// The account's decided confirmations whose session on `machine` has no notice yet.
+    pub async fn unnotified(&self, account: Uuid, machine: Uuid) -> Result<Vec<Held>, String> {
+        let query = format!(
+            "select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
+             where c.account = $1 and c.machine = $2 and c.decided_at is not null and c.outcome is not null and not c.notified order by c.decided_at"
+        );
+        Ok(self.client().await?.query(&query, &[&account, &machine]).await.map_err(err)?.iter().map(held).collect())
+    }
+
+    pub async fn notified(&self, id: Uuid) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set notified = true where id = $1", &[&id]).await.map_err(err).map(drop)
     }
 
     /// The account's codes nobody has used yet, newest first.

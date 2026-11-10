@@ -447,6 +447,8 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
     let (out, mut outbox, overflowed) = Outbox::new();
     account.client_connected(id, db::hash(&token), out, machines);
     eprintln!("pinned-server: client {id} of account {} connected", account.id);
+    let (pushing, to) = (hub.clone(), account.clone());
+    tokio::spawn(async move { crate::surface::send_confirmations(&pushing, &to, id).await });
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
@@ -556,6 +558,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     }
     account.came_online(&machine, socket_id, row.name, row.dedicated, version.clone(), out);
     hub.push_machines(&account).await;
+    tokio::spawn(crate::surface::deliver_notices(hub.clone(), account.clone(), machine.clone()));
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 
     let (mut sink, mut stream) = socket.split();
@@ -629,7 +632,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             }
         }
         Ok(MachineFrame::Output { viewer, tab, data }) => account.output(machine, &viewer, tab, data),
-        Ok(MachineFrame::Call { id, call }) => {
+        Ok(MachineFrame::Call { id, mut call }) => {
             let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
@@ -637,6 +640,23 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // import into an account with no connectors or tastes yet, read the tastes, sync its projects,
                 // and serve the global orchestrator and the Capitães, which `relay` checks against this socket,
                 // and a thread's workers on other machines, which `remote` stamps with this socket.
+                // Its sessions act as the user only through `surface`, which checks, audits and holds
+                // each act, and never decide a confirmation.
+                let surfaced = match call {
+                    HubCall::Act { act } => Some(crate::surface::act(&hub, &account, &machine, act).await),
+                    HubCall::Confirmations => Some(hub.hub_call(&account, HubCall::Confirmations).await),
+                    HubCall::DecideConfirmation { .. } => Some(Err("only the account's owner decides, in the app".to_owned())),
+                    other => {
+                        call = other;
+                        None
+                    }
+                };
+                if let Some(result) = surfaced {
+                    if let Err(e) = &result {
+                        eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
+                    }
+                    return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+                }
                 if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
                     let result = crate::remote::serve(&hub, &account, &machine, call).await;
                     if let Err(e) = &result {

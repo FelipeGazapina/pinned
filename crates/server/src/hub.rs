@@ -534,6 +534,13 @@ impl Hub {
                 let records = self.db.task_records(account.id, since).await?;
                 return json(pinned_core::delegate::aggregate(&records, now, days));
             }
+            HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
+            HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
+            HubCall::DecideConfirmation { id, approve } => return crate::surface::decide(self, account, &id, approve).await,
+            HubCall::AgentAudit { before, limit } => {
+                let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
+                return json(self.db.audit_rows(account.id, before, limit).await?);
+            }
         };
         if changed {
             self.watch(account).await?;

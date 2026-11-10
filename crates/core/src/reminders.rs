@@ -1208,7 +1208,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
-            Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"act","action":"rename_machine","args":{"id":"m1","name":"Mini"},"request_id":"r-1"}}"#.into())
+            Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"act","action":"rename_machine","args":{"name":"Mini","id":"m1"},"request_id":"r-1"}}"#.into())
         );
         assert_eq!(ask("actions", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"actions"}}"#.into()));
         assert_eq!(ask("act", serde_json::json!({}), Some("tab-2")), Err("act: missing field `action`".into()));
