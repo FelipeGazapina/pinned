@@ -101,13 +101,19 @@ pub fn cursor_models(list: &str) -> Vec<ModelChoice> {
         .collect()
 }
 
-/// A rough cost tier from the model id, for routing when no price list covers it.
+/// A model's cost tier: the catalog's when it lists the model, otherwise a rough one from the
+/// words of its id. A costly word wins, so `opus-fast` is high, and `minimax` is no `mini`.
 pub fn cost_of(id: &str) -> Cost {
+    if let Some((.., cost)) = CLAUDE_MODELS.iter().find(|(known, ..)| *known == id) {
+        return *cost;
+    }
     let id = id.to_ascii_lowercase();
-    if ["haiku", "flash", "mini", "fast", "nano", "lite"].iter().any(|hint| id.contains(hint)) {
-        Cost::Low
-    } else if ["opus", "max", "pro", "ultra", "thinking"].iter().any(|hint| id.contains(hint)) {
+    let words: Vec<&str> = id.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let says = |hints: &[&str]| words.iter().any(|word| hints.contains(word));
+    if says(&["opus", "max", "pro", "ultra", "thinking"]) {
         Cost::High
+    } else if says(&["haiku", "flash", "mini", "fast", "nano", "lite"]) {
+        Cost::Low
     } else {
         Cost::Mid
     }

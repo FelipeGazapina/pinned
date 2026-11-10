@@ -81,6 +81,8 @@ pub struct NewTask {
 pub enum Claim {
     Fresh(Box<Task>),
     Existing(String),
+    /// This many workers already work in the task's project, the most it allows at once.
+    Full(usize),
 }
 
 impl Delegates {
@@ -97,7 +99,8 @@ impl Delegates {
         delegates
     }
 
-    /// The folder of each task still at work, for the workers-at-once limit of its project.
+    /// The folder of each task still at work.
+    #[cfg(test)]
     pub fn working_cwds(&self) -> Vec<PathBuf> {
         self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal()).map(|task| task.cwd.clone()).collect()
     }
@@ -142,14 +145,29 @@ impl Delegates {
         ready
     }
 
-    /// The same caller and `clientRequestId` returns the task already started.
-    pub fn claim(&self, new: NewTask) -> Claim {
+    /// The task the caller already started with this `clientRequestId`.
+    pub fn requested(&self, caller_key: &str, request_id: Option<&str>) -> Option<String> {
+        let request_id = request_id?;
+        self.tasks.lock().unwrap().iter().find(|task| task.caller_key == caller_key && task.client_request_id.as_deref() == Some(request_id)).map(|task| task.id.clone())
+    }
+
+    /// The same caller and `clientRequestId` returns the task already started. Otherwise a new
+    /// task starts unless `at_once` tasks already work in its project, counted under the same lock
+    /// so two callers can't both take the last place.
+    pub fn claim(&self, new: NewTask, at_once: Option<u32>) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(request_id) = new.client_request_id.as_deref() {
             if let Some(existing) = tasks.iter().find(|task| {
                 task.caller_key == new.caller_key && task.client_request_id.as_deref() == Some(request_id)
             }) {
                 return Claim::Existing(existing.id.clone());
+            }
+        }
+        if let Some(most) = at_once {
+            let project = crate::history::project_of(&new.cwd);
+            let working = tasks.iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count();
+            if working >= most as usize {
+                return Claim::Full(working);
             }
         }
         let task = fresh(new);
@@ -160,9 +178,10 @@ impl Delegates {
     }
 
     pub fn begin(&self, new: NewTask) -> Task {
-        match self.claim(new) {
+        match self.claim(new, None) {
             Claim::Fresh(task) => *task,
             Claim::Existing(id) => self.tasks.lock().unwrap().iter().find(|task| task.id == id).unwrap().clone(),
+            Claim::Full(_) => unreachable!("begin sets no limit"),
         }
     }
 

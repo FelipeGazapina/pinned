@@ -414,6 +414,12 @@ pub(crate) use drivers::{driver, replay};
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_costly_word_in_a_model_id_outranks_a_cheap_one() {
+        let tiers: Vec<_> = ["claude-opus-5-5", "claude-haiku-5-5", "opus-fast", "gpt-6-max-mini", "minimax-m3", "minimax-m3.1-flash", "qwen3.8-max", "glm-5.3"].iter().map(|id| cost_of(id).name()).collect();
+        assert_eq!(tiers, ["high", "low", "high", "high", "mid", "low", "high", "mid"]);
+    }
+
     fn fixture(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/delegate")
@@ -985,6 +991,42 @@ grok-4.7-high - Grok 4.7  High
             client_request_id: None,
             role: None,
         })
+    }
+
+    #[test]
+    fn two_callers_cannot_both_take_the_last_place_at_once() {
+        let delegates = Arc::new(Delegates::default());
+        let ask = |caller: usize, cwd: &str| NewTask {
+            parent: Parent::Tab(format!("tab-{caller}")),
+            tool: None,
+            title: "Fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: PathBuf::from(cwd),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:tab-{caller}"),
+            client_request_id: None,
+            role: None,
+        };
+        assert!(matches!(delegates.claim(ask(0, "/p/.claude/worktrees/w1"), Some(2)), Claim::Fresh(_)));
+        assert!(matches!(delegates.claim(ask(0, "/elsewhere"), Some(1)), Claim::Fresh(_)), "another project has its own places");
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let callers: Vec<_> = (1..=8)
+            .map(|caller| {
+                let (delegates, start, new) = (delegates.clone(), start.clone(), ask(caller, "/p"));
+                std::thread::spawn(move || {
+                    start.wait();
+                    delegates.claim(new, Some(2))
+                })
+            })
+            .collect();
+        let claims: Vec<_> = callers.into_iter().map(|caller| caller.join().unwrap()).collect();
+        let fresh = claims.iter().filter(|claim| matches!(claim, Claim::Fresh(_))).count();
+        let full: Vec<_> = claims.iter().filter_map(|claim| if let Claim::Full(working) = claim { Some(*working) } else { None }).collect();
+        assert_eq!((fresh, full), (1, vec![2; 7]), "the worker in p's worktree and one more fill p's two places");
     }
 
     fn parent() -> Caller {
@@ -1894,15 +1936,9 @@ exec '{real}' "$@"
             client_request_id: Some(request.into()),
             role: None,
         };
-        let first = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let first = delegates.begin(spec("tab:tab-1", "tab-1", "req-7")).id;
         delegates.apply(&first, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
-        let again = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
-            Claim::Existing(id) => id,
-            Claim::Fresh(task) => task.id,
-        };
+        let again = delegates.begin(spec("tab:tab-1", "tab-1", "req-7")).id;
         assert_eq!(again, first);
         let replay = delegates.started_json(&again).unwrap();
         assert_eq!(replay["summary"], "DONE");
@@ -1918,10 +1954,7 @@ exec '{real}' "$@"
         assert_eq!(merge_cursor_list(Some("composer-2.5 - Composer\n"), "   "), "composer-2.5 - Composer\n");
         assert_eq!(merge_cursor_list(None, ""), "");
         assert_eq!(merge_cursor_list(Some("old\n"), "new\n"), "new\n");
-        let fresh_id = match delegates.claim(spec("tab:tab-1", "tab-1", "req-8")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let fresh_id = delegates.begin(spec("tab:tab-1", "tab-1", "req-8")).id;
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
@@ -1930,10 +1963,7 @@ exec '{real}' "$@"
         let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &fresh_id).unwrap();
         assert_eq!(status["workState"], "working");
         assert_eq!(status["next"], next);
-        let other = match delegates.claim(spec("tab:tab-2", "tab-2", "req-7")) {
-            Claim::Fresh(task) => task.id,
-            Claim::Existing(id) => id,
-        };
+        let other = delegates.begin(spec("tab:tab-2", "tab-2", "req-7")).id;
         assert_ne!(other, first);
     }
 

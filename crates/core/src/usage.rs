@@ -190,23 +190,32 @@ pub struct TaskUsage {
     pub box_ms: Option<u64>,
 }
 
-/// The tokens one transcript used so far, by model and speed, read a little more on each call.
+/// The tokens a worker's transcripts used so far, by model and speed, read a little more on each call.
 #[derive(Clone, Debug, Default)]
 pub struct Meter {
-    offset: u64,
+    offsets: HashMap<PathBuf, u64>,
     seen: HashSet<(Option<String>, Option<String>)>,
     sums: HashMap<(String, Speed), [u64; 4]>,
 }
 
 impl Meter {
-    /// Reads the whole lines `file` gained since the last call.
-    pub fn advance(&mut self, file: &Path) -> std::io::Result<()> {
+    /// Reads the whole lines `transcript` and its subagents' transcripts gained since the last
+    /// call. True when any of them gained one. A new session's transcript adds to the same sums.
+    pub fn advance(&mut self, transcript: &Path) -> std::io::Result<bool> {
+        let mut moved = self.read(transcript)?;
+        let subagents = std::fs::read_dir(transcript.with_extension("").join("subagents")).into_iter().flatten().flatten();
+        for file in subagents.map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "jsonl")) {
+            moved |= self.read(&file).unwrap_or(false);
+        }
+        Ok(moved)
+    }
+
+    fn read(&mut self, file: &Path) -> std::io::Result<bool> {
         use std::io::{Read, Seek, SeekFrom};
         let mut f = std::fs::File::open(file)?;
-        if self.offset > f.metadata()?.len() {
-            *self = Meter::default();
-        }
-        f.seek(SeekFrom::Start(self.offset))?;
+        // A rewritten file is read again from the start; `seen` keeps its messages from counting twice.
+        let offset = self.offsets.get(file).copied().filter(|offset| *offset <= f.metadata().map_or(0, |m| m.len())).unwrap_or(0);
+        f.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![];
         f.read_to_end(&mut bytes)?;
         let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
@@ -226,8 +235,8 @@ impl Meter {
                 *total += n;
             }
         }
-        self.offset += whole as u64;
-        Ok(())
+        self.offsets.insert(file.to_owned(), offset + whole as u64);
+        Ok(whole > 0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -646,6 +655,28 @@ mod tests {
         assert_eq!((twice.tokens_in, twice.tokens_out, twice.cost_usd), (22_000, 4000, None), "a model with no price leaves the cost unknown");
         let priced = PriceBook { prices: HashMap::from([("glm-5.3".to_owned(), Price { input: 1.0, output: 2.0, cache_read: Some(0.1), cache_write: None })]), ..PriceBook::default() };
         assert!((meter.usage(&table(), &priced).cost_usd.unwrap() - 0.066).abs() < 1e-9, "the user's own price counts");
+    }
+
+    #[test]
+    fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
+        let first = dir.path().join("s1.jsonl");
+        std::fs::write(&first, format!("{}\n", assistant("m1", "r1", "s1", "2026-11-09T10:00:00Z", "claude-opus-5-5", usage(100)))).unwrap();
+        let mut meter = Meter::default();
+        assert!(meter.advance(&first).unwrap());
+        assert!(!meter.advance(&first).unwrap(), "nothing new was written");
+
+        std::fs::create_dir_all(dir.path().join("s1/subagents")).unwrap();
+        let agent = dir.path().join("s1/subagents/agent-a1.jsonl");
+        std::fs::write(&agent, format!("{}\n", assistant("m2", "r2", "s1", "2026-11-09T10:01:00Z", "claude-opus-5-5", usage(1000)))).unwrap();
+        assert!(meter.advance(&first).unwrap(), "the subagent's transcript gained a line");
+        assert_eq!(meter.usage(&table(), &PriceBook::default()).tokens_out, 1100);
+
+        let second = dir.path().join("s2.jsonl");
+        std::fs::write(&second, format!("{}\n", assistant("m3", "r3", "s2", "2026-11-09T10:02:00Z", "claude-opus-5-5", usage(10)))).unwrap();
+        meter.advance(&second).unwrap();
+        assert_eq!(meter.usage(&table(), &PriceBook::default()).tokens_out, 1110, "/clear starts a new transcript, not a new total");
     }
 
     #[test]

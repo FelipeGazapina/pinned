@@ -506,7 +506,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 14] {
                             "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
-                            "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it." },
+                            "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
                             "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none." },
                             "max_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The most effort a call may ask for." },
                             "budget_cents": { "type": "integer", "minimum": 0, "description": "What one worker may spend, in US cents; 0 sets no cap." },
