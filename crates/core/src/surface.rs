@@ -309,6 +309,7 @@ pub const ACTIONS: &[Action] = &[
     h("delegate", Excluded, "a machine's way to run delegate_task on another machine or a box: call delegate_task"),
     h("remote_task", Excluded, "a machine's way to read its remote worker: call task_status"),
     h("remote_ended", Excluded, "a machine's way to report a remote worker's end"),
+    h("place", Excluded, "a machine's way to have the hub pick the machine for a heavy worker: call delegate_task, which places it by the account's policy"),
     h("machine_states", Excluded, "a machine's way to read every machine's load for orchestrator_capabilities: call orchestrator_capabilities"),
     h("set_box_claude_token", Confirm, "Keeps a Claude token for boxes that run as a pinned account. The user enters the token in the app; an agent never sends one.").wired().asks(&["token"]),
     h("remove_box_claude_token", Confirm, "Forgets the Claude token kept for boxes that run as a pinned account.").wired(),

@@ -100,6 +100,11 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         .map(|tools| tools.iter().filter_map(Value::as_str).map(str::trim).filter(|tool| !tool.is_empty()).map(str::to_owned).collect())
         .unwrap_or_default();
     let client_request_id = optional_str(&args["clientRequestId"]);
+    let heavy = match args.get("heavy") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(heavy)) => Some(*heavy),
+        Some(other) => return Err(format!("heavy must be true or false, not {other}")),
+    };
     Ok(Request {
         task,
         title,
@@ -121,6 +126,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         role,
         tools,
         client_request_id,
+        heavy,
     })
 }
 

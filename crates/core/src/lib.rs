@@ -37,6 +37,7 @@ pub mod private;
 pub mod process;
 pub mod projects;
 pub mod prwatch;
+pub mod placement;
 pub mod pty;
 pub mod pulls;
 pub mod reading;

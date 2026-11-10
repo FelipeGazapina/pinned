@@ -293,6 +293,9 @@ pub struct Request {
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// Whether the account's placement policy places this worker, over its rule for heavy work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heavy: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -818,6 +821,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
@@ -877,6 +881,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         assert_eq!(

@@ -196,6 +196,10 @@ pub struct TastePatch {
     pub time_limit_min: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub box_budget_cents: Option<u32>,
+    /// The account's placement policy. Only the Captains' and the orchestrator's scope take it:
+    /// it belongs to the account, and a project's own comes later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::placement::Placement>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -228,6 +232,7 @@ pub enum TasteField {
     BudgetCents,
     TimeLimitMin,
     BoxBudgetCents,
+    Placement,
 }
 
 /// An account's tastes.
@@ -238,6 +243,8 @@ pub struct Tastes {
     pub captains: Taste,
     /// Each project's changes over `captains`, by repo.
     pub projects: BTreeMap<String, TastePatch>,
+    /// Where the account's heavy delegated work runs.
+    pub placement: crate::placement::Placement,
 }
 
 impl Profile {
@@ -430,6 +437,7 @@ impl Taste {
             TasteField::BudgetCents => self.budget_cents = default.budget_cents,
             TasteField::TimeLimitMin => self.time_limit_min = default.time_limit_min,
             TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
+            TasteField::Placement => {}
         }
     }
 }
@@ -584,6 +592,7 @@ impl TastePatch {
         take(newer.budget_cents, &mut self.budget_cents);
         take(newer.time_limit_min, &mut self.time_limit_min);
         take(newer.box_budget_cents, &mut self.box_budget_cents);
+        take(newer.placement, &mut self.placement);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -643,6 +652,7 @@ impl TastePatch {
             TasteField::BudgetCents => self.budget_cents = None,
             TasteField::TimeLimitMin => self.time_limit_min = None,
             TasteField::BoxBudgetCents => self.box_budget_cents = None,
+            TasteField::Placement => self.placement = None,
         }
     }
 }
@@ -675,7 +685,22 @@ impl Tastes {
 
     /// Applies `patch` to the scope, or changes nothing when the result fails `Taste::check`. A
     /// project's patch keeps only the fields that differ from the Capitães'.
-    pub fn set(&mut self, scope: &TasteScope, patch: TastePatch) -> Result<(), String> {
+    pub fn set(&mut self, scope: &TasteScope, mut patch: TastePatch) -> Result<(), String> {
+        if let Some(placement) = patch.placement.take() {
+            if matches!(scope, TasteScope::Project { .. }) {
+                return Err("placement belongs to the account: set it for Captains (all), not for one project".into());
+            }
+            placement.check()?;
+            if patch.is_empty() {
+                self.placement = placement;
+                return Ok(());
+            }
+            let mut changed = self.clone();
+            changed.placement = placement;
+            changed.set(scope, patch)?;
+            *self = changed;
+            return Ok(());
+        }
         let taste = match scope {
             TasteScope::Orchestrator => &mut self.orchestrator,
             TasteScope::Captains => &mut self.captains,
@@ -708,6 +733,10 @@ impl Tastes {
 
     /// A project inherits the field again; the orchestrator and the Capitães get its default back.
     pub fn reset(&mut self, scope: &TasteScope, field: TasteField) {
+        if field == TasteField::Placement && !matches!(scope, TasteScope::Project { .. }) {
+            self.placement = crate::placement::Placement::default();
+            return;
+        }
         match scope {
             TasteScope::Orchestrator => self.orchestrator.reset(field),
             TasteScope::Captains => self.captains.reset(field),
@@ -726,6 +755,7 @@ impl Tastes {
     pub fn check(&self) -> Result<(), String> {
         self.orchestrator.check()?;
         self.captains.check()?;
+        self.placement.check()?;
         self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())
     }
 }
@@ -1317,5 +1347,28 @@ Deploys go through the VPS."
         migrate_worker_cap(Some(fresh.path()));
         assert_eq!(load(Some(fresh.path())).map(|t| (t.captains.profile(), t.captains.parallel)), Some((Profile::Aggressive, 8)), "the default cap lowers nothing, and the style still seeds");
         assert!(!fresh.path().join("orchestration.json").exists());
+    }
+
+    #[test]
+    fn the_placement_policy_is_set_and_reset_for_the_account_and_never_for_one_project() {
+        use crate::placement::{HeavyRule, Placement};
+        let policy = Placement { prefer: vec!["m-mini".into()], avoid: vec!["m-book".into()], heavy: HeavyRule::Worktree };
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { placement: Some(policy.clone()), parallel: Some(4), ..TastePatch::default() }).unwrap();
+        assert_eq!((&tastes.placement, tastes.captains.parallel), (&policy, 4), "a patch with other knobs sets both");
+        assert_eq!(
+            tastes.set(&site(), TastePatch { placement: Some(Placement::default()), ..TastePatch::default() }),
+            Err("placement belongs to the account: set it for Captains (all), not for one project".into())
+        );
+        let both = Placement { avoid: vec!["m-mini".into()], ..policy.clone() };
+        assert_eq!(tastes.set(&TasteScope::Captains, TastePatch { placement: Some(both), ..TastePatch::default() }), Err("machine m-mini is in both Prefer and Avoid; keep it in one".into()));
+        assert_eq!(tastes.placement, policy, "a refused change keeps the policy");
+        let stored = serde_json::to_value(&tastes).unwrap();
+        assert_eq!(stored["placement"], json!({ "prefer": ["m-mini"], "avoid": ["m-book"], "heavy": "worktree" }));
+        let mut older = stored.clone();
+        older.as_object_mut().unwrap().remove("placement");
+        assert_eq!(serde_json::from_value::<Tastes>(older).unwrap().placement, Placement::default(), "tastes kept before placement read with none");
+        tastes.reset(&TasteScope::Captains, TasteField::Placement);
+        assert_eq!((tastes.placement, tastes.captains.parallel), (Placement::default(), 4), "the reset clears the policy only");
     }
 }
