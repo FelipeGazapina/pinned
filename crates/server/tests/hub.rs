@@ -7201,7 +7201,7 @@ fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_
     origin.send(delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
     assert_eq!(reply_to(&mut origin, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
     origin.send(delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
-    assert_eq!(reply_to(&mut origin, 9)["err"], "mac-mini has no codex account that can run a worker; sign in there or pick another machine");
+    assert_eq!(reply_to(&mut origin, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
     while let Some(frame) = mini.try_text() {
         assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
     }
@@ -7231,7 +7231,7 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     assert_eq!(rows.iter().map(|row| row["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")]);
     let machines = capabilities_of(&bruno_home)["machines"].clone();
     assert_eq!(machines.as_array().unwrap().iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")], "{machines}");
-    assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("cursor"), "{machines}");
+    assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("grok-4.7") && !machines.to_string().contains("ana-mini"), "{machines}");
     let (raw_creds, _) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-raw");
     let mut origin = MachineSock::connect(&url, &raw_creds.machine_token, "0.17.24");
     origin.send(delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
