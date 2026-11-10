@@ -32,14 +32,26 @@ const KEEP_FINISHED: usize = 500;
 /// Finished tasks younger than this stay too, beyond `KEEP_FINISHED`.
 const KEEP_FINISHED_FOR_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 
+/// A finished task whose result no session took stays this long. Some never are: a task whose
+/// parent tab closed (tab ids do not outlive the process), a thread's own task, which `announces`
+/// nothing, and a grandchild whose headless parent ended before it read it.
+const KEEP_UNDELIVERED_FOR_MS: u64 = 60 * 24 * 60 * 60 * 1000;
+
 /// Drops the finished tasks that are not among the `newest` finished ones and are older than
 /// `max_age_ms`, and returns how many went. A task stays while it works, while its result has not
-/// reached the session that asked for it, and while a kept task still hangs under it, since a child's owner is found by walking up its parents.
-pub(super) fn prune(tasks: &mut Vec<Task>, now: u64, newest: usize, max_age_ms: u64) -> usize {
+/// reached the session that asked for it and is younger than `undelivered_ms`, and while a kept
+/// task still hangs under it, since a child's owner is found by walking up its parents.
+pub(super) fn prune(tasks: &mut Vec<Task>, now: u64, newest: usize, max_age_ms: u64, undelivered_ms: u64) -> usize {
     let ended = |task: &Task| task.ended.unwrap_or(task.started);
     let mut finished: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i].state.terminal()).collect();
     finished.sort_by_key(|&i| std::cmp::Reverse(ended(&tasks[i])));
-    let mut keep: Vec<bool> = tasks.iter().map(|task| !task.state.terminal() || !task.delivered || now.saturating_sub(ended(task)) < max_age_ms).collect();
+    let mut keep: Vec<bool> = tasks
+        .iter()
+        .map(|task| {
+            let age = now.saturating_sub(ended(task));
+            !task.state.terminal() || age < max_age_ms || (!task.delivered && age < undelivered_ms)
+        })
+        .collect();
     for &i in finished.iter().take(newest) {
         keep[i] = true;
     }
@@ -165,7 +177,7 @@ impl Delegates {
         *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
         *delegates.reports.lock().unwrap() = saved.reports;
         *delegates.notices.lock().unwrap() = saved.notices;
-        let pruned = prune(&mut delegates.tasks.lock().unwrap(), unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS) > 0;
+        let pruned = prune(&mut delegates.tasks.lock().unwrap(), unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS, KEEP_UNDELIVERED_FOR_MS) > 0;
         if delegates.adopt_restart() || pruned {
             delegates.persist();
         }
@@ -1368,7 +1380,7 @@ impl Delegates {
         let Some(path) = self.store.clone() else { return };
         let tasks = {
             let mut tasks = self.tasks.lock().unwrap();
-            prune(&mut tasks, unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS);
+            prune(&mut tasks, unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS, KEEP_UNDELIVERED_FOR_MS);
             tasks.iter().map(SavedTask::from_task).collect()
         };
         let saved = SavedFile {

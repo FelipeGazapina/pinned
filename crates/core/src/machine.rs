@@ -5576,8 +5576,13 @@ impl Machine {
             }
             self.record_turn(tab, &event);
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
-            if new_session || turn_ended {
-                self.refresh_stats_in_event(tab, turn_ended);
+            // A turn's gain in the transcript is small, so it is read here and the event's one list
+            // carries it. A new session's tally starts at 0, and a resumed conversation can be tens
+            // of MB: that read stays off the hook socket, which Claude waits on, and the list is sent again.
+            if turn_ended && !new_session {
+                self.refresh_stats_in_event(tab);
+            } else if new_session || turn_ended {
+                self.refresh_stats(tab, turn_ended);
             }
             self.maybe_deliver(tab);
             self.continue_when_limit_lifts(tab);
@@ -5758,13 +5763,13 @@ impl Machine {
         });
     }
 
-    /// Like `refresh_stats`, for a hook event whose own list is sent when the event ends: the
-    /// stats are read now, so that list carries them. Only a finished turn that its transcript has
-    /// not caught up with is waited for in the background, and sends the list again.
-    fn refresh_stats_in_event(&self, tab: &str, turn_ended: bool) {
+    /// Like `refresh_stats`, for the end of a turn in a hook event whose own list is sent when the
+    /// event ends: the stats are read now, so that list carries them. When the transcript has not
+    /// caught up with the turn, it is waited for in the background and the list is sent again.
+    fn refresh_stats_in_event(&self, tab: &str) {
         let before = self.tab(tab, |t| t.tally.turns).ok();
         let after = self.read_stats(tab);
-        if !turn_ended || after.is_none() || after != before {
+        if after.is_none() || after != before {
             return;
         }
         let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
@@ -6556,6 +6561,31 @@ pub(crate) mod tests {
         let lists = sent.lock().unwrap();
         let active = |list: &Vec<TabView>| list[0].stats.as_ref().and_then(|s| s.active_ms);
         assert_eq!((active(&lists[0]), active(&lists[1])), (None, Some(7000)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_session_event_returns_before_its_transcript_is_read_and_the_list_follows() {
+        let (m, dir, sent, account) = counting_machine("emits-new-session");
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        // A resumed conversation: tens of thousands of lines, with its one finished turn last.
+        let filler = format!("{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n", "x".repeat(400));
+        let transcript = projects.join("sess-1.jsonl");
+        std::fs::write(&transcript, filler.repeat(60_000) + "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":9000}\n").unwrap();
+        let reading = Instant::now();
+        Tally::default().advance(&transcript).unwrap();
+        let reading = reading.elapsed();
+
+        let event = AgentEvent { status: AgentStatus::Working, session: Some("sess-1".into()), ..done_event(&tab) };
+        let start = Instant::now();
+        m.record_event(event);
+        let returned = start.elapsed();
+        assert!(returned < reading / 2, "the event took {returned:?}, reading the transcript takes {reading:?}");
+        assert_eq!(lists_sent(&sent), 2, "the list at the event, and the list with the stats once they are read");
+        let lists = sent.lock().unwrap();
+        assert_eq!(lists[1][0].stats.as_ref().and_then(|s| s.active_ms), Some(9000));
         let _ = std::fs::remove_dir_all(dir);
     }
 

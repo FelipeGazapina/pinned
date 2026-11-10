@@ -1652,7 +1652,7 @@ grok-4.7-high - Grok 4.7  High
         }
         let mut tasks = delegates.tasks.lock().unwrap();
         // Newest 2 are t-1d and t-13d, and t-13d is also within 14 days: the 20, 30, 40 and 60 day tasks go.
-        assert_eq!(registry::prune(&mut tasks, NOW, 2, 14 * DAY), 4);
+        assert_eq!(registry::prune(&mut tasks, NOW, 2, 14 * DAY, 60 * DAY), 4);
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-13d", "t-1d"]);
         drop(tasks);
 
@@ -1662,14 +1662,15 @@ grok-4.7-high - Grok 4.7  High
         }
         let mut tasks = delegates.tasks.lock().unwrap();
         // Newest 4 are kept by count, which keeps more than the 14 days do.
-        assert_eq!(registry::prune(&mut tasks, NOW, 4, 14 * DAY), 2);
+        assert_eq!(registry::prune(&mut tasks, NOW, 4, 14 * DAY, 60 * DAY), 2);
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-30d", "t-20d", "t-13d", "t-1d"]);
     }
 
     #[test]
-    fn pruning_never_drops_a_task_that_works_or_whose_result_was_not_delivered_or_that_a_kept_one_hangs_under() {
+    fn pruning_keeps_what_works_what_a_kept_task_hangs_under_and_an_undelivered_result_for_sixty_days() {
         let delegates = Delegates::default();
-        finished(&delegates, "t-old-undelivered", 90, false);
+        finished(&delegates, "t-undelivered-61d", 61, false);
+        finished(&delegates, "t-undelivered-59d", 59, false);
         finished(&delegates, "t-old-parent", 90, true);
         finished(&delegates, "t-old-gone", 90, true);
         finished(&delegates, "t-old-child", 2, true);
@@ -1684,8 +1685,12 @@ grok-4.7-high - Grok 4.7  High
             tasks[at].ended = None;
         }
         let mut tasks = delegates.tasks.lock().unwrap();
-        assert_eq!(registry::prune(&mut tasks, NOW, 0, 14 * DAY), 1);
-        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-old-undelivered", "t-old-parent", "t-old-child", "t-old-working"], "only t-old-gone had nothing holding it");
+        assert_eq!(registry::prune(&mut tasks, NOW, 0, 14 * DAY, 60 * DAY), 2);
+        assert_eq!(
+            tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t-undelivered-59d", "t-old-parent", "t-old-child", "t-old-working"],
+            "the 61 day undelivered task and t-old-gone had nothing holding them"
+        );
     }
 
     #[test]
