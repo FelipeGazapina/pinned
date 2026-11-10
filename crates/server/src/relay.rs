@@ -210,7 +210,8 @@ async fn repo_look(hub: &Hub, account: &Account, from: Source<'_>, tab: &str, pr
         audit(AuditOutcome::Refused, "off for this account".into()).await;
         return Err(INSIGHT_OFF.into());
     }
-    if let Err(e) = account.repo_reads.lock().unwrap().take(Instant::now()) {
+    let taken = account.repo_reads.lock().unwrap().take(Instant::now());
+    if let Err(e) = taken {
         audit(AuditOutcome::Refused, e.clone()).await;
         return Err(e);
     }
@@ -285,10 +286,10 @@ async fn checkout(hub: &Hub, account: &Account, host: &str, project: &str, machi
         }
     }
     let online: Vec<&(&pinned_core::wire::MachineView, String)> = found.iter().filter(|(m, _)| m.online).collect();
-    let captain = |(m, path): &&(&pinned_core::wire::MachineView, String)| {
+    let captain = |(m, path): &(&pinned_core::wire::MachineView, String)| {
         account.tabs_of(&m.id).is_some_and(|tabs| tabs.iter().any(|t| t.role == Some(Role::Orchestrator) && t.running && t.cwd == *path))
     };
-    let chosen = online.iter().find(captain).or_else(|| online.iter().find(|(m, _)| m.id == host)).or_else(|| online.first());
+    let chosen = online.iter().find(|c| captain(c)).or_else(|| online.iter().find(|(m, _)| m.id == host)).or_else(|| online.first());
     match chosen {
         Some((m, path)) => Ok((m.id.clone(), m.name.clone(), path.clone())),
         None => match (named, found.first()) {
