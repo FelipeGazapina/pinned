@@ -12,7 +12,7 @@ const taste = () => {
   const context = {};
   vm.createContext(context);
   vm.runInContext(
-    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs };`,
+    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad };`,
     context,
   );
   return context.api;
@@ -221,4 +221,66 @@ test("project tabs: one per repo, named by the machine, plus repos only the tast
     { repo: "github.com/acme/infra", name: "infra" },
     { repo: SITE, name: "site" },
   ]);
+});
+
+const policy = (over = {}) => ({ prefer: [], avoid: [], heavy: "worktree", ...over });
+
+test("a machine joins Prefer or Avoid once, and never both", () => {
+  const { placementAdd } = taste();
+  const start = policy({ prefer: ["mini"], avoid: ["book"] });
+  assert.deepEqual(here(placementAdd(start, "prefer", "vps")), policy({ prefer: ["mini", "vps"], avoid: ["book"] }));
+  assert.deepEqual(here(placementAdd(start, "avoid", "mini")), start, "a preferred machine is not avoided as well");
+  assert.deepEqual(here(placementAdd(start, "prefer", "book")), start, "an avoided machine is not preferred as well");
+  assert.deepEqual(here(placementAdd(start, "prefer", "mini")), start, "a machine is not listed twice");
+  assert.deepEqual(here(placementAdd(start, "prefer", "")), start);
+});
+
+test("Prefer keeps its order, and a move at an end changes nothing", () => {
+  const { placementMove, placementRemove } = taste();
+  const start = policy({ prefer: ["a", "b", "c"], avoid: ["z"] });
+  assert.deepEqual(here(placementMove(start, "c", -1)).prefer, ["a", "c", "b"]);
+  assert.deepEqual(here(placementMove(start, "a", 1)).prefer, ["b", "a", "c"]);
+  assert.deepEqual(here(placementMove(start, "a", -1)), start);
+  assert.deepEqual(here(placementMove(start, "c", 1)), start);
+  assert.deepEqual(here(placementRemove(start, "prefer", "b")), policy({ prefer: ["a", "c"], avoid: ["z"] }));
+});
+
+test("a listed machine shows by name, and one the account lost shows struck out once the machines are known", () => {
+  const { placementMachines, placementRows, placementLoad } = taste();
+  const machines = placementMachines([
+    { id: "m1", name: "mac-mini", online: true, state: { workers: 2, workers_at_once: 5 } },
+    { id: "m2", name: "lypes-vps", online: false },
+    { id: "box", name: "a box", online: true, upstash_box: {} },
+    { name: "no id" },
+  ]);
+  assert.deepEqual(here(machines.map((m) => m.id)), ["m1", "m2"], "boxes and unidentified views are not machines");
+  const rows = placementRows(["m2", "m9", "m1"], machines);
+  assert.deepEqual(here(rows.map(({ name, online, gone }) => ({ name, online, gone }))), [
+    { name: "lypes-vps", online: false, gone: false },
+    { name: "m9", online: false, gone: true },
+    { name: "mac-mini", online: true, gone: false },
+  ]);
+  assert.deepEqual(here(placementRows(["m9"], [])).map((m) => m.gone), [false], "with no machine listed yet, nothing is called removed");
+  assert.deepEqual(rows.map(placementLoad), ["", "", "2 of 5 workers"]);
+});
+
+test("a changed policy saves in the Captains' call, beside their other changes, and an unchanged one saves nothing", () => {
+  const { tasteSaveCalls, tasteSetField } = taste();
+  const saved = { ...defaults(), placement: policy({ prefer: ["mini"] }) };
+  assert.deepEqual(here(tasteSaveCalls(saved, JSON.parse(JSON.stringify(saved)))), []);
+  const moved = { ...saved, placement: policy({ prefer: ["mini", "vps"], avoid: ["book"], heavy: "all_workers" }) };
+  assert.deepEqual(here(tasteSaveCalls(saved, moved)), [{ cmd: "set_taste", scope: captains, patch: { placement: moved.placement } }]);
+  const both = tasteSetField(moved, captains, "parallel", 4);
+  assert.deepEqual(here(tasteSaveCalls(saved, both)), [{ cmd: "set_taste", scope: captains, patch: { parallel: 4, placement: moved.placement } }]);
+  assert.deepEqual(here(tasteSaveCalls(defaults(), defaults())), [], "a hub that sends no policy saves none");
+});
+
+test("a rebase keeps an unsaved policy over what another device saved", () => {
+  const { tasteRebase, tasteSetField } = taste();
+  const saved = { ...defaults(), placement: policy() };
+  const draft = { ...saved, placement: policy({ avoid: ["book"] }) };
+  const fresh = { ...tasteSetField(saved, captains, "parallel", 6), placement: policy({ prefer: ["mini"] }) };
+  const rebased = tasteRebase(saved, draft, fresh);
+  assert.deepEqual(here(rebased.placement), policy({ avoid: ["book"] }));
+  assert.equal(rebased.captains.parallel, 6);
 });
