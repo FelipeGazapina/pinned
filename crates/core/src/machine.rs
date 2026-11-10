@@ -8585,7 +8585,7 @@ Deploys go through the VPS.";
 
         let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&global_tab, 80, 24).unwrap();
-        let orchestrator_brief = "Run up to 6 workers at once.
+        let orchestrator_brief = "Run up to 8 workers at once.
 Start each worker on claude-opus-5-5 directly, without trying a cheaper model first.
 Send hard work, such as architecture calls or a bug whose cause is unknown, straight to claude-opus-5-5.
 Tell the user only at the end, with the result.
