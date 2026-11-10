@@ -199,7 +199,7 @@ const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#
   await page.screenshot({ path: path.join(SCREENS, "surface-notice-desktop.png") });
 
   await page.click(`#thread-list .agent-confirm[data-confirmation="${invite.id}"] [data-agent=approve]`);
-  const code = await waitFor("the invite's code for the user", () => page.evaluate(() => document.querySelector("#thread-list .agent-invite code")?.textContent));
+  const code = await waitFor("the invite's code for the user", () => page.evaluate(() => document.querySelector("#thread-list .agent-once code")?.textContent));
   check(/^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/.test(code), `the user sees the invite code: ${code}`);
   const invited = `[pinned] The user approved your create_invite request (${invite.id}): done.`;
   await waitFor("the invite's notice in the agent's thread", () => page.evaluate((t) => document.querySelector("#thread")?.innerText.includes(t), invited), 45000);

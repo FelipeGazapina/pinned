@@ -5284,7 +5284,8 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
     assert_eq!(approve(&mut bob.client, &linear, json!({ "key": "lin_api_bobsguess" })), Err(format!("no confirmation {} waits", linear.as_str().unwrap())), "bob's app can't decide ana's");
     assert_eq!(waiting_actions(&mut ana.client), ["connect_linear"], "ana's still waits for her");
-    assert_eq!(ana.client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].as_array().unwrap().len(), 2, "ana's invites still work");
+    let unused = ana.client.hub(json!({ "cmd": "invites" })).unwrap()["pending"].clone();
+    assert_eq!(unused.as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(), [anas_invite.as_str()], "ana's unused invite still works: {unused}");
     assert_eq!(ana.client.hub(json!({ "cmd": "external_agents" })).unwrap()["agents"].as_array().unwrap().len(), 1, "ana's agent is still in");
     assert_eq!(vps_raw.calls("update_self"), 0, "ana's vps heard none of bob's");
 

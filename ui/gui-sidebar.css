@@ -315,8 +315,8 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .agent-once { flex: none; display: flex; flex-direction: column; gap: 4px; margin: 2px 0; padding: 8px; border: 1px solid rgb(var(--g-primary-rgb) / 0.4);
   border-radius: 8px; background: rgb(var(--g-primary-rgb) / 0.06); color: var(--g-side-fg); }
 .agent-once b { font-size: 13px; font-weight: 600; }
-.agent-once .row { margin-top: 2px; }
-.agent-once code { flex: 1; min-width: 0; font-size: 13px; letter-spacing: 0.04em; }
+.agent-once .row { margin-top: 2px; flex-wrap: wrap; }
+.agent-once code { flex: 1 1 100%; min-width: 0; font-size: 13px; letter-spacing: 0.04em; }
 @media (pointer: coarse) { :is(.agent-confirm, .agent-once) button { min-height: 40px; } }
 
 /* The inbox by project: a heading, then each project's head above its Captain, workers and threads. */
