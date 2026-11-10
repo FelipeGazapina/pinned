@@ -32158,7 +32158,7 @@
                 "format": "int64"
               },
               "expires_at": {
-                "description": "Unix seconds.",
+                "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
                 "type": "integer",
                 "format": "int64"
               }
@@ -32228,7 +32228,7 @@
                 "format": "int64"
               },
               "expires_at": {
-                "description": "Unix seconds.",
+                "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
                 "type": "integer",
                 "format": "int64"
               }
@@ -32761,7 +32761,7 @@
             "type": "string"
           },
           "expires_at": {
-            "description": "Unix seconds.",
+            "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
             "type": "integer",
             "format": "int64"
           }
@@ -32785,7 +32785,7 @@
             "type": "string"
           },
           "expires_at": {
-            "description": "Unix seconds.",
+            "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
             "type": "integer",
             "format": "int64"
           }
