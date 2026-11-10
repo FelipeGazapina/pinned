@@ -38,9 +38,7 @@ const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", 
  * manual settles and un-settles, snoozes, renames, and threads kept out of auto-settle. */
 const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
 try {
-  const saved = JSON.parse(load("gui-marks")) ?? {};
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) sideMarks[m] = sessionsOnly(saved[m]);
-  for (const m of ["pins", "order"]) sideMarks[m] = (saved[m] ?? []).filter((k) => k.startsWith("session:"));
+  Object.assign(sideMarks, storedSideMarks(JSON.parse(load("gui-marks"))));
 } catch {}
 const saveMarks = () => storeMarks("gui-marks");
 onRekey((from, to) => {
@@ -73,10 +71,13 @@ try {
   archived = JSON.parse(load("gui-archived")) ?? [];
 } catch {}
 const saveArchived = () => storeMarks("gui-archived");
-/** Marks, seen times and the archive live on the account's hub once it keeps them (marks.js), and in
- * this browser's storage before that, with an older hub, and signed out. */
+/** Marks, seen times and the archive live on the account's hub once it keeps them (marks.js), and
+ * always in this browser's storage too. */
 const MARK_STORES = { "gui-marks": () => sideMarks, "gui-archived": () => archived, "gui-seen": () => seenAt };
-const storeMarks = (key) => marksHub.saved() || save(key, JSON.stringify(MARK_STORES[key]()));
+const storeMarks = (key) => {
+  save(key, JSON.stringify(MARK_STORES[key]()));
+  marksHub.saved();
+};
 const marksHub = marksSync({
   read: () => ({ sideMarks, seenAt, archived: archived.map((entry) => ({ ...entry, machine: hubIdOf(entry.machine) })) }),
   write(state) {
@@ -86,9 +87,9 @@ const marksHub = marksSync({
     seenAt = state.seenAt;
     archived = state.archived.map((entry) => ({ ...entry, machine: localIdOf(entry.machine) }));
   },
-  stored: () => Object.keys(MARK_STORES).some((key) => load(key) != null),
   persist: () => Object.keys(MARK_STORES).forEach((key) => save(key, JSON.stringify(MARK_STORES[key]()))),
-  unstore: () => Object.keys(MARK_STORES).forEach((key) => save(key, null)),
+  load,
+  save,
   call: (call) => (hub ? hub.hub(call) : Promise.reject("not connected to the hub")),
   changed() {
     render();
