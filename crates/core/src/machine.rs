@@ -8999,8 +8999,11 @@ Have another model review a risky change before it goes ahead.";
         titling_claude(&claude);
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
         let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        // The tab runs under an added account, whose home is in the test's folder: the built-in one is the real ~/.claude.
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Spare".into(), auth: None, key: None }).unwrap();
         let tab = m.open_tab(Some(path.clone()), false).unwrap();
-        m.tab(&tab, |t| t.model = Some("claude-haiku-5-5".into())).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| (t.account, t.model) = (work, Some("claude-haiku-5-5".into()))).unwrap();
         assert_eq!(act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
         let first = started(&claude, &tab);
         assert!(!first.iter().any(|a| a == "--dangerously-skip-permissions"), "{first:?}");
@@ -9055,10 +9058,10 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(transcripts(), 3);
         assert_ne!(m.tab(&tab, |t| t.claude_session.clone()).unwrap().as_deref(), Some("sess-1"));
 
-        assert_eq!(act(json!({ "cmd": "switch_account", "tab": tab, "account": "work", "cols": 80, "rows": 24 })), Ok(json!(path)));
+        assert_eq!(act(json!({ "cmd": "switch_account", "tab": tab, "account": "spare", "cols": 80, "rows": 24 })), Ok(json!(path)));
         let moved = started(&claude, &tab);
-        assert_eq!(m.tab(&tab, |t| t.account.id.clone()).unwrap(), "work");
-        assert!(moved[3].ends_with("accounts/work"), "it runs under the other account now: {moved:?}");
+        assert_eq!(m.tab(&tab, |t| t.account.id.clone()).unwrap(), "spare");
+        assert!(moved[3].ends_with("accounts/spare"), "it runs under the other account now: {moved:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
