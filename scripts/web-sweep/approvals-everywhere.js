@@ -46,6 +46,8 @@ function startMini() {
   const home = path.join(DIR, "home2");
   const config = path.join(DIR, "node2");
   const alpha = path.join(home, "pinned", "alpha");
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(config, { recursive: true, force: true });
   fs.mkdirSync(alpha, { recursive: true });
   execFileSync("git", ["-C", alpha, "init", "-q"]);
   execFileSync("git", ["-C", alpha, "remote", "add", "origin", ALPHA]);
