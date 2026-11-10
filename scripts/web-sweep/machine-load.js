@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Settings › Machines with load and accounts (issue #151): a second node joins the stack, the first
-// gets an extra account (bloom) that the second lacks, and the page must show each machine's
-// workers, CPU, memory, disk and accounts, with the extra account on one machine only. Screenshots at
+// Settings › Machines with load and accounts (issue #151): a second node joins the stack with no
+// claude program, and the page must show each machine's workers, CPU, memory, disk and accounts, with
+// claude ready on the stack's node and not ready on the second. Screenshots at
 // 1440x900 and 390x844 go to $SWEEP_DIR/screens/machine-load-*.png.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
@@ -33,7 +33,8 @@ function startMini() {
   const home = path.join(DIR, "home-mini");
   const config = path.join(DIR, "node-mini");
   fs.mkdirSync(home, { recursive: true });
-  const env = { ...process.env, HOME: home, SHELL: path.join(DIR, "bin", "shell"), PATH: `${path.join(DIR, "bin")}:${process.env.PATH}` };
+  // No fake claude on its PATH, so this machine has the account but can't run a worker with it.
+  const env = { ...process.env, HOME: home, SHELL: "/bin/sh", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
   for (const key of ["PINNED_SOCK", "PINNED_TASK", "PINNED_ACCOUNT", "PINNED_TAB", "CLAUDE_CONFIG_DIR"]) delete env[key];
   execFileSync(SERVER, ["login", HUB, "sweep@example.test", "--name", "sweep-mini", "--config-dir", config], { env: { ...env, PINNED_PASSWORD: "sweep password 1" }, stdio: "ignore" });
   const log = fs.openSync(path.join(DIR, "node-mini.log"), "a");
@@ -78,26 +79,18 @@ const rows = (page) =>
       await page.evaluate(() => setMode("gui"));
       console.log(`${device}: signed in`);
       await waitFor("two online machines", () => page.evaluate(() => [...machines.values()].filter((m) => m.view.online).length >= 2));
-      if (device === "desktop") {
-        // Accounts, as go-account.js drives it: the login path adds an account on one machine only.
-        await page.click("#gui-settings");
-        await page.click('#settings-nav [data-page="accounts"]');
-        await page.waitForSelector("#account-list .card", { timeout: 15000 });
-        await page.fill(".add-account [name=name]", "Bloom");
-        await page.click(".add-account .primary");
-        await page.waitForSelector('#account-list .card[data-account="bloom"]', { timeout: 15000 });
-      }
       console.log(`${device}: machines online`);
       await page.evaluate(() => openSettings("machines"));
-      await waitFor("both machines' state and the extra account", async () => {
+      await waitFor("both machines' state and accounts", async () => {
         await page.evaluate(() => hub.hub({ cmd: "machines" }).then((list) => showMachines(list, null)));
         const shown = await rows(page);
-        return shown.filter((r) => r.stats.length >= 3 && r.accounts.length).length === 2 && shown.some((r) => r.accounts.includes("bloom"));
+        return shown.filter((r) => r.stats.length >= 3 && r.accounts.length).length >= 2;
       });
       const shown = await rows(page);
       console.log(JSON.stringify(shown));
-      const withBloom = shown.filter((r) => r.accounts.includes("bloom")).map((r) => r.name);
-      check(withBloom.length === 1, `${device}: bloom shows on one machine only (${withBloom})`);
+      const claudeOff = shown.filter((r) => r.accounts.includes("claude · not ready")).map((r) => r.name);
+      const claudeReady = shown.filter((r) => r.accounts.includes("claude")).map((r) => r.name);
+      check(claudeOff.join() === "sweep-mini" && claudeReady.join() === "sweep-node", `${device}: claude is ready on ${claudeReady} and not ready on ${claudeOff}`);
       check(shown.every((r) => /^Workers \d+ of \d+/.test(r.stats[0]) && r.stats.some((s) => s.startsWith("CPU ")) && r.stats.some((s) => s.startsWith("Disk "))), `${device}: each machine shows workers, CPU and disk`);
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       check(!overflow, `${device}: the page does not scroll sideways`);
