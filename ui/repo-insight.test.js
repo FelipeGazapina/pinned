@@ -39,7 +39,7 @@ test("turning it on sends set_repo_insight and keeps what the hub saved", async 
   context.bindRepoInsight();
   input.checked = true;
   await input.onchange();
-  assert.deepEqual(calls, [{ cmd: "set_repo_insight", settings: { on: true } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ cmd: "set_repo_insight", settings: { on: true } }]);
   assert.equal(context.settings.repo_insight.on, true);
 });
 
