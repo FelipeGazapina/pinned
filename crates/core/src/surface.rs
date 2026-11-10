@@ -776,7 +776,7 @@ pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
     }
 }
 
-fn secret_name(name: &str, sending: bool) -> bool {
+pub(crate) fn secret_name(name: &str, sending: bool) -> bool {
     let name = name.to_ascii_lowercase();
     ["token", "password", "secret", "secrets", "api_key", "claude_token"].contains(&name.as_str())
         || ["_token", "_secret", "_password"].iter().any(|end| name.ends_with(end))

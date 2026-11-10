@@ -117,6 +117,32 @@ fn origin_of(url: &str) -> Option<String> {
     (!scheme.is_empty() && !host.is_empty()).then(|| format!("{}://{host}", scheme.to_ascii_lowercase()))
 }
 
+/// Whether `name`, a flag's or a query parameter's, is a secret's name, as `API-Key` is.
+fn secret_flag(name: &str) -> bool {
+    crate::surface::secret_name(&name.to_ascii_lowercase().replace('-', "_"), true)
+}
+
+/// Whether `args` hand a secret to the server: `--token=x` or `-token=x` with a value, or a secret's
+/// flag followed by a further argument.
+fn args_hold_key(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(at, arg)| {
+        let Some(flag) = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-')) else { return false };
+        match flag.split_once('=') {
+            Some((name, value)) => secret_flag(name) && !value.trim().is_empty(),
+            None => secret_flag(flag) && at + 1 < args.len(),
+        }
+    })
+}
+
+/// Whether `url` carries a user and password before its host, or a query parameter with a secret's
+/// name and a value.
+fn url_holds_key(url: &str) -> bool {
+    let Some((_, rest)) = url.trim().split_once("://") else { return false };
+    let (authority, tail) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+    let query = tail.split('#').next().and_then(|before| before.split_once('?')).map_or("", |(_, query)| query);
+    authority.contains('@') || query.split('&').any(|pair| pair.split_once('=').is_some_and(|(name, value)| secret_flag(name) && !value.trim().is_empty()))
+}
+
 /// How pinned starts or reaches a server of the account's list, as Claude Code's own config
 /// names it. Environment and header values are secrets, so only their names are here.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -241,11 +267,13 @@ impl Spec {
         if self.project.as_deref().is_some_and(|p| p.trim().is_empty() || p.trim() != p) {
             return Err("a project is its repository, as github.com/owner/repo".into());
         }
+        let mut keyed = false;
         let shown: Vec<&str> = match &self.transport {
             Reach::Stdio { command, args, .. } => {
                 if command.trim().is_empty() {
                     return Err(format!("{name} runs no command"));
                 }
+                keyed = args_hold_key(args);
                 std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect()
             }
             Reach::Http { url, .. } | Reach::Sse { url, .. } => {
@@ -253,10 +281,11 @@ impl Spec {
                 if !matches!(scheme.as_deref(), Some("http" | "https")) || origin_of(url).is_none() {
                     return Err(format!("{name}'s URL must start with http:// or https://"));
                 }
+                keyed = url_holds_key(url);
                 vec![url.as_str()]
             }
         };
-        if shown.iter().any(|text| crate::surface::mask_secrets(text) != *text) {
+        if keyed || shown.iter().any(|text| crate::surface::mask_secrets(text) != *text) {
             return Err(format!("{name} holds a key in its command, arguments or URL, which lists show: put it in an environment variable or a header"));
         }
         let (kind, names) = self.transport.secrets();
@@ -617,6 +646,49 @@ mod tests {
         assert_eq!(refused(stdio("ctx", None, &["1KEY"])), "ctx: \"1KEY\" is not a valid environment variable name");
         assert_eq!(refused(http("lin", &["Bad Header"])), "lin: \"Bad Header\" is not a valid header name");
         assert_eq!(refused(http("lin", &["X-A", "x-a"])), "lin names x-a twice");
+    }
+
+    #[test]
+    fn a_key_in_a_flag_or_a_url_is_refused_and_ordinary_arguments_are_not() {
+        const REFUSAL: &str = "srv holds a key in its command, arguments or URL, which lists show: put it in an environment variable or a header";
+        let args = |args: &[&str]| Spec { transport: Reach::Stdio { command: "srv".into(), args: args.iter().map(|a| a.to_string()).collect(), env: vec![] }, ..stdio("srv", None, &[]) };
+        let url = |url: &str| Spec { transport: Reach::Http { url: url.into(), headers: vec![] }, ..http("srv", &[]) };
+        let refused: &[Spec] = &[
+            args(&["--token", "3f9a8c1e77d2"]),
+            args(&["--api-key=3f9a8c1e77d2"]),
+            args(&["--password", "hunter2"]),
+            args(&["-y", "-secret=abc"]),
+            args(&["--Client-Secret", "abc", "--root", "/srv"]),
+            args(&["--auth_token=abc"]),
+            args(&["--key", "abc"]),
+            url("https://mcp.example.com/mcp?api_key=3f9a8c1e77d2"),
+            url("https://mcp.example.com/mcp?region=eu&token=abc"),
+            url("https://mcp.example.com/mcp?Access-Token=abc#top"),
+            url("https://mcp.example.com?client-secret=abc"),
+            url("https://user:pw@mcp.example.com/mcp"),
+            url("https://user@mcp.example.com"),
+        ];
+        for spec in refused {
+            assert_eq!(spec.check(), Err(REFUSAL.to_owned()), "{:?}", spec.transport);
+        }
+        let allowed: &[Spec] = &[
+            args(&["-y", "@acme/ctx"]),
+            args(&["--root", "/srv"]),
+            args(&["--region", "eu"]),
+            args(&["--token"]),
+            args(&["--api-key="]),
+            args(&["--token=", "--root", "/srv"]),
+            args(&["--tokens=2", "--keyboard", "us"]),
+            url("https://mcp.linear.app/mcp"),
+            url("https://x.dev/sse?workspace=acme"),
+            url("https://x.dev/sse?token="),
+            url("https://x.dev/sse?token"),
+            url("https://x.dev/sse#token=abc"),
+            url("https://x.dev/me@home/mcp"),
+        ];
+        for spec in allowed {
+            assert_eq!(spec.check(), Ok(()), "{:?}", spec.transport);
+        }
     }
 
     #[test]

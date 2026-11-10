@@ -190,3 +190,14 @@ test("a server with no secrets is approved by saving it, and an import of a serv
   await flush();
   assert.match(dom["settings-page"].innerHTML, /<p class="error" id="mcp-form-error">work on MacBook has no MCP server gone<\/p>/);
 });
+
+test("the form shows the hub's refusal of a server that carries a key, and keeps what was typed", async () => {
+  const refusal = "files holds a key in its command, arguments or URL, which lists show: put it in an environment variable or a header";
+  const { context, calls, dom, state } = app({ answer: async (call) => { if (call.cmd === "save_mcp_server") throw refusal; return []; } });
+  vm.runInContext(`page = "mcp-servers"; mcpUi.form = { id: null, server: { name: "", transport: { type: "stdio", command: "", env: [] } } }`, context);
+  dom["mcp-form"] = mcpForm({ name: "files", project: "", type: "stdio", command: "files-mcp", args: "--token\n3f9a8c1e77d2", url: "", names: "" }, {});
+  await context.mcpSave();
+  assert.deepEqual(here(calls.find((c) => c.cmd === "save_mcp_server").server), { name: "files", transport: { type: "stdio", command: "files-mcp", args: ["--token", "3f9a8c1e77d2"], env: [] } });
+  assert.match(dom["settings-page"].innerHTML, new RegExp(`<p class="error" id="mcp-form-error">${refusal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</p>`));
+  assert.equal(state("mcpUi.form.server.transport.command"), "files-mcp", "the form stays open with the server as typed");
+});
