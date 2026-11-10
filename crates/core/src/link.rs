@@ -219,8 +219,16 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
-    let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    Syncer::default().run(shared, machine, &file, stopped);
+    let file = machine.sync_file().map(Path::to_path_buf);
+    Syncer::default().run(shared, machine, file.as_deref(), stopped);
+}
+
+/// Tells the hub how busy this machine is and which accounts it has. Blocks while it reads the
+/// tastes and the catalogs, so only a thread of its own calls it.
+fn report_state(shared: &Shared, machine: &Machine) {
+    if shared.online() {
+        shared.send(&MachineFrame::Event { event: MachineEvent::State { state: machine.report_state() } });
+    }
 }
 
 #[derive(Default)]
@@ -232,7 +240,7 @@ struct Syncer {
 }
 
 impl Syncer {
-    fn run(mut self, shared: &Shared, machine: &Machine, file: &Path, stopped: &watch::Receiver<bool>) {
+    fn run(mut self, shared: &Shared, machine: &Machine, file: Option<&Path>, stopped: &watch::Receiver<bool>) {
         let mut wait = SYNC_FIRST;
         'run: loop {
             let until = Instant::now() + wait;
@@ -247,7 +255,10 @@ impl Syncer {
             }
             wait = SYNC_EVERY;
             if shared.online() {
-                self.cycle(shared, machine, file);
+                report_state(shared, machine);
+                if let Some(file) = file {
+                    self.cycle(shared, machine, file);
+                }
             }
         }
         if let Some(state) = self.state.as_mut() {
@@ -414,10 +425,12 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     *shared.out.lock().unwrap() = Some(out.clone());
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
-    let sharing = machine.clone();
+    let (sharing, reporting) = (machine.clone(), shared.clone());
     std::thread::spawn(move || {
         sharing.share_tastes_again();
         sharing.send_records();
+        sharing.warm_statuses();
+        report_state(&reporting, &sharing);
     });
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
     for (account, usage) in machine.usage() {
@@ -711,7 +724,7 @@ mod tests {
         syncer.cycle(&shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         let (_stop, stopped) = watch::channel(true);
-        syncer.run(&shared, &machine, &file, &stopped);
+        syncer.run(&shared, &machine, Some(&file), &stopped);
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         let _ = std::fs::remove_dir_all(dir);
@@ -724,7 +737,7 @@ mod tests {
         drop(stop);
         let (ended, done) = mpsc::channel();
         std::thread::spawn(move || {
-            Syncer::default().run(&shared, &machine, &file, &stopped);
+            Syncer::default().run(&shared, &machine, Some(&file), &stopped);
             let _ = ended.send(());
         });
         assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok(()));
