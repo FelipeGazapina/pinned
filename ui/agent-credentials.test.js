@@ -129,7 +129,7 @@ test("Approve on connect_linear opens the Connectors page's Linear form, says wh
   assert.equal(state("page"), "integrations");
   assert.match(
     dom["settings-page"].innerHTML,
-    /<p class="agent-asking" id="agent-asking" role="status">Asked by Wire up the tracker on MacBook\. Entering the key here approves it\.\s*<button type="button" class="secondary" data-action="cancel-agent-approval">Cancel<\/button><\/p><ol class="steps">/,
+    /<p class="agent-asking" id="agent-asking" role="status">Asked by “Wire up the tracker” on MacBook\. Entering the key here approves it\.\s*<button type="button" class="secondary" data-action="cancel-agent-approval">Cancel<\/button><\/p><ol class="steps">/,
   );
   assert.match(dom["settings-page"].innerHTML, /<input id="linear-key" type="password" placeholder="lin_api_…" autocomplete="off">/);
   assert.equal(dom["linear-key"].focused, true);
@@ -204,7 +204,7 @@ test("Approve on set_account_key opens that machine's Accounts page with the rep
   assert.match(dom["settings-page"].innerHTML, /<button class="chip active" data-action="accounts-machine" data-machine="imac-id">iMac<\/button>/);
   assert.match(
     dom["account-list"].innerHTML,
-    /<div class="card" data-account="go-work">[\s\S]*<div class="replace-key"><p class="agent-asking" id="agent-asking" role="status">Asked by Wire up the tracker on MacBook\. Entering the key here approves it\.[\s\S]*<input name="key" type="password" placeholder="oc_sk_\.\.\."/,
+    /<div class="card" data-account="go-work">[\s\S]*<div class="replace-key"><p class="agent-asking" id="agent-asking" role="status">Asked by “Wire up the tracker” on MacBook\. Entering the key here approves it\.[\s\S]*<input name="key" type="password" placeholder="oc_sk_\.\.\."/,
   );
   const input = { value: "oc_sk_new" };
   const card = { dataset: { account: "go-work" }, querySelector: (selector) => (selector === "[name=key]" ? input : element()) };
@@ -220,7 +220,7 @@ test("Approve on add_account fills the Add an account form with the name and pro
   context.onAgentConfirmations([{ ...asked, action: "add_account", args: { provider: "claude", name: "Side Go", auth: "opencode-go" } }]);
   await click(context, "approve", "c-5");
   const html = dom["settings-page"].innerHTML;
-  assert.match(html, /<p class="agent-asking" id="agent-asking" role="status">Asked by Wire up the tracker on MacBook\. Entering the key here approves it\./);
+  assert.match(html, /<p class="agent-asking" id="agent-asking" role="status">Asked by “Wire up the tracker” on MacBook\. Entering the key here approves it\./);
   assert.match(html, /<select name="provider" disabled><option value="claude">Claude Code<\/option><option value="codex">Codex<\/option><option value="cursor">Cursor<\/option><option value="opencode-go" selected>OpenCode Go<\/option><\/select>/);
   assert.match(html, /<input name="name" placeholder="Work" autocomplete="off" spellcheck="false" value="Side Go" readonly>/);
   Object.assign(form.provider, { value: "opencode-go" });
@@ -238,7 +238,7 @@ test("an add_account without a key says adding approves it, and sends entered em
   const { context, calls, dom, form } = app({ answer: async () => ({ decision: "approved", outcome: "done", result: added }) });
   context.onAgentConfirmations([{ ...asked, action: "add_account", args: { provider: "codex", name: "Side" } }]);
   await click(context, "approve", "c-5");
-  assert.match(dom["settings-page"].innerHTML, /Asked by Wire up the tracker on MacBook\. Adding the account here approves it\./);
+  assert.match(dom["settings-page"].innerHTML, /Asked by “Wire up the tracker” on MacBook\. Adding the account here approves it\./);
   assert.match(dom["settings-page"].innerHTML, /<option value="codex" selected>Codex<\/option>/);
   Object.assign(form.provider, { value: "codex" });
   Object.assign(form.name, { value: "Side" });
