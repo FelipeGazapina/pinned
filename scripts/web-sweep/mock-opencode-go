@@ -8,7 +8,8 @@
 //   "delay:<ms>"  waits <ms> before the first byte, then streams
 // It also takes `gapMs` (pause between streamed events) and `preview` (each option of the
 // question carries a preview). GET /mock/log lists every Messages request the mock answered.
-// GO_MOCK_FIRST (comma-separated) and GO_MOCK_GAP_MS set the same at start.
+// GO_MOCK_FIRST (comma-separated) and GO_MOCK_GAP_MS set the same at start. GO_MOCK_WEEKLY (percent,
+// default 18) and GO_MOCK_WEEKLY_SECS (seconds to the reset, default 86400) set the weekly window.
 const http = require("http");
 
 const port = Number(process.argv[2] || 8798);
@@ -17,7 +18,7 @@ const MODELS = [
   { id: "kimi-k3", name: "Kimi K3" },
   { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
 ];
-const meter = (percent, seconds) => ({ status: "ok", percent, resetsAt: new Date(Date.now() + seconds * 1000).toISOString() });
+const meter = (percent, seconds) => ({ status: percent >= 100 ? "rate-limited" : "ok", percent, resetsAt: new Date(Date.now() + seconds * 1000).toISOString() });
 const script = {
   first: (process.env.GO_MOCK_FIRST || "").split(",").filter(Boolean),
   gapMs: Number(process.env.GO_MOCK_GAP_MS || 350),
@@ -210,7 +211,7 @@ http
         JSON.stringify({
           usage: {
             rolling: meter(42, 3600),
-            weekly: meter(18, 86400),
+            weekly: meter(Number(process.env.GO_MOCK_WEEKLY ?? 18), Number(process.env.GO_MOCK_WEEKLY_SECS ?? 86400)),
             monthly: meter(80, 864000),
           },
         }),

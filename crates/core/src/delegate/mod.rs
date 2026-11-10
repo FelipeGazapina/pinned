@@ -382,11 +382,21 @@ pub struct Task {
     pub effort: Option<String>,
     /// The limit that stopped it, when one did.
     pub limit: Option<String>,
+    /// Where it was asked to run, when a usage limit moved it elsewhere.
+    pub moved: Option<Moved>,
     pub review: Option<Review>,
     /// The thread's tab, kept for the record after the tab is gone.
     pub thread_tab: Option<String>,
     /// The hub holds this task's record as it is now.
     pub recorded: bool,
+}
+
+/// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Moved {
+    pub account: AccountId,
+    pub model: Option<String>,
+    pub reason: String,
 }
 
 /// Where a task delegated to another machine or a box runs.
@@ -490,12 +500,14 @@ pub struct SpawnSpec<'a> {
 
 mod catalog;
 mod drivers;
+mod limited;
 mod metrics;
 mod registry;
 mod request;
 
 pub use catalog::*;
 pub use drivers::*;
+pub use limited::*;
 pub use metrics::*;
 pub use registry::*;
 pub use request::*;
@@ -922,6 +934,7 @@ grok-4.7-high - Grok 4.7  High
                 signed_in: true,
                 bin_found: true,
                 limited: false,
+                limit: None,
                 models: provider_models(Provider::Claude),
                 constraints: vec![],
             },
@@ -932,6 +945,7 @@ grok-4.7-high - Grok 4.7  High
                 signed_in: false,
                 bin_found: false,
                 limited: false,
+                limit: None,
                 models: vec![],
                 constraints: codex_constraints(),
             },
@@ -942,6 +956,7 @@ grok-4.7-high - Grok 4.7  High
                 signed_in: true,
                 bin_found: true,
                 limited: true,
+                limit: None,
                 models: cursor_models(
                     "grok-4.7-high - Grok 4.7  High\ncomposer-2.5 - Composer 2.5\n",
                 ),
@@ -1007,6 +1022,7 @@ grok-4.7-high - Grok 4.7  High
             signed_in: true,
             bin_found: true,
             limited: false,
+            limit: None,
             models: provider_models(Provider::Claude),
             constraints: vec![],
         }];

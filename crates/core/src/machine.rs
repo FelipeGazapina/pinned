@@ -1,5 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
-use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
@@ -1449,6 +1449,9 @@ impl Machine {
         let mut view = accounts::View::new(account, status);
         if view.account.provider == Provider::Claude && view.account.auth != Auth::OpenCodeGo {
             view.models = self.claude_models();
+        }
+        if let Some((limit, true)) = self.standing(&view.account) {
+            (view.limited, view.limit_reason, view.limit_resume_at) = (true, Some(limit.reason), limit.resume_at);
         }
         view
     }
@@ -3668,22 +3671,8 @@ impl Machine {
         if account.auth != Auth::OpenCodeGo {
             return;
         }
-        let Some(key) = self.accounts.key(&account) else { return };
-        let now = Instant::now();
-        {
-            let mut refreshed = self.usage_refreshed.lock().unwrap();
-            if refreshed.get(&account.id).is_some_and(|at| now.duration_since(*at) < Duration::from_secs(15)) {
-                return;
-            }
-            refreshed.insert(account.id.clone(), now);
-        }
         let Some(machine) = self.me.upgrade() else { return };
-        let id = account.id.clone();
-        std::thread::spawn(move || {
-            if let Ok(usage) = crate::opencode_go::usage(&key) {
-                machine.record_usage(id, usage);
-            }
-        });
+        std::thread::spawn(move || machine.fetch_go_usage(&account));
     }
 
     /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
@@ -4157,6 +4146,61 @@ impl Machine {
         self.launch_child(side, None, request)
     }
 
+    /// Moves a task off an account a usage limit stopped. It goes to the next rung of the
+    /// project's model ladder that runs on an account that can take it, the rungs after the model
+    /// it asked for, or from the start when that model is not on the ladder or none was asked. The
+    /// move is returned for the task's record. With no rung left the task fails and names the
+    /// limited accounts.
+    fn route_around_limits(&self, account: Account, model: Option<String>, limits: &taste::Limits, cwd: &Path, effort: Option<&str>) -> Result<(Account, Option<String>, Option<crate::delegate::Moved>), String> {
+        use crate::delegate::{Admit, Moved};
+        let blocked = match self.admit_account(&account) {
+            Admit::Open | Admit::Trial => return Ok((account, model, None)),
+            Admit::Blocked(limit) => limit,
+        };
+        let ladder = self.tastes().resolve(&captain_scope(&history::project_of(cwd))).ladder;
+        let from = model.as_deref().and_then(|asked| ladder.iter().position(|rung| rung.model == asked)).map_or(0, |at| at + 1);
+        let claude = self.claude_models();
+        for rung in &ladder[from..] {
+            if limits.admit(Some(&rung.model), effort, &claude).is_err() {
+                continue;
+            }
+            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next));
+            let Some(next) = runs.into_iter().find(|next| !matches!(self.admit_account(next), Admit::Blocked(_))) else { continue };
+            let moved = Moved { account: account.id.clone(), model: model.clone(), reason: blocked.note() };
+            return Ok((next, Some(rung.model.clone()), Some(moved)));
+        }
+        let limited: Vec<String> = self
+            .accounts
+            .list()
+            .iter()
+            .filter_map(|account| self.standing(account).filter(|(_, blocked)| *blocked).map(|(limit, _)| format!("{}: {}", account.id, limit.note())))
+            .collect();
+        let rungs: Vec<&str> = ladder[from..].iter().map(|rung| rung.model.as_str()).collect();
+        let left = if rungs.is_empty() { "the ladder has no rung above it".to_owned() } else { format!("none of the rungs above it can run it ({})", rungs.join(", ")) };
+        Err(format!(
+            "{} is limited and {left}. Limited accounts: {}. Wait for a limit to lift, or change the model ladder in Settings › Way of working.",
+            account.id,
+            limited.join(" · ")
+        ))
+    }
+
+    /// Whether `next` can run ladder rung `rung` here: it names the rung's provider when the rung
+    /// does, lists the model, is signed in and its CLI is installed.
+    fn rung_runs_on(&self, rung: &taste::ModelRef, next: &Account) -> bool {
+        if let Some(provider) = &rung.provider {
+            let wanted = provider.trim().to_ascii_lowercase();
+            let driver = serde_json::to_value(next.provider).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+            let go = next.auth == Auth::OpenCodeGo && matches!(wanted.as_str(), "opencode" | "opencode-go" | "go");
+            if !(go || wanted == next.id.to_ascii_lowercase() || wanted == next.name.to_ascii_lowercase() || (wanted == driver && next.auth != Auth::OpenCodeGo)) {
+                return false;
+            }
+        }
+        if !self.launch.bin(next.provider).is_file() || !self.status(next).signed_in {
+            return false;
+        }
+        next.provider == Provider::Codex || self.catalog_of(next, true).0.iter().any(|model| model.id == rung.model)
+    }
+
     fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
         let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator } = side;
@@ -4180,7 +4224,8 @@ impl Machine {
         let access = resolve_access(ceiling, &request)?;
         // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
-        let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
+        let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
+        let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
         let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
@@ -4205,6 +4250,9 @@ impl Machine {
             Claim::Fresh(task) => *task,
         };
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        if let Some(moved) = moved {
+            self.delegates.set_moved(&task.id, moved);
+        }
         self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
         self.delegates.describe(&task.id, delegator, effort.clone());
         if let Some(tab) = parent_tab.as_deref() {
@@ -4391,7 +4439,7 @@ impl Machine {
         }
         // The meter reads a working task only; this reads the turn that just ended before it settles.
         self.meter_workers();
-        let parent = self.delegates.settle_thread(&task, self.reply_of(tab, event), error, self.thread_steps(tab), self.launch.path_env.as_deref());
+        let parent = self.delegates.settle_thread(&task, self.reply_of(tab, event), error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -4569,8 +4617,79 @@ impl Machine {
         });
     }
 
+    /// The models an account offers a delegated child, and what constrains it.
+    fn catalog_of(&self, account: &Account, found: bool) -> (Vec<crate::delegate::ModelChoice>, Vec<String>) {
+        match account.provider {
+            Provider::Claude if account.auth == Auth::OpenCodeGo => (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()]),
+            Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
+            Provider::Codex => (vec![], crate::delegate::codex_constraints()),
+            Provider::Cursor => {
+                let list = self.delegates.cursor_catalog(&self.launch.bin(account.provider), self.launch.path_env.as_deref());
+                let mut constraints = crate::delegate::cursor_constraints();
+                if found && list.trim().is_empty() {
+                    constraints.push("the model list is not ready yet".into());
+                }
+                (crate::delegate::cursor_models(&list), constraints)
+            }
+        }
+    }
+
+    /// Asks the Console for a Go account's allowance now, unless it was asked for in the last 15 s.
+    /// The windows are the main source of an account's `limited`, so what asks about a limit asks
+    /// first, instead of waiting for a session's statusline. A test machine asks only a fake
+    /// endpoint, which `PINNED_OPENCODE_GO_USAGE_URL` names.
+    fn fetch_go_usage(&self, account: &Account) {
+        if account.auth != Auth::OpenCodeGo || (test_binary() && std::env::var_os("PINNED_OPENCODE_GO_USAGE_URL").is_none()) {
+            return;
+        }
+        let Some(key) = self.accounts.key(account) else { return };
+        let now = Instant::now();
+        {
+            let mut refreshed = self.usage_refreshed.lock().unwrap();
+            if refreshed.get(&account.id).is_some_and(|at| now.duration_since(*at) < Duration::from_secs(15)) {
+                return;
+            }
+            refreshed.insert(account.id.clone(), now);
+        }
+        match crate::opencode_go::usage(&key) {
+            Ok(usage) => self.record_usage(account.id.clone(), usage),
+            Err(e) => eprintln!("pinned: could not read {}'s OpenCode Go usage: {e}", account.id),
+        }
+    }
+
+    /// Why `account` is limited and whether that still blocks it, or None. A usage window at 99%
+    /// is the main source, and its reset is the `resume_at`. A 429 a child died on marks the
+    /// account in `delegates.limits()`, which stands in for the providers that report no windows.
+    fn standing(&self, account: &Account) -> Option<(crate::delegate::Limit, bool)> {
+        self.fetch_go_usage(account);
+        let limits = self.delegates.limits();
+        let now = limits.now();
+        let usage = self.usage.lock().unwrap().get(&account.id).copied().unwrap_or_default();
+        let full: Vec<(&str, LimitWindow)> = [("5-hour", usage.five_hour), ("weekly", usage.seven_day), ("monthly", usage.monthly)]
+            .into_iter()
+            .filter_map(|(name, window)| Some((name, window?)))
+            .filter(|(_, window)| window.used_percentage >= 99.0 && window.resets_at > now)
+            .collect();
+        if let Some(resume_at) = full.iter().map(|(_, window)| window.resets_at).max() {
+            let names: Vec<String> = full.iter().map(|(name, window)| format!("{name} usage at {}%", window.used_percentage.round())).collect();
+            return Some((crate::delegate::Limit { reason: names.join(", "), since: 0, resume_at: Some(resume_at), strikes: 0, retry_at: resume_at, trial: None }, true));
+        }
+        limits.standing(&account.id)
+    }
+
+    /// Whether a delegated task may start on `account`: a limit blocks it, and after a backoff
+    /// the first task is the account's trial.
+    fn admit_account(&self, account: &Account) -> crate::delegate::Admit {
+        use crate::delegate::Admit;
+        match self.standing(account) {
+            Some((limit, true)) => Admit::Blocked(limit),
+            Some((_, false)) => self.delegates.limits().admit(&account.id),
+            None => Admit::Open,
+        }
+    }
+
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
-        use crate::delegate::{capabilities, codex_constraints, cursor_models, Access, Inherited, ListedAccount};
+        use crate::delegate::{capabilities, Access, Inherited, LimitNote, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
@@ -4586,36 +4705,21 @@ impl Machine {
             .into_iter()
             .map(|account| {
                 let status = self.status(&account);
-                let bin = self.launch.bin(account.provider);
-                let found = bin.is_file();
-                let (models, mut constraints) = match account.provider {
-                    Provider::Claude if account.auth == Auth::OpenCodeGo => {
-                        (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()])
-                    }
-                    Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
-                    Provider::Codex => (vec![], codex_constraints()),
-                    Provider::Cursor => {
-                        let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
-                        let mut constraints = crate::delegate::cursor_constraints();
-                        if found && list.trim().is_empty() {
-                            constraints.push("the model list is not ready yet".into());
-                        }
-                        (cursor_models(&list), constraints)
-                    }
-                };
+                let found = self.launch.bin(account.provider).is_file();
+                let (models, mut constraints) = self.catalog_of(&account, found);
                 if !status.signed_in {
                     constraints.push("not signed in on this machine".into());
                 }
                 if !found {
                     constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
                 }
-                let limited = self.usage.lock().unwrap().get(&account.id).is_some_and(|usage| {
-                    [usage.five_hour, usage.seven_day, usage.monthly].iter().flatten().any(|window| window.used_percentage >= 99.0)
-                });
-                if limited {
-                    constraints.push("a usage limit stopped this account".into());
+                let standing = self.standing(&account);
+                if let Some((limit, blocked)) = &standing {
+                    constraints.push(if *blocked { limit.note() } else { format!("{} A task may try it now.", limit.note()) });
                 }
-                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, models, constraints }
+                let limited = standing.as_ref().is_some_and(|(_, blocked)| *blocked);
+                let limit = standing.filter(|(_, blocked)| *blocked).map(|(limit, _)| LimitNote { reason: limit.reason, resume_at: limit.resume_at, retry_at: Some(limit.retry_at).filter(|_| limit.resume_at.is_none()) });
+                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, limited, limit, models, constraints }
             })
             .collect::<Vec<_>>();
         let search = (!search.is_empty()).then_some(search);
@@ -4656,6 +4760,13 @@ impl Machine {
             // Claude Code's idle notice after the turn end the worker waits past.
             if waiting && event.status == AgentStatus::NeedsInput && event.message.as_deref().is_some_and(|m| m.contains("waiting for your input")) {
                 return;
+            }
+            if event.status == AgentStatus::Failed {
+                // A turn that is a delegated task's marks the account when the task ends.
+                let session = self.tab(tab, |t| t.task.is_none().then(|| t.account.id.clone())).ok().flatten();
+                if let (Some(account), Some(message)) = (session, event.message.as_deref()) {
+                    self.delegates.limits().mark(&account, message, event.resume_at);
+                }
             }
             let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
             let held = worker && event.status == AgentStatus::Done && self.waits_on_background(tab);
@@ -11515,5 +11626,216 @@ Have another model review a risky change before it goes ahead.";
             other => panic!("{other:?}"),
         }
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    const GO_429: &str = "API Error: Request rejected (429) · Go usage limit exceeded";
+
+    /// Claude Code's StopFailure hook as the Go gateway's 429 makes it, for `tab`.
+    #[cfg(unix)]
+    fn go_429(tab: &str, resume_at: Option<u64>) -> AgentEvent {
+        let hook = json!({ "session_id": "s1", "hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": GO_429 }).to_string();
+        AgentEvent { tab: Some(tab.to_owned()), resume_at, ..hooks::event_from(Some("failed"), &hook).unwrap() }
+    }
+
+    #[cfg(unix)]
+    fn worker_done(tab: &str) -> AgentEvent {
+        AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: Some("Done.".into()) }
+    }
+
+    #[cfg(unix)]
+    fn provider<'a>(capabilities: &'a Value, id: &str) -> &'a Value {
+        capabilities["providers"].as_array().unwrap().iter().find(|p| p["providerInstanceId"] == id).unwrap_or_else(|| panic!("no provider {id} in {capabilities}"))
+    }
+
+    #[cfg(unix)]
+    fn caps(m: &Machine) -> Value {
+        serde_json::from_str(&m.capabilities(None, None, "").unwrap()).unwrap()
+    }
+
+    /// A Captain whose `claude` account a long usage limit already stops, so a task moved off `work` lands on `spare`, whose home is in the test's folder.
+    #[cfg(unix)]
+    fn captain_with_spare(name: &str) -> (Arc<Machine>, PathBuf, String) {
+        let (m, dir, captain) = limited_captain(name, TastePatch::default());
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Spare".into(), auth: None, key: None }).unwrap();
+        m.delegates.limits().mark("claude", "You've hit your monthly spend limit", Some(unix_now() + 7 * 86_400));
+        (m, dir, captain)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_429_on_a_worker_limits_its_account_and_the_next_delegate_task_moves_up_the_ladder() {
+        let (m, dir, captain) = captain_with_spare("provider-limited");
+        assert!(!provider(&caps(&m), "work")["limited"].as_bool().unwrap(), "nothing limits it yet");
+        let first = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (first_task, first_tab) = (first["taskId"].as_str().unwrap().to_owned(), first["tabId"].as_str().unwrap().to_owned());
+        m.record_event(go_429(&first_tab, None));
+        let caller = crate::delegate::Caller { tab: Some(captain.clone()), task: None };
+        let status = m.delegates.status(&caller, &first_task).unwrap();
+        assert_eq!(status["workState"], "failed");
+        assert!(status["error"].as_str().unwrap().contains("Go usage limit exceeded"), "{status}");
+
+        let capabilities = caps(&m);
+        let work = provider(&capabilities, "work");
+        assert_eq!((work["limited"].clone(), work["limit"]["reason"].clone(), work["limit"]["resumeAt"].clone()), (json!(true), json!(GO_429), Value::Null), "{work}");
+        assert!(work["limit"]["retryAt"].as_u64().unwrap() > unix_now(), "{work}");
+        assert!(work["constraints"].as_array().unwrap().iter().any(|c| c.as_str().unwrap().contains(GO_429) && c.as_str().unwrap().contains("pinned lets one task try it again at")), "{work}");
+        let accounts = m.list_accounts();
+        let shown = accounts.iter().find(|a| a.account.id == "work").unwrap();
+        assert_eq!((shown.limited, shown.limit_reason.as_deref(), shown.limit_resume_at), (true, Some(GO_429), None));
+        assert!(!accounts.iter().find(|a| a.account.id == "spare").unwrap().limited, "another account is not limited");
+
+        let moved = delegate_task(&m, &captain, work_on("work", Some("claude-sonnet-5-5")));
+        assert_eq!((moved["providerInstanceId"].as_str(), moved["model"].as_str()), (Some("spare"), Some("claude-opus-5-5")), "{moved}");
+        assert_eq!((moved["movedFrom"]["providerInstanceId"].as_str(), moved["movedFrom"]["model"].as_str()), (Some("work"), Some("claude-sonnet-5-5")), "{moved}");
+        assert!(moved["movedFrom"]["reason"].as_str().unwrap().contains(GO_429), "{moved}");
+        let (id, tab) = (moved["taskId"].as_str().unwrap().to_owned(), moved["tabId"].as_str().unwrap().to_owned());
+        let status = m.delegates.status(&caller, &id).unwrap();
+        assert_eq!((status["providerInstanceId"].as_str(), status["model"].as_str(), status["movedFrom"]["providerInstanceId"].as_str()), (Some("spare"), Some("claude-opus-5-5"), Some("work")), "task_status says which one ran: {status}");
+
+        m.record_event(worker_done(&tab));
+        let record = m.delegates.records().into_iter().find(|r| r.id == id).unwrap();
+        assert_eq!((record.account.as_str(), record.model.as_deref(), record.asked_account.as_deref(), record.asked_model.as_deref()), ("spare", Some("claude-opus-5-5"), Some("work"), Some("claude-sonnet-5-5")));
+        assert!(record.moved_because.unwrap().contains(GO_429));
+        let stats = m.local_delegation_stats(30).brief();
+        assert_eq!(stats["byModel"]["claude-opus-5-5"]["movedByLimit"], 1, "{stats}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn work_on(account: &str, model: Option<&str>) -> Value {
+        json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": account, "model": model } })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn with_no_rung_left_a_task_for_a_limited_account_fails_and_names_the_limited_accounts() {
+        let (m, dir, captain) = captain_with_spare("provider-limited-none");
+        let sonnet = taste::ModelRef { provider: None, model: "claude-sonnet-5-5".into() };
+        m.set_local_taste(&TasteScope::Captains, TastePatch { ladder: Some(vec![sonnet]), ..TastePatch::default() }).unwrap();
+        m.delegates.limits().mark("work", GO_429, None);
+        let request = crate::delegate::parse_request(&work_on("work", Some("claude-sonnet-5-5"))).unwrap();
+        let error = m.start_delegate(Some(captain.clone()), None, None, request).unwrap_err();
+        assert!(error.starts_with("work is limited and the ladder has no rung above it."), "{error}");
+        assert!(error.contains(&format!("work: a usage limit stopped this account: {GO_429}")) && error.contains("claude: a usage limit stopped this account: You've hit your monthly spend limit"), "{error}");
+        assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "a refused call starts nothing");
+
+        // Another rung exists, but it runs only on accounts that are limited too.
+        let opus = taste::ModelRef { provider: None, model: "claude-opus-5-5".into() };
+        let sonnet = taste::ModelRef { provider: None, model: "claude-sonnet-5-5".into() };
+        m.set_local_taste(&TasteScope::Captains, TastePatch { ladder: Some(vec![sonnet, opus]), ..TastePatch::default() }).unwrap();
+        m.delegates.limits().mark("spare", GO_429, None);
+        let request = crate::delegate::parse_request(&work_on("work", Some("claude-sonnet-5-5"))).unwrap();
+        let error = m.start_delegate(Some(captain), None, None, request).unwrap_err();
+        assert!(error.starts_with("work is limited and none of the rungs above it can run it (claude-opus-5-5)."), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_limit_with_a_reset_time_lifts_when_that_time_passes() {
+        let (m, dir, captain) = captain_with_spare("provider-limited-reset");
+        let now = unix_now();
+        let clock = Arc::new(AtomicU64::new(now * 1000));
+        m.delegates.limits().set_clock({
+            let clock = clock.clone();
+            move || clock.load(Ordering::SeqCst)
+        });
+        let tab = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None))["tabId"].as_str().unwrap().to_owned();
+        m.record_event(go_429(&tab, Some(now + 3600)));
+        let capabilities = caps(&m);
+        let work = provider(&capabilities, "work");
+        assert_eq!((work["limited"].clone(), work["limit"]["resumeAt"].clone(), work["limit"]["retryAt"].clone()), (json!(true), json!(now + 3600), Value::Null), "{work}");
+        assert!(work["constraints"].as_array().unwrap().iter().any(|c| c.as_str().unwrap().contains("It resumes at")), "{work}");
+
+        clock.store((now + 3599) * 1000, Ordering::SeqCst);
+        assert!(provider(&caps(&m), "work")["limited"].as_bool().unwrap(), "one second early");
+        clock.store((now + 3600) * 1000, Ordering::SeqCst);
+        let after = caps(&m);
+        assert_eq!((provider(&after, "work")["limited"].clone(), provider(&after, "work")["limit"].clone()), (json!(false), Value::Null));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_run_that_succeeds_after_the_mark_clears_it_and_one_that_began_before_does_not() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let (m, dir, _) = captain_with_spare("provider-limited-clear");
+        let task = |title: &str| {
+            m.delegates.begin(NewTask { parent: Parent::Tab("tab-x".into()), tool: None, title: title.into(), account: "work".into(), provider: Provider::Claude, model: None, cwd: dir.clone(), mode: Mode::Async, access: Access::Auto, isolated: false, caller_key: "tab:tab-x".into(), client_request_id: None, role: None }).id
+        };
+        let finish = |id: &str| {
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"s"}).to_string()), None);
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        };
+        let old = task("old");
+        std::thread::sleep(Duration::from_millis(5));
+        m.delegates.limits().mark("work", GO_429, None);
+        finish(&old);
+        assert!(provider(&caps(&m), "work")["limited"].as_bool().unwrap(), "a run that began before the 429 proves nothing");
+        std::thread::sleep(Duration::from_millis(5));
+        let fresh = task("fresh");
+        finish(&fresh);
+        assert!(!provider(&caps(&m), "work")["limited"].as_bool().unwrap(), "a success after it clears it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_child_that_ends_on_a_429_headless_marks_its_account_too() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let (m, dir, _) = captain_with_spare("provider-limited-headless");
+        let id = m.delegates.begin(NewTask { parent: Parent::Tab("tab-x".into()), tool: None, title: "Headless".into(), account: "work".into(), provider: Provider::Claude, model: None, cwd: dir.clone(), mode: Mode::Async, access: Access::Auto, isolated: false, caller_key: "tab:tab-x".into(), client_request_id: None, role: None }).id;
+        m.delegates.apply(&id, crate::delegate::ChildEvent::Exited { code: Some(1), stderr: GO_429.into() }, None);
+        let capabilities = caps(&m);
+        assert_eq!((provider(&capabilities, "work")["limited"].clone(), provider(&capabilities, "work")["limit"]["reason"].clone()), (json!(true), json!(GO_429)));
+        let failed = m.delegates.begin(NewTask { parent: Parent::Tab("tab-x".into()), tool: None, title: "Other".into(), account: "spare".into(), provider: Provider::Claude, model: None, cwd: dir.clone(), mode: Mode::Async, access: Access::Auto, isolated: false, caller_key: "tab:tab-x".into(), client_request_id: None, role: None }).id;
+        m.delegates.apply(&failed, crate::delegate::ChildEvent::Exited { code: Some(1), stderr: "the build failed".into() }, None);
+        assert!(!provider(&caps(&m), "spare")["limited"].as_bool().unwrap(), "an ordinary failure limits nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Answers every request with `body`, as the OpenCode Console's usage endpoint.
+    #[cfg(unix)]
+    fn fake_usage_endpoint(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/zen/go/v1/usage", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        url
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_go_accounts_weekly_window_at_100_percent_limits_it_until_the_reset_with_no_session_open() {
+        let (m, dir, _) = limited_captain("provider-limited-window", TastePatch::default());
+        let account = m.accounts.add(Provider::Claude, "personal", Auth::OpenCodeGo).unwrap();
+        m.accounts.set_key(&account, "oc_sk_test").unwrap();
+        let reset = unix_now() + 5 * 86_400 + 11 * 3600;
+        let body: &'static str = Box::leak(
+            json!({ "usage": {
+                "rolling": { "status": "ok", "percent": 0, "resetsAt": (unix_now() + 3600) * 1000 },
+                "weekly": { "status": "rate-limited", "percent": 100, "resetsAt": reset * 1000 },
+                "monthly": { "status": "ok", "percent": 67, "resetsAt": (unix_now() + 20 * 86_400) * 1000 },
+            } })
+            .to_string()
+            .into_boxed_str(),
+        );
+        std::env::set_var("PINNED_OPENCODE_GO_USAGE_URL", fake_usage_endpoint(body));
+        // No statusline ever ran: before this, nothing asked the Console and the account read as free.
+        assert!(m.usage().get("personal").is_none());
+        let capabilities = caps(&m);
+        std::env::remove_var("PINNED_OPENCODE_GO_USAGE_URL");
+        let personal = provider(&capabilities, "personal");
+        assert_eq!((personal["limited"].clone(), personal["limit"]["resumeAt"].clone(), personal["limit"]["reason"].clone()), (json!(true), json!(reset), json!("weekly usage at 100%")), "{personal}");
+        assert!(personal["constraints"].as_array().unwrap().iter().any(|c| c.as_str().unwrap().contains("weekly usage at 100%") && c.as_str().unwrap().contains("It resumes at")), "{personal}");
+        let shown = m.list_accounts().into_iter().find(|a| a.account.id == "personal").unwrap();
+        assert_eq!((shown.limited, shown.limit_resume_at), (true, Some(reset)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

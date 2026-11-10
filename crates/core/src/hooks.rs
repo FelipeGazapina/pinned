@@ -129,7 +129,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
     Some(AgentEvent {
         status,
         cwd: field("cwd"),
-        message: field("message"),
+        message: field("message").or_else(|| (status == AgentStatus::Failed).then(|| failure_text(&hook)).flatten()),
         tab: std::env::var(TAB_ENV).ok(),
         session: field("session_id").or_else(|| field("thread-id")).or_else(|| field("thread_id")),
         title: field("transcript_path")
@@ -239,6 +239,15 @@ fn run_statusline(command: &str, input: &str) -> Vec<u8> {
     // A command that never reads its input closes the pipe early, and still gets to print.
     let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
     child.wait_with_output().map(|out| out.stdout).unwrap_or_default()
+}
+
+/// What a StopFailure hook says stopped the turn: the details, the API error Claude Code rendered
+/// as the last message, and the error kind. A last message that is not an API error is the turn's
+/// partial reply, which says nothing about why it stopped.
+fn failure_text(hook: &serde_json::Value) -> Option<String> {
+    let last = hook["last_assistant_message"].as_str().filter(|text| text.trim_start().starts_with("API Error"));
+    let lines: Vec<&str> = [hook["error_details"].as_str(), last, hook["error"].as_str()].into_iter().flatten().map(str::trim).filter(|text| !text.is_empty()).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 #[cfg(unix)]
@@ -716,6 +725,10 @@ mod tests {
         assert_eq!(event_from(Some("done"), r#"{"session_id":"s1"}"#).unwrap().reply, None);
         let failed = r#"{"session_id":"s1","error":"rate_limit","last_assistant_message":"Parti"}"#;
         assert_eq!(event_from(Some("failed"), failed).unwrap().reply, None);
+        assert_eq!(event_from(Some("failed"), failed).unwrap().message.as_deref(), Some("rate_limit"), "a partial reply is not the error");
+        let go = r#"{"session_id":"s1","error":"rate_limit","last_assistant_message":"API Error: Request rejected (429) · Go usage limit exceeded"}"#;
+        assert_eq!(event_from(Some("failed"), go).unwrap().message.as_deref(), Some("API Error: Request rejected (429) · Go usage limit exceeded\nrate_limit"));
+        assert_eq!(event_from(Some("done"), go).unwrap().message, None);
         let event = event_from(Some("done"), stop).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&serde_json::to_string(&event).unwrap()).unwrap().reply, event.reply, "it survives the socket to the machine");
         assert!(!serde_json::to_string(&AgentEvent { reply: None, ..event }).unwrap().contains("reply"), "an event sent on carries no reply field");

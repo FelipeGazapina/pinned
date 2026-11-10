@@ -1977,6 +1977,71 @@ fn two_invited_accounts_see_nothing_of_each_others_machines_projects_or_memory()
     bruno_node.kill();
 }
 
+/// One line to a node's hook socket and its one-line answer, as a hook or an MCP bridge does.
+fn ask_socket(dir: &Path, line: &Value) -> Value {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{line}").unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
+#[test]
+fn a_limit_one_accounts_provider_hit_shows_on_its_machines_and_never_on_another_accounts() {
+    let hub = TestHub::start_with("limit_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let start = |client: &mut Client, token: &str, email: &str, name: &str| {
+        let dir = temp(&format!("limit-apart-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token };
+        let node = Node::start(&dir, creds);
+        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        client.wait_machines(&[(name, true)]);
+        (node, dir, machine.id)
+    };
+    let (ana_node, ana_home, ana_machine) = start(&mut ana_client, &ana_token, "ana@acme.dev", "ana-mac");
+    let (bruno_node, bruno_home, bruno_machine) = start(&mut bruno_client, &bruno_token, "bruno@acme.dev", "bruno-mac");
+
+    let limited = |client: &mut Client, machine: &str| {
+        let accounts = client.call(machine, json!({ "cmd": "list_accounts" })).unwrap();
+        accounts.as_array().unwrap().iter().find(|a| a["id"] == "claude").unwrap().clone()
+    };
+    let capabilities = |home: &Path| -> Value {
+        let reply = ask_socket(home, &json!({ "kind": "capabilities", "search": "" }));
+        serde_json::from_str(reply["Ok"].as_str().unwrap()).unwrap()
+    };
+    let claude = |capabilities: &Value| capabilities["providers"].as_array().unwrap().iter().find(|p| p["providerInstanceId"] == "claude").unwrap().clone();
+    assert_eq!((limited(&mut ana_client, &ana_machine)["limited"].clone(), claude(&capabilities(&ana_home))["limited"].clone()), (Value::Null, json!(false)), "nothing limits it yet");
+
+    // Ana's thread ends on the Go gateway's 429.
+    let tab = ana_node.machine.open_tab(Some(ana_home.display().to_string()), false).unwrap();
+    let failed = json!({ "kind": "agent", "status": "failed", "tab": tab, "message": "API Error: Request rejected (429) · Go usage limit exceeded\nrate_limit" });
+    ask_socket(&ana_home, &failed);
+    let ana = limited(&mut ana_client, &ana_machine);
+    assert_eq!((ana["limited"].clone(), ana["limit_reason"].clone()), (json!(true), json!("API Error: Request rejected (429) · Go usage limit exceeded")), "{ana}");
+    let seen = claude(&capabilities(&ana_home));
+    assert_eq!((seen["limited"].clone(), seen["limit"]["reason"].clone()), (json!(true), json!("API Error: Request rejected (429) · Go usage limit exceeded")), "{seen}");
+
+    // Bruno's machine and capabilities show nothing of it, and he can neither reach Ana's machine nor clear its state.
+    assert_eq!(limited(&mut bruno_client, &bruno_machine)["limited"], Value::Null);
+    assert_eq!(claude(&capabilities(&bruno_home))["limited"], json!(false));
+    let refused = Err(format!("this account has no machine {ana_machine}"));
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "list_accounts" })), refused);
+    assert_eq!(bruno_client.call(&ana_machine, json!({ "cmd": "tabs" })), refused);
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && (f.to_string().contains(&ana_machine) || f.to_string().contains("usage limit"))).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's limit: {leaked:?}");
+    assert_eq!(limited(&mut ana_client, &ana_machine)["limited"], json!(true), "Bruno's calls left Ana's limit as it was");
+    let (mut ana_node, mut bruno_node) = (ana_node, bruno_node);
+    ana_node.kill();
+    bruno_node.kill();
+}
+
 #[test]
 fn a_burst_of_parallel_sign_ins_counts_against_the_limit() {
     let hub = TestHub::start("burst");

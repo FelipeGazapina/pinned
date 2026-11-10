@@ -196,8 +196,19 @@ pub struct ListedAccount {
     pub bin_found: bool,
     /// A usage limit stopped this account; route around it unless nothing else can run.
     pub limited: bool,
+    /// Why and until when, while `limited` is true.
+    pub limit: Option<LimitNote>,
     pub models: Vec<ModelChoice>,
     pub constraints: Vec<String>,
+}
+
+/// What stopped an account, as `orchestrator_capabilities` states it.
+pub struct LimitNote {
+    pub reason: String,
+    /// Unix seconds when the provider says the limit lifts.
+    pub resume_at: Option<u64>,
+    /// Unix seconds when pinned lets a task try the account again, for a limit with no reset time.
+    pub retry_at: Option<u64>,
 }
 
 pub struct Inherited {
@@ -262,6 +273,7 @@ fn account_json(account: &ListedAccount, needle: Option<&str>) -> Option<Value> 
         "canRunChildTask": ready,
         "canRunCrossProviderChildTask": ready && account.provider != Provider::Cursor,
         "limited": account.limited,
+        "limit": account.limit.as_ref().map(|limit| json!({ "reason": limit.reason, "resumeAt": limit.resume_at, "retryAt": limit.retry_at })),
         "constraints": account.constraints,
     }))
 }

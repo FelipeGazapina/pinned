@@ -16,6 +16,8 @@ pub struct Delegates {
     store: Option<PathBuf>,
     cursor: Arc<Mutex<Option<Cache>>>,
     warming: Arc<AtomicBool>,
+    /// The accounts a usage limit stopped, kept in `provider-limits.json` beside the tasks.
+    limits: ProviderLimits,
 }
 
 /// How many taken notices a machine remembers: a hub resends only those decided in the last week.
@@ -64,6 +66,7 @@ impl Default for Delegates {
             store: None,
             cursor: Arc::new(Mutex::new(None)),
             warming: Arc::new(AtomicBool::new(false)),
+            limits: ProviderLimits::default(),
         }
     }
 }
@@ -93,7 +96,8 @@ pub enum Claim {
 
 impl Delegates {
     pub fn load(file: Option<PathBuf>) -> Self {
-        let delegates = Self { store: file.clone(), ..Self::default() };
+        let limits = ProviderLimits::load(file.as_ref().map(|file| file.with_file_name("provider-limits.json")));
+        let delegates = Self { store: file.clone(), limits, ..Self::default() };
         let Some(file) = file else { return delegates };
         let Ok(bytes) = std::fs::read(&file) else { return delegates };
         let Ok(saved) = serde_json::from_slice::<SavedFile>(&bytes) else { return delegates };
@@ -107,6 +111,37 @@ impl Delegates {
     }
 
     /// How many tasks still at work run in `project`, the repository their folders belong to.
+    /// Which accounts a usage limit stopped, and the trial that lets one back in.
+    pub fn limits(&self) -> &ProviderLimits {
+        &self.limits
+    }
+
+    /// Notes that a usage limit moved task `id` off the account and model its request named.
+    pub fn set_moved(&self, id: &str, moved: Moved) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.moved = Some(moved);
+        }
+        self.persist();
+    }
+
+    /// What a task that just ended says about its account: a limit error marks it, a success that
+    /// began after the mark clears it.
+    fn observe(&self, id: &str, resume_at: Option<u64>) {
+        let seen = self.tasks.lock().unwrap().iter().find(|task| task.id == id).map(|task| (task.account.clone(), task.state, task.error.clone(), task.started));
+        match seen {
+            Some((account, WorkState::Failed, Some(error), _)) => {
+                if !self.limits.mark(&account, &error, resume_at) {
+                    self.limits.release_trial(&account);
+                }
+            }
+            Some((account, WorkState::Cancelled, ..)) => self.limits.release_trial(&account),
+            Some((account, WorkState::ResultAvailable, _, started)) => {
+                self.limits.clear(&account, started);
+            }
+            _ => {}
+        }
+    }
+
     pub fn working_in(&self, project: &Path) -> usize {
         self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
     }
@@ -138,7 +173,7 @@ impl Delegates {
     /// Ends a task whose thread's session is the child: its turn ended with `summary`, or failed
     /// with `error`. Returns the parent tab when the notice is ready. The session stays open as
     /// the thread, so nothing is killed.
-    pub fn settle_thread(&self, id: &str, summary: Option<String>, error: Option<String>, steps: Vec<Item>, path: Option<&str>) -> Option<String> {
+    pub fn settle_thread(&self, id: &str, summary: Option<String>, error: Option<String>, resume_at: Option<u64>, steps: Vec<Item>, path: Option<&str>) -> Option<String> {
         let (ready, dirs) = {
             let mut tasks = self.tasks.lock().unwrap();
             let index = tasks.iter().position(|task| task.id == id && task.state == WorkState::Working)?;
@@ -154,6 +189,7 @@ impl Delegates {
         for dir in dirs {
             crate::branches::drop_worktree(&dir, path);
         }
+        self.observe(id, resume_at);
         self.persist();
         ready
     }
@@ -537,9 +573,10 @@ impl Delegates {
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
     pub fn apply(&self, id: &str, event: ChildEvent, path: Option<&str>) -> Option<String> {
-        let (ready, dirs, stop, pending) = {
+        let (ready, dirs, stop, pending, ended) = {
             let mut tasks = self.tasks.lock().unwrap();
             let index = tasks.iter().position(|task| task.id == id)?;
+            let was_working = !tasks[index].state.terminal();
             let mut watch = false;
             let (held, reaped) = match event {
                 ChildEvent::Line(line) => {
@@ -572,7 +609,7 @@ impl Delegates {
             let pending = pending_report(&mut tasks[index]);
             let id = tasks[index].id.clone();
             let ready = chain_ready(&tasks, &id).then(|| root_tab(&tasks, tasks[index].parent.clone())).flatten();
-            (ready, dirs, stop, pending)
+            (ready, dirs, stop, pending, was_working && tasks[index].state.terminal())
         };
         match stop {
             Some(Stop::Exited(agent)) => {
@@ -595,6 +632,9 @@ impl Delegates {
         }
         if let Some(report) = pending {
             self.push_report(report);
+        }
+        if ended {
+            self.observe(id, None);
         }
         self.persist();
         ready
@@ -633,7 +673,7 @@ impl Delegates {
                 body["next"] = json!(result_next(task));
                 body
             } else {
-                json!({
+                let mut body = json!({
                     "taskId": task.id,
                     "title": task.title,
                     "providerInstanceId": task.account,
@@ -642,7 +682,9 @@ impl Delegates {
                     "cwd": task.cwd.display().to_string(),
                     "tabId": task.thread.as_ref().map(|thread| thread.tab.clone()),
                     "next": next_line(task),
-                })
+                });
+                with_moved(&mut body, task);
+                body
             }
         };
         self.persist();
@@ -1296,6 +1338,7 @@ fn status_json(task: &Task) -> Value {
     if let Some(limit) = &task.limit {
         body["stoppedByLimit"] = json!(limit);
     }
+    with_moved(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
@@ -1320,6 +1363,14 @@ fn status_json(task: &Task) -> Value {
         json!(working_next(task))
     };
     body
+}
+
+/// Names where a task was asked to run, when a usage limit moved it. `providerInstanceId` and
+/// `model` already say where it runs.
+fn with_moved(body: &mut Value, task: &Task) {
+    if let Some(moved) = &task.moved {
+        body["movedFrom"] = json!({ "providerInstanceId": moved.account, "model": moved.model, "reason": moved.reason });
+    }
 }
 
 fn who(task: &Task) -> String {
@@ -1524,6 +1575,7 @@ fn fresh(new: NewTask) -> Task {
         delegator: Delegator::default(),
         effort: None,
         limit: None,
+        moved: None,
         review: None,
         thread_tab: None,
         recorded: false,
@@ -1562,6 +1614,9 @@ fn record(task: &Task) -> Option<TaskRecord> {
         outcome,
         reason: if outcome == TaskOutcome::Done { None } else { task.error.clone() },
         limit: task.limit.clone().filter(|_| outcome == TaskOutcome::Limit),
+        asked_account: task.moved.as_ref().map(|moved| moved.account.clone()),
+        asked_model: task.moved.as_ref().and_then(|moved| moved.model.clone()),
+        moved_because: task.moved.as_ref().map(|moved| moved.reason.clone()),
         review: task.review.clone(),
         thread: task.thread_tab.clone(),
     })
@@ -1645,6 +1700,8 @@ struct SavedTask {
     #[serde(default)]
     limit: Option<String>,
     #[serde(default)]
+    moved: Option<Moved>,
+    #[serde(default)]
     review: Option<Review>,
     #[serde(default)]
     thread_tab: Option<String>,
@@ -1696,6 +1753,7 @@ impl SavedTask {
             delegator: task.delegator.clone(),
             effort: task.effort.clone(),
             limit: task.limit.clone(),
+            moved: task.moved.clone(),
             review: task.review.clone(),
             thread_tab: task.thread_tab.clone(),
             recorded: task.recorded,
@@ -1742,6 +1800,7 @@ impl SavedTask {
             delegator: self.delegator,
             effort: self.effort,
             limit: self.limit,
+            moved: self.moved,
             review: self.review,
             thread_tab: self.thread_tab,
             recorded: self.recorded,

@@ -8424,6 +8424,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -17249,6 +17270,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -23077,6 +23119,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -28645,6 +28708,27 @@
                   "null"
                 ]
               },
+              "asked_account": {
+                "description": "The account the request asked for, when a usage limit moved the task to `account`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asked_model": {
+                "description": "The model the request asked for, when a usage limit moved the task to `model`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "moved_because": {
+                "description": "Why the task ran elsewhere than asked: the limit that stopped the account it asked for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "review": {
                 "anyOf": [
                   {
@@ -32617,6 +32701,13 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "moved": {
+                "description": "Tasks a usage limit moved off the account or model they asked for.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
               "cancelled": {
                 "type": "integer",
                 "format": "uint32",
@@ -32695,6 +32786,7 @@
               "done",
               "failed",
               "limited",
+              "moved",
               "cancelled",
               "accepted",
               "redone",
@@ -32908,6 +33000,13 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "moved": {
+                "description": "Tasks a usage limit moved off the account or model they asked for.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
               },
               "cancelled": {
                 "type": "integer",
