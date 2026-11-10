@@ -1524,6 +1524,7 @@ mod tests {
             taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
+            work: None,
             question: None,
         }
     }
