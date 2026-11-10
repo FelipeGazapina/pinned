@@ -9437,7 +9437,7 @@ while True:
         let dir = temp(name);
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
-        let (claude, sock) = (recording_claude(&dir), dir.join("pinned.sock"));
+        let (claude, sock) = (thread_claude(&dir), dir.join("pinned.sock"));
         let m = work_machine(&dir, &claude, &sock);
         m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
         let path = m.open_project(project).display().to_string();
