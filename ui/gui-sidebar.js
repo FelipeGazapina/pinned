@@ -331,9 +331,10 @@ function snoozeLimitStops() {
   }
 }
 
-/** Per machine id, whether it had any thread when it was last online. An offline machine that had some
- * is named in the sidebar; one known to have had none is not. It survives a reload, so a machine that
- * is already down when the page opens is still named. */
+/** Per machine id, whether it had a thread while it was online. An offline machine that had one is named
+ * in the sidebar, and so is one nothing is known of; one seen online with none is not. It survives a
+ * reload, so a machine that is already down when the page opens is still named. A machine that stops
+ * cleanly closes its threads before it goes, so a later 0 never takes a "had threads" back. */
 const threadsSeen = (() => {
   try {
     return JSON.parse(load("machine-threads")) ?? {};
@@ -342,8 +343,10 @@ const threadsSeen = (() => {
   }
 })();
 function noteThreadsSeen(machine, count) {
-  if (machine === LOCAL || !machines.get(machine)?.view.online || threadsSeen[machine] === count > 0) return;
-  threadsSeen[machine] = count > 0;
+  if (machine === LOCAL || !machines.get(machine)?.view?.online) return;
+  const had = count > 0 || (threadsSeen[machine] ?? false);
+  if (threadsSeen[machine] === had) return;
+  threadsSeen[machine] = had;
   save("machine-threads", JSON.stringify(threadsSeen));
 }
 

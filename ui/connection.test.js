@@ -61,6 +61,26 @@ test("no machine offline, nothing is named, and the empty list says no threads y
   assert.equal(emptyListText(true), "No threads to show while machines are offline");
 });
 
+test("a machine seen online is remembered as having had threads, and closing them on the way out doesn't undo it", () => {
+  const stored = [];
+  const machines = new Map([["a", machine("mini", true)], ["b", machine("box", true)], ["local", machine("This Mac", true, 0)]]);
+  const context = { machines, LOCAL: "local", load: () => null, save: (key, value) => stored.push([key, value]) };
+  vm.createContext(context);
+  vm.runInContext(`${sidebarSrc.slice(sidebarSrc.indexOf("const threadsSeen"), sidebarSrc.indexOf("/** One line for a machine that is offline"))}\nObject.assign(globalThis, { threadsSeen, noteThreadsSeen });`, context);
+  context.noteThreadsSeen("a", 0);
+  context.noteThreadsSeen("b", 2);
+  context.noteThreadsSeen("local", 3);
+  assert.deepEqual(here(context.threadsSeen), { a: false, b: true });
+  context.noteThreadsSeen("a", 1);
+  context.noteThreadsSeen("b", 0);
+  assert.deepEqual(here(context.threadsSeen), { a: true, b: true });
+  machines.get("a").view.online = false;
+  context.noteThreadsSeen("a", 0);
+  assert.deepEqual(here(context.threadsSeen), { a: true, b: true }, "offline changes nothing");
+  assert.deepEqual(JSON.parse(stored.at(-1)[1]), { a: true, b: true });
+  assert.equal(stored.at(-1)[0], "machine-threads");
+});
+
 const element = () => ({
   className: "",
   dataset: {},
