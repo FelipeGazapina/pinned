@@ -10003,7 +10003,7 @@ Have another model review a risky change before it goes ahead.";
         let back = second.open_tab(None, false).unwrap();
         second.tab(&back, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&second, &tab, Some("s-1"), "c-1"), Ok(json!(true)), "the tab that took it was found by its session");
-        assert_eq!(notice_call(&second, "tab-gone-9", None, "c-1"), Ok(json!(true)), "a repeat is answered even with no tab to find");
+        assert_eq!(notice_call(&second, &tab, None, "c-1"), Ok(json!(true)), "a repeat is answered even with no tab or session to find");
         assert_eq!(second.view(&back).unwrap().queued, 0, "a restart made the notice type again");
         assert_eq!(notice_call(&second, &tab, Some("s-1"), "c-2"), Ok(json!(true)));
         assert_eq!(second.view(&back).unwrap().queued, 1, "a new id still queues");
