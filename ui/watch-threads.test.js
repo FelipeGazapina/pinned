@@ -6,7 +6,7 @@ import vm from "node:vm";
 function publishThreadWatch() {
   const src = readFileSync(new URL("./gui.js", import.meta.url), "utf8");
   const start = src.indexOf("const followed =");
-  const end = src.indexOf("setInterval(() => {", start);
+  const end = src.indexOf("visibleInterval(() => {", start);
   const calls = [];
   const state = { gui: true, hidden: false, tabs: [], active: null };
   const sandbox = {
@@ -189,7 +189,7 @@ function page() {
     settingsOpen: () => false,
     render: () => sandbox.publishThreadWatch(),
     POLL_MS: 1200,
-    setInterval: (tick) => (state.tick = tick),
+    visibleInterval: (tick) => (state.tick = tick),
     setTimeout,
     clearTimeout,
   };
@@ -205,7 +205,7 @@ const callOn = (machine, call) => {
 };
 ${slice(main, "function setTabs", "/** The machine's accounts")}
 ${slice(main, "function showMachines", "async function bootApp")}
-${slice(gui, "const followed =", "setInterval(() => guiOn() && renderSidebar()")}
+${slice(gui, "const followed =", "visibleInterval(() => guiOn() && renderSidebar()")}
 globalThis.showMachines = showMachines;
 globalThis.disconnectHub = disconnectHub;
 globalThis.setTabs = setTabs;`,
