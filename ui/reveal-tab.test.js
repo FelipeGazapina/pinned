@@ -12,6 +12,7 @@ function load(callOn) {
   const sandbox = {
     tabs,
     calls,
+    active: null,
     machines: new Map([["remote", { tabPaths: "" }]]),
     closing: new Set(),
     keyOf: (machine, id) => `${machine}:${id}`,

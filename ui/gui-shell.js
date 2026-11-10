@@ -220,8 +220,13 @@ function threadItem(tab, query = "") {
     time: latestUserAt(tab),
     recency: latestUserAt(tab),
     terms: [threadTitle(tab), ...prTerms(tab), projectName(tab), t.workspace?.branch ?? "", found?.snippet ?? "", t.session ?? ""],
-    run: () => activate(tab),
+    run: () => openPicked(tab),
   };
+}
+/** Shows a thread picked in the palette. On a phone the sidebar closes, as a pick in it does, so the thread is not under it. */
+function openPicked(tab) {
+  activate(tab);
+  if (narrow(768)) toggleSidebar(false);
 }
 const openProjectIn = (machine, path) => (machine === LOCAL ? openTab(LOCAL, path) : openRemote(machine, path, false)).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 function paletteProjects() {
@@ -301,7 +306,7 @@ async function openSettings(name) {
 
 /** CommandPalette.logic's linked-thread search: the threads a pull request's link names, while the query is its URL. */
 const linkedThreadItems = () =>
-  palette.linked.threads.map((tab) => ({ icon: "message-square", title: esc(threadTitle(tab)), sub: "Linked thread", terms: [palette.linked.query, threadTitle(tab)], run: () => activate(tab) }));
+  palette.linked.threads.map((tab) => ({ icon: "message-square", title: esc(threadTitle(tab)), sub: "Linked thread", terms: [palette.linked.query, threadTitle(tab)], run: () => openPicked(tab) }));
 
 const PALETTE_VIEWS = {
   root: {
