@@ -132,7 +132,21 @@ async function signIn(page) {
   }
 }
 
+const hubUp = () => {
+  try {
+    execFileSync("curl", ["-fs", HUB], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 (async () => {
+  // An earlier try that stopped half way may have left the hub down.
+  if (!hubUp()) {
+    startHub();
+    await waitFor("the hub", hubUp);
+  }
   for (const n of NODES) pairNode(n);
   for (const n of NODES.slice(1)) startNode(n);
   const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
@@ -253,7 +267,7 @@ async function signIn(page) {
     await login.screenshot({ path: path.join(SHOTS, `connection-states-signin-real-${size}.png`) });
     console.log(`shot signin-${size}`);
     startHub();
-    await waitFor("the hub", () => { try { execFileSync("curl", ["-fs", HUB], { stdio: "ignore" }); return true; } catch { return false; } });
+    await waitFor("the hub", hubUp);
     await login.click("#login .retry");
     await waitFor("Retry to sign in", () => login.evaluate(() => document.body.dataset.hub === "online"), 30000);
     check(true, `${size}: Retry signed in once the hub was back`);
