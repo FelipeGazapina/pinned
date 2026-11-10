@@ -311,8 +311,22 @@ pub const ACTIONS: &[Action] = &[
     h("act", Excluded, "the surface itself: call act"),
     h("confirmations", Read, "The actions waiting on the user's approval, then the last 20 decided, with what each came to.").wired(),
     h("decide_confirmation", Excluded, "only the user decides, in the app"),
+    h("unlock", Excluded, "the user's own password, which only the app sends"),
     h("agent_audit", Read, "The audit trail of agents' acts on this account, newest first: limit rows (50, at most 200) from unix second before and earlier.").wired(),
 ];
+
+/// A signed-in client's answer to a call only the account's owner makes, until it unlocks.
+pub const LOCKED: &str = "unlock with your password in the app to do this";
+
+/// Whether a signed-in client must have unlocked with the password to run `cmd` on `side`: a
+/// decision always, and a `confirm` action on a `locked` login. The app keeps its login on disk,
+/// where any process of the same user reads it; the unlock lives in the app's memory only.
+pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
+    if side == Side::Hub && cmd == "decide_confirmation" {
+        return true;
+    }
+    locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
+}
 
 /// Hub actions that start work and that the hub holds to the limits itself: the server's `act`
 /// runs each through its own limits path, and refuses one it has no path for.
@@ -686,6 +700,14 @@ pub struct Decided {
     pub result: Value,
 }
 
+/// `HubCall::Unlock`'s answer. The app keeps `token` in memory and sends it again in
+/// `ClientFrame::Auth` after a reconnect; it works for that login until `until`, unix seconds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Unlocked {
+    pub token: String,
+    pub until: i64,
+}
+
 /// What the audit row of a call that ran says beyond its arguments: that it loosened a session's
 /// permissions.
 pub fn widening(call: &Parsed) -> Option<String> {
@@ -883,6 +905,20 @@ mod tests {
         assert!(stale.is_empty(), "surface::ACTIONS names calls the wire no longer has: {stale:?}");
         assert_eq!(ACTIONS.len(), wire.len(), "one entry per call");
         assert!(wire.len() > 160, "the schemas list every variant: {}", wire.len());
+    }
+
+    #[test]
+    fn a_decision_always_needs_the_unlock_and_a_confirm_action_needs_it_on_a_locked_login() {
+        let needs = |side, cmd, locked| owner_only(side, cmd, locked);
+        assert!(needs(Side::Hub, "decide_confirmation", false) && needs(Side::Hub, "decide_confirmation", true));
+        assert!(needs(Side::Hub, "remove_machine", true) && !needs(Side::Hub, "remove_machine", false), "an older app's login keeps its calls");
+        assert!(needs(Side::Node, "update_self", true) && needs(Side::Hub, "approve_agent", true) && needs(Side::Hub, "set_taste", true));
+        assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
+        assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
+        assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
+        let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
+        assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
     #[test]

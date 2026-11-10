@@ -24,6 +24,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -36,6 +37,9 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   name text not null, os text not null, token_hash bytea unique not null,
   created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
 alter table machines add column if not exists version text not null default '';
+-- Set once an app that asks for the password signs in with the login: the login alone then runs
+-- no call only the account's owner makes (`surface::owner_only`).
+alter table logins add column if not exists locked boolean not null default false;
 -- Null until the account first sets or imports its tastes.
 alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
@@ -213,6 +217,12 @@ pub struct Audit<'a> {
     pub outcome: AuditOutcome,
     pub detail: &'a str,
     pub request_id: Option<&'a str>,
+}
+
+/// A login token's account, and whether an app locked it (`Db::login`).
+pub struct Login {
+    pub account: Uuid,
+    pub locked: bool,
 }
 
 /// A confirmation as the hub keeps it: what the user sees, and the Claude session that asked,
@@ -543,18 +553,18 @@ impl Db {
         Ok(token.text)
     }
 
-    /// The account a login token belongs to, marking the login used.
-    pub async fn login(&self, token: &str) -> Result<Option<Uuid>, String> {
+    /// The login `token` opens, marking it used, and locked from now on when `lock`.
+    pub async fn login(&self, token: &str, lock: bool) -> Result<Option<Login>, String> {
         let row = self
             .client().await?
             .query_opt(
-                "update logins set last_used = now() where token_hash = $1 \
-                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account",
-                &[&hash(token), &LOGIN_IDLE_DAYS],
+                "update logins set last_used = now(), locked = locked or $3 where token_hash = $1 \
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account, locked",
+                &[&hash(token), &LOGIN_IDLE_DAYS, &lock],
             )
             .await
             .map_err(err)?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(row.map(|r| Login { account: r.get(0), locked: r.get(1) }))
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), String> {
@@ -910,6 +920,27 @@ impl Db {
             return Ok(None);
         }
         self.confirmation(account, id).await
+    }
+
+    /// Gives every confirmation decided more than `running` ago and still without an outcome one: a
+    /// hub that stopped between the decision and its outcome left it. A denial ran nothing; an
+    /// approval may have run, so it reads as failed with `approved_outcome`. Answers each with its account.
+    pub async fn finish_interrupted(&self, approved_outcome: &str, running: Duration) -> Result<Vec<(Uuid, Held)>, String> {
+        let rows = self
+            .client().await?
+            .query(
+                "update agent_confirmations set outcome = case when approved then $1 else 'denied' end, result = 'null'::jsonb \
+                 where decided_at < now() - make_interval(secs => $2) and outcome is null returning account, id",
+                &[&approved_outcome, &running.as_secs_f64()],
+            )
+            .await
+            .map_err(err)?;
+        let mut finished = vec![];
+        for row in &rows {
+            let account: Uuid = row.get(0);
+            finished.extend(self.confirmation(account, row.get(1)).await?.map(|held| (account, held)));
+        }
+        Ok(finished)
     }
 
     /// Puts a decided confirmation back to waiting, as a credential action whose run failed, so the

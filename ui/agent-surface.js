@@ -250,6 +250,20 @@ function agentSay(text, error = false) {
   agentActivity.notice = { text, error };
 }
 
+/** The account's password, which the hub asks for before a call only the owner makes, such as an
+ * approval; `error` is why the last one failed. Null when the user cancels. */
+function askOwnerPassword(error) {
+  return askDialog(
+    `<h3>Enter your password</h3>
+    <p class="about">Approving an agent's request, and changes only you make, need it. It holds until you close this window, for at most 12 hours.</p>
+    <label>Password<input type="password" name="password" autocomplete="current-password"></label>
+    <p class="error" role="alert">${esc(error)}</p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="primary">Unlock</button></div>`,
+    (form) => form.password.value || undefined,
+    (form) => setTimeout(() => form.password.focus()),
+  );
+}
+
 /** Approve or Deny. `entered` is what the user typed in a credential action's form, and its failure
  * is thrown for that form to show, while the confirmation keeps waiting. */
 async function decideAgentConfirmation(id, approve, entered) {

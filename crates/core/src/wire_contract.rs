@@ -106,6 +106,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("AuditEntry".into(), schemas::<crate::surface::AuditEntry>());
     outbound.insert("Confirmation".into(), schemas::<crate::surface::Confirmation>());
     outbound.insert("Decided".into(), schemas::<crate::surface::Decided>());
+    outbound.insert("Unlocked".into(), schemas::<crate::surface::Unlocked>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),

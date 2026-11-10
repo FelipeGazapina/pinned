@@ -1387,6 +1387,7 @@ function connectHub(signedIn) {
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
     confirmations: (items) => onAgentConfirmations(items),
+    locked: (error) => askOwnerPassword(error),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";
       if (on) retryUploadImages();

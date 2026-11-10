@@ -14,17 +14,20 @@ use pinned_core::{github, sync};
 use pinned_core::wire::{
     Call, HubCall, Invites, MachineEvent, MachineId, MachineView, PairCode, ProjectView, Reply, RunSpec, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
+use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 const MAX_RECORDS_PER_CALL: usize = 500;
+/// How long the password the app took counts as the owner being there.
+const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
 pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
 
@@ -86,6 +89,15 @@ pub struct Hub {
     sockets: AtomicU64,
     /// Serializes external agents' work on one project's orchestrator.
     agent_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The unlocks apps hold in memory, by the sha256 of the token. A hub restart forgets them, and
+    /// the app asks for the password again.
+    unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
+}
+
+struct Unlock {
+    /// The sha256 of the login it was taken on, the only one it works for.
+    login: Vec<u8>,
+    until: Instant,
 }
 
 pub struct Account {
@@ -142,6 +154,10 @@ impl Online {
 struct Client {
     out: Outbox,
     login: Vec<u8>,
+    /// Its app asks for the password before a call only the owner makes.
+    locked: bool,
+    /// Until when the password the app took counts for this connection.
+    unlocked: Option<Instant>,
     attached: HashSet<Target>,
     threads: HashMap<MachineId, HashSet<TabId>>,
 }
@@ -166,7 +182,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default() })
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
@@ -180,6 +196,26 @@ impl Hub {
             locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
         };
         lock.lock_owned().await
+    }
+
+    /// Unlocks client `client` of `account` for `UNLOCK_FOR`, once it gave the account's password,
+    /// and answers the token its app sends again after a reconnect.
+    pub fn unlock(&self, account: &Account, client: u64) -> Option<Unlocked> {
+        let token = db::Token::new();
+        let now = Instant::now();
+        let until = now + UNLOCK_FOR;
+        let login = account.unlocked(client, until)?;
+        let mut unlocks = self.unlocks.lock().unwrap();
+        unlocks.retain(|_, unlock| unlock.until > now);
+        unlocks.insert(token.hash, Unlock { login, until });
+        let ends = SystemTime::now() + UNLOCK_FOR;
+        Some(Unlocked { token: token.text, until: ends.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) })
+    }
+
+    /// When the unlock `token` ends, if it was taken on login `login` and has not ended yet.
+    pub fn unlocked_until(&self, token: &str, login: &[u8]) -> Option<Instant> {
+        let unlocks = self.unlocks.lock().unwrap();
+        unlocks.get(&db::hash(token)).filter(|unlock| unlock.login == login && unlock.until > Instant::now()).map(|unlock| unlock.until)
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -553,6 +589,7 @@ impl Hub {
             HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
             HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
             HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
+            HubCall::Unlock { .. } => return Err("only the app unlocks, on its own connection".into()),
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
                 return json(self.db.audit_rows(account.id, before, limit).await?);
@@ -723,6 +760,7 @@ impl Hub {
                 account.client_gone(client);
             }
         }
+        self.unlocks.lock().unwrap().retain(|_, unlock| unlock.login != hash);
     }
 }
 
@@ -967,7 +1005,7 @@ impl Account {
 
     /// Registers a client, sending it `hello` first: built under the same lock that events take,
     /// so no event falls between the snapshot and the stream.
-    pub fn client_connected(&self, id: u64, login: Vec<u8>, out: Outbox, mut machines: Vec<MachineView>) {
+    pub fn client_connected(&self, id: u64, login: Vec<u8>, locked: bool, unlocked: Option<Instant>, out: Outbox, mut machines: Vec<MachineView>) {
         let mut live = self.live.lock().unwrap();
         {
             let updates = self.updates.lock().unwrap();
@@ -982,7 +1020,30 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, attached: HashSet::new(), threads: HashMap::new() });
+        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new() });
+    }
+
+    /// Whether client `id` must unlock before `call` on `side`: only the account's owner makes it,
+    /// and the password the app took for this connection is missing or past its time.
+    pub fn needs_unlock(&self, id: u64, side: Side, call: &impl Serialize) -> bool {
+        let (locked, unlocked) = match self.live.lock().unwrap().clients.get(&id) {
+            Some(client) => (client.locked, client.unlocked.is_some_and(|until| until > Instant::now())),
+            None => return true,
+        };
+        !unlocked && surface::owner_only(side, &surface::cmd_of(call), locked)
+    }
+
+    /// The sha256 of the login client `id` signed in with.
+    pub fn login_of(&self, id: u64) -> Option<Vec<u8>> {
+        self.live.lock().unwrap().clients.get(&id).map(|client| client.login.clone())
+    }
+
+    /// Counts client `id` as its owner until `until`, and answers its login.
+    fn unlocked(&self, id: u64, until: Instant) -> Option<Vec<u8>> {
+        let mut live = self.live.lock().unwrap();
+        let client = live.clients.get_mut(&id)?;
+        client.unlocked = Some(until);
+        Some(client.login.clone())
     }
 
     pub fn client_gone(&self, id: u64) {
@@ -1231,7 +1292,7 @@ mod tests {
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
         let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
         for client in [1, 2] {
-            account.client_connected(client, vec![], Outbox::new().0, vec![]);
+            account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
         let (old, _, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.16.1".into(), old);
