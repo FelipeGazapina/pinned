@@ -4138,9 +4138,8 @@ impl Machine {
     /// The tool call or question the session of `tab` is blocked on: the latest call of its
     /// transcript that has no result yet.
     fn pending_ask(&self, tab: &str) -> Option<String> {
-        let file = self.transcript(tab).inspect_err(|e| eprintln!("DEBUG-ASK {tab}: {e}")).ok()?;
+        let file = self.transcript(tab).ok()?;
         let page = thread::read(&file, thread::last_page(&file)).ok()?;
-        eprintln!("DEBUG-ASK {tab}: {} items, pending {:?}", page.items.len(), thread::pending_tool(&page.items));
         let (_, summary) = thread::pending_tool(&page.items)?;
         Some(summary.to_owned()).filter(|summary| !summary.is_empty())
     }
