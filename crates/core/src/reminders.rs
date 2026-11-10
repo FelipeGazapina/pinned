@@ -1211,9 +1211,11 @@ fn restore_var(name: &str, value: Option<String>) {
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
+        assert_eq!(ask("work_cost", serde_json::json!({}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost"}}"#.into()));
+        assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
