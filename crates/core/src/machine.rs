@@ -4382,7 +4382,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new())).ok()?;
+        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?;
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
@@ -6392,11 +6392,11 @@ pub(crate) mod tests {
         let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
         m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
         let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
-        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None });
+        m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None, waiting: None });
         let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
         assert!(m.delegates.settle_remote(&remote, &captain, "m-mini", &end(usage(Some(0.30), (2000, 800), None))).is_some());
         let boxed = start(Parent::Tab(captain.clone()), "Box suite", Provider::Claude, "claude-sonnet-5-5");
-        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None });
+        m.delegates.set_remote(&boxed, RemoteTarget { machine: "m-box".into(), name: "box-1".into(), tab: None, looked: None, waiting: None });
         assert!(m.delegates.settle_remote(&boxed, &captain, "m-box", &end(usage(Some(0.10), (500, 250), Some(0.05)))).is_some());
         let cursor = start(Parent::Tab(captain.clone()), "Cursor review", Provider::Cursor, "composer-2.5");
 
