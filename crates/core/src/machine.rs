@@ -4747,7 +4747,8 @@ impl Machine {
             accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
             sessions: tabs.iter().filter(|tab| tab.running).count() as u32,
             workers: working.max(worker_tabs),
-            workers_at_once: self.tastes().resolve(&TasteScope::Captains).limits().parallel,
+            // The account's tastes as last kept on disk: asking the hub for them could stall the report.
+            workers_at_once: self.local_tastes().resolve(&TasteScope::Captains).limits().parallel,
             reported_at: 0,
         }
     }
