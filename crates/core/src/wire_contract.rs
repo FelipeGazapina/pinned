@@ -101,6 +101,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
     outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());
     outbound.insert("DelegationStats".into(), schemas::<crate::delegate::DelegationStats>());
+    outbound.insert("SessionMarks".into(), schemas::<crate::marks::SessionMarks>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),

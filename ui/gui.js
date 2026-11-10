@@ -34,7 +34,7 @@ onRekey((from, to) => {
   if (!(from in seenAt)) return;
   seenAt[to] = seenAt[from];
   delete seenAt[from];
-  save("gui-seen", JSON.stringify(seenAt));
+  storeMarks("gui-seen");
 });
 
 const ui = {
