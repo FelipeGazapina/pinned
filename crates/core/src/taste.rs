@@ -1120,6 +1120,7 @@ Deploys go through the VPS."
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
+            "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
         assert_eq!(serde_json::from_value::<Tastes>(json).unwrap(), tastes);

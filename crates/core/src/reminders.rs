@@ -932,6 +932,7 @@ mod tests {
             vec![
                 "budgetMs".to_owned(),
                 "clientRequestId".into(),
+                "heavy".into(),
                 "interactionMode".into(),
                 "isolation".into(),
                 "limitMs".into(),
