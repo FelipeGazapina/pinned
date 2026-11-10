@@ -264,6 +264,9 @@ pub struct DelegationStats {
     pub by_outcome: Vec<Group>,
     pub slowest: Vec<TaskBrief>,
     pub priciest: Vec<TaskBrief>,
+    /// Stored task records that did not read, so the totals leave them out.
+    #[serde(default)]
+    pub unreadable: u32,
 }
 
 pub const STATS_DAYS: [u32; 3] = [1, 7, 30];
@@ -326,6 +329,7 @@ pub fn aggregate(records: &[TaskRecord], now: u64, days: u32) -> DelegationStats
         by_outcome,
         slowest: slowest.iter().take(TOP).map(brief).collect(),
         priciest: priciest.iter().take(TOP).map(brief).collect(),
+        unreadable: 0,
     }
 }
 
@@ -404,13 +408,20 @@ impl DelegationStats {
         };
         let models: serde_json::Map<String, Value> = self.by_model.iter().map(|g| (g.label.clone(), row(g))).collect();
         let outcomes: serde_json::Map<String, Value> = self.by_outcome.iter().map(|g| (g.key.clone(), json!(g.runs))).collect();
-        json!({
+        let mut brief = json!({
             "days": self.days,
             "all": row(&self.totals),
             "costUsd": round(self.totals.cost_usd + self.totals.box_usd, 2),
             "byModel": models,
             "outcomes": outcomes,
-        })
+        });
+        if self.totals.box_usd > 0.0 {
+            brief["boxUsd"] = json!(round(self.totals.box_usd, 2));
+        }
+        if self.unreadable > 0 {
+            brief["unreadableRecords"] = json!(self.unreadable);
+        }
+        brief
     }
 }
 

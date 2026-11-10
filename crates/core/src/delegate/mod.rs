@@ -252,7 +252,7 @@ impl Origin {
 }
 
 /// How a task that runs on another machine ended, as that machine reports it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct RemoteEnd {
     /// `result_available`, `failed` or `cancelled`.
     pub state: String,
@@ -260,6 +260,10 @@ pub struct RemoteEnd {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the worker used, its box's time included: the delegating task shows it. An older
+    /// machine sends none. The machine that ran the task records the run, so this is for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::TaskUsage>,
 }
 
 /// The delegation request, after the MCP arguments have been read once.
@@ -2684,7 +2688,7 @@ exec '{real}' "$@"
         });
         delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None });
         assert_eq!(delegates.cards("tab-1"), vec![], "its thread on mini nests under tab-1 instead");
-        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None };
+        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
         assert!(!delegates.settle_remote(&task.id, "tab-1", "m-other", &end), "another machine can't end it");
         assert!(!delegates.settle_remote(&task.id, "tab-2", "m-mini", &end), "nor can it end another tab's task");
         assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end));
