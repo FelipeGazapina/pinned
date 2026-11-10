@@ -196,4 +196,4 @@ function drawAgentActivity() {
   document.getElementById("agent-activity").onclick = agentSurfaceClick;
 }
 
-settingsSection({ page: "agent-activity", label: "Agent activity", icon: "history", show: () => showAgentActivity(), search: [{ title: "Agent activity", terms: ["audit agent actions approvals confirmations trail approve deny"] }] });
+settingsSection({ page: "agent-activity", label: "Agent activity", icon: "shield", show: () => showAgentActivity(), search: [{ title: "Agent activity", terms: ["audit agent actions approvals confirmations trail approve deny"] }] });
