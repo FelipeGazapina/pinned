@@ -1282,6 +1282,10 @@ impl Machine {
     }
 
     fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
+        self.nudge_thread_watchers_at(seen, Instant::now());
+    }
+
+    fn nudge_thread_watchers_at(&self, seen: &mut HashMap<String, TranscriptLook>, now: Instant) {
         let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
         if watched.is_empty() {
             return;
@@ -1291,7 +1295,6 @@ impl Machine {
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
-        let now = Instant::now();
         for (id, session, status, account) in open {
             if !watched.contains(&id) {
                 continue;
@@ -5779,16 +5782,17 @@ pub(crate) mod tests {
         let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
         let before = scans();
         let mut looks = HashMap::new();
+        let mut now = Instant::now();
         for _ in 0..10 {
-            m.nudge_thread_watchers(&mut looks);
+            m.nudge_thread_watchers_at(&mut looks, now);
         }
         assert_eq!(scans(), before + 1, "ten ticks at the prompt search once");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
-        m.nudge_thread_watchers(&mut looks);
+        m.nudge_thread_watchers_at(&mut looks, now);
         assert_eq!(scans(), before + 2, "a turn that starts searches at once");
         std::fs::write(projects.join("p007/s1.jsonl"), assistant_line("first")).unwrap();
-        std::thread::sleep(THREAD_LOOK_EVERY * 2);
-        m.nudge_thread_watchers(&mut looks);
+        now += THREAD_LOOK_EVERY * 2;
+        m.nudge_thread_watchers_at(&mut looks, now);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started nudges");
         let _ = std::fs::remove_dir_all(root);
     }
