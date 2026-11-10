@@ -26,6 +26,46 @@ pub struct Delegates {
 /// How often the counted time of working tasks reaches disk while nothing else changes.
 const COUNTED_SAVE_EVERY: Duration = Duration::from_secs(60);
 
+/// The finished tasks `tasks.json` keeps whatever their age, newest first.
+const KEEP_FINISHED: usize = 500;
+
+/// Finished tasks younger than this stay too, beyond `KEEP_FINISHED`.
+const KEEP_FINISHED_FOR_MS: u64 = 14 * 24 * 60 * 60 * 1000;
+
+/// Drops the finished tasks that are not among the `newest` finished ones and are older than
+/// `max_age_ms`, and returns how many went. A task stays while it works, while its result has not
+/// reached the session that asked for it, and while a kept task still hangs under it, since a child's owner is found by walking up its parents.
+pub(super) fn prune(tasks: &mut Vec<Task>, now: u64, newest: usize, max_age_ms: u64) -> usize {
+    let ended = |task: &Task| task.ended.unwrap_or(task.started);
+    let mut finished: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i].state.terminal()).collect();
+    finished.sort_by_key(|&i| std::cmp::Reverse(ended(&tasks[i])));
+    let mut keep: Vec<bool> = tasks.iter().map(|task| !task.state.terminal() || !task.delivered || now.saturating_sub(ended(task)) < max_age_ms).collect();
+    for &i in finished.iter().take(newest) {
+        keep[i] = true;
+    }
+    if keep.iter().all(|kept| *kept) {
+        return 0;
+    }
+    let position: HashMap<&str, usize> = tasks.iter().enumerate().map(|(i, task)| (task.id.as_str(), i)).collect();
+    for i in 0..tasks.len() {
+        if !keep[i] {
+            continue;
+        }
+        let mut at = i;
+        while let Parent::Task(parent) = &tasks[at].parent {
+            let Some(&up) = position.get(parent.as_str()) else { break };
+            if std::mem::replace(&mut keep[up], true) {
+                break;
+            }
+            at = up;
+        }
+    }
+    let before = tasks.len();
+    let mut keep = keep.into_iter();
+    tasks.retain(|_| keep.next().unwrap_or(true));
+    before - tasks.len()
+}
+
 /// What the news that a remote worker waits on the user says between the worker and the ask.
 pub const ASK_NOTICE: &str = " waits on the user for ";
 
@@ -125,7 +165,8 @@ impl Delegates {
         *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
         *delegates.reports.lock().unwrap() = saved.reports;
         *delegates.notices.lock().unwrap() = saved.notices;
-        if delegates.adopt_restart() {
+        let pruned = prune(&mut delegates.tasks.lock().unwrap(), unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS) > 0;
+        if delegates.adopt_restart() || pruned {
             delegates.persist();
         }
         delegates
@@ -1325,15 +1366,20 @@ impl Delegates {
     fn persist(&self) {
         *self.saved_at.lock().unwrap() = Instant::now();
         let Some(path) = self.store.clone() else { return };
+        let tasks = {
+            let mut tasks = self.tasks.lock().unwrap();
+            prune(&mut tasks, unix_millis(), KEEP_FINISHED, KEEP_FINISHED_FOR_MS);
+            tasks.iter().map(SavedTask::from_task).collect()
+        };
         let saved = SavedFile {
-            tasks: self.tasks.lock().unwrap().iter().map(SavedTask::from_task).collect(),
+            tasks,
             reports: self.reports.lock().unwrap().clone(),
             notices: self.notices.lock().unwrap().clone(),
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let Ok(bytes) = serde_json::to_vec_pretty(&saved) else { return };
+        let Ok(bytes) = serde_json::to_vec(&saved) else { return };
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -2391,7 +2437,7 @@ fn isolated_cwd(task: &Task) -> Option<PathBuf> {
     (task.isolated && task.conversation.is_none() && task.state.terminal()).then(|| task.cwd.clone())
 }
 
-fn unix_millis() -> u64 {
+pub(super) fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
