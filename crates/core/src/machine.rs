@@ -13739,7 +13739,9 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn with_an_empty_policy_a_heavy_worker_runs_here_and_never_asks_the_hub() {
         let (m, dir, captain) = limited_captain("place-empty", TastePatch::default());
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(dir.join("app")).status().unwrap().success());
+        for args in [&["init", "-q"][..], &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "start"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
         m.set_hub_id("m-book".into(), "MacBook".into());
         let calls = placing_hub(&m, vec![], &[]);
         let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
