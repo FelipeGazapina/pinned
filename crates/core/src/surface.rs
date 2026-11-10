@@ -146,6 +146,7 @@ pub const ACTIONS: &[Action] = &[
     n("open_run", Excluded, "the hub's way to reopen an archived conversation's tab for an agent without starting it"),
     n("run", Excluded, "the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's"),
     n("deliver", Excluded, "the hub's way into a workflow's session, matched by environment"),
+    n("run_now", Excluded, "the hub's way to start a workflow's Run now on a machine under its limits: call run_workflow"),
     n("upload", Excluded, "the app's file upload: you have your own files"),
     n("read_upload", Excluded, "the app's picture previews"),
     n("read_image", Excluded, "the app's picture previews"),
@@ -269,6 +270,7 @@ pub const ACTIONS: &[Action] = &[
     h("save_connector", Write, "Saves a workflow (a new one with no id, else the one with that id) and answers it as stored. A workflow with a session that skips permission prompts needs a session that skips them too.").wired(),
     h("delete_connector", Confirm, "Deletes a workflow.").wired(),
     h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model.").wired(),
+    h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
     h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine.").wired(),
@@ -337,7 +339,7 @@ pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
 
 /// Hub actions that start work and that the hub holds to the limits itself: the server's `act`
 /// runs each through its own limits path, and refuses one it has no path for.
-pub const HUB_LIMITS: &[&str] = &["open_box"];
+pub const HUB_LIMITS: &[&str] = &["open_box", "run_workflow"];
 
 pub fn find(name: &str) -> Option<&'static Action> {
     ACTIONS.iter().find(|action| action.name == name)
@@ -615,6 +617,18 @@ impl ActorRole {
             ActorRole::TasteChat => "taste_chat",
             ActorRole::Workflow => "workflow",
             ActorRole::Session => "session",
+        }
+    }
+
+    /// How a person reads the role, as "Run now by the Captain …".
+    pub fn label(self) -> &'static str {
+        match self {
+            ActorRole::GlobalOrchestrator => "the global orchestrator",
+            ActorRole::Captain => "the Captain",
+            ActorRole::Worker => "the worker",
+            ActorRole::TasteChat => "the taste chat",
+            ActorRole::Workflow => "the workflow session",
+            ActorRole::Session => "the session",
         }
     }
 }
@@ -991,7 +1005,7 @@ mod tests {
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
                 "disconnect_upstash", "set_box_access", "answer_box", "clone", "share_project", "save_connector", "delete_connector",
-                "generate_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
+                "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
@@ -1002,6 +1016,8 @@ mod tests {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
+        assert!(find("run_workflow").is_some_and(|a| a.starts_work && a.class == Write), "a Run now goes through the limits, with no approval");
+        assert_eq!(find("run_now").map(|a| a.class), Some(Excluded), "only the hub starts a Run now on a machine");
     }
 
     #[test]
@@ -1130,6 +1146,14 @@ mod tests {
             assert!(HUB_LIMITS.contains(&"open_box"), "the hub holds open_box to the box budget and cap");
             let Ok(Parsed::Hub(HubCall::OpenBox { budget_usd, .. })) = parse(find("open_box").unwrap(), &json!({ "repo": "acme/site", "budget_usd": 3.0 })) else { panic!("open_box") };
             assert_eq!(budget_usd, Some(3.0));
+        }
+
+        #[test]
+        fn run_workflow() {
+            wired("run_workflow", Write, "hub", true, json!({ "id": "c1" }));
+            assert!(HUB_LIMITS.contains(&"run_workflow"), "the hub holds run_workflow to the caller's limits");
+            let Ok(Parsed::Hub(HubCall::RunWorkflow { id })) = parse(find("run_workflow").unwrap(), &json!({ "id": "c1" })) else { panic!("run_workflow") };
+            assert_eq!(id, "c1");
         }
 
         #[test]

@@ -6,7 +6,8 @@ use crate::boxes::Opener;
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
-use pinned_core::wire::{Call, HubCall, ToClient};
+use pinned_core::connectors::{Placement, RunsOn};
+use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -230,8 +231,34 @@ async fn limited(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, action
             let opener = Opener { machine: caller.machine, tab: caller.tab.clone(), role: caller.role };
             json(hub.boxes.open_session(hub, account, repo, size, budget_usd, Some(opener)).await?)
         }
+        Parsed::Hub(HubCall::RunWorkflow { id }) => json(run_workflow(hub, account, caller, &id).await?),
         _ => Err(format!("{} starts work on the hub, and nothing holds it to the limits there", action.name)),
     }
+}
+
+/// An agent's Run now of workflow `id`: on its own machine, as its own task, held to the limits it
+/// runs under (`Call::RunNow` inside `ActFor`), and never with wider permissions than its own.
+async fn run_workflow(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, id: &str) -> Result<RunStarted, String> {
+    let title = if caller.title.is_empty() { caller.tab.clone() } else { caller.title.clone() };
+    let by = format!("{} {title:?} through run_workflow", caller.role.label());
+    let run = hub.connectors(account).await?.run_now(id, &by)?;
+    let origin = caller.machine.to_string();
+    let elsewhere = match &run.runs_on {
+        RunsOn::FreshBox(_) => Some("an Upstash Box".to_owned()),
+        RunsOn::Machine(machine) if machine != &origin => Some(account.name_of(machine).unwrap_or_else(|| machine.clone())),
+        RunsOn::Machine(_) | RunsOn::Any => None,
+    };
+    if let Some(elsewhere) = elsewhere {
+        return Err(format!("run_workflow starts work only on this session's own machine for now, and this workflow runs on {elsewhere}"));
+    }
+    let spec = hub.run_spec(account, &run).await;
+    if !caller.bypass && spec.args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions") {
+        return Err("run_workflow would run a session that skips its permission prompts, and your own session asks for them".into());
+    }
+    let call = Call::ActFor { caller: caller.tab.clone(), call: json(crate::hub::run_call(spec, &run.subject))? };
+    let tab = hub.call_machine(account, &origin, call, ACT_WAIT).await.map_err(String::from)?;
+    let tab = tab.as_str().ok_or("the machine started the session without a tab id")?.to_owned();
+    Ok(account.started(id, Placement { machine: origin, tab }))
 }
 
 /// The user's decision on confirmation `id`, from a signed-in client of `account`. `entered` is

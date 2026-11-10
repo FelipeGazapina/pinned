@@ -894,6 +894,7 @@ impl Machine {
             Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
             Call::OpenRun { run } => json(self.open_run(&run)?),
+            Call::RunNow { run, title } => json(self.run_now(&run, &title, None)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
             Call::Upload { name, data } => {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
@@ -1501,6 +1502,102 @@ impl Machine {
                 return Err(e);
             }
         }
+        Ok(id)
+    }
+
+    /// Opens a workflow's Run now and starts it, as `run` does a triggered run, as a task held to
+    /// the limits of the project it runs in: its model's tier and its effort, the project's workers
+    /// at once, its time limit and budget. Its first finished turn ends the task, whose record goes
+    /// to the delegation metrics. `caller` is the agent session that asked: its own task narrows the
+    /// limits, it may not start a session with wider access than its own, and it hears when the
+    /// task ends. None is the user: the task's parent is then its own tab, which is never told.
+    pub fn run_now(&self, run: &RunSpec, title: &str, caller: Option<&str>) -> Result<TabId, String> {
+        use crate::delegate::{Access, Caller, Claim, Delegator, Mode, NewTask, Parent, Thread};
+        // The hub sends a run again when it lost the answer: the session it started answers.
+        if let Some(work) = session_of(&run.env) {
+            let tabs = self.tabs.lock().unwrap();
+            if let Some((id, _)) = tabs.iter().find(|(_, t)| (t.session.is_some() || t.starting) && session_of(&t.env).as_ref() == Some(&work)) {
+                return Ok(id.clone());
+            }
+        }
+        let flag = |name: &str| run.args.windows(2).find(|pair| pair[0] == name).map(|pair| pair[1].clone());
+        let model = flag("--model");
+        let mode = flag("--permission-mode");
+        let access = Access::derive(mode.as_deref() == Some("bypassPermissions"), mode.as_deref() == Some("plan"));
+        if let Some(caller) = caller {
+            let ceiling = self.tab(caller, |t| t.child_access())?;
+            if crate::delegate::tighten(ceiling, access) != access {
+                return Err(format!("the workflow's session runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
+            }
+        }
+        let id = self.open_run(run)?;
+        let (cwd, account) = self.tab(&id, |t| (t.cwd.clone(), t.account.clone()))?;
+        let project = history::project_of(&cwd);
+        let limits = caller.map_or_else(|| self.tastes().resolve(&captain_scope(&project)).limits(), |caller| self.limits_in(caller, &project));
+        let effort = match limits.admit(model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
+            Ok(effort) => effort,
+            Err(refused) => {
+                self.close_tab(&id);
+                return Err(refused);
+            }
+        };
+        let parent = caller.unwrap_or(&id).to_owned();
+        let caller_ref = Caller { tab: Some(parent.clone()), task: None };
+        let new = NewTask {
+            parent: Parent::Tab(parent.clone()),
+            tool: None,
+            title: title.to_owned(),
+            account: account.id.clone(),
+            provider: account.provider,
+            model,
+            cwd: cwd.clone(),
+            mode: Mode::Async,
+            access,
+            isolated: false,
+            caller_key: caller_ref.key(),
+            client_request_id: None,
+            role: None,
+        };
+        let task = match self.delegates.claim(new, Some(limits.parallel)) {
+            Claim::Fresh(task) => *task,
+            Claim::Full(working) => {
+                self.close_tab(&id);
+                return Err(workers_full(working));
+            }
+            Claim::Existing(task) => {
+                self.close_tab(&id);
+                return Err(format!("task {task} already runs for this request"));
+            }
+        };
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        self.delegates.set_limits(&task.id, budget_ms, limit_ms);
+        self.delegates.hold_to(&task.id, taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits });
+        let delegator = match caller {
+            Some(_) => self.delegator(&caller_ref),
+            // The user's run: the tab is its own session, and no session hears when it ends.
+            None => Delegator { tab: None, ..self.delegator(&caller_ref) },
+        };
+        self.delegates.describe(&task.id, delegator, effort);
+        if let Some(caller) = caller {
+            self.delegates.note_parent(&task.id, self.tab(caller, |t| t.claude_session.clone()).ok().flatten());
+        }
+        let _ = self.tab(&id, |t| {
+            t.task = Some(task.id.clone());
+            if let Some(caller) = caller {
+                t.spawned_by.get_or_insert_with(|| caller.to_owned());
+            }
+        });
+        self.delegates.link_thread(&task.id, Thread { tab: id.clone(), runs: true });
+        if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+            self.close_tab(&id);
+            return Err(error);
+        }
+        if let Some(pid) = self.tab(&id, |t| t.session.as_ref().and_then(pty::Session::pid)).ok().flatten() {
+            self.delegates.remember_pid(&task.id, pid);
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
         Ok(id)
     }
 
@@ -2656,6 +2753,9 @@ impl Machine {
         }
         if let Call::Enqueue { path, text, request_id, busy, .. } = call {
             return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
+        }
+        if let Call::RunNow { run, title } = call {
+            return json(self.run_now(&run, &title, Some(caller))?);
         }
         if let Call::Prompt { tab, text } = &call {
             self.may_prompt(caller, tab)?;
@@ -4481,6 +4581,10 @@ impl Machine {
                     }
                 }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
+                // A workflow's Run now is a task with no worker role: its first finished turn ends it too.
+                None => {
+                    self.settle_thread_task(tab, &event);
+                }
                 _ => {}
             }
             self.record_turn(tab, &event);
@@ -9622,6 +9726,80 @@ Have another model review a risky change before it goes ahead.";
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
         assert_eq!(m.call(Call::ActFor { caller: global, call: json!({ "cmd": "start_claude", "tab": plain, "cols": 80, "rows": 24 }) }), Err(NO_PROJECT_WORK.into()));
         assert!(!m.view(&outside).unwrap().running && !m.view(&wide).unwrap().running && !m.view(&plain).unwrap().running, "a refused start starts nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A workflow's Run now as the hub builds it: its setup's flags, its name and its own subject.
+    #[cfg(unix)]
+    fn run_now_spec(folder: &str, model: &str, permission: &str) -> RunSpec {
+        let args = ["--model", model, "--effort", "medium", "--permission-mode", permission, "--name", "Nightly · Run now", "Run now by the account's owner."];
+        let subject = crate::agent::Subject::LinearIssue { issue: format!("run-now:c1:{model}{permission}") };
+        RunSpec { folder: folder.into(), repo: None, args: args.map(String::from).to_vec(), env: crate::agent::session_env("c1", &subject), token: None, account: None, budget_usd: None }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_run_now_starts_the_workflows_session_as_a_task_under_its_projects_limits_and_records_it() {
+        use crate::delegate::{DelegatorKind, TaskOutcome};
+        let (m, dir, captain) = limited_captain("run-now", TastePatch { tier: Some(taste::Tier::Mid), parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let run_now = |spec: RunSpec| m.call(Call::RunNow { run: spec, title: "Nightly · Run now".into() });
+        let tabs = || m.tabs().len();
+        let before = tabs();
+
+        assert_eq!(
+            run_now(run_now_spec(&path, "claude-opus-5-5", "auto")),
+            Err("claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into())
+        );
+        assert_eq!(tabs(), before, "a run the limits refuse leaves no tab");
+
+        let spec = run_now_spec(&path, "claude-sonnet-5-5", "auto");
+        let tab: String = serde_json::from_value(run_now(spec.clone()).unwrap()).unwrap();
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.connector.as_deref(), view.running, view.role), (Some("c1"), true, None), "a workflow's session, not a worker");
+        let task = m.tab(&tab, |t| t.task.clone()).unwrap().expect("the run is a task");
+        let held = m.delegates.get(&task).unwrap();
+        assert_eq!((held.title.as_str(), held.model.as_deref(), held.cwd.display().to_string()), ("Nightly · Run now", Some("claude-sonnet-5-5"), path.clone()));
+        let args = started(&dir.join("claude"), &tab);
+        assert!(args.windows(2).any(|w| w == ["--model", "claude-sonnet-5-5"]) && args.windows(2).any(|w| w == ["--permission-mode", "auto"]), "the workflow's own setup: {args:?}");
+        assert_eq!(run_now(spec), Ok(json!(tab)), "a run sent again after a lost answer finds its session");
+
+        assert_eq!(
+            run_now(run_now_spec(&path, "claude-sonnet-5-5", "acceptEdits")),
+            Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into())
+        );
+        assert_eq!(tabs(), before + 1, "a run past workers-at-once leaves no tab");
+
+        m.record_event(done_event(&tab));
+        let records = m.delegates.records();
+        let record = records.iter().find(|r| r.id == task).expect("the ended run's record for the metrics");
+        assert_eq!(
+            (record.title.as_str(), record.delegator.kind, record.delegator.tab.as_deref(), record.outcome, record.effort.as_deref(), record.thread.as_deref()),
+            ("Nightly · Run now", DelegatorKind::Session, None, TaskOutcome::Done, Some("medium"), Some(tab.as_str()))
+        );
+        assert!(!m.delegates.has_pending(), "no session waits on the user's run, so nothing is typed into its own tab");
+        assert!(run_now(run_now_spec(&path, "claude-sonnet-5-5", "acceptEdits")).is_ok(), "an ended run frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_run_now_is_its_own_task_and_never_wider_than_its_session() {
+        use crate::delegate::DelegatorKind;
+        let (m, dir, captain) = limited_captain("run-now-agent", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |spec: RunSpec| m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "run_now", "run": spec, "title": "Nightly · Run now" }) });
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        assert_eq!(act(run_now_spec(&path, "claude-sonnet-5-5", "bypassPermissions")), Err("the workflow's session runs with full access, wider than your session's auto".into()));
+
+        let tab: String = serde_json::from_value(act(run_now_spec(&path, "claude-sonnet-5-5", "auto")).unwrap()).unwrap();
+        assert_eq!(m.view(&tab).unwrap().spawned_by.as_deref(), Some(captain.as_str()));
+        let task = m.tab(&tab, |t| t.task.clone()).unwrap().unwrap();
+        m.record_event(done_event(&tab));
+        let records = m.delegates.records();
+        let record = records.iter().find(|r| r.id == task).unwrap();
+        assert_eq!((record.delegator.kind, record.delegator.tab.as_deref()), (DelegatorKind::Captain, Some(captain.as_str())), "the asking session's task");
+        assert!(m.delegates.has_pending(), "the asking session gets the task's notice");
         let _ = std::fs::remove_dir_all(dir);
     }
 

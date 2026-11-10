@@ -270,6 +270,14 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .flow-card .chain i { width: 10px; height: 2px; background: var(--s-line, #3d434d); }
 .flow-card .hint { line-height: 1.4; }
 .flow-card .switch { margin-top: 3px; }
+.flow-card { flex-wrap: wrap; }
+.flow-card .run-now { flex: none; margin-top: -2px; }
+.flow-card .run-now:disabled { opacity: 0.55; cursor: default; }
+.flow-card .run-now[aria-busy="true"] { opacity: 1; cursor: progress; }
+.run-now-outcome { flex: 1 0 100%; margin: 2px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; }
+.run-now-outcome.started { color: var(--done); }
+.run-now-outcome.refused { color: var(--s-error, #ff6b6b); }
+.run-now-outcome .link { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .new-card { width: 100%; margin: 10px 0; padding: 10px; border: 1px dashed var(--border); border-radius: 10px; color: var(--muted); }
 .new-card:hover { color: var(--fg); border-color: var(--working); }
 .template { width: 100%; display: flex; gap: 10px; align-items: flex-start; margin: 10px 0; padding: 12px; text-align: left;

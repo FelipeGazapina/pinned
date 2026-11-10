@@ -1804,6 +1804,9 @@ impl Connectors {
 
     /// Moves the session's issue to the column the connector maps `stage` to.
     pub async fn stage(&self, connector: &str, subject: &Subject, stage: Stage) -> Result<String, String> {
+        if is_run_now(subject) {
+            return Ok("Run now started this session, which has no Linear issue to move".into());
+        }
         let (issue, column) = {
             let store = self.store.lock().unwrap();
             let c = store.connector(connector)?;
@@ -4051,6 +4054,119 @@ impl Connectors {
     }
 }
 
+/// The subject a Run now's session carries. It names no Linear issue or Slack thread: it keeps one
+/// run apart from another, so a run sent again after a lost answer finds the session it started.
+const RUN_NOW: &str = "run-now:";
+
+/// Whether `subject` is a Run now's, which no trigger found.
+pub fn is_run_now(subject: &Subject) -> bool {
+    matches!(subject, Subject::LinearIssue { issue } if issue.starts_with(RUN_NOW))
+}
+
+/// The tab title a Run now's session starts under, which its task keeps too.
+pub fn run_now_title(spec: &RunSpec) -> String {
+    spec.args.windows(2).find(|pair| pair[0] == "--name").map_or_else(|| "Run now".to_owned(), |pair| pair[1].clone())
+}
+
+const RUN_NOW_NOTE: &str = "No Linear issue or Slack thread started this session, so `pinned stage`, `pinned slack reply` and `pinned linear` have nothing to act on here. Do the work the instructions above describe.";
+
+/// Where a Run now of `workflow` opens its session. It walks from the trigger's outgoing edges as
+/// a triggered run does, to the first talk or session step, and answers that step's owner, setup
+/// and text, and whether a proof step came first. A step that acts on the trigger's issue or
+/// thread has none to act on, and a classify or switch has nothing to read, so the walk passes
+/// them by their `out` port. A branch that only the trigger's answers pick, and a stop, end it.
+fn manual_start(library: &runner::Library, names: &BTreeMap<String, String>, workflow: &str) -> Result<(String, SessionSetup, bool), String> {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    let graph = library.get(workflow).ok_or_else(|| format!("workflow {:?} has no steps", name(workflow)))?;
+    let out = crate::graph::PortId(crate::graph::PortId::OUT.into());
+    let mut owner = workflow.to_owned();
+    let mut graph = graph;
+    let mut queue: Vec<crate::graph::NodeId> = graph.next(&graph.trigger().id, &out).into_iter().cloned().collect();
+    let mut proof = false;
+    let mut called = vec![workflow.to_owned()];
+    for _ in 0..256 {
+        let Some(id) = queue.first().cloned() else {
+            return Err(format!("workflow {:?} opens no session: give it a talk or session step after its trigger", name(workflow)));
+        };
+        queue.remove(0);
+        let node = graph.node(&id).ok_or_else(|| format!("workflow {:?} names a step {} it does not have", name(&owner), id.0))?;
+        let next = match &node.kind {
+            NodeKind::Talk { prompt } => return Ok((owner, SessionSetup { prompt: prompt.clone(), ..SessionSetup::default() }, proof)),
+            NodeKind::Session(setup) => return Ok((owner, setup.clone(), proof)),
+            NodeKind::Stop => return Err(format!("workflow {:?} stops at {:?} before it opens a session, so Run now has nothing to start", name(&owner), node.name)),
+            NodeKind::Call { workflow: target } => {
+                if called.contains(target) {
+                    return Err(format!("workflow {:?} calls {:?}, which is already on the way", name(&owner), name(target)));
+                }
+                called.push(target.clone());
+                graph = library.get(target).ok_or_else(|| format!("workflow {:?} calls {:?}, which has no steps", name(&owner), name(target)))?;
+                owner = target.clone();
+                queue = graph.next(&graph.trigger().id, &out).into_iter().cloned().collect();
+                continue;
+            }
+            NodeKind::Proof => {
+                proof = true;
+                graph.next(&id, &out)
+            }
+            kind if kind.ports().iter().any(|port| port.id == out) => graph.next(&id, &out),
+            _ => {
+                return Err(format!(
+                    "workflow {:?} branches at {:?} on what its trigger found, and Run now has no Linear issue or Slack thread to read, so it can't pick a branch",
+                    name(&owner),
+                    node.name
+                ))
+            }
+        };
+        queue.splice(0..0, next.into_iter().cloned());
+    }
+    Err(format!("workflow {:?} has too many steps before its session", name(workflow)))
+}
+
+/// The session a Run now of `owner` opens: its own setup, its instructions, and in place of the
+/// issue or thread a trigger would hand it, who started it and when.
+fn manual_run(owner: &Connector, workflow: &str, title: &str, talk: &str, by: &str, now: DateTime<Utc>, exe: &str) -> Run {
+    let at = now.format("%Y-%m-%d %H:%M UTC");
+    let stamp = now.timestamp_millis();
+    let mut args = claude_args(owner, &format!("run-now-{stamp}"), title.to_owned());
+    let mut prompt = owner.instructions.trim().to_owned();
+    if owner.proof {
+        prompt += &proof_of_work(exe);
+    }
+    prompt += owner.box_note();
+    let input = format!("Run now by {by}, at {at}.");
+    prompt += &format!("\n\n{input} {RUN_NOW_NOTE}");
+    if !talk.trim().is_empty() {
+        prompt += &format!("\n\n{}", talk.trim());
+    }
+    args.push(prompt);
+    let subject = Subject::LinearIssue { issue: format!("{RUN_NOW}{workflow}:{stamp}") };
+    Run { cwd: owner.folder.clone(), repo: owner.repo(), args, connector: owner.id.clone(), subject, mentioned: vec![], account: owner.account(), runs_on: owner.runs_on.clone(), input }
+}
+
+impl Connectors {
+    /// The session a Run now of the saved workflow `id` opens, started by `by` (as "Run now by
+    /// <by>"). It has the same setup a triggered run's session would have, with no issue or thread
+    /// behind it. A workflow that only sorts Slack messages, or only answers threads another
+    /// workflow hands it, has no session of its own to start, and is refused.
+    pub fn run_now(&self, id: &str, by: &str) -> Result<Run, String> {
+        let workflow = self.store.lock().unwrap().connectors.iter().find(|c| c.id == id).cloned().ok_or_else(|| format!("this account has no workflow {id}"))?;
+        match &workflow.trigger {
+            Trigger::SlackMessage { .. } => {
+                return Err(format!("workflow {:?} sorts new Slack messages into other workflows and has no session of its own, so Run now has nothing to start", workflow.name))
+            }
+            Trigger::Called => {
+                return Err(format!("workflow {:?} answers only the Slack threads another workflow hands it, so Run now has no thread to give it", workflow.name))
+            }
+            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
+        }
+        let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
+        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup);
+        owner.proof |= proof || self.graph_has_proof(&owner.id);
+        let title: String = format!("{} · Run now", workflow.name).chars().take(TAB_NAME_CHARS).collect();
+        Ok(manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4568,6 +4684,79 @@ mod tests {
             account: String::new(),
             graph: None,
         }
+    }
+
+    fn node(id: &str, name: &str, kind: NodeKind) -> Node {
+        Node { id: NodeId(id.into()), name: name.into(), position: [0, 0], group_name: None, kind }
+    }
+
+    fn edge(from: &str, port: &str, to: &str) -> Edge {
+        Edge { from: NodeId(from.into()), port: PortId(port.into()), to: NodeId(to.into()) }
+    }
+
+    fn kind_classify(branch_on: Option<&str>) -> crate::graph::Classify {
+        let choices = ["bug", "question"].map(|label| crate::graph::Choice { id: PortId(label.into()), label: label.into(), description: String::new() });
+        let question = crate::graph::Question { name: "kind".into(), ask: "What is it?".into(), choices: choices.to_vec() };
+        crate::graph::Classify { model: "typesafe-ai/jev".into(), instructions: String::new(), questions: vec![question], branch_on: branch_on.map(Into::into), gate: Gate::Direct, fallback: crate::graph::Fallback::None }
+    }
+
+    #[test]
+    fn a_run_now_opens_the_workflows_own_session_with_no_trigger_behind_it() {
+        let (connectors, dir) = stored("run-now", vec![linear_connector()]);
+        let run = connectors.run_now("c1", "the account's owner, from Settings › Workflows").unwrap();
+        let (prompt, flags) = run.args.split_last().unwrap();
+        assert_eq!(flags[..6], ["--model", "sonnet", "--effort", "xhigh", "--permission-mode", "acceptEdits"], "the workflow's model, effort and permissions");
+        assert!(flags[6].starts_with("--worktree=run-now-"), "its own worktree: {flags:?}");
+        assert_eq!(flags[7..], ["--name", "Resolve · Run now"]);
+        assert!(prompt.starts_with("Fix it.\n\nRun now by the account's owner, from Settings › Workflows, at "), "its instructions, then who started it: {prompt}");
+        assert!(prompt.ends_with(RUN_NOW_NOTE), "{prompt}");
+        assert!(!prompt.contains("stage coding") && !prompt.contains("Report your progress"), "no issue to report on: {prompt}");
+        assert!(is_run_now(&run.subject) && run.connector == "c1" && run.runs_on == RunsOn::Any);
+        assert_eq!(run_now_title(&run.spec()), "Resolve · Run now");
+        assert_eq!(block_on(connectors.stage("c1", &run.subject, Stage::Coding)), Ok("Run now started this session, which has no Linear issue to move".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_now_walks_the_graph_from_its_trigger_to_its_first_session_step() {
+        let mut c = linear_connector();
+        c.graph = Some(Graph {
+            nodes: vec![
+                node("t", "Trigger", NodeKind::Trigger { watch: Watch::LinearLabel { label: "claude".into() } }),
+                node("ask", "Ask", NodeKind::Classify(kind_classify(None))),
+                node("stage", "Picked", NodeKind::StagePicked),
+                node("s", "Session", NodeKind::Session(SessionSetup { prompt: "Summarize the week.".into(), model: "claude-opus-5-5".into(), ..SessionSetup::default() })),
+            ],
+            edges: vec![edge("t", "out", "ask"), edge("ask", "out", "stage"), edge("stage", "out", "s")],
+        });
+        let (connectors, dir) = stored("run-now-graph", vec![c.clone()]);
+        let run = connectors.run_now("c1", "the Captain \"Ops\" through run_workflow").unwrap();
+        assert_eq!(run.args[..2], ["--model", "claude-opus-5-5"], "the session step's own setup");
+        let prompt = run.args.last().unwrap();
+        assert!(prompt.contains("Run now by the Captain \"Ops\" through run_workflow, at ") && prompt.ends_with("\n\nSummarize the week."), "{prompt}");
+
+        c.graph.as_mut().unwrap().nodes[1] = node("ask", "Ask", NodeKind::Classify(kind_classify(Some("kind"))));
+        c.graph.as_mut().unwrap().edges[1] = edge("ask", "bug", "stage");
+        let (connectors, other) = stored("run-now-branch", vec![c]);
+        assert_eq!(
+            connectors.run_now("c1", "you").map(drop),
+            Err("workflow \"Resolve\" branches at \"Ask\" on what its trigger found, and Run now has no Linear issue or Slack thread to read, so it can't pick a branch".into())
+        );
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(other));
+    }
+
+    #[test]
+    fn a_run_now_refuses_a_workflow_with_no_session_of_its_own() {
+        let called = Connector { id: "c3".into(), name: "Answer".into(), trigger: Trigger::Called, ..slack_connector() };
+        let decide = Decide { model: "typesafe-ai/jev".into(), instructions: String::new(), categories: vec![], fallback: None };
+        let sorter = Connector { id: "c4".into(), name: "Sort".into(), trigger: Trigger::SlackMessage { channel: "#support".into(), decide }, ..slack_connector() };
+        let (connectors, dir) = stored("run-now-refused", vec![slack_connector(), called, sorter]);
+        assert_eq!(connectors.run_now("c3", "you").map(drop), Err("workflow \"Answer\" answers only the Slack threads another workflow hands it, so Run now has no thread to give it".into()));
+        assert_eq!(connectors.run_now("c4", "you").map(drop), Err("workflow \"Sort\" sorts new Slack messages into other workflows and has no session of its own, so Run now has nothing to start".into()));
+        assert_eq!(connectors.run_now("nope", "you").map(drop), Err("this account has no workflow nope".into()));
+        let mention = connectors.run_now("c2", "you").unwrap();
+        assert_eq!(mention.args[..4], ["--effort", "high", "--permission-mode", "plan"], "a mention workflow runs with no thread");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn issue() -> linear::Issue {

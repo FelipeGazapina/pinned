@@ -340,7 +340,7 @@ impl Delegates {
                     quiet.push(task.id.clone());
                 } else if ran >= task.run.budget_ms && !task.run.told_late {
                     task.run.told_late = true;
-                    if let Parent::Tab(tab) = &task.parent {
+                    if let (Parent::Tab(tab), true) = (&task.parent, announces(task)) {
                         late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, task: Some(task.id.clone()), request: None });
                     }
                 }
@@ -755,7 +755,7 @@ impl Delegates {
             .iter()
             .enumerate()
             .filter(|(_, task)| {
-                !task.delivered && task.state.terminal() && matches!(&task.parent, Parent::Tab(parent) if parent == tab)
+                !task.delivered && task.state.terminal() && announces(task) && matches!(&task.parent, Parent::Tab(parent) if parent == tab)
             })
             .map(|(index, _)| index)
             .collect();
@@ -909,7 +909,7 @@ impl Delegates {
 
     pub fn has_pending(&self) -> bool {
         let tasks = self.tasks.lock().unwrap();
-        let finished = tasks.iter().any(|task| !task.delivered && task.state.terminal() && matches!(task.parent, Parent::Tab(_)));
+        let finished = tasks.iter().any(|task| !task.delivered && task.state.terminal() && announces(task) && matches!(task.parent, Parent::Tab(_)));
         let reports = self.reports.lock().unwrap().iter().any(|report| !report.claimed && !stale(report, &tasks));
         finished || reports
     }
@@ -1322,6 +1322,9 @@ fn pending_report(task: &mut Task) -> Option<Report> {
     }
     task.run.told_pending = true;
     let Parent::Tab(tab) = &task.parent else { return None };
+    if !announces(task) {
+        return None;
+    }
     let text = format!(
         "[pinned] Delegated task {} \"{}\" ({}) replied and still runs {}. pinned ends the task when that work finishes and the agent replies again, or, when only shells are left, after {} with no activity, and then stops what is still running. Call task_status with taskId \"{}\" to read the reply and the work, or task_cancel to stop it now.",
         task.id,
@@ -1384,6 +1387,12 @@ fn card_state(state: WorkState) -> subagents::State {
         WorkState::Failed => subagents::State::Failed,
         WorkState::Cancelled => subagents::State::Cancelled,
     }
+}
+
+/// Whether the task's end and progress are told to its parent. A task whose parent is the very
+/// tab that shows it, as the user's Run now of a workflow, has no other session waiting on it.
+fn announces(task: &Task) -> bool {
+    !matches!((&task.parent, &task.thread_tab), (Parent::Tab(parent), Some(thread)) if parent == thread)
 }
 
 fn root_tab(tasks: &[Task], mut parent: Parent) -> Option<String> {
