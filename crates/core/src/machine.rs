@@ -58,6 +58,10 @@ struct SentAsk {
 
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
+/// How often, and how many times, a blocked session's transcript is read again for the call it
+/// waits on; and how long a remote ask waits for that detail before it is told without.
+const ASK_DETAIL_TRIES: u32 = 8;
+const ASK_DETAIL_WAIT: u64 = 5;
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
 /// How often this machine asks after each task it delegated elsewhere on its own, so one whose
 /// machine is gone, whose box never connected or whose end got lost ends here too.
@@ -4124,6 +4128,9 @@ impl Machine {
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
+        if view.ask_detail.is_none() && unix_now().saturating_sub(view.updated.unwrap_or_default()) < ASK_DETAIL_WAIT {
+            return None;
+        }
         let (kind, tool) = global::ask_of(view.message.as_deref());
         Some(crate::delegate::RemoteAsk { kind, tool, ask: view.ask_detail.or(view.message).unwrap_or_default(), since: view.updated.unwrap_or_default() })
     }
@@ -5247,6 +5254,29 @@ impl Machine {
         if changed == Ok(true) {
             self.save_sessions();
         }
+        if event.status == AgentStatus::NeedsInput && !was_done && self.tab(tab, |t| t.ask_detail.is_none()).unwrap_or(false) {
+            self.find_ask_detail_later(tab);
+        }
+    }
+
+    /// Claude Code can fire its permission notice before it writes the call to the transcript, so
+    /// a detail not found at the event is looked for again for a few seconds.
+    fn find_ask_detail_later(&self, tab: &str) {
+        let (me, tab) = (self.me.clone(), tab.to_owned());
+        std::thread::spawn(move || {
+            for _ in 0..ASK_DETAIL_TRIES {
+                std::thread::sleep(Duration::from_millis(500));
+                let Some(machine) = me.upgrade() else { return };
+                if machine.tab(&tab, |t| t.status != Some(AgentStatus::NeedsInput) || t.ask_detail.is_some()).unwrap_or(true) {
+                    return;
+                }
+                if let Some(detail) = machine.pending_ask(&tab) {
+                    let _ = machine.tab(&tab, |t| t.ask_detail = Some(detail).filter(|_| t.status == Some(AgentStatus::NeedsInput)));
+                    machine.emit_tabs();
+                    return;
+                }
+            }
+        });
     }
 
     /// Starts a turn on a prompt, or on its end saves what the session changed since.
@@ -11050,9 +11080,12 @@ Have another model review a risky change before it goes ahead.";
         let event = |status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(worker.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
         m.record_event(event(AgentStatus::Working, None));
         m.record_event(event(AgentStatus::NeedsInput, Some("Claude needs your input")));
+        m.send_remote_asks(Instant::now());
+        assert!(told.try_recv().is_err(), "it waits a moment for the transcript to name the call");
+        m.tab(&worker, |t| t.updated = Some(unix_now() - 60)).unwrap();
         let now = Instant::now();
         m.send_remote_asks(now);
-        assert!(told.try_recv().is_err());
+        assert!(told.try_recv().is_err(), "the hub is down");
         m.send_remote_asks(now + Duration::from_secs(1));
         assert!(told.try_recv().is_err(), "not sent again before REMOTE_LOOK passed");
         up.store(true, Ordering::SeqCst);
