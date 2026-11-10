@@ -122,7 +122,10 @@ const send = (page, key, text) =>
 
     // The worker hits its permission prompt: type /ask into its thread, on its own machine.
     await send(page, worker, "/ask");
-    await waitFor("three rows in Waiting on you", () => page.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 60000);
+    await waitFor("three rows in Waiting on you", () => page.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 40000).catch(async (e) => {
+      console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => ({ title: t.view.title, machine: machines.get(t.machine)?.view.name, status: t.view.status, running: t.view.running, interrupted: t.view.interrupted, message: t.view.message, detail: t.view.ask_detail, menu: !!t.menu }))), null, 1));
+      throw e;
+    });
 
     for (const [size, viewport] of SIZES) {
       const phone = size === "phone";
