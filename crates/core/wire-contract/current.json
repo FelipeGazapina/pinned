@@ -3004,6 +3004,56 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this\nmachine, as the hub passes on that session's `act`. A call that starts a session holds it to\nthe caller's delegation limits (`surface::Action::starts_work`).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act_for"
+                  },
+                  "caller": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "cmd",
+                  "caller",
+                  "call"
+                ]
+              },
+              {
+                "description": "`true` once `text` is queued for the tab, as worker reports are: typed once its session is\nidle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when\nno tab has it. A repeat of `id` queues nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "notice"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "text",
+                  "id"
+                ]
               }
             ]
           },
@@ -5920,6 +5970,85 @@
                   "machine",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under\n`surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/AgentAct"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "act"
+                ]
+              },
+              {
+                "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "confirmations"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "decide_confirmation"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "approve": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "approve"
+                ]
+              },
+              {
+                "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from before unix time `before`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_audit"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -8357,6 +8486,41 @@
               "name",
               "project",
               "at"
+            ]
+          },
+          "AgentAct": {
+            "description": "An agent session's `act`, as its machine passes it to the hub. The hub reads the session's role\nand Claude session from the tabs that machine reported, never from here.",
+            "type": "object",
+            "properties": {
+              "tab": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "args": {
+                "description": "The action's fields, as `actions` describes them.",
+                "default": null
+              },
+              "request_id": {
+                "description": "Makes a repeat answer the first outcome instead of running again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "tab",
+              "action",
+              "args"
             ]
           },
           "Target3": {
@@ -11328,6 +11492,56 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this\nmachine, as the hub passes on that session's `act`. A call that starts a session holds it to\nthe caller's delegation limits (`surface::Action::starts_work`).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act_for"
+                  },
+                  "caller": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "cmd",
+                  "caller",
+                  "call"
+                ]
+              },
+              {
+                "description": "`true` once `text` is queued for the tab, as worker reports are: typed once its session is\nidle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when\nno tab has it. A repeat of `id` queues nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "notice"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "text",
+                  "id"
+                ]
               }
             ]
           },
@@ -14191,6 +14405,85 @@
                   "machine",
                   "tab"
                 ]
+              },
+              {
+                "description": "From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under\n`surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/AgentAct"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "act"
+                ]
+              },
+              {
+                "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "confirmations"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "decide_confirmation"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "approve": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "approve"
+                ]
+              },
+              {
+                "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from before unix time `before`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_audit"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -16545,6 +16838,40 @@
               "name",
               "project",
               "at"
+            ]
+          },
+          "AgentAct": {
+            "description": "An agent session's `act`, as its machine passes it to the hub. The hub reads the session's role\nand Claude session from the tabs that machine reported, never from here.",
+            "type": "object",
+            "properties": {
+              "tab": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "args": {
+                "description": "The action's fields, as `actions` describes them.",
+                "default": null
+              },
+              "request_id": {
+                "description": "Makes a repeat answer the first outcome instead of running again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "tab",
+              "action"
             ]
           },
           "Target3": {
@@ -19016,6 +19343,85 @@
                   "cmd",
                   "machine",
                   "tab"
+                ]
+              },
+              {
+                "description": "From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under\n`surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/AgentAct"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "act"
+                ]
+              },
+              {
+                "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "confirmations"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "decide_confirmation"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "approve": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "approve"
+                ]
+              },
+              {
+                "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from before unix time `before`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_audit"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -21938,6 +22344,41 @@
               "project",
               "at"
             ]
+          },
+          "AgentAct": {
+            "description": "An agent session's `act`, as its machine passes it to the hub. The hub reads the session's role\nand Claude session from the tabs that machine reported, never from here.",
+            "type": "object",
+            "properties": {
+              "tab": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "args": {
+                "description": "The action's fields, as `actions` describes them.",
+                "default": null
+              },
+              "request_id": {
+                "description": "Makes a repeat answer the first outcome instead of running again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "tab",
+              "action",
+              "args"
+            ]
           }
         }
       },
@@ -24226,6 +24667,85 @@
                   "cmd",
                   "machine",
                   "tab"
+                ]
+              },
+              {
+                "description": "From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under\n`surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/AgentAct"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "act"
+                ]
+              },
+              {
+                "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "confirmations"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a signed-in client: `surface::Decided`. Approving runs the action for the session that\nasked; either way the session gets a notice.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "decide_confirmation"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "approve": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "approve"
+                ]
+              },
+              {
+                "description": "`Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`\nrows (50, at most 200) from before unix time `before`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "agent_audit"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -27052,6 +27572,40 @@
               "project",
               "at"
             ]
+          },
+          "AgentAct": {
+            "description": "An agent session's `act`, as its machine passes it to the hub. The hub reads the session's role\nand Claude session from the tabs that machine reported, never from here.",
+            "type": "object",
+            "properties": {
+              "tab": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "args": {
+                "description": "The action's fields, as `actions` describes them.",
+                "default": null
+              },
+              "request_id": {
+                "description": "Makes a repeat answer the first outcome instead of running again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "tab",
+              "action"
+            ]
           }
         }
       }
@@ -27268,6 +27822,164 @@
         ]
       }
     },
+    "ActAnswer": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ActAnswer",
+        "description": "What `act` came to.",
+        "oneOf": [
+          {
+            "description": "It ran. `result` is what the call answered, with secrets and the action's hidden fields out.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "done"
+              },
+              "result": true
+            },
+            "required": [
+              "outcome",
+              "result"
+            ]
+          },
+          {
+            "description": "It waits on the user's approval in the app as confirmation `id`.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "pending"
+              },
+              "id": {
+                "type": "string"
+              },
+              "next": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "id",
+              "next"
+            ]
+          },
+          {
+            "description": "The account already ran an act with this `request_id`, which came to `earlier` at unix time `at`.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "repeat"
+              },
+              "earlier": {
+                "$ref": "#/$defs/AuditOutcome"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "outcome",
+              "earlier",
+              "at"
+            ]
+          }
+        ],
+        "$defs": {
+          "AuditOutcome": {
+            "type": "string",
+            "enum": [
+              "done",
+              "failed",
+              "refused",
+              "pending",
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ActAnswer",
+        "description": "What `act` came to.",
+        "oneOf": [
+          {
+            "description": "It ran. `result` is what the call answered, with secrets and the action's hidden fields out.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "done"
+              },
+              "result": true
+            },
+            "required": [
+              "outcome",
+              "result"
+            ]
+          },
+          {
+            "description": "It waits on the user's approval in the app as confirmation `id`.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "pending"
+              },
+              "id": {
+                "type": "string"
+              },
+              "next": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "id",
+              "next"
+            ]
+          },
+          {
+            "description": "The account already ran an act with this `request_id`, which came to `earlier` at unix time `at`.",
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "repeat"
+              },
+              "earlier": {
+                "$ref": "#/$defs/AuditOutcome"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "outcome",
+              "earlier",
+              "at"
+            ]
+          }
+        ],
+        "$defs": {
+          "AuditOutcome": {
+            "type": "string",
+            "enum": [
+              "done",
+              "failed",
+              "refused",
+              "pending",
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      }
+    },
     "AgentRedirect": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -27370,6 +28082,411 @@
           "scopes",
           "expires_at"
         ]
+      }
+    },
+    "AuditEntry": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AuditEntry",
+        "description": "One row of the audit trail: an agent's act, a refusal, or the user's decision on a confirmation.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "description": "Empty for a machine since removed.",
+            "type": "string",
+            "default": ""
+          },
+          "tab": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/ActorRole"
+          },
+          "action": {
+            "type": "string"
+          },
+          "args": {
+            "description": "The arguments as compact JSON, secrets hidden and long strings cut (`summary`).",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/$defs/AuditOutcome"
+          },
+          "detail": {
+            "description": "The error or refusal, or what a decided action came to.",
+            "type": "string",
+            "default": ""
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "machine",
+          "machine_name",
+          "tab",
+          "role",
+          "action",
+          "args",
+          "outcome",
+          "detail"
+        ],
+        "$defs": {
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "AuditOutcome": {
+            "type": "string",
+            "enum": [
+              "done",
+              "failed",
+              "refused",
+              "pending",
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "AuditEntry",
+        "description": "One row of the audit trail: an agent's act, a refusal, or the user's decision on a confirmation.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "description": "Empty for a machine since removed.",
+            "type": "string",
+            "default": ""
+          },
+          "tab": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/ActorRole"
+          },
+          "action": {
+            "type": "string"
+          },
+          "args": {
+            "description": "The arguments as compact JSON, secrets hidden and long strings cut (`summary`).",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/$defs/AuditOutcome"
+          },
+          "detail": {
+            "description": "The error or refusal, or what a decided action came to.",
+            "type": "string",
+            "default": ""
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "machine",
+          "tab",
+          "role",
+          "action",
+          "args",
+          "outcome"
+        ],
+        "$defs": {
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "AuditOutcome": {
+            "type": "string",
+            "enum": [
+              "done",
+              "failed",
+              "refused",
+              "pending",
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      }
+    },
+    "Confirmation": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Confirmation",
+        "description": "A `confirm` action an agent asked for, waiting on the user or decided.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "description": "Unix seconds it was asked.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string",
+            "default": ""
+          },
+          "tab": {
+            "type": "string"
+          },
+          "title": {
+            "description": "The asking session's title when it asked.",
+            "type": "string",
+            "default": ""
+          },
+          "role": {
+            "$ref": "#/$defs/ActorRole"
+          },
+          "action": {
+            "type": "string"
+          },
+          "about": {
+            "description": "What the action does, from the manifest.",
+            "type": "string",
+            "default": ""
+          },
+          "args": {
+            "description": "The exact arguments it runs with."
+          },
+          "target": {
+            "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Decision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decided_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outcome": {
+            "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "machine",
+          "machine_name",
+          "tab",
+          "title",
+          "role",
+          "action",
+          "about",
+          "args"
+        ],
+        "$defs": {
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Confirmation",
+        "description": "A `confirm` action an agent asked for, waiting on the user or decided.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "description": "Unix seconds it was asked.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "machine_name": {
+            "type": "string",
+            "default": ""
+          },
+          "tab": {
+            "type": "string"
+          },
+          "title": {
+            "description": "The asking session's title when it asked.",
+            "type": "string",
+            "default": ""
+          },
+          "role": {
+            "$ref": "#/$defs/ActorRole"
+          },
+          "action": {
+            "type": "string"
+          },
+          "about": {
+            "description": "What the action does, from the manifest.",
+            "type": "string",
+            "default": ""
+          },
+          "args": {
+            "description": "The exact arguments it runs with."
+          },
+          "target": {
+            "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Decision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decided_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outcome": {
+            "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "machine",
+          "tab",
+          "role",
+          "action",
+          "args"
+        ],
+        "$defs": {
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
+            ]
+          }
+        }
       }
     },
     "Connector": {
@@ -29720,6 +30837,69 @@
         }
       }
     },
+    "Decided": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Decided",
+        "description": "The answer to the user's decision: the action's own answer, unredacted, for an approved one.",
+        "type": "object",
+        "properties": {
+          "decision": {
+            "$ref": "#/$defs/Decision"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "result": {
+            "default": null
+          }
+        },
+        "required": [
+          "decision",
+          "outcome",
+          "result"
+        ],
+        "$defs": {
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Decided",
+        "description": "The answer to the user's decision: the action's own answer, unredacted, for an approved one.",
+        "type": "object",
+        "properties": {
+          "decision": {
+            "$ref": "#/$defs/Decision"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "result": {
+            "default": null
+          }
+        },
+        "required": [
+          "decision",
+          "outcome"
+        ],
+        "$defs": {
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
+            ]
+          }
+        }
+      }
+    },
     "DelegationStats": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -31814,10 +32994,19 @@
             ]
           },
           "WaitingKind": {
-            "type": "string",
-            "enum": [
-              "needs_input",
-              "failed"
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "needs_input",
+                  "failed"
+                ]
+              },
+              {
+                "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
+                "type": "string",
+                "const": "confirm"
+              }
             ]
           },
           "OverviewMachine": {
@@ -32214,10 +33403,19 @@
             ]
           },
           "WaitingKind": {
-            "type": "string",
-            "enum": [
-              "needs_input",
-              "failed"
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "needs_input",
+                  "failed"
+                ]
+              },
+              {
+                "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
+                "type": "string",
+                "const": "confirm"
+              }
             ]
           },
           "OverviewMachine": {
@@ -38757,6 +39955,26 @@
               "type",
               "marks"
             ]
+          },
+          {
+            "description": "The agents' actions waiting on the user's approval, after `Hello` and after any change.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "confirmations"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Confirmation"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "items"
+            ]
           }
         ],
         "$defs": {
@@ -41348,6 +42566,117 @@
               "project",
               "at"
             ]
+          },
+          "Confirmation": {
+            "description": "A `confirm` action an agent asked for, waiting on the user or decided.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "title": {
+                "description": "The asking session's title when it asked.",
+                "type": "string",
+                "default": ""
+              },
+              "role": {
+                "$ref": "#/$defs/ActorRole"
+              },
+              "action": {
+                "type": "string"
+              },
+              "about": {
+                "description": "What the action does, from the manifest.",
+                "type": "string",
+                "default": ""
+              },
+              "args": {
+                "description": "The exact arguments it runs with."
+              },
+              "target": {
+                "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Decision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decided_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "outcome": {
+                "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "at",
+              "machine",
+              "machine_name",
+              "tab",
+              "title",
+              "role",
+              "action",
+              "about",
+              "args"
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
+            ]
           }
         }
       },
@@ -41490,6 +42819,26 @@
             "required": [
               "type",
               "marks"
+            ]
+          },
+          {
+            "description": "The agents' actions waiting on the user's approval, after `Hello` and after any change.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "confirmations"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Confirmation"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "items"
             ]
           }
         ],
@@ -44001,6 +45350,114 @@
               "name",
               "project",
               "at"
+            ]
+          },
+          "Confirmation": {
+            "description": "A `confirm` action an agent asked for, waiting on the user or decided.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "int64"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string"
+              },
+              "title": {
+                "description": "The asking session's title when it asked.",
+                "type": "string",
+                "default": ""
+              },
+              "role": {
+                "$ref": "#/$defs/ActorRole"
+              },
+              "action": {
+                "type": "string"
+              },
+              "about": {
+                "description": "What the action does, from the manifest.",
+                "type": "string",
+                "default": ""
+              },
+              "args": {
+                "description": "The exact arguments it runs with."
+              },
+              "target": {
+                "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Decision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decided_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "outcome": {
+                "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "at",
+              "machine",
+              "tab",
+              "role",
+              "action",
+              "args"
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "Decision": {
+            "type": "string",
+            "enum": [
+              "approved",
+              "denied"
             ]
           }
         }
@@ -47147,6 +48604,56 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this\nmachine, as the hub passes on that session's `act`. A call that starts a session holds it to\nthe caller's delegation limits (`surface::Action::starts_work`).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act_for"
+                  },
+                  "caller": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "cmd",
+                  "caller",
+                  "call"
+                ]
+              },
+              {
+                "description": "`true` once `text` is queued for the tab, as worker reports are: typed once its session is\nidle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when\nno tab has it. A repeat of `id` queues nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "notice"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "text",
+                  "id"
                 ]
               }
             ]
@@ -51862,6 +53369,56 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "What `call`, a `Call` as JSON, answers when run for the agent session in tab `caller` on this\nmachine, as the hub passes on that session's `act`. A call that starts a session holds it to\nthe caller's delegation limits (`surface::Action::starts_work`).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "act_for"
+                  },
+                  "caller": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "cmd",
+                  "caller",
+                  "call"
+                ]
+              },
+              {
+                "description": "`true` once `text` is queued for the tab, as worker reports are: typed once its session is\nidle. A `tab` gone since, as after a restart, is found by its Claude `session`. `false` when\nno tab has it. A repeat of `id` queues nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "notice"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "text",
+                  "id"
                 ]
               }
             ]
