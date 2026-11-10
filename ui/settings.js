@@ -299,7 +299,7 @@ function boxTokensHtml() {
   const rows = kept.map(([name, hint]) => `<div class="row box-token"><span><b>${esc(name)}</b> · token <b>${esc(hint)}</b></span>
       <button class="secondary" data-action="remove-box-token" data-name="${esc(name)}">Remove</button></div>`).join("");
   return `<div class="box-tokens">
-      <p class="hint">Claude token per account. A worker's box signs in with the token of the account <code>delegate_task</code> names, else the default one above.</p>
+      <p class="hint">Claude token per account. Every box signs in with the token of the account its project runs on, or of the one <code>delegate_task</code> names. The token above is the claude account's. A box whose account has no token here doesn't open.</p>
       ${rows}
       ${agentAskingHtml("set_box_claude_token")}
       <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
