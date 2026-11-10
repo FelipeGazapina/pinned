@@ -637,6 +637,23 @@
                 ]
               },
               {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -9136,6 +9153,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
                   },
                   "run": {
                     "$ref": "#/$defs/RunSpec"
@@ -46238,6 +46272,23 @@
                 ]
               },
               {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -51014,6 +51065,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
                   },
                   "run": {
                     "$ref": "#/$defs/RunSpec"
