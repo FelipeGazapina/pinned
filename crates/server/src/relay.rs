@@ -13,8 +13,11 @@ use pinned_core::link::is_unknown_command;
 use pinned_core::reading;
 use pinned_core::wire::{Call, HubCall, MachineId, ProjectView, TabView};
 use serde_json::{json, Value};
+use pinned_core::repo_look::RepoLook;
+use pinned_core::surface::{self as act_surface, ActorRole, AuditOutcome};
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Each machine answers whether it hosts from its in-order call queue, behind whatever it was doing.
 const HOST_WAIT: Duration = Duration::from_secs(10);
@@ -37,6 +40,7 @@ pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: Source<'_>, cal
         HubCall::Overview => overview(hub, account, from).await,
         HubCall::ReadCaptain { machine, path } => read_captain(hub, account, from, &machine, path).await,
         HubCall::ReadSession { tab, machine, items } => read_session(hub, account, from, tab, machine, items).await,
+        HubCall::RepoLook { tab, project, machine, look } => repo_look(hub, account, from, &tab, &project, machine.as_deref(), look).await,
         _ => Err("that is not a global orchestrator call".into()),
     }
 }
@@ -150,6 +154,149 @@ async fn look(hub: &Hub, account: &Account, machine: &str, settings_wait: Durati
     );
     let projects = projects.and_then(|listed| serde_json::from_value(listed).map_err(|e| Unanswered::Refused(e.to_string())));
     Look { projects, settings, tabs }
+}
+
+/// Repo reads an account's global orchestrator may make a minute and an hour.
+pub const READS_PER_MINUTE: usize = 30;
+pub const READS_PER_HOUR: usize = 300;
+pub const INSIGHT_OFF: &str = "Reading repositories is off for this account, so the Orchestrator can't look at the code. Felipe can turn it on in Settings > Account > Orchestrator repo access.";
+
+/// When an account's repo reads came, for their limit.
+#[derive(Default)]
+pub struct ReadRate {
+    at: VecDeque<Instant>,
+}
+
+impl ReadRate {
+    /// Counts one read at `now`, or answers why it may not run: past 30 in the last minute or
+    /// 300 in the last hour. A refused read does not count.
+    pub fn take(&mut self, now: Instant) -> Result<(), String> {
+        let (minute, hour) = (Duration::from_secs(60), Duration::from_secs(3600));
+        while self.at.front().is_some_and(|t| now.duration_since(*t) >= hour) {
+            self.at.pop_front();
+        }
+        if self.at.iter().filter(|t| now.duration_since(**t) < minute).count() >= READS_PER_MINUTE {
+            return Err(format!("slow down: {READS_PER_MINUTE} repo reads in the last minute; ask the Captain to explore instead"));
+        }
+        if self.at.len() >= READS_PER_HOUR {
+            return Err(format!("slow down: {READS_PER_HOUR} repo reads in the last hour; ask the Captain to explore instead"));
+        }
+        self.at.push_back(now);
+        Ok(())
+    }
+}
+
+/// The global orchestrator's repo_overview, repo_read and repo_search: `look` at `project`'s
+/// checkout on `machine`, else on the one its Capitão runs in, the asking machine's, or the first
+/// online one. Only the host may ask, only while the account allows it and within the read rate.
+/// Every call it lets through writes one audit row, with the arguments and never the file text.
+async fn repo_look(hub: &Hub, account: &Account, from: Source<'_>, tab: &str, project: &str, machine: Option<&str>, look: RepoLook) -> Result<Value, String> {
+    let Source::Machine(from) = from else { return Err("only the global orchestrator reads repositories".into()) };
+    only_host(hub, account, &Source::Machine(from), "read a repository").await?;
+    let asker = uuid::Uuid::parse_str(from).map_err(|_| format!("this account has no machine {from}"))?;
+    let mut args = look.args();
+    (args["project"], args["machine"]) = (json!(project), json!(machine));
+    let audit = |outcome: AuditOutcome, detail: String| {
+        let args = act_surface::summary(&args);
+        let action = look.action();
+        async move {
+            let row = crate::db::Audit { account: account.id, machine: asker, tab, role: ActorRole::GlobalOrchestrator, action, args: &args, outcome, detail: &detail, request_id: None };
+            if let Err(e) = hub.db.audit(&row).await {
+                eprintln!("pinned-server: account {}'s {action} audit row was not written: {e}", account.id);
+            }
+        }
+    };
+    if !hub.connectors(account).await?.repo_insight().on {
+        audit(AuditOutcome::Refused, "off for this account".into()).await;
+        return Err(INSIGHT_OFF.into());
+    }
+    if let Err(e) = account.repo_reads.lock().unwrap().take(Instant::now()) {
+        audit(AuditOutcome::Refused, e.clone()).await;
+        return Err(e);
+    }
+    let (id, name, path) = match checkout(hub, account, from, project, machine).await {
+        Ok(found) => found,
+        Err(e) => {
+            audit(AuditOutcome::Failed, e.clone()).await;
+            return Err(e);
+        }
+    };
+    let answer = match hub.call_machine(account, &id, Call::RepoLook { path: path.clone(), look: look.clone() }, RELAY_WAIT).await {
+        Ok(answer) => Ok(answer),
+        Err(Unanswered::Refused(e)) if is_unknown_command(&e) => Err(format!("{name} needs to update pinned to let the Orchestrator read its repos")),
+        Err(e) => Err(String::from(e)),
+    };
+    match answer {
+        Ok(mut out) => {
+            audit(AuditOutcome::Done, format!("{name}: {}", look_detail(&out))).await;
+            (out["machine"], out["machine_name"], out["project"]) = (json!(id), json!(name), json!(project));
+            Ok(out)
+        }
+        Err(e) => {
+            audit(AuditOutcome::Failed, format!("{name}: {e}")).await;
+            Err(e)
+        }
+    }
+}
+
+/// What a look answered, as its audit row says it: sizes, never text.
+fn look_detail(out: &Value) -> String {
+    if out.get("text").is_some() {
+        return format!("{}, lines {}-{} of {}, {} redacted", out["file"].as_str().unwrap_or(""), out["from_line"], out["to_line"], out["total_lines"], out["redacted"]);
+    }
+    if out.get("hits").is_some() {
+        return format!("{} of {} hits in {} files", out["shown"], out["total"], out["files"]);
+    }
+    if out.get("paths").is_some() {
+        return format!("{} of {} paths", out["shown"], out["total"]);
+    }
+    if out.get("binary").is_some() {
+        return format!("{}, binary", out["file"].as_str().unwrap_or(""));
+    }
+    format!("overview, {} files", out["size"]["files"])
+}
+
+/// The machine id, its name and the folder of `project`'s checkout to read: `project` is a repo
+/// key, `<machine id>:<path>` or a folder, as `projects` lists it, and `machine` an id or a name.
+/// Only the account's own machines and the projects they list are found.
+async fn checkout(hub: &Hub, account: &Account, host: &str, project: &str, machine: Option<&str>) -> Result<(MachineId, String, String), String> {
+    let machines = hub.machines(account).await?;
+    let named = match machine.map(|m| m.trim().trim_start_matches('@')) {
+        Some(m) => Some(machines.iter().find(|known| known.id == m || known.name.eq_ignore_ascii_case(m)).ok_or_else(|| format!("this account has no machine {m}"))?),
+        None => None,
+    };
+    let (keyed_machine, keyed_path) = match project.split_once(':') {
+        Some((m, path)) if path.starts_with('/') || path.get(1..2) == Some(":") => (Some(m), path),
+        _ => (None, project),
+    };
+    let mut found = vec![];
+    for m in machines.iter().filter(|m| named.is_none_or(|n| n.id == m.id) && keyed_machine.is_none_or(|k| k == m.id)) {
+        let mut listed = account.last_listed(&m.id);
+        if listed.is_empty() && m.online {
+            if let Ok(projects) = hub.call_machine(account, &m.id, Call::ListProjects, LOOK_WAIT).await.and_then(|v| serde_json::from_value::<Vec<ProjectView>>(v).map_err(|e| Unanswered::Refused(e.to_string()))) {
+                account.listed(&m.id, projects.clone());
+                listed = projects;
+            }
+        }
+        for p in listed {
+            if p.path == keyed_path || p.repo.as_deref() == Some(project) {
+                found.push((m, p.path));
+            }
+        }
+    }
+    let online: Vec<&(&pinned_core::wire::MachineView, String)> = found.iter().filter(|(m, _)| m.online).collect();
+    let captain = |(m, path): &&(&pinned_core::wire::MachineView, String)| {
+        account.tabs_of(&m.id).is_some_and(|tabs| tabs.iter().any(|t| t.role == Some(Role::Orchestrator) && t.running && t.cwd == *path))
+    };
+    let chosen = online.iter().find(captain).or_else(|| online.iter().find(|(m, _)| m.id == host)).or_else(|| online.first());
+    match chosen {
+        Some((m, path)) => Ok((m.id.clone(), m.name.clone(), path.clone())),
+        None => match (named, found.first()) {
+            (_, Some((m, _))) => Err(format!("{} is offline, so its checkout of {project} can't be read now", m.name)),
+            (Some(m), None) => Err(format!("{} has no project {project}", m.name)),
+            (None, None) => Err(format!("no online machine of this account has project {project}")),
+        },
+    }
 }
 
 /// The latest replies of the Capitão of the project at `path` on `machine`, as the node's own
@@ -299,5 +446,33 @@ mod tests {
         assert_eq!(problem(Err(Unanswered::Refused("no disk".into())), Ok(json!({})), Err(lost())), Some("no disk".into()));
         assert_eq!(problem(Ok(vec![]), Ok(json!({})), Err(old())), Some("precisa atualizar o pinned".into()));
         assert_eq!(problem(Err(lost()), Err(old()), Ok(vec![])), Some("precisa atualizar o pinned".into()));
+    }
+
+    #[test]
+    fn repo_reads_stop_at_30_a_minute_and_300_an_hour() {
+        let start = Instant::now();
+        let mut rate = ReadRate::default();
+        for _ in 0..30 {
+            rate.take(start).unwrap();
+        }
+        assert_eq!(rate.take(start), Err("slow down: 30 repo reads in the last minute; ask the Captain to explore instead".into()));
+        assert_eq!(rate.take(start + Duration::from_secs(59)).map_err(|e| e.contains("minute")), Err(true), "the refused one did not count, the window did not move");
+        rate.take(start + Duration::from_secs(60)).unwrap();
+        let mut at = start + Duration::from_secs(60);
+        for _ in 0..269 {
+            at += Duration::from_secs(3);
+            rate.take(at).unwrap();
+        }
+        assert_eq!(rate.take(at + Duration::from_secs(3)), Err("slow down: 300 repo reads in the last hour; ask the Captain to explore instead".into()));
+        assert_eq!(rate.take(start + Duration::from_secs(3600)), Ok(()), "an hour on, the first 30 are gone");
+    }
+
+    #[test]
+    fn a_looks_audit_detail_names_sizes_and_never_text() {
+        let read = json!({ "file": "src/a.rs", "from_line": 1, "to_line": 400, "total_lines": 900, "redacted": 2, "text": "SECRET TEXT" });
+        assert_eq!(look_detail(&read), "src/a.rs, lines 1-400 of 900, 2 redacted");
+        assert_eq!(look_detail(&json!({ "hits": [{ "text": "SECRET" }], "shown": 1, "total": 7, "files": 3 })), "1 of 7 hits in 3 files");
+        assert_eq!(look_detail(&json!({ "paths": ["a"], "shown": 1, "total": 1 })), "1 of 1 paths");
+        assert_eq!(look_detail(&json!({ "size": { "files": 806 } })), "overview, 806 files");
     }
 }

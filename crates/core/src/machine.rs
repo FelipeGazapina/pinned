@@ -1000,6 +1000,7 @@ impl Machine {
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
+            Call::RepoLook { path, look } => self.repo_look(&path, &look),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
                 let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
@@ -2605,6 +2606,33 @@ impl Machine {
         }
     }
 
+    /// `repo_look::look` of a project folder of this machine, never the global orchestrator's own:
+    /// an overview also lists the project's latest memories.
+    fn repo_look(&self, path: &str, look: &crate::repo_look::RepoLook) -> Result<Value, String> {
+        let path = canonical(path);
+        if !self.projects.lock().unwrap().iter().any(|p| p.path == path) {
+            return Err(format!("{} is not a project on this machine", path.display()));
+        }
+        let mut out = crate::repo_look::look(&path, look)?;
+        if *look == crate::repo_look::RepoLook::Overview {
+            let memories = self.memories.search(&path, "", 10).unwrap_or_default();
+            let cut = |text: &str| crate::repo_look::redact(&text.chars().take(300).collect::<String>()).0;
+            out["memory"] = memories.iter().map(|m| json!({ "id": m.id, "title": m.title, "text": cut(&m.text) })).collect();
+        }
+        Ok(out)
+    }
+
+    /// The global orchestrator's repo tools, always through the hub: it checks that the account
+    /// allows them, holds them to the read rate and writes each to the audit trail.
+    fn repo_tool(&self, tab: &str, project: &str, machine: Option<&str>, look: crate::repo_look::RepoLook) -> Result<String, String> {
+        let call = HubCall::RepoLook { tab: tab.to_owned(), project: project.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), look };
+        match self.call_hub(call) {
+            Ok(out) => text_json(out),
+            Err(e) if e == NOT_LINKED => Err("the repo tools read through the hub, and this machine is not signed in to one".into()),
+            Err(e) => Err(needs_update(e)),
+        }
+    }
+
     /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
         let mut waiting = self.projects_overview()?.waiting;
@@ -2784,6 +2812,18 @@ impl Machine {
             ProjectTool::ReadSession { id, machine, items } => {
                 only_global()?;
                 self.read_session(&id, machine.as_deref(), items)
+            }
+            ProjectTool::RepoOverview { project, machine } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Overview)
+            }
+            ProjectTool::RepoRead { project, machine, path, rev, from_line, lines } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Read { file: path, rev, from_line, lines })
+            }
+            ProjectTool::RepoSearch { project, machine, query, glob, regex, case, max } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Search { query, glob, regex, case, max })
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
                 only_global()?;

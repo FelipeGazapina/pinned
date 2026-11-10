@@ -39,6 +39,7 @@ pub mod pty;
 pub mod pulls;
 pub mod reading;
 pub mod reminders;
+pub mod repo_look;
 pub mod scaffold;
 pub mod scripts;
 pub mod sessions;

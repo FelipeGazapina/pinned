@@ -358,6 +358,9 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// `repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,
+    /// with secrets left out. The global orchestrator's repo tools, sent by the hub.
+    RepoLook { path: String, look: crate::repo_look::RepoLook },
     /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
     /// latest ones for an empty query.
     MemorySearch {
@@ -751,6 +754,7 @@ impl Call {
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
                 | Call::ReadSession { .. }
+                | Call::RepoLook { .. }
                 | Call::Workspace { .. }
                 | Call::ProjectHistory { .. }
                 | Call::Diff { .. }
@@ -976,6 +980,8 @@ pub enum HubCall {
     DisconnectUpstash,
     /// `connectors::BoxAccess`.
     SetBoxAccess { access: BoxAccess },
+    /// `connectors::RepoInsight`: whether the global orchestrator may read the account's repos.
+    SetRepoInsight { settings: crate::connectors::RepoInsight },
     /// Allows or refuses the pending box question `id`.
     AnswerBox { id: String, allow: bool },
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
@@ -1087,6 +1093,18 @@ pub enum HubCall {
     ResetTasteField { scope: TasteScope, field: TasteField },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
+    /// From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of
+    /// `project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a
+    /// Capitão runs in, the asking machine's own, or the first online one; with `machine`,
+    /// `machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past
+    /// 30 calls a minute or 300 an hour. Each call writes an audit row.
+    RepoLook {
+        tab: TabId,
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        look: crate::repo_look::RepoLook,
+    },
     /// From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on
     /// the online machine that has that tab, with `id`, `machine` and `machine_name` set.
     ReadSession {
@@ -1908,7 +1926,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();

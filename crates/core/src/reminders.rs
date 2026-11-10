@@ -555,6 +555,51 @@ fn project_tools() -> [(Audience, serde_json::Value); 16] {
                 "required": ["id"],
             },
         })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_overview",
+            "description": "Read-only look at a project's repository: the machine, branch and HEAD it read, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the start of the README, the latest commits and the project's memories. Use it before you hand a Capitão more than a one-liner. Off until Felipe turns it on in Settings; every call is in Agent activity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to read, an id or a name. Optional: the checkout its Capitão runs in, else this machine's, else the first online one." },
+                },
+                "required": ["project"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_read",
+            "description": "Read lines of one file in a project's repository, read-only: at most 400 lines or 24 KB a call, with next_line to read on. Files that may hold secrets, and anything git ignores, can't be read; lines that hold a token come back as [redacted].",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "path": { "type": "string", "description": "The file's path inside the repository, such as crates/core/src/wire.rs." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to read, an id or a name. Optional." },
+                    "rev": { "type": "string", "description": "A commit or ref to read the file at, such as HEAD~3. Optional: the working tree." },
+                    "from_line": { "type": "integer", "description": "The first line, 1 when left out." },
+                    "lines": { "type": "integer", "description": "How many lines, at most 400." },
+                },
+                "required": ["project", "path"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_search",
+            "description": "Search a project's repository, read-only. With query: the lines that hold it (40 by default, at most 100, with the total), in the files glob matches when given. With glob alone: the paths that match it, at most 200. Secrets and ignored files are never searched.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "query": { "type": "string", "description": "Text to find; a regular expression with regex." },
+                    "glob": { "type": "string", "description": "Only these files, such as **/*.rs or ui/*.js." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to search, an id or a name. Optional." },
+                    "regex": { "type": "boolean", "description": "Read query as an extended regular expression." },
+                    "case": { "type": "boolean", "description": "Match case." },
+                    "max": { "type": "integer", "description": "Hits to return, 40 when left out, at most 100." },
+                },
+                "required": ["project"],
+            },
+        })),
         (Audience::TasteChat, serde_json::json!({
             "name": "taste_get",
             "description": "Read one scope of the account's way of working as JSON: effective (every field as its sessions get it), own (what the scope sets itself; a project's fields left out inherit from captains), profile, and brief (the text its sessions start with).",
@@ -804,6 +849,9 @@ fn send(message: &Message) -> Result<String, String> {
                 | ProjectTool::Waiting
                 | ProjectTool::Sessions { .. }
                 | ProjectTool::ReadSession { .. }
+                | ProjectTool::RepoOverview { .. }
+                | ProjectTool::RepoRead { .. }
+                | ProjectTool::RepoSearch { .. }
                 | ProjectTool::TellOrchestrator { .. }
                 | ProjectTool::TasteGet { .. }
                 | ProjectTool::TasteSet { .. }
@@ -1204,7 +1252,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1264,7 +1312,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
@@ -1279,6 +1327,14 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("waiting", serde_json::Value::Null), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"waiting"}}"#.into()));
         assert_eq!(ask("sessions", serde_json::json!({ "project": "client-apps" })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"sessions","project":"client-apps"}}"#.into()));
         assert_eq!(ask("read_session", serde_json::json!({ "id": "tab-1a-3", "items": 5 })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"read_session","id":"tab-1a-3","items":5}}"#.into()));
+        assert_eq!(
+            ask("repo_read", serde_json::json!({ "project": "github.com/o/r", "path": "src/a.rs", "from_line": 401 })),
+            Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_read","project":"github.com/o/r","path":"src/a.rs","from_line":401}}"#.into())
+        );
+        assert_eq!(
+            ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
+            Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
+        );
     }
 
     #[test]

@@ -121,6 +121,41 @@ pub enum ProjectTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// The global orchestrator's: `repo_look::RepoLook::Overview` of `project`'s checkout.
+    RepoOverview {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: `repo_look::RepoLook::Read` of `path` in `project`'s checkout.
+    RepoRead {
+        project: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_line: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<u32>,
+    },
+    /// The global orchestrator's: `repo_look::RepoLook::Search` in `project`'s checkout.
+    RepoSearch {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        glob: Option<String>,
+        #[serde(default)]
+        regex: bool,
+        #[serde(default)]
+        case: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
+    },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
     /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
