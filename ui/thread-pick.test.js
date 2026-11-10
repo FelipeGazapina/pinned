@@ -16,6 +16,7 @@ const composer = read("./gui-composer.js");
 const shell = read("./gui-shell.js");
 const sidebar = read("./gui-sidebar.js");
 const timeline = read("./gui-timeline.js");
+const settings = read("./settings.js");
 
 /** What a phone's and a desktop's browser answer the media queries the app asks. */
 const SCREENS = {
@@ -103,8 +104,10 @@ test("a thread picked in the palette on a desktop keeps the sidebar open", () =>
 });
 
 /** The global orchestrator's thread view with one Captain report drawn, and a click on its Captain. */
-function reportClick(tabs) {
+function reportClick(tabs, { machineId = "box", tabId = "tab-old-1", account = null } = {}) {
   const context = pageOn("desktop");
+  context.LOCAL = "local";
+  context.account = account;
   context.tabs = tabs;
   context.active = tabs[0];
   context.revealed = [];
@@ -129,10 +132,11 @@ function reportClick(tabs) {
     `${between(gui, "const projectName =", "\n")}
 ${between(sidebar, "const isOrchestrator =", "\n")}
 ${between(timeline, "function reportRowHtml", "/** The prompt bubble")}
+${between(settings, "const localIdOf =", "\n")}
 ${between(timeline, 'threadView.addEventListener("click"', 'threadView.addEventListener("toggle"')}`,
     context,
   );
-  const html = vm.runInContext("reportRowHtml", context)({ project: "alpha", machineName: "sweep-node", machineId: "box", tabId: "tab-old-1", text: "CI is green." }, "t0");
+  const html = vm.runInContext("reportRowHtml", context)({ project: "alpha", machineName: "sweep-node", machineId, tabId, text: "CI is green." }, "t0");
   const dataset = Object.fromEntries([...html.matchAll(/data-report-([a-z]+)="([^"]*)"/g)].map(([, name, value]) => [`report${name[0].toUpperCase()}${name.slice(1)}`, value]));
   const button = { dataset };
   context.onClick({ target: { closest: (selector) => (selector === "[data-report-tab]" ? button : null) } });
@@ -147,6 +151,25 @@ test("a Captain report from before a restart opens that project's Captain under 
   const page = reportClick([global, worker, beta, captain]);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(page.active.key, "box:tab-new-1");
+  assert.deepEqual(page.revealed, []);
+  assert.deepEqual(page.told, []);
+});
+
+test("in the desktop app, a report from a Captain on the same Mac opens its tab", async () => {
+  const global = tabOf("local", "tab-1a-9", { orchestrator_global: true, cwd: "/home/.pinned/orchestrator" });
+  const captain = tabOf("local", "tab-1a-1", { role: "orchestrator" });
+  const page = reportClick([global, captain], { machineId: "mac-1", tabId: "tab-1a-1", account: { machine_id: "mac-1" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.active.key, "local:tab-1a-1");
+  assert.deepEqual(page.told, []);
+});
+
+test("in the desktop app, a report from before a restart opens the same Mac's Captain under its new tab id", async () => {
+  const global = tabOf("local", "tab-1a-9", { orchestrator_global: true, cwd: "/home/.pinned/orchestrator" });
+  const captain = tabOf("local", "tab-1a-4", { role: "orchestrator" });
+  const page = reportClick([global, captain], { machineId: "mac-1", tabId: "tab-1a-1", account: { machine_id: "mac-1" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.active.key, "local:tab-1a-4");
   assert.deepEqual(page.revealed, []);
   assert.deepEqual(page.told, []);
 });
