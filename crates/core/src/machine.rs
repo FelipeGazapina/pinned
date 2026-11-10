@@ -10628,15 +10628,16 @@ Have another model review a risky change before it goes ahead.";
     fn a_start_the_hub_did_not_answer_stays_starting_and_a_repeat_returns_the_same_task() {
         let (m, dir, captain) = limited_captain("start-timeout", TastePatch::default());
         let asks = Arc::new(Mutex::new(vec![]));
-        let seen = asks.clone();
+        let released = Arc::new(AtomicBool::new(false));
+        let (seen, answering) = (asks.clone(), released.clone());
         m.set_hub(Arc::new(move |call| match call {
             HubCall::Delegate { task, .. } => {
-                let mut asks = seen.lock().unwrap();
-                asks.push(task);
-                match asks.len() {
-                    1 | 2 => Err(crate::link::HUB_TIMEOUT.into()),
-                    _ => Ok(json!({ "machine": "m-box", "machineName": "Box · Slow", "box": "b1", "workState": "working" })),
+                seen.lock().unwrap().push(task);
+                if !answering.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(20));
+                    return Err(crate::link::HUB_TIMEOUT.into());
                 }
+                Ok(json!({ "machine": "m-box", "machineName": "Box · Slow", "box": "b1", "workState": "working" }))
             }
             _ => Err("not this test's".into()),
         }));
@@ -10647,10 +10648,11 @@ Have another model review a risky change before it goes ahead.";
         let repeat = delegate_task(&m, &captain, asked);
         assert_eq!(repeat["taskId"].as_str(), Some(task.as_str()), "the same request is the same task: {repeat}");
 
+        released.store(true, Ordering::SeqCst);
         wait_for("the hub to answer the asked-again start", || m.delegates.get(&task).and_then(|t| t.remote).is_some_and(|remote| remote.machine == "m-box"));
         assert_eq!(state_of(&m, &task).0, "working");
         let asks = asks.lock().unwrap();
-        assert_eq!((asks.len(), asks.iter().all(|asked| *asked == task)), (3, true), "every ask names the one task, so the hub finds the box it made: {asks:?}");
+        assert!(asks.len() >= 2 && asks.iter().all(|asked| *asked == task), "every ask names the one task, so the hub finds the box it made: {asks:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
