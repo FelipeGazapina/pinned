@@ -56,7 +56,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     LOCAL: "local",
     account: signedIn ? { machine_id: "this-mac" } : null,
     machines: new Map([
-      ["local", { hubView: { name: "MacBook" } }],
+      ["local", { hubView: { name: "MacBook" }, view: { online: true } }],
       ["imac-id", { view: { name: "iMac" } }],
     ]),
     hub: signedIn ? { hub: (call) => (calls.push(call), answer(call)) } : null,
@@ -277,7 +277,8 @@ const sidebarTop = (opts) =>
 
 test("Waiting on you shows with its count when only confirmations wait and no machine hosts the orchestrator", () => {
   const { context } = sidebarTop();
-  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => null, globalWaitingRows: () => [] });
+  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => null, globalWaitingRows: () => [], globalOfferRows: () => [] });
+  context.machines.delete("imac-id");
   assert.equal(context.globalSidebarTop().length, 0);
   context.onAgentConfirmations([removeImac, createInvite]);
   const [head, asks, ...rest] = context.globalSidebarTop();
@@ -290,13 +291,33 @@ test("Waiting on you shows with its count when only confirmations wait and no ma
 test("the orchestrator's row counts confirmations with the waiting threads, and lists confirmations first", () => {
   const { context } = sidebarTop();
   const thread = { className: "waiting-row" };
-  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => "local", globalWaitingRows: () => [thread], machineName: () => "MacBook", isGlobalOrchestratorTab: () => false });
+  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => "local", globalWaitingRows: () => [thread], globalOfferRows: () => [], machineName: () => "MacBook", isGlobalOrchestratorTab: () => false });
   context.onAgentConfirmations([removeImac, createInvite]);
   const [row, head, asks, last] = context.globalSidebarTop();
   assert.match(row.innerHTML, /<span class="count" title="3 waiting on you">3<\/span>$/);
   assert.match(head.innerHTML, /<span class="count">3<\/span>/);
   assert.equal(asks.className, "agent-asks");
   assert.equal(last, thread);
+});
+
+test("offers sit under their own head, collapsed unless opened, and never count as waiting", () => {
+  const { context } = sidebarTop();
+  const offer = { className: "waiting-row offer" };
+  const blocked = { className: "waiting-row" };
+  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => "local", globalWaitingRows: () => [blocked], globalOfferRows: () => [offer, offer], machineName: () => "MacBook", isGlobalOrchestratorTab: () => false });
+  const [row, head, last, offersHead, ...rest] = context.globalSidebarTop();
+  assert.match(row.innerHTML, /<span class="count" title="1 waiting on you">1<\/span>$/, "the badge counts the blocked thread only");
+  assert.match(head.innerHTML, /Waiting on you<\/span><span class="count">1<\/span>/);
+  assert.equal(last, blocked);
+  assert.equal(offersHead.className, "waiting-head offers-head");
+  assert.match(offersHead.innerHTML, /<span>Asked in its last reply<\/span><span class="count">2<\/span>/);
+  assert.equal(rest.length, 0, "collapsed by default");
+  vm.runInContext("ui.offersOpen = true", context);
+  assert.equal(context.globalSidebarTop().length, 6, "opened, both offers follow their head");
+  Object.assign(context, { globalWaitingRows: () => [] });
+  const [onlyRow, onlyHead] = context.globalSidebarTop();
+  assert.equal(onlyHead.className, "waiting-head offers-head", "with nothing blocked, Waiting on you is not drawn");
+  assert.doesNotMatch(onlyRow.innerHTML, /class="count"/);
 });
 
 const page = (n, from = 1794249424) =>

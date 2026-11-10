@@ -52,6 +52,12 @@ const MCP_WAIT: Duration = Duration::from_millis(500);
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
+/// How long a start the hub did not answer waits before it asks again, when the hub was not
+/// there to answer (a timeout already waited).
+const START_RETRY: Duration = Duration::from_secs(5);
+/// How often this machine asks after each task it delegated elsewhere on its own, so one whose
+/// machine is gone, whose box never connected or whose end got lost ends here too.
+const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -523,6 +529,8 @@ pub struct Machine {
     builtin_claude_config: PathBuf,
     quitting: AtomicBool,
     delegate_pass_armed: AtomicBool,
+    /// A thread is asking after the tasks this machine delegated elsewhere.
+    checking_remotes: Arc<AtomicBool>,
     sending_records: AtomicBool,
     /// After the hub refused records, when to offer them again.
     records_retry: Mutex<Option<Instant>>,
@@ -533,8 +541,9 @@ pub struct Machine {
     usage_refreshed: Mutex<BTreeMap<accounts::AccountId, Instant>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
-    /// Ends of tasks run here for another machine's tabs that the hub could not pass on yet.
-    remote_ends: Mutex<Vec<(Instant, HubCall)>>,
+    /// When the end of each task run here for another machine's tab was last sent, by task, so
+    /// an end the hub could not pass on is sent again at most every `REMOTE_LOOK`.
+    remote_ends: Mutex<HashMap<String, Instant>>,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
@@ -709,6 +718,7 @@ impl Machine {
             builtin_claude_config,
             quitting: AtomicBool::new(false),
             delegate_pass_armed: AtomicBool::new(false),
+            checking_remotes: Arc::default(),
             sending_records: AtomicBool::new(false),
             records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
@@ -2721,18 +2731,32 @@ impl Machine {
         serde_json::from_value(handoff).map_err(|e| format!("the hub's answer did not read: {e}"))
     }
 
-    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains. The
-    /// orchestrator's messages that started the turn are answered by it, and under
-    /// `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator with their ids.
+    /// Runs when the turn of `project`'s Capitão `captain` ends, before the tab's queue drains.
+    /// Under `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator and answers
+    /// the messages in flight, but only once the Capitão is idle with none of its own tasks still at
+    /// work and has something to say: a turn that ends on a tool call, or one that waits for a worker,
+    /// leaves them in flight for the turn that ends the work. A task at work holds the report only
+    /// while the oldest message in flight is under `CAPTAIN_HOLD` old, so a Capitão that always has a
+    /// worker running still answers. A turn that failed reports at once.
     fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent) {
-        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
-        if answers.is_empty() || self.global_settings().reports != global::ReportPolicy::Auto {
+        if self.global_settings().reports != global::ReportPolicy::Auto {
+            self.sent.lock().unwrap().answer(project);
             return;
         }
+        let Some(oldest) = self.sent.lock().unwrap().in_flight(project).iter().map(|sent| sent.at).min() else { return };
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
-            _ => truncate(&self.reply_of(captain, event).unwrap_or_else(|| "(no reply)".into()), REPORT_CHARS, "read_captain has the whole message"),
+            _ => {
+                let Some(reply) = self.reply_of(captain, event).filter(|reply| !reply.trim().is_empty()) else { return };
+                let waited = unix_now().saturating_sub(oldest);
+                if waited < CAPTAIN_HOLD.as_secs() && self.delegates.working_for(&format!("tab:{captain}")) > 0 {
+                    return;
+                }
+                let machine = self.hub_id.lock().unwrap().clone();
+                captain_report_text(&reply, captain, &machine)
+            }
         };
+        let answers: Vec<String> = self.sent.lock().unwrap().answer(project).into_iter().map(|sent| sent.request_id).collect();
         // Up to the hub it may wait a minute, which the hook that ended the turn must not.
         let (me, captain, project) = (self.me.clone(), captain.to_owned(), project.to_owned());
         std::thread::spawn(move || {
@@ -3355,6 +3379,10 @@ impl Machine {
         *self.hub.lock().unwrap() = Some(hub);
         *self.mcp_loaded.lock().unwrap() = None;
         self.mcp_waited.store(false, Ordering::SeqCst);
+        // Ends kept from before a restart go out once there is a hub to take them.
+        if !self.delegates.remote_ends().is_empty() {
+            self.arm_delegate_pass();
+        }
     }
 
     /// The account's enabled MCP servers: the hub's answer within `MCP_WAIT`, else the ones it
@@ -3541,6 +3569,7 @@ impl Machine {
     pub fn restore_tabs(&self) -> Vec<TabId> {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
+            self.delegates.end_unresumed();
             return vec![];
         };
         let now = unix_now();
@@ -3580,10 +3609,37 @@ impl Machine {
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
         self.delegates.rebind(&sessions);
+        self.resume_workers(&sessions);
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
         }
         ids
+    }
+
+    /// Ties each working task that a restart carried over to its worker's restored tab, and ends the
+    /// ones whose worker did not come back. A worker's tab gets back what its spawn gave it.
+    fn resume_workers(&self, sessions: &[(String, String)]) {
+        for (task, tab) in self.delegates.resume_workers(sessions) {
+            let Some(info) = self.delegates.get(&task) else { continue };
+            let origin = match &info.parent {
+                crate::delegate::Parent::Tab(key) => crate::delegate::Origin::of_key(key).map(|(machine, tab)| crate::delegate::Origin {
+                    machine: machine.to_owned(),
+                    machine_name: String::new(),
+                    tab: tab.to_owned(),
+                    task: info.client_request_id.clone().unwrap_or_default(),
+                    access: info.access,
+                    delegator: info.delegator.clone(),
+                    limits: info.limits,
+                }),
+                crate::delegate::Parent::Task(_) => None,
+            };
+            let _ = self.tab(&tab, |t| {
+                t.task = Some(task.clone());
+                t.title = Some(info.title.clone());
+                t.origin = origin;
+            });
+        }
+        self.delegates.end_unresumed();
     }
 
     /// Each account's usage, as its sessions last reported it.
@@ -3894,15 +3950,29 @@ impl Machine {
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let remote = self.delegates.get(id).filter(|t| !t.state.terminal()).and_then(|t| t.remote);
+        let mut note = None;
         if let (Some(remote), Some(tab)) = (remote, caller.tab.as_deref()) {
             self.delegates.status(&caller, id)?;
             if !remote.machine.is_empty() {
-                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: Some(reason.to_owned()) };
-                let answer = self.call_hub(cancel).map_err(|e| format!("{} did not take the cancel: {}", remote.name, needs_update(e)))?;
-                self.settle_from(tab, id, &remote, &answer);
+                let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+                match self.call_hub(cancel) {
+                    Ok(answer) => self.settle_from(tab, id, &remote, &answer),
+                    // The task ends here whatever the other side says, or it would hang here for good.
+                    Err(e) => {
+                        eprintln!("pinned: {} did not take the cancel of {id}: {e}", remote.name);
+                        note = Some(match crate::delegate::machine_gone(&e) {
+                            true => format!("{} is gone from this account, so pinned cancelled the task here", remote.name),
+                            false => format!("{} did not take the cancel ({}), so pinned cancelled the task here only: its worker there may still run", remote.name, needs_update(e)),
+                        });
+                    }
+                }
             }
         }
-        self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+        let mut body = self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref())?;
+        if let Some(note) = note {
+            body["note"] = json!(note);
+        }
+        Ok(body.to_string())
     }
 
     /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
@@ -3949,14 +4019,16 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
-        let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
-        match self.call_hub(asked) {
+        let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
+        let begun = Instant::now();
+        match self.call_hub(asked.clone()) {
             Ok(answer) => {
-                let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
-                let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
-                let tab = answer["tabId"].as_str().map(str::to_owned);
-                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
-                self.arm_delegate_pass();
+                self.remote_answered(&task.id, &answer);
+                self.remote_started(&task.id)
+            }
+            // The hub may still be starting it: a failed task here would let a retry start a second one.
+            Err(error) if crate::link::is_unanswered(&error) => {
+                self.finish_start(tab, task.id.clone(), asked, begun);
                 self.remote_started(&task.id)
             }
             Err(error) => {
@@ -3965,6 +4037,54 @@ impl Machine {
                 Err(error)
             }
         }
+    }
+
+    /// Notes where the hub started the worker of remote task `id`.
+    fn remote_answered(&self, id: &str, answer: &Value) {
+        let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
+        let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
+        let tab = answer["tabId"].as_str().map(str::to_owned);
+        self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+        self.arm_delegate_pass();
+    }
+
+    /// A start the hub did not answer stays a starting task. A thread asks again, since the hub
+    /// answers the same start with the worker or box it already has, until it answers or
+    /// `BOX_CONNECT_WAIT` has passed since `begun`, which fails the task.
+    fn finish_start(&self, tab: String, id: String, asked: HubCall, begun: Instant) {
+        use crate::delegate::{wait_span, BOX_CONNECT_WAIT};
+        let Some(me) = self.me.upgrade() else { return };
+        std::thread::spawn(move || {
+            let failed = loop {
+                if me.delegates.get(&id).is_none_or(|task| task.state.terminal()) {
+                    return;
+                }
+                if begun.elapsed() >= BOX_CONNECT_WAIT {
+                    break format!("the hub did not finish starting it within {}", wait_span(BOX_CONNECT_WAIT));
+                }
+                match me.call_hub(asked.clone()) {
+                    Ok(answer) => {
+                        if me.delegates.get(&id).is_none_or(|task| task.state.terminal()) {
+                            let remote = crate::delegate::RemoteTarget { machine: answer["machine"].as_str().unwrap_or_default().to_owned(), name: String::new(), tab: None, looked: None };
+                            me.cancel_remote(&tab, &id, &remote, "it was cancelled while it started");
+                        } else {
+                            me.remote_answered(&id, &answer);
+                            me.emit_tabs();
+                        }
+                        return;
+                    }
+                    Err(e) if crate::link::is_unanswered(&e) => {
+                        if e != crate::link::HUB_TIMEOUT {
+                            std::thread::sleep(START_RETRY);
+                        }
+                    }
+                    Err(e) => break needs_update(e),
+                }
+            };
+            me.delegates.fail(&id, failed, me.launch.path_env.as_deref());
+            me.maybe_deliver(&tab);
+            me.emit_tabs();
+        });
     }
 
     fn remote_started(&self, id: &str) -> Result<String, String> {
@@ -3982,7 +4102,7 @@ impl Machine {
         if remote.machine.is_empty() {
             return None;
         }
-        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: tab.to_owned(), task: id.to_owned(), cancel: None };
+        let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: None };
         let answer = self.call_hub(asked).ok()?;
         self.settle_from(tab, id, remote, &answer);
         Some(answer["recentSteps"].clone()).filter(|steps| steps.is_array())
@@ -3991,27 +4111,87 @@ impl Machine {
     /// Ends the remote task when `answer`, the status its machine gave, says it ended.
     fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
         let state = answer["workState"].as_str().unwrap_or_default();
+        let usage = serde_json::from_value::<crate::usage::TaskUsage>(answer["usage"].clone()).ok();
         if !matches!(state, "result_available" | "failed" | "cancelled") {
+            if let Some(usage) = usage {
+                self.delegates.note_remote_usage(id, usage);
+            }
             return;
         }
         let end = crate::delegate::RemoteEnd {
             state: state.to_owned(),
             summary: answer["summary"].as_str().map(str::to_owned),
             error: answer["error"].as_str().map(str::to_owned),
+            usage,
         };
-        if self.delegates.settle_remote(id, tab, &remote.machine, &end) {
+        if self.delegates.settle_remote(id, tab, &remote.machine, &end).is_some() {
             self.emit_tabs();
         }
     }
 
     /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
     fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
-        if !self.delegates.settle_remote(task, tab, from, end) {
-            return false;
-        }
-        self.maybe_deliver(tab);
+        // The tab that delegated it may have a new id since: a restart gives every tab one.
+        let Some(parent) = self.delegates.settle_remote(task, tab, from, end) else { return false };
+        self.maybe_deliver(&parent);
         self.emit_tabs();
         true
+    }
+
+    /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
+    /// whose end got lost ends as its machine answers; one whose machine left the account, or
+    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here.
+    fn check_remotes(&self, now: Instant) {
+        use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
+        for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
+            let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(&id, &tab), task: id.clone(), cancel: None };
+            let failed = match self.call_hub(asked) {
+                Ok(answer) => {
+                    self.settle_from(&tab, &id, &remote, &answer);
+                    continue;
+                }
+                Err(e) if machine_gone(&e) => format!("{} is gone from this account (a box that ended, or a machine someone removed), so its worker can't finish", remote.name),
+                Err(e) if e == BOX_BOOTING && ran >= BOX_CONNECT_WAIT => {
+                    let failed = format!("the box did not connect within {}", wait_span(BOX_CONNECT_WAIT));
+                    self.cancel_remote(&tab, &id, &remote, &failed);
+                    failed
+                }
+                Err(_) => continue,
+            };
+            self.delegates.fail(&id, failed, self.launch.path_env.as_deref());
+            self.maybe_deliver(&tab);
+            self.emit_tabs();
+        }
+    }
+
+    /// Tells the machine that runs a task this machine ended that it ended, best-effort.
+    fn cancel_remote(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, reason: &str) {
+        let cancel = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(id, tab), task: id.to_owned(), cancel: Some(reason.to_owned()) };
+        if let Err(e) = self.call_hub(cancel) {
+            eprintln!("pinned: could not tell {} that {id} ended here: {e}", remote.name);
+        }
+    }
+
+    /// `check_remotes` and the cancels `stopped` needs on a thread of their own, since each asks
+    /// the hub and the hub may wait on another machine.
+    fn look_after_remotes(&self, stopped: Vec<(String, String, crate::delegate::RemoteTarget)>) {
+        let Some(me) = self.me.upgrade() else { return };
+        if !stopped.is_empty() {
+            let me = me.clone();
+            std::thread::spawn(move || {
+                for (tab, id, remote) in stopped {
+                    me.cancel_remote(&tab, &id, &remote, "it ran past its time limit");
+                }
+            });
+        }
+        if self.checking_remotes.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let checking = self.checking_remotes.clone();
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.check_remotes(Instant::now())));
+            checking.store(false, Ordering::SeqCst);
+        });
     }
 
     /// `Call::RemoteTask`: the status of the task started here for `task` of `tab` on `origin`, or
@@ -4031,22 +4211,32 @@ impl Machine {
     }
 
     /// Sends the end of each task that a tab on another machine delegated here back through the
-    /// hub. An end the hub could not pass on waits for the next pass, at most every `REMOTE_LOOK`.
+    /// hub. Each stays undelivered on disk until the hub passed it on, and an end that did not get
+    /// through is sent again at most every `REMOTE_LOOK`.
     fn send_remote_ends(&self, now: Instant) {
-        let fresh: Vec<_> = self.delegates.claim_remote_ends().into_iter().map(|(_, machine, tab, task, end)| HubCall::RemoteEnded { to: machine, tab, task, end }).collect();
+        let due: Vec<_> = {
+            let mut sent = self.remote_ends.lock().unwrap();
+            let ends = self.delegates.remote_ends();
+            sent.retain(|id, _| ends.iter().any(|(task, ..)| task == id));
+            ends.into_iter().filter(|(id, ..)| sent.get(id).is_none_or(|at| now.saturating_duration_since(*at) >= REMOTE_LOOK)).collect()
+        };
         // A worker box goes once its end got through, so the tasks' records go first.
-        if !fresh.is_empty() && self.hub.lock().unwrap().is_some() {
+        if !due.is_empty() && self.hub.lock().unwrap().is_some() {
             self.record_now();
         }
-        let held = std::mem::take(&mut *self.remote_ends.lock().unwrap());
-        let (again, mut waiting): (Vec<_>, Vec<_>) = held.into_iter().partition(|(at, _)| now.saturating_duration_since(*at) >= REMOTE_LOOK);
-        for call in fresh.into_iter().chain(again.into_iter().map(|(_, call)| call)) {
-            if let Err(e) = self.call_hub(call.clone()) {
-                eprintln!("pinned: could not send a delegated task's end back: {e}");
-                waiting.push((now, call));
+        for (id, machine, tab, task, end) in due {
+            self.remote_ends.lock().unwrap().insert(id.clone(), now);
+            match self.call_hub(HubCall::RemoteEnded { to: machine.clone(), tab, task, end }) {
+                Ok(taken) => {
+                    if taken != Value::Bool(true) {
+                        eprintln!("pinned: {machine} did not take the end of {id}: its task there had ended already");
+                    }
+                    self.delegates.remote_end_sent(&id);
+                    self.remote_ends.lock().unwrap().remove(&id);
+                }
+                Err(e) => eprintln!("pinned: could not send the end of {id} back to {machine}: {e}"),
             }
         }
-        self.remote_ends.lock().unwrap().extend(waiting);
     }
 
     /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
@@ -4609,7 +4799,8 @@ impl Machine {
                 continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
@@ -4952,7 +5143,7 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed)) = self.tab(tab, |t| {
+        let Ok((new, changed, task)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
             if new {
                 t.tally = Tally::default();
@@ -4964,11 +5155,14 @@ impl Machine {
                 t.cwd = worktree;
                 changed = true;
             }
-            t.claude_session = Some(session);
-            (new, changed)
+            t.claude_session = Some(session.clone());
+            (new, changed, t.task.clone())
         }) else {
             return false;
         };
+        if let Some(task) = task {
+            self.delegates.set_worker_session(&task, &session);
+        }
         if changed {
             self.save_sessions();
             self.stamp_parent_sessions();
@@ -5274,6 +5468,10 @@ fn is_absolute_anywhere(path: &str) -> bool {
 fn with_remote(mut body: Value, remote: &crate::delegate::RemoteTarget) -> Value {
     body["machine"] = json!(remote.name);
     body["tabId"] = json!(remote.tab);
+    if remote.machine.is_empty() {
+        body["starting"] = json!(true);
+        body["next"] = json!("the hub is still starting it, so do not start it again: call task_status with this taskId, and it ends here as failed if the start does not finish");
+    }
     body
 }
 
@@ -5297,9 +5495,37 @@ fn canonical(path: &str) -> PathBuf {
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
 
-/// Most of a worker's last message an orchestrator is sent, or of a Capitão's last message the
-/// global orchestrator is sent; the rest stays in the thread.
+/// Most of a worker's last message an orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
+
+/// Most of a Capitão's last message the global orchestrator is sent whole. Above it the report
+/// keeps its first `REPORT_HEAD` and last `REPORT_TAIL` characters, since a summary or a table of
+/// results usually closes a message.
+const CAPTAIN_REPORT_CHARS: usize = 16_000;
+
+/// How long a Capitão's task at work holds its report back, counted from the oldest message in
+/// flight; after it the next reply goes up even with tasks still working.
+const CAPTAIN_HOLD: Duration = Duration::from_secs(600);
+const REPORT_HEAD: usize = 10_000;
+const REPORT_TAIL: usize = 5_000;
+
+/// What a Capitão's reply says to the global orchestrator: the reply, or its head and tail with the
+/// way to read the whole of it. `machine` is the hub's id for this machine, empty when not linked.
+fn captain_report_text(reply: &str, captain: &str, machine: &str) -> String {
+    let total = reply.chars().count();
+    if total <= CAPTAIN_REPORT_CHARS {
+        return reply.to_owned();
+    }
+    let head_end = reply.char_indices().nth(REPORT_HEAD).map_or(reply.len(), |(at, _)| at);
+    let tail_start = reply.char_indices().nth(total - REPORT_TAIL).map_or(reply.len(), |(at, _)| at);
+    let on = if machine.is_empty() { String::new() } else { format!(", machine \"{machine}\"") };
+    format!(
+        "{}\n\n[{} of {total} characters left out of the middle. The whole message is the Capitão's latest one: read_session with id \"{captain}\"{on} and items 1 returns it whole. Once it has said more, ask for more items.]\n\n{}",
+        &reply[..head_end],
+        total - REPORT_HEAD - REPORT_TAIL,
+        &reply[tail_start..],
+    )
+}
 
 /// `text` cut to `max` characters, with a note that says where the rest is.
 fn truncate(text: &str, max: usize, rest: &str) -> String {
@@ -8954,7 +9180,7 @@ while True:
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
         assert_eq!(m.view(&tab).unwrap().queued, 2, "the Capitão's view does not count its queued messages");
 
-        m.record_event(hook(&tab, AgentStatus::Done));
+        m.record_event(AgentEvent { reply: Some("Shipped.".into()), ..hook(&tab, AgentStatus::Done) });
         let both = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r\x1b[200~[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\x1b[201~\r";
         assert_eq!(typed(&file, both), both);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "typed messages still count as queued");
@@ -9429,10 +9655,10 @@ while True:
         global_idle();
         turn(None, Some("Reply two."));
         turn(Some("r-3"), None);
-        wait_for("the second report", || reports().len() == 2);
-        global_idle();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reports().len(), 1, "a turn with no text reports nothing, and keeps r-3 in flight");
         turn(Some("r-4"), Some("Reply four."));
-        wait_for("the third report", || reports().len() == 3);
+        wait_for("the second report", || reports().len() == 2);
         global_idle();
 
         let delivered = m.sent.lock().unwrap().in_flight(&m.global_folder());
@@ -9440,11 +9666,138 @@ while True:
         let retried = m.call(Call::OrchestratorReport { request_id: delivered[0].request_id.clone(), report: first });
         assert_eq!(retried, Ok(json!({ "outcome": "entregue", "tab": global })), "a retry answers the first outcome");
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(reports(), ["Reply one.", "(no reply)", "Reply four."], "each turn's own reply, each once");
-        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 3);
+        assert_eq!(reports(), ["Reply one.", "Reply four."], "each report once, and none for a turn with no text");
+        assert_eq!(m.sent.lock().unwrap().in_flight(&m.global_folder()).len(), 2);
+        assert_eq!(m.sent.lock().unwrap().find("r-3").map(|s| s.progress), Some(Progress::Answered), "r-3 is answered by the report that ends its work");
         let read: Value = serde_json::from_str(&m.read_captain(&path, None).unwrap()).unwrap();
         assert_eq!(read["conversation"]["items"].as_array().unwrap().last().unwrap()["text"], "Reply four.", "read_captain reads the end of the transcript");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A host machine with a Capitão that has finished a turn and a global orchestrator whose typed
+    /// input lands in a file. Returns the machine, its folder, the project path, the Capitão's tab,
+    /// and a function that lists the reports the orchestrator was typed.
+    #[cfg(unix)]
+    fn report_stack(name: &str) -> (Arc<Machine>, PathBuf, String, String, impl Fn() -> Vec<String>) {
+        let dir = temp(name);
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (claude, sock) = (thread_claude(&dir), dir.join("pinned.sock"));
+        let m = work_machine(&dir, &claude, &sock);
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project).display().to_string();
+        m.set_project_account(&path, Some("work".into())).unwrap();
+        let capitao = idle_captain(&m, &path, &dir.join("capitao.bin"));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let inbox = dir.join("global.bin");
+        let (seen, sink) = viewer();
+        m.spawn(&global, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", inbox.display())), pty::size(80, 24)).unwrap();
+        m.attach(&global, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { session: Some("g1".into()), ..hook(&global, AgentStatus::Done) });
+        let reports = move || -> Vec<String> {
+            read_pty(&inbox).split("\x1b[200~").skip(1).map(|pasted| pasted.split_once("]: ").unwrap().1.trim_end_matches("\x1b[201~\r").to_owned()).collect()
+        };
+        (m, dir, path, capitao, reports)
+    }
+
+    /// One turn of the Capitão for the orchestrator's message `request_id`, ending on `reply`.
+    #[cfg(unix)]
+    fn captain_turn(m: &Machine, dir: &Path, path: &str, capitao: &str, n: u32, request_id: &str, reply: Option<&str>) {
+        assert_eq!(enqueue(m, path, request_id, request_id).unwrap()["outcome"], "entregue");
+        m.record_event(hook(capitao, AgentStatus::Working));
+        append_transcript(dir, "s1", &turn_lines(n, &format!("[Orquestrador] {request_id}"), reply));
+        m.record_event(hook(capitao, AgentStatus::Done));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_capitao_waiting_on_its_task_reports_when_the_task_has_ended_not_at_its_first_turn() {
+        let (m, dir, path, capitao, reports) = report_stack("report-waits");
+        let started = delegate_task(&m, &capitao, json!({
+            "task": "Fix the form.",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" },
+        }));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some("I'll report when the worker ends."));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new(), "its task is still working");
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::InFlight), "the message stays unanswered");
+
+        m.delegates.fail(&task, "stopped for the test".into(), None);
+        append_transcript(&dir, "s1", &turn_lines(2, "[worker] the task ended", Some("The form ships: PR #7.")));
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || reports().len() == 1);
+        assert_eq!(reports(), ["The form ships: PR #7."]);
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_report_goes_up_once_the_message_has_waited_ten_minutes_though_a_task_still_works() {
+        let (m, dir, path, capitao, reports) = report_stack("report-hold-ends");
+        let started = delegate_task(&m, &capitao, json!({
+            "task": "Run the pipeline.",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" },
+        }));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some("Started the pipeline."));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new(), "a fresh message is held while its task works");
+
+        m.sent.lock().unwrap().backdate("r-1", CAPTAIN_HOLD.as_secs() + 1);
+        append_transcript(&dir, "s1", &turn_lines(2, "[Orquestrador] reply now with the plan", Some("The plan: ship the form, then the report.")));
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || reports().len() == 1);
+        assert_eq!(reports(), ["The plan: ship the form, then the report."]);
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        assert!(m.delegates.working_for(&format!("tab:{capitao}")) > 0, "the task is still working");
+        m.delegates.fail(&task, "stopped for the test".into(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_with_no_text_sends_no_report_and_no_empty_one() {
+        let (m, dir, path, capitao, reports) = report_stack("report-no-text");
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", None);
+        captain_turn(&m, &dir, &path, &capitao, 2, "r-2", Some("   "));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new());
+        assert_eq!(m.sent.lock().unwrap().in_flight(&PathBuf::from(&path)).len(), 2, "both messages still wait for a reply");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_20k_report_arrives_as_head_and_tail_with_a_pointer_that_read_session_resolves_to_the_whole_text() {
+        let (m, dir, path, capitao, reports) = report_stack("report-long");
+        let whole: String = (0..4000).map(|i| format!("{i:04} ")).collect();
+        assert_eq!(whole.chars().count(), 20_000);
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some(&whole));
+        wait_for("the report", || reports().len() == 1);
+        let sent = reports().remove(0);
+        assert!(sent.starts_with(&whole[..10_000]), "the head is there");
+        assert!(sent.ends_with(&whole[15_000..]), "the tail is there");
+        assert!(sent.contains("5000 of 20000 characters left out") && sent.contains(&format!("read_session with id \"{capitao}\"")), "the pointer names the session: {}", &sent[10_000..10_400]);
+        let read: Value = serde_json::from_str(&m.read_session(&capitao, None, Some(1)).unwrap()).unwrap();
+        assert_eq!(read["conversation"]["items"][0]["text"], whole.as_str(), "read_session returns the whole message");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_report_up_to_16k_is_sent_whole_and_a_longer_one_keeps_its_ends() {
+        let whole = "x".repeat(16_000);
+        assert_eq!(captain_report_text(&whole, "tab-1", "m1"), whole);
+        let long = format!("{}{}{}", "a".repeat(10_000), "é".repeat(3_000), "z".repeat(5_000));
+        let cut = captain_report_text(&long, "tab-1", "m1");
+        assert!(cut.starts_with(&"a".repeat(10_000)) && cut.ends_with(&"z".repeat(5_000)));
+        assert!(cut.contains("3000 of 18000 characters left out") && cut.contains("id \"tab-1\", machine \"m1\" and items 1"), "{cut}");
     }
 
     /// The Stop hook's payload for session s1, as Claude Code 2.1.322 sends it, with the turn's last
@@ -9525,7 +9878,7 @@ while True:
 
     #[test]
     #[cfg(unix)]
-    fn a_turn_that_ends_asking_the_user_waits_on_them_until_the_next_turn_and_across_a_restart() {
+    fn a_turn_that_ends_asking_the_user_offers_until_the_next_turn_and_blocks_nobody() {
         let dir = temp("waits-question");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
@@ -9534,21 +9887,25 @@ while True:
         let path = m.open_project(project.clone()).display().to_string();
         m.set_project_account(&path, Some("work".into())).unwrap();
         let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
         let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
-        let asks = |question: &str| vec![(global::WaitingKind::NeedsInput, Some(question.to_owned()))];
+        let offers = |m: &Machine| m.local_overview().sessions.unwrap().into_iter().filter_map(|s| s.message).collect::<Vec<_>>();
+        let asks = |question: &str| vec![question.to_owned()];
 
         m.record_event(hook(&tab, AgentStatus::Working));
         append_transcript(&dir, "s1", &turn_lines(1, "Merge the fix.", Some("Merged. Quer que eu faça a release?")));
         m.record_event(hook(&tab, AgentStatus::Done));
-        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"));
+        assert_eq!(waiting(&m), [], "a finished turn that asked blocks nobody");
+        assert_eq!(offers(&m), asks("Quer que eu faça a release?"));
         m.record_event(AgentEvent { message: Some("Claude is waiting for your input".into()), ..hook(&tab, AgentStatus::NeedsInput) });
-        assert_eq!(waiting(&m), asks("Quer que eu faça a release?"), "Claude Code's idle notice a minute later");
+        assert_eq!(waiting(&m), [], "Claude Code's idle notice a minute later");
+        assert_eq!(offers(&m), asks("Quer que eu faça a release?"));
 
         m.record_event(hook(&tab, AgentStatus::Working));
-        assert_eq!(waiting(&m), [], "the user answered");
+        assert_eq!(offers(&m), Vec::<String>::new(), "the user answered");
         append_transcript(&dir, "s1", &turn_lines(2, "Sim.", Some("Released v0.17.21.")));
         m.record_event(hook(&tab, AgentStatus::Done));
-        assert_eq!(waiting(&m), [], "a turn that asked nothing");
+        assert_eq!(offers(&m), Vec::<String>::new(), "a turn that asked nothing");
 
         m.record_event(hook(&tab, AgentStatus::Working));
         append_transcript(&dir, "s1", &turn_lines(3, "And #89?", Some("O #89 conflita com o main. Fecho o #89?")));
@@ -9556,7 +9913,8 @@ while True:
         drop(m);
         let restarted = work_machine(&dir, &claude, &sock);
         assert_eq!(restarted.restore_tabs().len(), 1);
-        assert_eq!(waiting(&restarted), asks("Fecho o #89?"), "the question outlives a restart");
+        assert_eq!(waiting(&restarted), [], "nothing blocks after a restart");
+        assert_eq!(offers(&restarted), Vec::<String>::new(), "a stopped thread keeps no offer");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10436,6 +10794,380 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A task `tab` delegated to `machine`, named `name`, as `delegate_elsewhere` leaves it.
+    fn delegated_elsewhere(m: &Machine, tab: &str, machine: &str, name: &str) -> String {
+        use crate::delegate::{Access, Mode, NewTask, Parent, RemoteTarget};
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(tab.into()),
+            tool: None,
+            title: "Slow suite".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()) });
+        task.id
+    }
+
+    fn state_of(m: &Machine, id: &str) -> (String, Option<String>) {
+        let task = m.delegates.get(id).unwrap();
+        (task.state.as_str().to_owned(), task.error)
+    }
+
+    /// A machine over `dir`'s config as `limited_captain` made it, as after the app restarted.
+    #[cfg(unix)]
+    fn restarted(dir: &Path) -> Arc<Machine> {
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn reports(tab: &str, session: &str, status: AgentStatus, reply: Option<&str>) -> AgentEvent {
+        AgentEvent { session: Some(session.into()), reply: reply.map(str::to_owned), ..hook(tab, status) }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_working_thread_task_survives_a_restart_on_the_tab_its_session_got_and_still_ends() {
+        let (m, dir, captain) = limited_captain("restart-keeps", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.record_event(reports(&worker, "s-worker", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 2);
+        let by_session = |session: &str| tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some(session)).unwrap()).cloned().unwrap();
+        let (captain_now, worker_now) = (by_session("s-captain"), by_session("s-worker"));
+        assert_ne!(worker_now, worker, "a restart gives the worker's tab a new id");
+        let info = after.delegates.get(&task).unwrap();
+        assert_eq!(info.state.as_str(), "working", "its worker's session resumed, so the task did not fail: {:?}", info.error);
+        assert_eq!((info.thread.map(|t| (t.tab, t.runs)), info.parent), (Some((worker_now.clone(), true)), crate::delegate::Parent::Tab(captain_now.clone())), "the task follows its worker and its parent by session");
+        assert_eq!(after.tab(&worker_now, |t| t.task.clone()).unwrap(), Some(task.clone()));
+
+        after.record_event(reports(&worker_now, "s-worker", AgentStatus::Done, Some("Fixed the parser.")));
+        let ended = after.delegates.get(&task).unwrap();
+        assert_eq!((ended.state.as_str(), ended.summary.as_deref()), ("result_available", Some("Fixed the parser.")), "the resumed worker's turn ends it as before");
+        let notice = after.delegates.claim_notice(&captain_now).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task) && notice.contains("result available"), "the captain that came back hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_thread_task_whose_session_never_reported_ends_with_the_reason() {
+        let (m, dir, captain) = limited_captain("restart-no-session", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+        m.record_event(reports(&captain, "s-captain", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        after.restore_tabs();
+        assert_eq!(state_of(&after, &task), ("cancelled".into(), Some(crate::delegate::RESTART_ENDED.into())));
+        let notice = after.delegates.claim_notice(&after.tabs.lock().unwrap().keys().next().cloned().unwrap()).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the parent is told why: {notice}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_task_is_still_working_after_the_origin_restarts_and_takes_its_end_by_the_old_tab_id() {
+        use crate::delegate::RemoteTarget;
+        let root = temp("remote-origin-restart");
+        let (app, config) = (root.join("app"), root.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some("s-parent".into()));
+        let task = delegated_elsewhere(&before, &tab, "m-mini", "mini");
+        before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()) });
+        before.record_event(reports(&tab, "s-parent", AgentStatus::Working, None));
+        before.quit();
+        drop(before);
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = after.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_ne!(tabs[0], tab, "the parent has a new tab id");
+        assert_eq!(state_of(&after, &task), ("working".into(), None), "the machine that runs it was not restarted");
+        let remote = after.delegates.get(&task).unwrap().remote.expect("the remote survives the restart");
+        assert_eq!((remote.machine.as_str(), remote.name.as_str(), remote.tab.as_deref()), ("m-mini", "mini", Some("tab-9")));
+
+        let asked = Arc::new(Mutex::new(vec![]));
+        let seen = asked.clone();
+        after.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { tab, .. } => {
+                seen.lock().unwrap().push(tab);
+                Err("mini is offline".into())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        after.check_remotes(Instant::now());
+        assert_eq!(*asked.lock().unwrap(), vec![tab.clone()], "the 60 s look asks after it by the tab id the other machine knows");
+
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
+        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), false, "only the machine that runs it ends it");
+        assert!(after.remote_ended("m-mini", &tab, &task, &end), "the end the machine sends, naming the old tab id, is taken");
+        let done = after.delegates.get(&task).unwrap();
+        assert_eq!((done.state.as_str(), done.summary.as_deref()), ("result_available", Some("Green.")));
+        let notice = after.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&task), "the parent's new tab hears of it: {notice}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_host_that_restarts_keeps_reporting_its_end_to_the_machine_that_asked() {
+        let (m, dir, _captain) = limited_captain("restart-host", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        git(&dir.join("app"), &["init", "-q"]);
+        git(&dir.join("app"), &["remote", "add", "origin", "git@github.com:acme/app.git"]);
+        let origin = crate::delegate::Origin {
+            machine: "m-mac".into(),
+            machine_name: "mac".into(),
+            tab: "tab-7".into(),
+            task: "task-mac".into(),
+            access: crate::delegate::Access::Auto,
+            delegator: Default::default(),
+            limits: Default::default(),
+        };
+        let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+        let started: Value = serde_json::from_str(&m.start_for_origin(origin, request, Some("git@github.com:acme/app.git".into()), None).unwrap_or_else(|e| panic!("{e}"))).unwrap();
+        let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+        m.record_event(reports(&worker, "s-host", AgentStatus::Working, None));
+        m.quit();
+        drop(m);
+        let after = restarted(&dir);
+        let tabs = after.restore_tabs();
+        let worker_now = tabs.iter().find(|id| after.tab(id, |t| t.claude_session.as_deref() == Some("s-host")).unwrap()).cloned().unwrap();
+        assert!(after.tab(&worker_now, |t| t.origin.is_some()).unwrap(), "the worker still answers to the tab on the other machine");
+        after.record_event(reports(&worker_now, "s-host", AgentStatus::Done, Some("Done there.")));
+        assert_eq!(after.delegates.remote_ends().into_iter().map(|(id, machine, tab, origin_task, end)| (id, machine, tab, origin_task, end.state)).collect::<Vec<_>>(), vec![(task, "m-mac".into(), "tab-7".into(), "task-mac".into(), "result_available".into())]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+
+    #[test]
+    fn a_remote_task_past_its_limit_ends_here_when_its_machine_never_reports() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.delegates.set_limits(&id, 30_000, 60_000);
+        let begun = Instant::now();
+        assert_eq!(m.delegates.enforce_limits(begun + Duration::from_secs(61), None), vec![]);
+        assert_eq!(state_of(&m, &id).0, "working", "mini holds it to its limit and has a grace to report its end");
+        let stopped = m.delegates.enforce_limits(begun + Duration::from_secs(60) + crate::delegate::REMOTE_GRACE + Duration::from_secs(1), None);
+        assert_eq!(stopped.iter().map(|(tab, task, remote)| (tab.as_str(), task.as_str(), remote.machine.as_str())).collect::<Vec<_>>(), vec![("tab-1", id.as_str(), "m-mini")], "mini is told best-effort");
+        assert_eq!(state_of(&m, &id), ("cancelled".into(), Some("pinned stopped it after 6 min, past its limit of 1 min: mini never reported its end".into())));
+    }
+
+    #[test]
+    fn a_cancel_ends_a_remote_task_here_whatever_the_hub_answers() {
+        let m = machine();
+        let gone = delegated_elsewhere(&m, "tab-1", "m-gone", "mini");
+        let offline = delegated_elsewhere(&m, "tab-1", "m-off", "laptop");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { machine, .. } if machine == "m-gone" => Err(format!("this account has no machine {machine}")),
+            HubCall::RemoteTask { .. } => Err("laptop is offline".into()),
+            _ => Err("not this test's".into()),
+        }));
+        let cancel = |id: &str| serde_json::from_str::<Value>(&m.task_cancel(Some("tab-1".into()), None, id, "not now").unwrap()).unwrap();
+        let body = cancel(&gone);
+        assert_eq!((body["workState"].as_str(), body["note"].as_str()), (Some("cancelled"), Some("mini is gone from this account, so pinned cancelled the task here")), "{body}");
+        let body = cancel(&offline);
+        assert_eq!(
+            (body["workState"].as_str(), body["note"].as_str()),
+            (Some("cancelled"), Some("laptop did not take the cancel (laptop is offline), so pinned cancelled the task here only: its worker there may still run")),
+            "{body}"
+        );
+        assert_eq!((state_of(&m, &gone), state_of(&m, &offline)), (("cancelled".into(), Some("not now".into())), ("cancelled".into(), Some("not now".into()))));
+    }
+
+    #[test]
+    fn a_box_that_never_connects_fails_its_task_after_the_connect_window() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "Box · Slow suite");
+        let cancels = Arc::new(Mutex::new(vec![]));
+        let told = cancels.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { cancel: Some(reason), .. } => {
+                told.lock().unwrap().push(reason);
+                Ok(json!({ "workState": "cancelled" }))
+            }
+            HubCall::RemoteTask { .. } => Err(crate::delegate::BOX_BOOTING.into()),
+            _ => Err("not this test's".into()),
+        }));
+        let begun = Instant::now();
+        m.check_remotes(begun + Duration::from_secs(61));
+        assert_eq!(state_of(&m, &id).0, "working", "a box may take a few minutes to boot");
+        m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
+        assert_eq!(state_of(&m, &id), ("failed".into(), Some("the box did not connect within 5 min".into())));
+        assert_eq!(*cancels.lock().unwrap(), vec!["the box did not connect within 5 min".to_owned()], "the hub is told, so it deletes the box");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_the_hub_did_not_answer_stays_starting_and_a_repeat_returns_the_same_task() {
+        let (m, dir, captain) = limited_captain("start-timeout", TastePatch::default());
+        let asks = Arc::new(Mutex::new(vec![]));
+        let released = Arc::new(AtomicBool::new(false));
+        let (seen, answering) = (asks.clone(), released.clone());
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Delegate { task, .. } => {
+                seen.lock().unwrap().push(task);
+                if !answering.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(20));
+                    return Err(crate::link::HUB_TIMEOUT.into());
+                }
+                Ok(json!({ "machine": "m-box", "machineName": "Box · Slow", "box": "b1", "workState": "working" }))
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let asked = json!({ "task": "Run the suite.", "title": "Slow", "clientRequestId": "req-1", "target": { "box": { "repo": "acme/site" } } });
+        let first = delegate_task(&m, &captain, asked.clone());
+        let task = first["taskId"].as_str().unwrap().to_owned();
+        assert_eq!((first["workState"].as_str(), first["starting"].as_bool()), (Some("working"), Some(true)), "a timeout is not a failure: {first}");
+        let repeat = delegate_task(&m, &captain, asked);
+        assert_eq!(repeat["taskId"].as_str(), Some(task.as_str()), "the same request is the same task: {repeat}");
+
+        released.store(true, Ordering::SeqCst);
+        wait_for("the hub to answer the asked-again start", || m.delegates.get(&task).and_then(|t| t.remote).is_some_and(|remote| remote.machine == "m-box"));
+        assert_eq!(state_of(&m, &task).0, "working");
+        let asks = asks.lock().unwrap();
+        assert!(asks.len() >= 2 && asks.iter().all(|asked| *asked == task), "every ask names the one task, so the hub finds the box it made: {asks:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_still_unanswered_after_the_connect_window_fails_its_task() {
+        let (m, dir, captain) = limited_captain("start-window", TastePatch::default());
+        m.set_hub(Arc::new(|_| Err(crate::link::HUB_TIMEOUT.into())));
+        let first = delegate_task(&m, &captain, json!({ "task": "Run the suite.", "title": "Slow", "target": { "box": { "repo": "acme/site" } } }));
+        let task = first["taskId"].as_str().unwrap().to_owned();
+        let late = Instant::now().checked_sub(crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1)).unwrap();
+        m.finish_start(captain.clone(), task.clone(), HubCall::Overview, late);
+        wait_for("the late start to fail", || state_of(&m, &task).0 == "failed");
+        assert_eq!(state_of(&m, &task).1.as_deref(), Some("the hub did not finish starting it within 5 min"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hub_that_refuses_a_start_fails_its_task_at_once() {
+        let (m, dir, captain) = limited_captain("start-refused", TastePatch::default());
+        m.set_hub(Arc::new(|_| Err("Upstash Box is not connected".into())));
+        let request = crate::delegate::parse_request(&json!({ "task": "Run the suite.", "title": "Slow", "target": { "box": { "repo": "acme/site" } } })).unwrap();
+        assert_eq!(m.start_delegate(Some(captain), None, None, request), Err("Upstash Box is not connected".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_remote_workers_usage_lands_on_its_task_live_and_at_its_end_and_nothing_is_recorded_here() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let working = json!({ "workState": "working", "usage": { "tokens_in": 500, "tokens_out": 10, "cost_usd": 0.1, "wall_ms": 30_000 } });
+        m.set_hub(Arc::new(move |_| Ok(working.clone())));
+        let remote = m.delegates.get(&id).unwrap().remote.unwrap();
+        m.look_remote("tab-1", &id, &remote);
+        assert_eq!(m.delegates.get(&id).unwrap().usage.tokens_in, 500, "a look shows what the worker used so far");
+
+        let end = crate::delegate::RemoteEnd {
+            state: "result_available".into(),
+            summary: Some("Green.".into()),
+            error: None,
+            usage: Some(crate::usage::TaskUsage { tokens_in: 1200, tokens_out: 30, cost_usd: Some(0.42), wall_ms: 90_000, box_usd: Some(0.05), box_ms: Some(30 * 60_000) }),
+        };
+        assert!(m.remote_ended("m-mini", "tab-1", &id, &end));
+        let usage = m.delegates.get(&id).unwrap().usage;
+        assert_eq!((usage.tokens_in, usage.cost_usd, usage.box_ms), (1200, Some(0.42), Some(30 * 60_000)));
+        assert_eq!(m.delegates.records().len(), 0, "the machine that ran the task records it, so a run counts once");
+        assert!(m.delegates.unrecorded(10).is_empty());
+    }
+
+    #[test]
+    fn the_first_word_on_a_task_the_hub_was_still_starting_is_its_end_from_the_machine_that_ran_it() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "", "Box · Slow");
+        let end = crate::delegate::RemoteEnd { state: "failed".into(), summary: None, error: Some("Upstash Box: the box ended before its task did".into()), usage: None };
+        assert!(m.remote_ended("m-box", "tab-1", &id, &end), "a start that never got its answer still hears how it ended");
+        assert_eq!(state_of(&m, &id), ("failed".into(), Some("Upstash Box: the box ended before its task did".into())));
+    }
+
+    #[test]
+    fn a_remote_task_whose_machine_left_the_account_fails_on_the_next_look_and_a_lost_end_lands() {
+        let m = machine();
+        let gone = delegated_elsewhere(&m, "tab-1", "m-gone", "mini");
+        let done = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { machine, .. } if machine == "m-gone" => Err(format!("this account has no machine {machine}")),
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": "Green." })),
+            _ => Err("not this test's".into()),
+        }));
+        let now = Instant::now();
+        m.check_remotes(now);
+        assert_eq!(state_of(&m, &gone).0, "working", "asked a moment ago, at its start");
+        m.check_remotes(now + Duration::from_secs(61));
+        assert_eq!(state_of(&m, &gone), ("failed".into(), Some("mini is gone from this account (a box that ended, or a machine someone removed), so its worker can't finish".into())));
+        assert_eq!(state_of(&m, &done).0, "result_available", "an end that never arrived lands on the look");
+        assert_eq!(m.delegates.get(&done).unwrap().summary.as_deref(), Some("Green."));
+    }
+
+    #[test]
+    fn an_undelivered_remote_end_survives_a_restart_of_the_machine_that_ran_it() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent};
+        let root = temp("remote-end-restart");
+        let config = root.join("config");
+        let first = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        first.set_hub(Arc::new(|_| Err("mac is offline".into())));
+        let key = Origin::key("m-mac", "tab-1");
+        let task = first.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Slow suite".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        first.delegates.fail(&task.id, "the suite broke".into(), None);
+        first.send_remote_ends(Instant::now());
+        drop(first);
+
+        let second = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let (sent, ends) = std::sync::mpsc::channel();
+        second.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteEnded { to, tab, task, end } = call {
+                let _ = sent.send((to, tab, task, end.state, end.error));
+                return Ok(json!(true));
+            }
+            Ok(Value::Null)
+        }));
+        assert_eq!(
+            ends.recv_timeout(Duration::from_secs(10)),
+            Ok(("m-mac".into(), "tab-1".into(), "task-mac".into(), "failed".into(), Some("the suite broke".into()))),
+            "the end mac never got goes out once the restarted machine has a hub"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        drop(second);
+        let third = Machine::new(launch(), Some(config), None, |_| {});
+        assert_eq!(third.delegates.remote_ends(), vec![], "an end the hub took is not sent again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_worker_past_its_budget_is_stopped_and_task_status_shows_what_it_spent() {
@@ -11110,7 +11842,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(notice.contains(&finished), "the finished task was forgotten: {notice}");
         assert!(notice.contains("result available"), "the finished task's notice was forgotten: {notice}");
         assert!(notice.contains(&running.id), "the killed child was forgotten: {notice}");
-        assert!(notice.contains("stopped by restart"), "the killed child did not say why: {notice}");
+        assert!(notice.contains(crate::delegate::RESTART_ENDED), "the killed child did not say why: {notice}");
         let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
         assert_eq!(status["summary"], "DONE");
         let _ = std::fs::remove_dir_all(root);

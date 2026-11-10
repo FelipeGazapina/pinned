@@ -3800,10 +3800,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -8495,58 +8558,6 @@
               }
             ]
           },
-          "TaskUsage": {
-            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
-            "type": "object",
-            "properties": {
-              "tokens_in": {
-                "description": "Input tokens, cache reads and cache writes included.",
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "tokens_out": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "cost_usd": {
-                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "wall_ms": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "box_usd": {
-                "description": "What the worker's Upstash Box cost, for box work.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "box_ms": {
-                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint64",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "tokens_in",
-              "tokens_out",
-              "wall_ms"
-            ]
-          },
           "TaskOutcome": {
             "oneOf": [
               {
@@ -12760,10 +12771,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -17336,58 +17410,6 @@
                 "type": "string",
                 "const": "machine"
               }
-            ]
-          },
-          "TaskUsage": {
-            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
-            "type": "object",
-            "properties": {
-              "tokens_in": {
-                "description": "Input tokens, cache reads and cache writes included.",
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "tokens_out": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "cost_usd": {
-                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "wall_ms": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "box_usd": {
-                "description": "What the worker's Upstash Box cost, for box work.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "box_ms": {
-                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint64",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "tokens_in",
-              "tokens_out",
-              "wall_ms"
             ]
           },
           "TaskOutcome": {
@@ -23193,10 +23215,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "TaskRecord": {
@@ -23359,58 +23444,6 @@
                 "type": "string",
                 "const": "machine"
               }
-            ]
-          },
-          "TaskUsage": {
-            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
-            "type": "object",
-            "properties": {
-              "tokens_in": {
-                "description": "Input tokens, cache reads and cache writes included.",
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "tokens_out": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "cost_usd": {
-                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "wall_ms": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "box_usd": {
-                "description": "What the worker's Upstash Box cost, for box work.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "box_ms": {
-                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint64",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "tokens_in",
-              "tokens_out",
-              "wall_ms"
             ]
           },
           "TaskOutcome": {
@@ -28935,10 +28968,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "TaskRecord": {
@@ -29098,58 +29194,6 @@
                 "type": "string",
                 "const": "machine"
               }
-            ]
-          },
-          "TaskUsage": {
-            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
-            "type": "object",
-            "properties": {
-              "tokens_in": {
-                "description": "Input tokens, cache reads and cache writes included.",
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "tokens_out": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "cost_usd": {
-                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "wall_ms": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
-              "box_usd": {
-                "description": "What the worker's Upstash Box cost, for box work.",
-                "type": [
-                  "number",
-                  "null"
-                ],
-                "format": "double"
-              },
-              "box_ms": {
-                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint64",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "tokens_in",
-              "tokens_out",
-              "wall_ms"
             ]
           },
           "TaskOutcome": {
@@ -32971,6 +33015,13 @@
             "items": {
               "$ref": "#/$defs/TaskBrief"
             }
+          },
+          "unreadable": {
+            "description": "Stored task records that did not read, so the totals leave them out.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
           }
         },
         "required": [
@@ -32983,7 +33034,8 @@
           "by_delegator",
           "by_outcome",
           "slowest",
-          "priciest"
+          "priciest",
+          "unreadable"
         ],
         "$defs": {
           "Group": {
@@ -33271,6 +33323,13 @@
             "items": {
               "$ref": "#/$defs/TaskBrief"
             }
+          },
+          "unreadable": {
+            "description": "Stored task records that did not read, so the totals leave them out.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
           }
         },
         "required": [
@@ -36146,7 +36205,7 @@
                 "$ref": "#/$defs/SessionState"
               },
               "message": {
-                "description": "What it asks the user, or the error that stopped it.",
+                "description": "What it asks the user, or the error that stopped it. An idle session's is the offer its\nfinished turn ended on, which waits on nobody.",
                 "type": [
                   "string",
                   "null"
@@ -36241,7 +36300,7 @@
                 "const": "idle"
               },
               {
-                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending\nmid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
@@ -36712,7 +36771,7 @@
                 "$ref": "#/$defs/SessionState"
               },
               "message": {
-                "description": "What it asks the user, or the error that stopped it.",
+                "description": "What it asks the user, or the error that stopped it. An idle session's is the offer its\nfinished turn ended on, which waits on nobody.",
                 "type": [
                   "string",
                   "null"
@@ -36807,7 +36866,7 @@
                 "const": "idle"
               },
               {
-                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,\nor a finished turn whose last reply asked the user something.",
+                "description": "It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending\nmid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.",
                 "type": "string",
                 "const": "waiting_on_input"
               },
@@ -53750,10 +53809,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "GlobalOrchestratorSettings": {
@@ -58766,10 +58888,73 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           },
           "GlobalOrchestratorSettings": {

@@ -116,6 +116,8 @@ pub struct Hub {
     /// The unlocks apps hold in memory, by the sha256 of the token. A hub restart forgets them, and
     /// the app asks for the password again.
     unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
+    /// Turns true when the hub is about to stop, so every socket sends its close frame.
+    going_away: tokio::sync::watch::Sender<bool>,
 }
 
 struct Unlock {
@@ -209,7 +211,17 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
+    }
+
+    /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
+    pub fn going_away(&self) {
+        self.going_away.send_replace(true);
+    }
+
+    /// Turns true once `going_away` ran.
+    pub fn watch_going_away(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.going_away.subscribe()
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
@@ -217,10 +229,20 @@ impl Hub {
     /// would both see it stopped and start it twice. Locks nobody holds are dropped as others are
     /// taken, so the map stays small.
     pub async fn hold_captain(&self, account: &Account, machine: &str, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("{}:{machine}:{path}", account.id)).await
+    }
+
+    /// Held while the worker for task `task` of thread `tab` on `machine` starts elsewhere, so a
+    /// repeat of that start waits for the first and finds its worker instead of making another.
+    pub async fn hold_start(&self, account: &Account, machine: &str, tab: &str, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("start:{}:{machine}:{tab}:{task}", account.id)).await
+    }
+
+    async fn hold(&self, key: String) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.agent_locks.lock().unwrap();
             locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-            locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
         lock.lock_owned().await
     }
@@ -638,8 +660,10 @@ impl Hub {
                 let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
                 let now = pinned_core::connectors::unix_millis();
                 let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
-                let records = self.db.task_records(account.id, since).await?;
-                return json(pinned_core::delegate::aggregate(&records, now, days));
+                let (records, unreadable) = self.db.task_records(account.id, since).await?;
+                let mut stats = pinned_core::delegate::aggregate(&records, now, days);
+                stats.unreadable = unreadable;
+                return json(stats);
             }
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {

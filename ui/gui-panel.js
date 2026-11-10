@@ -1576,7 +1576,7 @@ filePicker.addEventListener("click", (e) => {
 onGuiKey("p", () => (filePicker.hidden || pickerMode !== "files" ? openPicker("files") : closePicker()));
 onGuiKey("f", () => (filePicker.hidden || pickerMode !== "content" ? openPicker("content") : closePicker()), { shift: true });
 
-setInterval(() => tabs.forEach((tab) => wireTerminalLinks(tab.term)), 1000);
+visibleInterval(() => tabs.forEach((tab) => wireTerminalLinks(tab.term)), 1000);
 
 /** The thread's pull requests: the ones claude linked from its transcript, and the ones linked by
  * hand, each with who linked it and when. */
@@ -1673,9 +1673,9 @@ async function fetchPorts(tab) {
   const s = shownSurface(tab);
   if (tab === active && s?.kind === "browser" && !s.url) renderBrowser(s, true);
 }
-setInterval(() => {
+visibleInterval(() => {
   const s = active && panelOf(active).open && shownSurface(active);
-  if (guiOn() && !document.hidden && s?.kind === "browser" && !s.url) fetchPorts(active);
+  if (guiOn() && s?.kind === "browser" && !s.url) fetchPorts(active);
 }, 3000);
 
 const MOD = IS_MAC ? "⌘" : "Ctrl+";
@@ -1782,7 +1782,7 @@ function trackFrameHistory() {
   h.s.frameForward = 0;
   if (shownSurface(active) === h.s) syncChrome(h.s);
 }
-setInterval(trackFrameHistory, 500);
+visibleInterval(trackFrameHistory, 500);
 
 const metaFetched = new Map();
 async function fetchPageMeta(tab, s) {

@@ -146,6 +146,11 @@ impl Delegates {
         self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count()
     }
 
+    /// How many tasks the session `caller_key` (`Caller::key`) started are still at work.
+    pub fn working_for(&self, caller_key: &str) -> usize {
+        self.tasks.lock().unwrap().iter().filter(|task| !task.state.terminal() && task.caller_key == caller_key).count()
+    }
+
     /// The folder of each task still at work.
     #[cfg(test)]
     pub fn working_cwds(&self) -> Vec<PathBuf> {
@@ -365,16 +370,25 @@ impl Delegates {
         }
     }
 
-    pub fn enforce_limits(&self, now: Instant, path: Option<&str>) {
-        let (late, over, quiet) = {
+    /// Stops each task past its time limit and ends quiet ones. A task on another machine gets
+    /// `REMOTE_GRACE` past its limit for that machine to report its end; the ones stopped here are
+    /// returned as (tab, task, machine), for the machine to be told best-effort.
+    pub fn enforce_limits(&self, now: Instant, path: Option<&str>) -> Vec<(String, String, RemoteTarget)> {
+        let (late, over, quiet, elsewhere) = {
             let mut tasks = self.tasks.lock().unwrap();
             let mut late = vec![];
             let mut over = vec![];
             let mut quiet = vec![];
+            let mut elsewhere = vec![];
             for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
                 let ran = millis(now.saturating_duration_since(task.run.begun));
-                // The machine that runs it holds it to its limit and reports how it ended.
-                if task.remote.is_some() && ran >= task.run.limit_ms {
+                if let (Some(remote), true) = (&task.remote, ran >= task.run.limit_ms) {
+                    if ran >= task.run.limit_ms.saturating_add(millis(REMOTE_GRACE)) {
+                        over.push((task.id.clone(), format!("pinned stopped it after {}, past its limit of {}: {} never reported its end", span(ran), span(task.run.limit_ms), remote.name)));
+                        if let Parent::Tab(tab) = &task.parent {
+                            elsewhere.push((tab.clone(), task.id.clone(), remote.clone()));
+                        }
+                    }
                     continue;
                 }
                 if ran >= task.run.limit_ms {
@@ -388,7 +402,7 @@ impl Delegates {
                     }
                 }
             }
-            (late, over, quiet)
+            (late, over, quiet, elsewhere)
         };
         for report in late {
             self.push_report(report);
@@ -402,6 +416,7 @@ impl Delegates {
         if !over.is_empty() || !quiet.is_empty() {
             self.persist();
         }
+        elsewhere
     }
 
     fn end_quiet(&self, id: &str, path: Option<&str>) {
@@ -434,11 +449,31 @@ impl Delegates {
         }
     }
 
+    /// Each working task on another machine that no one asked after for `every`, with its tab and
+    /// how long it ran, marked asked now.
+    pub fn remotes_due(&self, now: Instant, every: Duration) -> Vec<(String, String, RemoteTarget, Duration)> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let mut due = vec![];
+        for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
+            let (Parent::Tab(tab), Some(remote)) = (&task.parent, task.remote.as_mut()) else { continue };
+            if remote.machine.is_empty() || remote.looked.is_some_and(|at| now.saturating_duration_since(at) < every) {
+                continue;
+            }
+            remote.looked = Some(now);
+            due.push((tab.clone(), task.id.clone(), remote.clone(), now.saturating_duration_since(task.run.begun)));
+        }
+        due
+    }
+
     /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
     pub fn set_remote(&self, id: &str, remote: RemoteTarget) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            if let (Parent::Tab(tab), None) = (&task.parent, &task.remote_tab) {
+                task.remote_tab = Some(tab.clone());
+            }
             task.remote = Some(remote);
         }
+        self.persist();
     }
 
     /// The remote task's status as the machine running it last answered, when it is time to ask
@@ -455,15 +490,19 @@ impl Delegates {
     }
 
     /// Ends a task that runs on another machine as that machine reports it. Only a working task
-    /// that `tab` owns and `from` runs takes it. Returns whether it did.
-    pub fn settle_remote(&self, id: &str, tab: &str, from: &str, end: &RemoteEnd) -> bool {
-        {
+    /// that `tab` owns, by the id it has now or the one it was delegated from, and `from` runs (or
+    /// that no machine is known to run yet) takes it. Returns the tab that owns it now when it took it.
+    pub fn settle_remote(&self, id: &str, tab: &str, from: &str, end: &RemoteEnd) -> Option<String> {
+        let parent = {
             let mut tasks = self.tasks.lock().unwrap();
-            let Some(task) = tasks.iter_mut().find(|task| task.id == id) else { return false };
-            let owned = matches!(&task.parent, Parent::Tab(parent) if parent == tab);
-            if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| remote.machine != from) {
-                return false;
+            let task = tasks.iter_mut().find(|task| task.id == id)?;
+            let Parent::Tab(parent) = &task.parent else { return None };
+            let owned = parent == tab || task.remote_tab.as_deref() == Some(tab);
+            // A task the hub is still starting has no machine yet: its first word is from the machine that runs it.
+            if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| !remote.machine.is_empty() && remote.machine != from) {
+                return None;
             }
+            let parent = parent.clone();
             task.state = match end.state.as_str() {
                 "failed" => WorkState::Failed,
                 "cancelled" => WorkState::Cancelled,
@@ -472,30 +511,49 @@ impl Delegates {
             task.summary = end.summary.clone();
             task.error = end.error.clone();
             task.ended = Some(unix_millis());
-        }
+            if let Some(usage) = end.usage {
+                task.usage = usage;
+            }
+            parent
+        };
         self.persist();
-        true
+        Some(parent)
     }
 
-    /// Claims the end of each finished task that a tab on another machine delegated here, for the
-    /// hub to take back to it: that machine, its tab, its own id for the task and how it ended.
-    /// `release_notice` puts back the ids whose end did not get through.
-    pub fn claim_remote_ends(&self) -> Vec<(String, String, String, String, RemoteEnd)> {
-        let mut tasks = self.tasks.lock().unwrap();
+    /// Shows what the worker of a remote task has used so far, as the machine that runs it
+    /// reported. Nothing is recorded from it: that machine records the run.
+    pub fn note_remote_usage(&self, id: &str, usage: TaskUsage) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id && !task.state.terminal() && task.remote.is_some()) {
+            task.usage = usage;
+        }
+    }
+
+    /// The end of each finished task that a tab on another machine delegated here and whose end
+    /// that machine has not taken yet: this task, that machine, its tab, its own id for the task
+    /// and how it ended. `remote_end_sent` marks one taken; until then it stays on disk, across
+    /// restarts, to be sent again.
+    pub fn remote_ends(&self) -> Vec<(String, String, String, String, RemoteEnd)> {
+        let tasks = self.tasks.lock().unwrap();
         let mut ends = vec![];
-        for task in tasks.iter_mut().filter(|task| task.state.terminal() && !task.delivered) {
+        for task in tasks.iter().filter(|task| task.state.terminal() && !task.delivered) {
             let Parent::Tab(key) = &task.parent else { continue };
             let Some((machine, tab)) = Origin::of_key(key) else { continue };
             let Some(origin_task) = task.client_request_id.clone() else { continue };
-            task.delivered = true;
-            let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone() };
+            let usage = TaskUsage { wall_ms: task.ended.unwrap_or(task.started).saturating_sub(task.started), ..task.usage };
+            let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone(), usage: Some(usage) };
             ends.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, end));
         }
-        drop(tasks);
-        if !ends.is_empty() {
-            self.persist();
-        }
         ends
+    }
+
+    /// The hub passed task `id`'s end back to the machine that delegated it.
+    pub fn remote_end_sent(&self, id: &str) {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.delivered) else { return };
+            task.delivered = true;
+        }
+        self.persist();
     }
 
     /// The task started for `origin_task` of the tab on another machine that `parent_key` names.
@@ -731,18 +789,33 @@ impl Delegates {
         Ok(body)
     }
 
+    /// Ends the working tasks that cannot outlive this process, so the next launch finds them
+    /// ended with a reason. A thread's worker whose session is saved stays working: the next
+    /// launch resumes it. So does a task that runs on another machine.
     pub fn stop_for_restart(&self, path: Option<&str>) {
-        let roots: Vec<String> = {
+        let order: Vec<String> = {
             let tasks = self.tasks.lock().unwrap();
-            tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))).map(|task| task.id.clone()).collect()
+            let mut order = vec![];
+            for task in tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))) {
+                postorder(&tasks, &task.id, &mut order);
+            }
+            order
         };
-        for id in roots {
-            self.stop_tree(&id, "stopped by restart", path);
-        }
-        for id in self.running() {
-            self.stop_one(&id, "stopped by restart", path);
+        for id in order.into_iter().chain(self.running()) {
+            if !self.outlives_restart(&id) {
+                self.stop_one(&id, RESTART_ENDED, path);
+            }
         }
         self.persist();
+    }
+
+    fn outlives_restart(&self, id: &str) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.iter().find(|task| task.id == id).is_some_and(|task| {
+            task.state == WorkState::Working
+                && (task.thread.as_ref().is_some_and(|thread| thread.runs) && task.worker_session.is_some()
+                    || task.remote.as_ref().is_some_and(|remote| !remote.machine.is_empty()))
+        })
     }
 
     fn read(&self, tasks: &mut [Task], caller: &Caller, id: &str) -> Result<Value, String> {
@@ -981,21 +1054,74 @@ impl Delegates {
         finished || reports
     }
 
+    /// Ends each working task that a restart left nothing to carry on. A thread's worker keeps
+    /// working for `restore_tabs` to bring back, and a task on another machine keeps working there.
     fn adopt_restart(&self) -> bool {
         let mut changed = false;
         for task in self.tasks.lock().unwrap().iter_mut() {
             if task.state.terminal() {
                 continue;
             }
-            task.state = WorkState::Cancelled;
-            task.summary = task.newest_text.clone().or_else(|| task.summary.take());
-            task.error = Some("stopped by restart".into());
-            task.ended = Some(unix_millis());
-            task.delivered = false;
-            task.held = None;
+            let carried_on = task.state == WorkState::Working && task.remote.as_ref().is_some_and(|remote| !remote.machine.is_empty());
+            if (task.resuming && task.worker_session.is_some()) || carried_on {
+                continue;
+            }
+            end_after_restart(task);
             changed = true;
         }
         changed
+    }
+
+    /// Ties each task that was loaded as a thread's worker to the restored tab that has its
+    /// session, whatever id that tab got this time. Returns (task, tab) for each.
+    pub fn resume_workers(&self, sessions: &[(String, String)]) -> Vec<(String, String)> {
+        let mut resumed = vec![];
+        for task in self.tasks.lock().unwrap().iter_mut().filter(|task| task.resuming && !task.state.terminal()) {
+            let Some(tab) = task.worker_session.as_ref().and_then(|session| sessions.iter().find(|(id, _)| id == session)).map(|(_, tab)| tab.clone()) else { continue };
+            task.resuming = false;
+            task.thread_tab = Some(tab.clone());
+            task.thread = Some(Thread { tab: tab.clone(), runs: true });
+            resumed.push((task.id.clone(), tab));
+        }
+        if !resumed.is_empty() {
+            self.persist();
+        }
+        resumed
+    }
+
+    /// Ends the tasks that were to resume but whose worker session no restored tab has.
+    pub fn end_unresumed(&self) {
+        let mut changed = false;
+        for task in self.tasks.lock().unwrap().iter_mut().filter(|task| task.resuming) {
+            if !task.state.terminal() {
+                end_after_restart(task);
+                changed = true;
+            }
+            task.resuming = false;
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
+    /// Notes the Claude session of the thread that runs the task, for a restart to resume.
+    pub fn set_worker_session(&self, id: &str, session: &str) {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id && !task.state.terminal()) else { return };
+            if task.worker_session.as_deref() == Some(session) {
+                return;
+            }
+            task.worker_session = Some(session.to_owned());
+        }
+        self.persist();
+    }
+
+    /// The tab id to name the task's parent by to the machine that runs it: the one it was
+    /// delegated from, which a restart here does not change over there.
+    pub fn remote_tab(&self, id: &str, current: &str) -> String {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.iter().find(|task| task.id == id).and_then(|task| task.remote_tab.clone()).unwrap_or_else(|| current.to_owned())
     }
 
     fn persist(&self) {
@@ -1569,7 +1695,10 @@ fn fresh(new: NewTask) -> Task {
         ended_by: None,
         run: Run::default(),
         thread: None,
+        worker_session: None,
+        resuming: false,
         remote: None,
+        remote_tab: None,
         limits: crate::taste::Limits::default(),
         usage: crate::usage::TaskUsage::default(),
         delegator: Delegator::default(),
@@ -1708,6 +1837,46 @@ struct SavedTask {
     /// A task saved before records existed has nothing worth sending, so it counts as sent.
     #[serde(default = "already_recorded")]
     recorded: bool,
+    /// The task's own session runs it in a thread, which a restart resumes.
+    #[serde(default)]
+    thread_runs: bool,
+    #[serde(default)]
+    worker_session: Option<String>,
+    #[serde(default)]
+    remote: Option<SavedRemote>,
+    #[serde(default)]
+    remote_tab: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedRemote {
+    machine: String,
+    name: String,
+    #[serde(default)]
+    tab: Option<String>,
+}
+
+/// When a task that started at `started` (unix milliseconds) began, on this process's clock, so
+/// its time limit keeps counting from the original start after a restart.
+fn began(started: u64) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(Duration::from_millis(unix_millis().saturating_sub(started))).unwrap_or(now)
+}
+
+/// Why a restart ended a task.
+pub const RESTART_ENDED: &str = "pinned restarted and the worker could not resume";
+
+fn end_after_restart(task: &mut Task) {
+    task.resuming = false;
+    task.state = WorkState::Cancelled;
+    task.summary = task.newest_text.clone().or_else(|| task.summary.take());
+    task.error = Some(match &task.remote {
+        Some(remote) if remote.machine.is_empty() => format!("pinned restarted before the task reached {}", remote.name),
+        _ => RESTART_ENDED.into(),
+    });
+    task.ended = Some(unix_millis());
+    task.delivered = false;
+    task.held = None;
 }
 
 fn already_recorded() -> bool {
@@ -1757,6 +1926,10 @@ impl SavedTask {
             review: task.review.clone(),
             thread_tab: task.thread_tab.clone(),
             recorded: task.recorded,
+            thread_runs: task.thread.as_ref().is_some_and(|thread| thread.runs) || task.resuming,
+            worker_session: task.worker_session.clone(),
+            remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
+            remote_tab: task.remote_tab.clone(),
         }
     }
 
@@ -1792,9 +1965,12 @@ impl SavedTask {
             held: None,
             parent_session: self.parent_session,
             ended_by: self.ended_by,
-            run: Run { budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
+            run: Run { begun: began(self.started), budget_ms: self.budget_ms, limit_ms: self.limit_ms, ..Run::default() },
             thread: None,
-            remote: None,
+            worker_session: self.worker_session,
+            resuming: self.thread_runs && self.state == "working",
+            remote: self.remote.map(|remote| RemoteTarget { machine: remote.machine, name: remote.name, tab: remote.tab, looked: None }),
+            remote_tab: self.remote_tab,
             limits: self.limits,
             usage: self.usage,
             delegator: self.delegator,

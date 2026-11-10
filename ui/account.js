@@ -10,6 +10,7 @@ function showAccount() {
         <label>Password <input name="password" type="password" autocomplete="current-password"></label>
         <label hidden>Invite code, to create an account <input name="invite" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
         <p class="error" id="account-error"></p>
+        <button type="button" class="retry" hidden>Retry</button>
         <div class="actions"><button type="button" class="secondary" data-action="create-account">Create account</button>
           <button class="primary">Sign in</button></div>
       </form>`;
@@ -190,14 +191,23 @@ async function changePassword(form) {
   form.querySelector("button").disabled = false;
 }
 
+/** Words a failed sign-in: plainly when the hub can't be reached, with a Retry that sends it again. */
+function showSignInError(error, retry, e, hub, again) {
+  error.textContent = signInProblem(e, hub);
+  retry.hidden = !hubUnreachable(e);
+  retry.onclick = again;
+}
+
 async function signInApp(create) {
   const form = settingsPage.querySelector(".sign-in");
   const error = document.getElementById("account-error");
+  const retry = form.querySelector(".retry");
   const hubUrl = form.hub.value.trim().replace(/\/+$/, "");
   const email = form.email.value.trim();
   const password = form.password.value;
   if (!hubUrl || !email || !password) return (error.textContent = "Fill in the hub, your email and a password.");
   error.textContent = "";
+  retry.hidden = true;
   for (const b of form.querySelectorAll("button")) b.disabled = true;
   try {
     const signedIn = await invoke("sign_in", { hub: hubUrl, email, password, create, invite: form.invite.value.trim() || null });
@@ -205,7 +215,7 @@ async function signInApp(create) {
     connectHub(signedIn);
     showAccount();
   } catch (e) {
-    error.textContent = String(e);
+    showSignInError(error, retry, e, hubUrl, () => signInApp(create));
     for (const b of form.querySelectorAll("button")) b.disabled = false;
   }
 }
@@ -442,6 +452,7 @@ const loginForm = document.getElementById("login");
 function showLogin(reason = "") {
   document.body.dataset.page = "login";
   loginForm.querySelector(".error").textContent = reason;
+  loginForm.querySelector(".retry").hidden = true;
   loginForm.email.focus();
   signupMode("").then((mode) => (loginForm.invite.hidden = mode !== "invite"));
 }
@@ -453,6 +464,7 @@ async function loginWeb(create) {
   const invite = create ? loginForm.invite.value.trim() : "";
   if (!email || !password) return (error.textContent = "Fill in your email and password.");
   error.textContent = "";
+  loginForm.querySelector(".retry").hidden = true;
   try {
     const res = await fetch(`/api/${create ? "signup" : "login"}`, {
       method: "POST",
@@ -470,7 +482,7 @@ async function loginWeb(create) {
     delete document.body.dataset.page;
     connectHub({ hub: location.origin, user_token: body.token, machine_id: null, email: body.account?.email ?? email });
   } catch (e) {
-    error.textContent = String(e);
+    showSignInError(error, loginForm.querySelector(".retry"), e, location.origin, () => loginWeb(create));
   }
 }
 

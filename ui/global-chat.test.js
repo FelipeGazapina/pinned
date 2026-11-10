@@ -15,6 +15,7 @@ const reportFoldLabel = call("reportFoldLabel");
 const quickReplyOf = call("quickReplyOf");
 const speechTextOf = call("speechTextOf");
 const waitingKindOf = call("waitingKindOf");
+const offerOf = call("offerOf");
 // A top-level const stays in the vm's script scope, so it is read back through the vm itself.
 const globalSettings = vm.runInContext("globalSettings", context);
 
@@ -66,10 +67,39 @@ test("read aloud says the words without code blocks and without the Opções lin
 
 const waitingCases = JSON.parse(readFileSync(new URL("../crates/core/src/waiting_cases.json", import.meta.url), "utf8"));
 
-test("a thread waits on the user in exactly the cases the orchestrator's waiting() counts", () => {
-  const got = waitingCases.cases.map((c) => [c.case, waitingKindOf({ ...waitingCases.base, ...c.view })]);
-  assert.deepEqual(got, waitingCases.cases.map((c) => [c.case, c.waits]));
+test("a thread waits on the user, or holds an offer, in exactly the cases the orchestrator's waiting() and sessions use", () => {
+  const view = (c) => ({ ...waitingCases.base, ...c.view });
+  assert.deepEqual(
+    waitingCases.cases.map((c) => [c.case, waitingKindOf(view(c))]),
+    waitingCases.cases.map((c) => [c.case, c.waits]),
+  );
+  assert.deepEqual(
+    waitingCases.cases.map((c) => [c.case, offerOf(view(c), waitingCases.now) !== null]),
+    waitingCases.cases.map((c) => [c.case, c.offer === true]),
+  );
   assert.equal(waitingKindOf(null), null);
+  assert.equal(offerOf(null, waitingCases.now), null);
+});
+
+test("the list splits blocked threads from offers: a finished turn ending in a question is never blocked", () => {
+  const now = waitingCases.now;
+  const threads = {
+    approval: { status: "needs-input", running: true, interrupted: true },
+    failure: { status: "failed", running: true },
+    asked: { status: "done", running: true, question: "Want me to cut the release?", updated: now - 600 },
+    "asked a day ago": { status: "done", running: true, question: "Want me to cut the release?", updated: now - 25 * 3600 },
+    "asked by a worker": { role: "worker", status: "done", running: true, question: "Update the README?" },
+    "asked, then stopped": { status: "done", running: false, question: "Update the README?" },
+  };
+  const split = Object.fromEntries(Object.entries(threads).map(([name, view]) => [name, [waitingKindOf(view), offerOf(view, now)]]));
+  assert.deepEqual(split, {
+    approval: ["needs_input", null],
+    failure: ["failed", null],
+    asked: [null, "Want me to cut the release?"],
+    "asked a day ago": [null, null],
+    "asked by a worker": [null, null],
+    "asked, then stopped": [null, null],
+  });
 });
 
 test("the settings cache starts as the contracts default them", () => {

@@ -577,3 +577,5 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 .replace-key { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .replace-key input { flex: 1 1 240px; }
 .replace-key .error { flex-basis: 100%; margin: 0; }
+#login .retry, .sign-in .retry { align-self: flex-start; padding: 0; color: inherit; text-decoration: underline; }
+.sign-in .retry[hidden], #login .retry[hidden] { display: none; }

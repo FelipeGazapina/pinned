@@ -30,6 +30,10 @@ pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, call: Hub
 }
 
 async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Origin, request: Request, repo: Option<String>) -> Result<Value, String> {
+    // A start the caller gave up waiting on is asked again: the repeat waits for the first, then
+    // gets the worker or box that start made, since a worker's machine and a box's row both know
+    // the origin task.
+    let _starting = hub.hold_start(account, from, &origin.tab, &origin.task).await;
     if let Some(boxed) = request.target.boxed.clone() {
         return hub.boxes.open_delegate(hub, account, origin, request, repo, boxed).await;
     }
@@ -81,13 +85,20 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
     let answer = match (&worker_box, account.is_online(machine)) {
-        (Some(_), false) => Err("the box is still booting".to_owned()),
+        (Some(_), false) => Err(pinned_core::delegate::BOX_BOOTING.to_owned()),
         _ => call(hub, account, machine, asked, LOOK_WAIT).await,
     };
     match (worker_box, cancel) {
         (Some(row), Some(reason)) => {
+            let mut answer = answer.unwrap_or_else(|_| json!({ "workState": "cancelled", "error": reason }));
+            hub.boxes.add_box_usage(hub, account, &row, &mut answer).await;
             hub.boxes.end_delegate(hub, account, row).await?;
-            Ok(answer.unwrap_or_else(|_| json!({ "workState": "cancelled", "error": reason })))
+            Ok(answer)
+        }
+        (Some(row), None) => {
+            let mut answer = answer?;
+            hub.boxes.add_box_usage(hub, account, &row, &mut answer).await;
+            Ok(answer)
         }
         _ => answer,
     }
@@ -97,13 +108,18 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
 /// that machine took it; only a machine the hub could not reach is an error, which `from` sends
 /// again. A worker box goes once its end got through.
 async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, end: RemoteEnd) -> Result<Value, String> {
+    let worker_box = hub.boxes.delegate_box(hub, account, from).await?;
+    let mut end = end;
+    if let Some(row) = &worker_box {
+        hub.boxes.add_end_box_usage(hub, account, row, &mut end).await;
+    }
     let taken = match hub.call_machine(account, to, Call::RemoteEnded { from: from.to_owned(), tab, task, end }, LOOK_WAIT).await {
         Ok(taken) => taken,
         Err(Unanswered::Refused(e)) if !account.is_online(to) => return Err(e),
         Err(Unanswered::Refused(_)) => Value::Bool(false),
         Err(Unanswered::Lost(e)) => return Err(e),
     };
-    if let Some(row) = hub.boxes.delegate_box(hub, account, from).await? {
+    if let Some(row) = worker_box {
         hub.boxes.end_delegate(hub, account, row).await?;
     }
     Ok(taken)

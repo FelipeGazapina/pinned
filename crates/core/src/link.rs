@@ -27,6 +27,12 @@ const HELLO_WAIT: Duration = Duration::from_secs(15);
 const CALL_WAIT: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// A connection that stayed up this long was healthy, so the one that follows its end starts over
+/// at `BACKOFF_MIN` instead of continuing the climb of the failed attempts before it.
+const BACKOFF_STABLE: Duration = Duration::from_secs(30);
+/// Every wait varies by up to this fraction either way, so machines a hub restart dropped together
+/// don't all come back at the same moment.
+const BACKOFF_JITTER: f64 = 0.25;
 const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
@@ -81,9 +87,9 @@ impl Shared {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.pending.lock().unwrap().remove(&id);
-                Err("the hub did not answer within 60 seconds".into())
+                Err(HUB_TIMEOUT.into())
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the connection to the hub dropped".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(DROPPED.into()),
         }
     }
 
@@ -131,6 +137,15 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
 
 /// What a hub call answers while the link is down.
 pub const OFFLINE: &str = "not connected to the hub";
+/// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
+pub const HUB_TIMEOUT: &str = "the hub did not answer within 60 seconds";
+const DROPPED: &str = "the connection to the hub dropped";
+
+/// Whether a hub call failed for want of an answer, not because the hub refused it: it may have
+/// run anyway, and asking again is safe only for a call the hub answers the same way twice.
+pub fn is_unanswered(error: &str) -> bool {
+    matches!(error, HUB_TIMEOUT | OFFLINE | DROPPED)
+}
 
 impl Link {
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
@@ -246,6 +261,11 @@ impl Syncer {
                 }
             }
         }
+        if let Some(state) = self.state.as_mut() {
+            if let Err(e) = state.flush() {
+                eprintln!("pinned: {e}");
+            }
+        }
         machine.hold_sync_state(false);
     }
 
@@ -303,44 +323,87 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
-        if let Err(e) = state.save(file) {
+        if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
         }
     }
 }
 
+/// How long the link waits before dialing again: it doubles from `BACKOFF_MIN` to `BACKOFF_MAX`
+/// with each attempt that fails, and starts over after a connection that held.
+#[derive(Debug)]
+struct Backoff {
+    next: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Backoff { next: BACKOFF_MIN }
+    }
+
+    /// Notes that a connection ended after `up` of being accepted by the hub, or None if the hub
+    /// never accepted it. A stable one, or one the hub closed on purpose, resets the climb.
+    fn ended(&mut self, up: Option<Duration>, closed_cleanly: bool) {
+        if closed_cleanly || up.is_some_and(|up| up >= BACKOFF_STABLE) {
+            self.next = BACKOFF_MIN;
+        }
+    }
+
+    /// The wait before the next dial, varied by `BACKOFF_JITTER` around the current step and never
+    /// past `BACKOFF_MAX`. `unit` is a draw in `0.0..1.0`.
+    fn wait(&mut self, unit: f64) -> Duration {
+        let spread = 1.0 + BACKOFF_JITTER * (2.0 * unit.clamp(0.0, 1.0) - 1.0);
+        let wait = self.next.mul_f64(spread).min(BACKOFF_MAX);
+        self.next = (self.next * 2).min(BACKOFF_MAX);
+        wait
+    }
+}
+
+/// A draw in `0.0..1.0` from the standard library's randomly seeded hasher.
+fn draw() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let bits = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    (bits >> 11) as f64 / (1u64 << 53) as f64
+}
+
 async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>, listener: u64) {
-    let mut backoff = BACKOFF_MIN;
+    let mut backoff = Backoff::new();
     loop {
+        let mut accepted = None;
         let ended = tokio::select! {
-            ended = connection(&shared, &creds, &machine, &version) => Some(ended),
+            ended = connection(&shared, &creds, &machine, &version, &mut accepted) => Some(ended),
             _ = stopped.changed() => None,
         };
         shared.disconnected(&machine);
+        let up = accepted.map(|at: Instant| at.elapsed());
         match ended {
             None => break,
             Some(Ok(())) => {
                 eprintln!("pinned: disconnected from {}", creds.hub);
-                backoff = BACKOFF_MIN;
+                backoff.ended(up, true);
             }
             Some(Err(Fault::Refused(e))) => {
-                eprintln!("pinned: hub link: {e}; retrying in {}s", backoff.as_secs());
+                backoff.ended(up, false);
+                eprintln!("pinned: hub link: {e}; retrying");
                 crate::boot::refuse();
             }
-            Some(Err(Fault::Transport(e))) => eprintln!("pinned: hub link: {e}; retrying in {}s", backoff.as_secs()),
+            Some(Err(Fault::Transport(e))) => {
+                backoff.ended(up, false);
+                eprintln!("pinned: hub link: {e}; retrying");
+            }
         }
+        let wait = backoff.wait(draw());
         tokio::select! {
-            _ = tokio::time::sleep(backoff) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = stopped.changed() => break,
         }
-        backoff = (backoff * 2).min(BACKOFF_MAX);
     }
     machine.unsubscribe(listener);
 }
 
-/// One connection, from dialing to its end. Ok means the hub accepted the machine before the
-/// connection ended, so the next attempt waits the least.
-async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str) -> Result<(), Fault> {
+/// One connection, from dialing to its end. Ok means the hub closed it with a close frame, as it
+/// does when it restarts. `accepted` is set to the moment the hub accepted the machine.
+async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str, accepted: &mut Option<Instant>) -> Result<(), Fault> {
     let url = ws_url(&creds.hub).map_err(Fault::Transport)?;
     let (mut sink, mut stream) = dial(&url).await.map_err(Fault::Transport)?.split();
     let auth = MachineFrame::Auth {
@@ -352,6 +415,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     sink.send(text(&auth)).await.map_err(transport)?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     let hello = accept_hello(hello)?;
+    *accepted = Some(Instant::now());
     machine.set_hub_id(hello.id, hello.name);
     if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
         return std::future::pending().await;
@@ -536,6 +600,63 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    fn waits(backoff: &mut Backoff, count: usize) -> Vec<u64> {
+        (0..count).map(|_| backoff.wait(0.5).as_secs()).collect()
+    }
+
+    #[test]
+    fn failed_attempts_double_the_wait_up_to_the_cap() {
+        let mut backoff = Backoff::new();
+        assert_eq!(waits(&mut backoff, 8), [1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn a_connection_that_held_for_the_stable_period_starts_the_wait_over() {
+        let mut backoff = Backoff::new();
+        waits(&mut backoff, 4);
+        backoff.ended(Some(BACKOFF_STABLE - Duration::from_millis(1)), false);
+        assert_eq!(backoff.wait(0.5).as_secs(), 16, "a connection a hair short of stable keeps the climb");
+        backoff.ended(Some(BACKOFF_STABLE), false);
+        assert_eq!(waits(&mut backoff, 3), [1, 2, 4]);
+    }
+
+    #[test]
+    fn a_connection_the_hub_never_accepted_keeps_the_climb() {
+        let mut backoff = Backoff::new();
+        waits(&mut backoff, 3);
+        backoff.ended(None, false);
+        assert_eq!(backoff.wait(0.5).as_secs(), 8);
+    }
+
+    #[test]
+    fn a_close_frame_from_the_hub_resets_the_wait() {
+        let mut backoff = Backoff::new();
+        waits(&mut backoff, 5);
+        backoff.ended(Some(Duration::from_secs(1)), true);
+        assert_eq!(waits(&mut backoff, 2), [1, 2]);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_of_the_step_and_under_the_cap() {
+        for step in 0..8 {
+            let nominal = (BACKOFF_MIN * 2u32.pow(step)).min(BACKOFF_MAX);
+            let (mut low, mut high) = (Backoff::new(), Backoff::new());
+            low.next = nominal;
+            high.next = nominal;
+            let (low, high) = (low.wait(0.0), high.wait(1.0));
+            assert_eq!(low, nominal.mul_f64(0.75), "step {step}");
+            assert_eq!(high, nominal.mul_f64(1.25).min(BACKOFF_MAX), "step {step}");
+            assert!(high <= BACKOFF_MAX);
+        }
+    }
+
+    #[test]
+    fn draws_cover_the_unit_interval_and_vary() {
+        let draws: Vec<f64> = (0..200).map(|_| draw()).collect();
+        assert!(draws.iter().all(|d| (0.0..1.0).contains(d)));
+        assert!(draws.iter().any(|d| *d < 0.25) && draws.iter().any(|d| *d > 0.75));
+    }
+
     #[test]
     fn the_machine_socket_follows_the_hubs_scheme() {
         assert_eq!(ws_url("https://pinned.example.com/").as_deref(), Ok("wss://pinned.example.com/ws/machine"));
@@ -590,8 +711,8 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
         syncer.cycle(&shared, &machine, &file);
-        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null), "an idle cycle keeps the state it holds and doesn't rewrite the file");
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
         let _ = std::fs::remove_dir_all(dir);
     }
 

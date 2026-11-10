@@ -58,7 +58,7 @@ try {
 const isFolded = (tab) => foldedThreads.has(threadKey(tab));
 const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
 onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
-Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
+Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", offersOpen: load("gui-offers-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
 /** What ⌘⇧T brings back, newest last, as T3 Code's closed views: `{ thread }` for a closed thread and
@@ -331,13 +331,45 @@ function snoozeLimitStops() {
   }
 }
 
+/** Per machine id, whether it had a thread while it was online. An offline machine that had one is named
+ * in the sidebar, and so is one nothing is known of; one seen online with none is not. It survives a
+ * reload, so a machine that is already down when the page opens is still named. A machine that stops
+ * cleanly closes its threads before it goes, so a later 0 never takes a "had threads" back. */
+const threadsSeen = (() => {
+  try {
+    return JSON.parse(load("machine-threads")) ?? {};
+  } catch {
+    return {};
+  }
+})();
+function noteThreadsSeen(machine, count) {
+  if (machine === LOCAL || !machines.get(machine)?.view?.online) return;
+  const had = count > 0 || (threadsSeen[machine] ?? false);
+  if (threadsSeen[machine] === had) return;
+  threadsSeen[machine] = had;
+  save("machine-threads", JSON.stringify(threadsSeen));
+}
+
+/** One line for a machine that is offline: its name and when it was last seen. */
+function machineNote(machine) {
+  const note = document.createElement("div");
+  note.className = "machine-note";
+  note.setAttribute("role", "status");
+  note.dataset.machine = machine.id;
+  note.innerHTML = `<span class="dot"></span><span class="text"><b>${esc(machine.name)}</b> offline${machine.seen ? ` · ${esc(machine.seen)}` : ""}</span>`;
+  return note;
+}
+
 /** The fixed rows above the projects: the global orchestrator's own row, with how many things
  * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
  * orchestrator as its settings do and its host machine under that, and is left out while no
  * machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
-  const host = globalHostMachine();
+  const online = globalHostMachine();
+  // With no machine online the row stays, on the machine that held it last, and says why it can't open.
+  const host = online ?? [...machines.keys()].find((id) => id !== LOCAL) ?? null;
+  const away = !!host && machines.get(host)?.view?.online !== true;
   const asks = agentWaitingRows();
   if (!host && !asks.length) return [];
   const threads = globalWaitingRows();
@@ -349,41 +381,79 @@ function globalSidebarTop() {
     row.type = "button";
     row.className = "global-row";
     row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
+    row.classList.toggle("disabled", away);
+    if (away) {
+      row.setAttribute("aria-disabled", "true");
+      row.title = `${machineName(host)} is offline, so the orchestrator can't open`;
+    }
     row.dataset.globalOpen = "true";
     const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
-    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
+    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · ${away ? "offline" : "all projects"}</span></span>${count}`;
     top.push(row);
   }
-  if (!waiting.length) return top;
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "waiting-head";
-  head.dataset.shelf = "waiting";
-  head.setAttribute("aria-expanded", ui.waitingOpen);
-  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-  return [...top, head, ...(ui.waitingOpen ? waiting : [])];
+  const offers = globalOfferRows();
+  if (!waiting.length && !offers.length) return top;
+  const sections = [];
+  if (waiting.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head";
+    head.dataset.shelf = "waiting";
+    head.setAttribute("aria-expanded", ui.waitingOpen);
+    head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.waitingOpen ? waiting : []));
+  }
+  if (offers.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head offers-head";
+    head.dataset.shelf = "offers";
+    head.setAttribute("aria-expanded", ui.offersOpen);
+    head.innerHTML = `${icon("message-circle")}<span>Asked in its last reply</span><span class="count">${offers.length}</span>${icon(ui.offersOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.offersOpen ? offers : []));
+  }
+  return [...top, ...sections];
 }
 
-/** What each `waitingKindOf` answer reads as, and the tone of its dot. */
-const WAITING_LOOKS = { needs_input: ["Question", "question"], failed: ["Failed", "failed"] };
+/** What each `waitingKindOf` answer reads as, its tone, and the dot's tone. The label is the text
+ * that names the kind on the row, so colour is never the only sign. */
+const WAITING_LOOKS = { needs_input: ["Needs input", "question"], failed: ["Failed", "failed"] };
 
-/** Every thread on every machine that waits on Felipe, newest first: a question or a failure, each
- * with its title, where it is and since when. */
+/** One row of the waiting area: a dot, the thread's title, and under it the kind in words, where the
+ * thread is and since when. Clicking it opens the thread. */
+function waitingRow(tab, label, tone, extra = "") {
+  const row = document.createElement("div");
+  row.className = `waiting-row${extra}`;
+  row.dataset.waiting = tab.key;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
+  row.tabIndex = 0;
+  const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
+  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+  return row;
+}
+
+/** Every thread on every machine that is blocked on Felipe, newest first: a question or an approval
+ * pending, or a failure, each with its title, where it is and since when. */
 function globalWaitingRows() {
   return tabs
     .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
-    .map(({ tab, kind }) => {
-      const [label, tone] = WAITING_LOOKS[kind] ?? [kind, "other"];
-      const row = document.createElement("div");
-      row.className = "waiting-row";
-      row.dataset.waiting = tab.key;
-      row.setAttribute("role", "button");
-      row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
-      row.tabIndex = 0;
-      const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
-      row.innerHTML = `<span class="dot ${tone}" title="${esc(label)}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+    .map(({ tab, kind }) => waitingRow(tab, ...(WAITING_LOOKS[kind] ?? [kind, "other"])));
+}
+
+/** The threads whose finished turn ended asking something, newest first, greyed: they wait on
+ * nobody, and the question is the row's tooltip. */
+function globalOfferRows() {
+  const now = nowS();
+  return tabs
+    .map((tab) => ({ tab, offer: offerOf(tab.view, now) }))
+    .filter((o) => o.offer)
+    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
+    .map(({ tab, offer }) => {
+      const row = waitingRow(tab, "Asked", "offer", " offer");
+      row.title = offer;
       return row;
     });
 }
@@ -392,7 +462,7 @@ function globalWaitingRows() {
  * tab starts when its first message is sent, as every other new tab does. */
 async function openGlobalChat() {
   const host = globalHostMachine();
-  if (!host) return tell("No machine is online to open the orchestrator on.", 4000);
+  if (!host || machines.get(host)?.view?.online !== true) return tell(host ? `${esc(machineName(host))} is offline, so the orchestrator can't open.` : "No machine is online to open the orchestrator on.", 4000);
   if (narrow(768)) toggleSidebar(false);
   try {
     const open = tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
@@ -420,8 +490,10 @@ function renderSidebar() {
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
-  threadList.replaceChildren(...globalSidebarTop(), ...list);
-  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
+  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
+  threadList.replaceChildren(...away.map(machineNote), ...globalSidebarTop(), ...list);
+  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
@@ -916,8 +988,17 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
+/** When the app's hub link dropped, in seconds, while it is down. The timers stop there, so a "Working 7m"
+ * the app can no longer vouch for doesn't keep counting. */
+let linkDownAt = null;
+function noteHubLink(on) {
+  linkDownAt = on ? null : (linkDownAt ?? nowS());
+}
+/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
+const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
-  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, nowS() - el.dataset.since)) : "";
+  const now = linkDownAt ?? nowS();
+  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
   for (const el of document.querySelectorAll("[data-stats]")) {
     const text = statsLabel(tabByKey(el.dataset.stats));
     if (el.textContent !== text) el.textContent = text;

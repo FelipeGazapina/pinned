@@ -5,6 +5,7 @@
 //! pass after a restart finishes whatever the last hub left halfway.
 
 use crate::hub::{Account, Hub, RUN_WAIT};
+use pinned_core::delegate::BOX_CONNECT_WAIT;
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
@@ -99,7 +100,7 @@ impl Default for Policy {
     fn default() -> Policy {
         let minutes = |m: u64| Duration::from_secs(m * 60);
         Policy {
-            boot_wait: minutes(6),
+            boot_wait: BOX_CONNECT_WAIT,
             idle: minutes(10),
             done: minutes(2),
             exited: minutes(5),
@@ -215,6 +216,25 @@ pub enum End {
     Disconnected,
     Failed(String),
 }
+
+/// Why a box ended, as the task it ran hears it.
+fn ended_because(why: &End) -> String {
+    match why {
+        End::TabClosed => "its worker's thread was closed".into(),
+        End::Exited => "its worker exited".into(),
+        End::Idle => "its worker sat idle".into(),
+        End::Done => "its work was done".into(),
+        End::Offline => "it went offline".into(),
+        End::Expired => "it ran out of time or budget".into(),
+        End::Removed => "someone removed its machine".into(),
+        End::Vanished => "it was deleted outside pinned".into(),
+        End::Disconnected => "Upstash Box was disconnected".into(),
+        End::Failed(e) => e.clone(),
+    }
+}
+
+/// How long the hub waits on the delegating machine to take a box's end.
+const ORIGIN_WAIT: Duration = Duration::from_secs(30);
 
 const ENDS: [(End, &str); 9] = [
     (End::TabClosed, "tab-closed"),
@@ -340,6 +360,11 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
         review: None,
         thread: None,
     }
+}
+
+/// A worker box's answer to the `delegate_task` that made it, and to every repeat of it.
+fn started_box(row: &BoxRow) -> serde_json::Value {
+    serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" })
 }
 
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
@@ -713,6 +738,12 @@ impl Boxes {
     pub async fn open_delegate(&self, hub: &Arc<Hub>, account: &Arc<Account>, origin: Origin, mut request: Request, repo: Option<String>, boxed: BoxTarget) -> Result<serde_json::Value, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
+        // The row's subject names the origin task, so a repeat of a start finds the box that start
+        // made, with no box key, cap or account checks to pass a second time.
+        let subject = Subject::LinearIssue { issue: format!("task {}/{}", origin.machine, origin.task) };
+        if let Some(row) = hub.db.box_row_for(account.id, DELEGATE_CONNECTOR, &subject).await? {
+            return Ok(started_box(&row));
+        }
         let asked = Subject::LinearIssue { issue: format!("workers of {} {}", origin.machine_name, origin.tab) };
         allowed(&connectors, connectors.box_access().worker, "Workers", DELEGATE_CONNECTOR, &asked).await?;
         if request.target.driver_kind.as_deref().is_some_and(|kind| kind != "claude") {
@@ -737,10 +768,9 @@ impl Boxes {
         (request.target.machine, request.target.boxed, request.target.driver_kind) = (None, None, None);
         let budget_usd = box_budget(hub, account, Some(&repo), None).await?;
         let spec = RunSpec { folder: String::new(), repo: Some(repo), args: vec!["--name".into(), request.title.clone()], env: vec![], token: None, account: None, budget_usd };
-        let subject = Subject::LinearIssue { issue: format!("task {}/{}", origin.machine, origin.task) };
         let work = BoxWork::Delegate { origin, request: Box::new(request), claude: Some(claude) };
         let row = self.reserve_work(hub, account, DELEGATE_CONNECTOR, subject, spec, boxed.size, work, &keys).await?;
-        Ok(serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" }))
+        Ok(started_box(&row))
     }
 
     /// The global orchestrator's `send_to_captain` with `box`: the Captain of `repo` in a box
@@ -793,13 +823,6 @@ impl Boxes {
             let Some(_driving) = hub.boxes.drive_guard(&booting.id) else { return };
             if let Err(e) = hub.boxes.drive(&hub, &account, booting.clone(), &booting.spec, &keys).await {
                 eprintln!("pinned-server: could not boot box {} for {}: {e}", booting.id, booting.connector);
-                if let BoxWork::Delegate { origin, .. } = &booting.work {
-                    let end = RemoteEnd { state: "failed".into(), summary: None, error: Some(format!("Upstash Box: {e}")) };
-                    let ended = Call::RemoteEnded { from: booting.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
-                    if let Err(e) = hub.call_machine(&account, &origin.machine, ended, RUN_WAIT).await {
-                        eprintln!("pinned-server: could not tell {} its box failed: {}", origin.machine, String::from(e));
-                    }
-                }
             }
         });
         Ok(row)
@@ -1014,7 +1037,7 @@ impl Boxes {
             let left = self.policy.boot_wait.saturating_sub(row.age).max(self.policy.boot_wait / 2);
             match tokio::time::timeout(left, self.boot(hub, account, &row, keys)).await {
                 Ok(booted) => booted,
-                Err(_) => Err(format!("the box did not boot within {} s", left.as_secs())),
+                Err(_) => Err(format!("the box did not connect within {}", pinned_core::delegate::wait_span(self.policy.boot_wait))),
             }
         };
         let booted = match booted {
@@ -1034,6 +1057,7 @@ impl Boxes {
                 if hub.db.set_box_phase(&row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
+                    self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
                     self.record_agent_box(hub, account, &row).await;
                     if let Err(e) = self.end(hub, account, &row.remains(), Some(keys)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
@@ -1189,15 +1213,70 @@ impl Boxes {
         Ok(())
     }
 
+    /// A worker box ended before its task did: the machine whose tab delegated the task hears it
+    /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
+    async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
+        let BoxWork::Delegate { origin, .. } = &row.work else { return };
+        let error = match why {
+            End::Done => return,
+            End::Failed(e) => format!("Upstash Box: {e}"),
+            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
+        };
+        let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
+        self.add_end_box_usage(hub, account, row, &mut end).await;
+        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
+        if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
+            eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+        }
+    }
+
+    /// The box time a worker box's task has used, in ms: once it ended, what the box's task
+    /// records were billed, which `Hub::record_tasks` bills at the box rate; before that, or when no
+    /// record came, the box's life so far.
+    async fn box_time(&self, hub: &Hub, account: &Account, row: &BoxRow, ended: bool) -> u64 {
+        let age = u64::try_from(row.age.as_millis()).unwrap_or(u64::MAX);
+        if !ended {
+            return age;
+        }
+        match hub.db.billed_box_ms(account.id, row.machine, "").await {
+            Ok(billed) if billed > 0 => billed,
+            _ => age,
+        }
+    }
+
+    fn with_box_time(usage: Option<TaskUsage>, ms: u64) -> TaskUsage {
+        let mut usage = usage.unwrap_or_default();
+        usage.wall_ms = usage.wall_ms.max(ms);
+        usage.box_ms = Some(ms);
+        usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+        usage
+    }
+
+    /// Adds the box's cost to the `usage` of a worker's status answer, as `delegate_task`'s
+    /// caller shows it.
+    pub async fn add_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, answer: &mut serde_json::Value) {
+        let ended = matches!(answer["workState"].as_str(), Some("result_available" | "failed" | "cancelled"));
+        let ms = self.box_time(hub, account, row, ended).await;
+        let usage = Self::with_box_time(serde_json::from_value(answer["usage"].clone()).ok(), ms);
+        answer["usage"] = serde_json::to_value(usage).unwrap_or_default();
+    }
+
+    /// Adds the box's cost to the usage of an end the worker's machine reports.
+    pub async fn add_end_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, end: &mut RemoteEnd) {
+        let ms = self.box_time(hub, account, row, true).await;
+        end.usage = Some(Self::with_box_time(end.usage, ms));
+    }
+
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
     async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
-            let ending = Phase::Ending(why);
+            let ending = Phase::Ending(why.clone());
             if !hub.db.set_box_phase(&row.id, &row.phase, &ending).await? {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
+            self.tell_origin(hub, account, &row, &why).await;
         }
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), keys).await?;
