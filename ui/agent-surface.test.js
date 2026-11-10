@@ -56,7 +56,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     LOCAL: "local",
     account: signedIn ? { machine_id: "this-mac" } : null,
     machines: new Map([
-      ["local", { hubView: { name: "MacBook" } }],
+      ["local", { hubView: { name: "MacBook" }, view: { online: true } }],
       ["imac-id", { view: { name: "iMac" } }],
     ]),
     hub: signedIn ? { hub: (call) => (calls.push(call), answer(call)) } : null,
@@ -278,6 +278,7 @@ const sidebarTop = (opts) =>
 test("Waiting on you shows with its count when only confirmations wait and no machine hosts the orchestrator", () => {
   const { context } = sidebarTop();
   Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => null, globalWaitingRows: () => [], globalOfferRows: () => [] });
+  context.machines.delete("imac-id");
   assert.equal(context.globalSidebarTop().length, 0);
   context.onAgentConfirmations([removeImac, createInvite]);
   const [head, asks, ...rest] = context.globalSidebarTop();
