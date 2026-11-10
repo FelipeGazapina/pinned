@@ -1035,7 +1035,7 @@ mod tests {
             ],
             "what waits is the sessions waiting on input or stopped on an error; a loose thread that asked is an offer, not a wait"
         );
-        assert_eq!(overview.waiting[2].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
+        assert_eq!(overview.waiting[1].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
     }
 
     #[test]

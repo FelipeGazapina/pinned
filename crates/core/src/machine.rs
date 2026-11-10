@@ -9478,6 +9478,7 @@ while True:
         let path = m.open_project(project.clone()).display().to_string();
         m.set_project_account(&path, Some("work".into())).unwrap();
         let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
         let waiting = |m: &Machine| m.waiting().unwrap().into_iter().map(|w| (w.kind, w.message)).collect::<Vec<_>>();
         let offers = |m: &Machine| m.local_overview().sessions.unwrap().into_iter().filter_map(|s| s.message).collect::<Vec<_>>();
         let asks = |question: &str| vec![question.to_owned()];
