@@ -1797,7 +1797,7 @@ mod tests {
             ("unlink ~/x", Some(DeleteOutside)),
             ("find ~ -name '*.o' -delete", Some(DeleteOutside)),
             ("find / -delete", Some(DeleteOutside)),
-            ("find . -exec rm -rf ~ \;", Some(DeleteOutside)),
+            ("find . -exec rm -rf ~ \\;", Some(DeleteOutside)),
             ("git -C /tmp clean -fd", Some(DeleteOutside)),
             ("git clean -fd /tmp/x", Some(DeleteOutside)),
             // Section 7: a second command after a harmless one.
@@ -2350,7 +2350,7 @@ mod tests {
         assert_eq!(edit("out/new/deep.rs"), Some(WriteOutside));
         assert_eq!(edit("out2/new/deep.rs"), Some(WriteOutside));
         assert_eq!(edit("in/new/deep.rs"), None);
-        assert_eq!(edit("in/../new.rs"), Some(WriteOutside).filter(|_| false));
+        assert_eq!(edit("in/../new.rs"), None, "in/.. is the worktree: the link resolves before the ..");
         assert_eq!(edit("out/../new.rs"), None, "out/.. is the worktree: the link resolves before the ..");
         assert_eq!(edit("missing/../../x.rs"), Some(WriteOutside));
 
