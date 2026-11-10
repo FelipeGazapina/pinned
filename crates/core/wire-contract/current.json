@@ -3076,6 +3076,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -5359,6 +5372,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -12065,6 +12091,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -14302,6 +14341,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -19701,6 +19753,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -25553,6 +25618,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "machines"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for\n`orchestrator_capabilities`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "machine_states"
                   }
                 },
                 "required": [
@@ -53085,6 +53163,19 @@
                 ]
               },
               {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
                 "type": "object",
                 "properties": {
@@ -58175,6 +58266,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "state"
                   }
                 },
                 "required": [
