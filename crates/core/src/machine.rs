@@ -13388,6 +13388,18 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn with_an_empty_policy_a_heavy_worker_runs_here_and_never_asks_the_hub() {
+        let (m, dir, captain) = limited_captain("place-empty", TastePatch::default());
+        m.set_hub_id("m-book".into(), "MacBook".into());
+        let calls = placing_hub(&m, vec![], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), Vec::<String>::new());
+        assert_eq!(started["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "" }), "nothing changes for an account with no policy");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_heavy_worker_runs_where_the_hub_places_it_and_task_status_says_so() {
         let (m, dir, captain) = placing_captain("place-heavy");
         let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([])))], &[]);
