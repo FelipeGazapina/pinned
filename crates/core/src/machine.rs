@@ -10873,6 +10873,198 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.delegates.get(&done).unwrap().summary.as_deref(), Some("Green."));
     }
 
+    fn bash_ask(command: &str) -> crate::delegate::RemoteAsk {
+        crate::delegate::RemoteAsk { kind: global::AskKind::Approval, tool: Some("Bash".into()), ask: command.into(), since: 1794239000 }
+    }
+
+    #[test]
+    fn a_remote_workers_approval_shows_on_its_task_tells_the_thread_once_and_clears_when_answered() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let status = || m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &id).unwrap();
+        let asked = |from: &str, ask: Option<crate::delegate::RemoteAsk>| m.call(Call::RemoteAsked { from: from.into(), tab: "tab-1".into(), task: id.clone(), ask }).unwrap();
+        assert_eq!(status()["waiting"], Value::Null, "nothing waits at its start");
+
+        assert_eq!(asked("m-mini", Some(bash_ask("git push origin main"))), json!(true));
+        assert_eq!(status()["waiting"], json!({ "kind": "approval", "tool": "Bash", "ask": "git push origin main", "since": 1794239000, "machine": "mini", "tab": null }));
+        assert!(status()["next"].as_str().unwrap().contains("its worker waits on the user (approval: git push origin main); the user answers in its thread on mini"), "{}", status()["next"]);
+        let (notice, _) = m.delegates.claim_notice("tab-1").expect("the thread that delegated it is told");
+        assert_eq!(
+            notice,
+            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use Bash: git push origin main. The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
+        );
+        asked("m-mini", Some(bash_ask("git push origin main")));
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "an ask the machine reports again is told once");
+        assert_eq!(asked("m-other", Some(bash_ask("rm -rf /"))), json!(false), "only the machine that runs the task says what it waits on");
+
+        assert_eq!(asked("m-mini", None), json!(true));
+        assert_eq!(status()["waiting"], Value::Null, "answered");
+    }
+
+    #[test]
+    fn an_ask_the_thread_has_not_heard_yet_is_taken_back_when_it_is_answered_first() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let asked = |ask: Option<crate::delegate::RemoteAsk>| m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask }).unwrap();
+        asked(Some(bash_ask("git push origin main")));
+        asked(None);
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "the thread is busy, and by the time it is idle the worker was answered");
+    }
+
+    #[test]
+    fn a_look_at_a_remote_task_learns_what_its_worker_waits_on_when_the_notice_was_lost() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        let waiting = Arc::new(Mutex::new(json!({ "kind": "question", "ask": "Which one should open the PR?", "since": 1794239100 })));
+        let answers = waiting.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "working", "waiting": answers.lock().unwrap().clone() })),
+            _ => Err("not this test's".into()),
+        }));
+        let now = Instant::now();
+        m.check_remotes(now + Duration::from_secs(61));
+        let status = |m: &Machine| m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &id).unwrap();
+        assert_eq!(status(&m)["waiting"]["kind"], json!("question"));
+        assert_eq!(status(&m)["waiting"]["ask"], json!("Which one should open the PR?"));
+        *waiting.lock().unwrap() = Value::Null;
+        m.check_remotes(now + Duration::from_secs(130));
+        assert_eq!(status(&m)["waiting"], Value::Null, "a `null` from a machine that keeps count says it waits on nothing");
+    }
+
+    #[test]
+    fn a_remote_task_that_ends_waiting_on_nothing_clears_what_it_waited_on() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
+        m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask: Some(bash_ask("ls")) }).unwrap();
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), end }).unwrap(), json!(true));
+        assert_eq!(m.delegates.get(&id).unwrap().remote.unwrap().waiting, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_blocked_on_a_permission_prompt_tells_the_machine_that_delegated_it_the_command_then_that_it_goes_on() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent, Thread};
+        let root = temp("remote-ask");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Push the fix."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","message":{"content":[{"type":"tool_use","id":"t0","name":"Bash","input":{"command":"git status"}}]}}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"2026-10-29T10:01:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"t0","content":"clean"}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-29T10:02:00Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let (sent, told) = std::sync::mpsc::channel();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteAsked { to, tab, task, ask } = call {
+                let _ = sent.send((to, tab, task, ask));
+            }
+            Ok(json!(true))
+        }));
+        let app = Path::new("/work/app");
+        let work = m.accounts.get("work").unwrap();
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work, vec![], role_env(Role::Worker, app), false, Some("s1".into()));
+        m.spawn(&worker, sh("exec cat > /dev/null"), pty::size(80, 24)).unwrap();
+        let key = Origin::key("m-mac", "tab-1");
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Push the fix".into(),
+            account: "work".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        let event = |status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(worker.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+
+        m.record_event(event(AgentStatus::Working, None));
+        m.send_remote_asks(Instant::now());
+        assert!(told.try_recv().is_err(), "a worker that works asks nothing");
+
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));
+        let now = Instant::now();
+        m.send_remote_asks(now);
+        let (to, tab, origin_task, ask) = told.try_recv().expect("the machine that delegated it is told");
+        assert_eq!((to.as_str(), tab.as_str(), origin_task.as_str()), ("m-mac", "tab-1", "task-mac"));
+        let ask = ask.unwrap();
+        assert_eq!((ask.kind, ask.tool.as_deref(), ask.ask.as_str()), (global::AskKind::Approval, Some("Bash"), "git push origin main"), "the call the prompt waits on, not the one that ran before it");
+        m.send_remote_asks(now + Duration::from_secs(10));
+        assert!(told.try_recv().is_err(), "told once, though the pass runs every second");
+        let status = m.remote_task("m-mac", "tab-1", "task-mac", None).unwrap();
+        assert_eq!((status["waiting"]["kind"].as_str(), status["waiting"]["ask"].as_str()), (Some("approval"), Some("git push origin main")), "a look at the task says it too: {status}");
+
+        m.record_event(event(AgentStatus::Working, None));
+        m.send_remote_asks(now + Duration::from_secs(20));
+        let (_, _, _, cleared) = told.try_recv().expect("answered: the machine that delegated it is told it goes on");
+        assert_eq!(cleared, None);
+        m.send_remote_asks(now + Duration::from_secs(30));
+        assert!(told.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_ask_the_hub_did_not_take_is_sent_again_and_the_generic_idle_notice_is_no_ask() {
+        use crate::delegate::{Access, Mode, NewTask, Origin, Parent, Thread};
+        let m = machine();
+        let (sent, told) = std::sync::mpsc::channel();
+        let up = Arc::new(AtomicBool::new(false));
+        let reach = up.clone();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::RemoteAsked { ask, .. } = call {
+                if !reach.load(Ordering::SeqCst) {
+                    return Err("ana-mac is offline".into());
+                }
+                let _ = sent.send(ask);
+            }
+            Ok(json!(true))
+        }));
+        let worker = running(&m, role_env(Role::Worker, Path::new("/work/app")), "exec cat > /dev/null");
+        let key = Origin::key("m-mac", "tab-1");
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(key.clone()),
+            tool: None,
+            title: "Push the fix".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{key}"),
+            client_request_id: Some("task-mac".into()),
+            role: None,
+        });
+        m.delegates.link_thread(&task.id, Thread { tab: worker.clone(), runs: true });
+        let event = |status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(worker.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        m.record_event(event(AgentStatus::Working, None));
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude needs your input")));
+        let now = Instant::now();
+        m.send_remote_asks(now);
+        assert!(told.try_recv().is_err());
+        m.send_remote_asks(now + Duration::from_secs(1));
+        assert!(told.try_recv().is_err(), "not sent again before REMOTE_LOOK passed");
+        up.store(true, Ordering::SeqCst);
+        m.send_remote_asks(now + REMOTE_LOOK);
+        let ask = told.try_recv().expect("sent again once the hub can pass it on").unwrap();
+        assert_eq!((ask.kind, ask.ask.as_str()), (global::AskKind::Question, "Claude needs your input"));
+        m.record_event(event(AgentStatus::Done, None));
+        m.record_event(event(AgentStatus::NeedsInput, Some("Claude is waiting for your input")));
+        m.send_remote_asks(now + REMOTE_LOOK * 2);
+        assert_eq!(told.try_recv().expect("the turn ended"), None, "the idle notice after a finished turn asks nothing");
+    }
+
     #[test]
     fn an_undelivered_remote_end_survives_a_restart_of_the_machine_that_ran_it() {
         use crate::delegate::{Access, Mode, NewTask, Origin, Parent};
