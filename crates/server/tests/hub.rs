@@ -3941,9 +3941,17 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
         }
     };
     let ana_raw = RawMachine::start(&url, &ana_machine_token, host("/a/site"));
-    let mut asking = captain_tab("tab-9", "/b/secret-project");
-    asking["question"] = json!("Ship the unreleased pricing page?");
-    let bob_tabs = json!({ "kind": "tabs", "tabs": [asking] });
+    // A finished turn that ends on a question is an offer, which waits on nobody; a question
+    // pending mid-turn is a real ask.
+    let mut offering = captain_tab("tab-9", "/b/secret-project");
+    offering["question"] = json!("Ship the unreleased pricing page?");
+    let mut asking = captain_tab("tab-8", "/b/secret-project");
+    asking["role"] = Value::Null;
+    asking["opened"] = json!(2);
+    asking["status"] = json!("needs-input");
+    asking["interrupted"] = json!(true);
+    asking["message"] = json!("Claude needs your permission to rm the staging database");
+    let bob_tabs = json!({ "kind": "tabs", "tabs": [offering, asking] });
     let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![bob_tabs], host("/b/secret-project"));
     ana.wait_machines(&[("ana-mini", true)]);
     bob.wait_machines(&[("bob-mac", true)]);
@@ -3951,11 +3959,14 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
 
     let bobs = bob.hub(json!({ "cmd": "overview" })).unwrap();
     assert!(bobs.to_string().contains("/b/secret-project") && bobs.to_string().contains(&bob_m), "bob's own overview lists his project: {bobs}");
-    assert!(bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's question waits on bob: {bobs}");
+    assert!(bobs["waiting"].to_string().contains("rm the staging database"), "bob's pending permission ask waits on bob: {bobs}");
+    assert!(!bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's offer waits on nobody: {bobs}");
+    let offer = bobs["sessions"].as_array().unwrap().iter().find(|s| s["id"] == "tab-9").unwrap_or_else(|| panic!("bob's Capitão is a session of his: {bobs}"));
+    assert_eq!((offer["state"].as_str(), offer["message"].as_str()), (Some("idle"), Some("Ship the unreleased pricing page?")), "bob's own overview shows the offer on his Capitão's session");
     for (from, overview) in [("ana's client", ana.hub(json!({ "cmd": "overview" }))), ("ana's host", ana_raw.ask(json!({ "cmd": "overview" })))] {
         let overview = overview.unwrap().to_string();
         assert!(overview.contains("/a/site") && overview.contains(&ana_m), "{from}: {overview}");
-        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing"), "{from} sees none of bob's: {overview}");
+        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing") && !overview.contains("staging database"), "{from} sees none of bob's: {overview}");
     }
 
     let none = Err(format!("this account has no machine {bob_m}"));
@@ -4518,7 +4529,8 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     let asking = running_tab(&mut fleet.client, &mac, &apps);
     hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": asking, "title": slack }));
     hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "needs-input", "tab": asking, "message": "Claude needs your permission to use Bash" }));
-    // A transcript past the 8 MiB a read from its start reaches.
+    // A transcript past the 8 MiB a read from its start reaches. Its last reply ends on a question,
+    // an offer once the turn is done, so the session is idle with the question as its message.
     let long = running_tab(&mut fleet.client, &mac, &apps);
     let transcripts = fleet.mac_dir.join("accounts/bloom/projects/client-apps");
     std::fs::create_dir_all(&transcripts).unwrap();
@@ -4555,7 +4567,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     wait_for("mac's tabs and the long transcript's tally on the hub", || {
         let listed = sessions(None);
         let list = listed["sessions"].as_array().unwrap();
-        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["state"] == "waiting_on_input") && list.iter().any(|s| s["id"] == worker)
+        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["message"] == "Should I answer them?") && list.iter().any(|s| s["id"] == worker)
     });
     let listed = sessions(Some("client-apps"));
     let list = listed["sessions"].as_array().unwrap().clone();
@@ -4577,7 +4589,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     };
     let mut expected = vec![
         on_mac(&asking, "thread", "waiting_on_input", json!({ "title": slack, "message": "Claude needs your permission to use Bash" })),
-        on_mac(&long, "thread", "waiting_on_input", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
+        on_mac(&long, "thread", "idle", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
         on_mac(&new_thread, "thread", "idle", json!({})),
         on_mac(&captain, "captain", "running", json!({})),
         on_mac(&worker, "worker", "idle", json!({ "captain": captain, "title": "Lint the app." })),
@@ -4620,9 +4632,9 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     let waiting = tool(json!({ "name": "waiting" })).unwrap();
     let mut waits: Vec<(&str, &str, &str)> = waiting.as_array().unwrap().iter().map(|w| (w["tab"].as_str().unwrap(), w["kind"].as_str().unwrap(), w["message"].as_str().unwrap_or(""))).collect();
     waits.sort();
-    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (long.as_str(), "needs_input", "Should I answer them?"), (failed.as_str(), "failed", "")];
+    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (failed.as_str(), "failed", "")];
     expected_waits.sort();
-    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, the loose thread whose last reply asked included");
+    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, and the loose thread whose last reply asked is an offer that waits on nobody");
     let here = tool(json!({ "name": "read_session", "id": failed })).unwrap();
     assert_eq!(here, json!({ "state": "failed", "next": "it may take a message now", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "id": failed, "machine": mini, "machine_name": "mini" }));
     assert_eq!(tool(json!({ "name": "read_session", "id": "tab-0-0" })), Err("no online machine of this account has a session tab-0-0".into()));
