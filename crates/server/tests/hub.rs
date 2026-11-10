@@ -4831,6 +4831,45 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
 }
 
 #[test]
+fn a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered() {
+    let mut fleet = Fleet::start("remote_ask");
+    origin(Path::new(&fleet.site), SITE);
+    origin(&fleet.mini_dir.join("site"), SITE);
+    let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Push the footer fix.", "title": "Push footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
+    let (task, child) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+    wait_launch(&mini_dir, &child, "Push the footer fix.");
+
+    let transcripts = mini_dir.join("accounts/work/projects/site");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let call = r#"{"type":"assistant","uuid":"a1","timestamp":"2020-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#;
+    std::fs::write(transcripts.join("s-push.jsonl"), format!("{call}\n")).unwrap();
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child, "session": "s-push", "cwd": there }));
+    assert_eq!(task_status(&mac_dir, &captain, &task)["waiting"], Value::Null, "a worker that works waits on no one");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "needs-input", "tab": child, "message": "Claude needs your permission to use Bash" }));
+    wait_for("mac's task to say its worker waits", || !task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["workState"], "working", "it keeps its place");
+    assert_eq!(
+        (status["waiting"]["kind"].as_str(), status["waiting"]["tool"].as_str(), status["waiting"]["ask"].as_str(), status["waiting"]["machine"].as_str()),
+        (Some("approval"), Some("Bash"), Some("git push origin main"), Some("mini")),
+        "the command, the tool and the machine it waits on: {status}"
+    );
+    let overview = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let rows: Vec<(&str, &str, &str, &str, &str)> = overview["waiting"].as_array().unwrap().iter().map(|w| (w["machine"].as_str().unwrap(), w["machine_name"].as_str().unwrap(), w["tab"].as_str().unwrap(), w["ask"].as_str().unwrap_or(""), w["detail"].as_str().unwrap_or(""))).collect();
+    assert_eq!(rows, vec![(mini.as_str(), "mini", child.as_str(), "approval", "git push origin main")], "waiting() lists the worker under mini's name: {overview}");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child }));
+    wait_for("mac's task to hear it was answered", || task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+}
+
+#[test]
 fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends() {
     let hub = TestHub::start_with_boxes("rbox", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);

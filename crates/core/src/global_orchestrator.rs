@@ -975,6 +975,29 @@ mod tests {
     }
 
     #[test]
+    fn waiting_lists_a_workers_approval_and_question_from_every_machine_with_the_machine_the_project_and_what_is_asked() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let on_mini = [project("/Users/f/site", Some("github.com/o/site"))];
+        let approval = TabView { interrupted: true, ask_detail: Some("git push origin main".into()), title: Some("Push the fix".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794239000), ..view("tab-m-3", "/Users/f/site/.claude/worktrees/pinned-3", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let question = TabView { interrupted: true, ask_detail: Some("Which one should open the PR?".into()), title: Some("Pick the PR opener".into()), message: Some("Claude needs your input".into()), updated: Some(1794239500), ..view("tab-b-9", "/w/site/.claude/worktrees/pinned-9", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let working = TabView { interrupted: true, ..view("tab-m-4", "/Users/f/site/.claude/worktrees/pinned-4", Some(Role::Worker), true, Some(AgentStatus::Working)) };
+        let (book_tabs, mini_tabs) = ([question], [approval, working]);
+        let machines = [
+            MachineSnapshot { id: "m-book", name: "MacBook", online: true, version: "0.17.24", projects: &site, tabs: &book_tabs, problem: None },
+            MachineSnapshot { id: "m-mini", name: "Mac mini", online: true, version: "0.17.24", projects: &on_mini, tabs: &mini_tabs, problem: None },
+        ];
+        let waiting: Vec<_> = overview_at(&machines, 1794240000).waiting.iter().map(|w| serde_json::to_value(w).unwrap()).collect();
+        assert_eq!(
+            waiting,
+            vec![
+                serde_json::json!({ "machine": "m-book", "machine_name": "MacBook", "tab": "tab-b-9", "kind": "needs_input", "ask": "question", "detail": "Which one should open the PR?", "project": "/w/site", "title": "Pick the PR opener", "message": "Claude needs your input", "since": 1794239500 }),
+                serde_json::json!({ "machine": "m-mini", "machine_name": "Mac mini", "tab": "tab-m-3", "kind": "needs_input", "ask": "approval", "tool": "Bash", "detail": "git push origin main", "project": "/Users/f/site", "title": "Push the fix", "message": "Claude needs your permission to use Bash", "since": 1794239000 }),
+            ],
+            "the worker on the Mac mini waits under that machine's name, with the command it asks; the one that works does not"
+        );
+    }
+
+    #[test]
     fn a_permission_notice_is_an_approval_with_its_tool_and_any_other_a_question() {
         assert_eq!(ask_of(Some("Claude needs your permission to use Bash")), (AskKind::Approval, Some("Bash".into())));
         assert_eq!(ask_of(Some("Claude needs your permission to use mcp__pinned__act")), (AskKind::Approval, Some("mcp__pinned__act".into())));
