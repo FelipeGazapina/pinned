@@ -581,7 +581,7 @@ impl Hub {
                 return json(self.write_marks(account, changes).await?);
             }
             HubCall::ArchiveSession { machine, tab } => return json(self.archive_session(account, &machine, &tab).await?),
-            HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session).await?),
+            HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session, true).await?),
             HubCall::DeleteSession { machine, tab } => {
                 self.delete_session(account, &machine, &tab).await?;
                 return Ok(Value::Null);
@@ -685,7 +685,10 @@ impl Hub {
         Ok(row)
     }
 
-    async fn unarchive_session(&self, account: &Account, session: &str) -> Result<Target, String> {
+    /// Reopens an archived conversation in a new tab with its name and pin back. The user's Unarchive
+    /// resumes it at once; with `start` false, as for an agent, the tab stays unstarted: starting it
+    /// is `start_claude`'s, which holds it to the agent's limits.
+    pub(crate) async fn unarchive_session(&self, account: &Account, session: &str, start: bool) -> Result<Target, String> {
         let mark = |mark| MarkChange { session: session.into(), mark };
         let (was, archived) = {
             let _held = account.marks.lock().await;
@@ -699,7 +702,8 @@ impl Hub {
             (was, archived)
         };
         let run = RunSpec { folder: archived.cwd, repo: None, args: vec!["--resume".into(), session.into()], env: vec![], token: None, account: None, budget_usd: None };
-        let started = self.call_machine(account, &archived.machine, Call::Run { run }, RUN_WAIT).await.map_err(String::from);
+        let call = if start { Call::Run { run } } else { Call::OpenRun { run } };
+        let started = self.call_machine(account, &archived.machine, call, RUN_WAIT).await.map_err(String::from);
         let _held = account.marks.lock().await;
         let tab: TabId = match started.and_then(|tab| serde_json::from_value(tab).map_err(|e| e.to_string())) {
             Ok(tab) => tab,

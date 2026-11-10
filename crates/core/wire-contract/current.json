@@ -648,6 +648,23 @@
                 ]
               },
               {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -9175,6 +9192,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
                   },
                   "run": {
                     "$ref": "#/$defs/RunSpec"
@@ -32248,7 +32282,7 @@
                 "format": "int64"
               },
               "expires_at": {
-                "description": "Unix seconds.",
+                "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
                 "type": "integer",
                 "format": "int64"
               }
@@ -32318,7 +32352,7 @@
                 "format": "int64"
               },
               "expires_at": {
-                "description": "Unix seconds.",
+                "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
                 "type": "integer",
                 "format": "int64"
               }
@@ -32851,7 +32885,7 @@
             "type": "string"
           },
           "expires_at": {
-            "description": "Unix seconds.",
+            "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
             "type": "integer",
             "format": "int64"
           }
@@ -32875,7 +32909,7 @@
             "type": "string"
           },
           "expires_at": {
-            "description": "Unix seconds.",
+            "description": "Unix seconds. A code no longer expires, so this is always `NEVER_EXPIRES`, which an older\napp shows as a date far away.",
             "type": "integer",
             "format": "int64"
           }
@@ -46328,6 +46362,23 @@
                 ]
               },
               {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
                 "description": "`true` when a live tab whose environment holds every pair took `text` as a prompt.",
                 "type": "object",
                 "properties": {
@@ -51104,6 +51155,23 @@
                   "cmd": {
                     "type": "string",
                     "const": "run"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/RunSpec"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "run"
+                ]
+              },
+              {
+                "description": "The new tab's id, as `Run` makes it, but not started: the hub reopens an archived conversation\nfor an agent this way, which then starts it with `start_claude`, under the limits.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_run"
                   },
                   "run": {
                     "$ref": "#/$defs/RunSpec"

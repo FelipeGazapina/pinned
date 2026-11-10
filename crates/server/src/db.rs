@@ -16,7 +16,7 @@ use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
 use pinned_core::surface::{ActorRole, AuditEntry, AuditOutcome, Confirmation, Decision};
-use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite};
+use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite, NEVER_EXPIRES};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -45,10 +45,14 @@ alter table accounts add column if not exists tastes jsonb;
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
 -- A code one account made that lets one person create their own account, on a hub in invite mode.
+-- It lives until it is used or revoked. Rows made before 0.17.22 carried a 7-day date, which
+-- nothing reads anymore and this clears.
 create table if not exists invites (id uuid primary key, code_hash bytea unique not null,
   account uuid not null references accounts on delete cascade, hint text not null,
-  created_at timestamptz not null default now(), expires_at timestamptz not null,
+  created_at timestamptz not null default now(), expires_at timestamptz,
   used_by uuid references accounts on delete set null, used_at timestamptz);
+alter table invites alter column expires_at drop not null;
+update invites set expires_at = null where used_at is null and expires_at is not null;
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
   path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
   primary key (account, project, path));
@@ -757,18 +761,16 @@ impl Db {
     }
 
     pub async fn create_invite(&self, account: Uuid) -> Result<NewInvite, String> {
-        let client = self.client().await?;
-        client.execute("delete from invites where used_at is null and expires_at < now()", &[]).await.map_err(err)?;
         let (id, code) = (Uuid::new_v4(), invite_code());
-        let row = client
-            .query_one(
-                "insert into invites (id, code_hash, account, hint, expires_at) values ($1, $2, $3, $4, now() + interval '7 days')
-                 returning extract(epoch from expires_at)::bigint",
+        self.client()
+            .await?
+            .execute(
+                "insert into invites (id, code_hash, account, hint) values ($1, $2, $3, $4)",
                 &[&id, &invite_hash(&code), &account, &code[..4].to_owned()],
             )
             .await
             .map_err(err)?;
-        Ok(NewInvite { id: id.to_string(), code, expires_at: row.get(0) })
+        Ok(NewInvite { id: id.to_string(), code, expires_at: NEVER_EXPIRES })
     }
 
     /// Writes one row of the account's audit trail.
@@ -932,13 +934,13 @@ impl Db {
         let rows = self
             .client().await?
             .query(
-                "select id, hint, extract(epoch from created_at)::bigint, extract(epoch from expires_at)::bigint from invites
-                 where account = $1 and used_at is null and expires_at > now() order by created_at desc",
+                "select id, hint, extract(epoch from created_at)::bigint from invites
+                 where account = $1 and used_at is null order by created_at desc",
                 &[&account],
             )
             .await
             .map_err(err)?;
-        Ok(rows.iter().map(|r| InviteView { id: r.get::<_, Uuid>(0).to_string(), hint: r.get(1), created_at: r.get(2), expires_at: r.get(3) }).collect())
+        Ok(rows.iter().map(|r| InviteView { id: r.get::<_, Uuid>(0).to_string(), hint: r.get(1), created_at: r.get(2), expires_at: NEVER_EXPIRES }).collect())
     }
 
     /// False when the account has no unused code `id`.
@@ -954,7 +956,7 @@ impl Db {
         let row = self
             .client().await?
             .query_one(
-                "with invite as (select id from invites where code_hash = $1 and used_at is null and expires_at > now() for update),
+                "with invite as (select id from invites where code_hash = $1 and used_at is null for update),
                  made as (insert into accounts (id, email, password_hash) select $2, $3, $4 from invite on conflict (email) do nothing returning id),
                  spent as (update invites set used_by = made.id, used_at = now() from made, invite where invites.id = invite.id returning invites.id)
                  select exists (select 1 from invite), exists (select 1 from made), exists (select 1 from spent)",

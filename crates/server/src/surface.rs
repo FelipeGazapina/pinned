@@ -5,7 +5,7 @@
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
-use pinned_core::wire::{Call, ToClient};
+use pinned_core::wire::{Call, HubCall, ToClient};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,6 +187,8 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// machine, where the origin machine hears which session asked.
 async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
+        // An agent's Unarchive only reopens the tab: starting a session is `start_claude`'s, under its limits.
+        Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
             let call = if on_origin { Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? } } else { call };
