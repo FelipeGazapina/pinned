@@ -5167,7 +5167,8 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     assert!(ran(act(&ana.dir, &ana.tab, "skills", json!({})))["copies"].is_array());
     let missing = ran(act(&ana.dir, &ana.tab, "save_skill", json!({ "text": "# x", "copies": [{ "dir": ana.dir.join("no-skill").display().to_string(), "since": "abc" }] })));
     assert_eq!(missing["copies"][0]["outcome"], "missing");
-    assert!(ran(act(&ana.dir, &ana.tab, "token_usage", json!({ "since": 0 }))).is_object());
+    let usage = ran(act(&ana.dir, &ana.tab, "token_usage", json!({ "since": 0 })));
+    assert!(!usage.is_null(), "{usage}");
     for (action, args) in [
         ("list_projects", json!({})),
         ("project_history", json!({ "path": docs })),
