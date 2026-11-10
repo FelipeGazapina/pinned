@@ -481,6 +481,7 @@ test("Placement lists Prefer in order and Avoid, by machine name, with each mach
   assert.match(html, /data-act="pheavy" data-value="worktree" aria-pressed="true">A worker in its own worktree/);
   assert.match(html, /If no machine fits, the worker runs on the machine that asked, and the reason is shown\./);
   assert.match(html, /CPU is over 90% for 1 minute or it has under 2 GB of memory free\./);
+  assert.match(html, /A machine with under 10 GB of disk free takes no heavy worker\./);
   assert.doesNotMatch(html, /data-act="[^"]*"[^>]*data-field="when_none"|Fail and say why/, "falling back to the asking machine has no switch");
   assert.doesNotMatch(html, /Nothing is preferred or avoided/);
   await p.click(/data-act="pmove" data-id="m-mini" data-step="-1"/);

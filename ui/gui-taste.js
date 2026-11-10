@@ -261,7 +261,8 @@ function tastePlacementHtml() {
     <div class="taste-field"><div class="taste-label"><span>Heavy work</span></div><div class="taste-seg" role="group" aria-label="Heavy work">${heavy}</div></div>
     <div class="taste-policy"><p class="taste-quiet">${active ? "A heavy worker goes to the first preferred machine that fits, then to the least busy one. An avoided machine runs a worker only when it is the one that asked and nothing else fits." : "Nothing is preferred or avoided, so every worker runs on the machine it was asked on."}</p>
       <p class="taste-quiet">If no machine fits, the worker runs on the machine that asked, and the reason is shown.</p>
-      <p class="taste-quiet">A machine counts as busy while its CPU is over 90% for 1 minute or it has under 2 GB of memory free.</p></div>`);
+      <p class="taste-quiet">A machine counts as busy while its CPU is over 90% for 1 minute or it has under 2 GB of memory free.</p>
+      <p class="taste-quiet">A machine with under 10 GB of disk free takes no heavy worker.</p></div>`);
 }
 
 function tastePaceHtml(t) {
