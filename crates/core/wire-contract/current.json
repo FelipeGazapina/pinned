@@ -3096,6 +3096,31 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and\nthe names of their environment and headers, never their values, for the app to import.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_importable"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -6097,6 +6122,136 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads\nwhile enabled, each with the names of its secrets and never their values.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_mcp_server"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "server": {
+                    "$ref": "#/$defs/Spec"
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "server"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: turns a server of the account's list on or off for the sessions started next.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enable_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "enabled"
+                ]
+              },
+              {
+                "description": "Removes a server and its secrets from the account's list.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`\nconfigures (`Call::McpImportable`), for every project or for `project` (a repository),\nwith `secrets` typed in the app for each of its names.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_mcp_server"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account",
+                  "name"
+                ]
+              },
+              {
+                "description": "From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to\nload into the sessions it starts.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "load_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -8570,6 +8725,130 @@
               "action",
               "args"
             ]
+          },
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "Target3": {
             "type": "object",
@@ -11632,6 +11911,31 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and\nthe names of their environment and headers, never their values, for the app to import.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_importable"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -14580,6 +14884,136 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads\nwhile enabled, each with the names of its secrets and never their values.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_mcp_server"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "server": {
+                    "$ref": "#/$defs/Spec"
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "server"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: turns a server of the account's list on or off for the sessions started next.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enable_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "enabled"
+                ]
+              },
+              {
+                "description": "Removes a server and its secrets from the account's list.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`\nconfigures (`Call::McpImportable`), for every project or for `project` (a repository),\nwith `secrets` typed in the app for each of its names.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_mcp_server"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account",
+                  "name"
+                ]
+              },
+              {
+                "description": "From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to\nload into the sessions it starts.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "load_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -16969,6 +17403,130 @@
               "tab",
               "action"
             ]
+          },
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "Target3": {
             "type": "object",
@@ -19520,6 +20078,136 @@
                     ],
                     "format": "uint32",
                     "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads\nwhile enabled, each with the names of its secrets and never their values.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_mcp_server"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "server": {
+                    "$ref": "#/$defs/Spec"
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "server"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: turns a server of the account's list on or off for the sessions started next.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enable_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "enabled"
+                ]
+              },
+              {
+                "description": "Removes a server and its secrets from the account's list.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`\nconfigures (`Call::McpImportable`), for every project or for `project` (a repository),\nwith `secrets` typed in the app for each of its names.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_mcp_server"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account",
+                  "name"
+                ]
+              },
+              {
+                "description": "From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to\nload into the sessions it starts.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "load_mcp_servers"
                   }
                 },
                 "required": [
@@ -22481,6 +23169,130 @@
               "action",
               "args"
             ]
+          },
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },
@@ -24850,6 +25662,136 @@
                     ],
                     "format": "uint32",
                     "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads\nwhile enabled, each with the names of its secrets and never their values.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_mcp_servers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_mcp_server"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "server": {
+                    "$ref": "#/$defs/Spec"
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "server"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: turns a server of the account's list on or off for the sessions started next.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "enable_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "enabled"
+                ]
+              },
+              {
+                "description": "Removes a server and its secrets from the account's list.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remove_mcp_server"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`mcp::Entry`: adds the server `name` that the Claude Code account `account` on `machine`\nconfigures (`Call::McpImportable`), for every project or for `project` (a repository),\nwith `secrets` typed in the app for each of its names.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "import_mcp_server"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "secrets": {
+                    "$ref": "#/$defs/Secrets"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine",
+                  "account",
+                  "name"
+                ]
+              },
+              {
+                "description": "From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to\nload into the sessions it starts.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "load_mcp_servers"
                   }
                 },
                 "required": [
@@ -27714,6 +28656,130 @@
               "tab",
               "action"
             ]
+          },
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -32680,6 +33746,561 @@
                 "required": [
                   "state",
                   "reason"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "McpLoad": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Load",
+        "description": "An enabled server with its secrets, as the hub hands it to a machine that starts a session.",
+        "type": "object",
+        "properties": {
+          "server": {
+            "$ref": "#/$defs/Spec"
+          },
+          "secrets": {
+            "$ref": "#/$defs/Secrets",
+            "default": {}
+          }
+        },
+        "required": [
+          "server",
+          "secrets"
+        ],
+        "$defs": {
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Load",
+        "description": "An enabled server with its secrets, as the hub hands it to a machine that starts a session.",
+        "type": "object",
+        "properties": {
+          "server": {
+            "$ref": "#/$defs/Spec"
+          },
+          "secrets": {
+            "$ref": "#/$defs/Secrets",
+            "default": {}
+          }
+        },
+        "required": [
+          "server"
+        ],
+        "$defs": {
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "Secrets": {
+            "description": "The secret values of a server, by name: never in an answer, a list, an audit row or an error.",
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "McpServer": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Entry",
+        "description": "A server of the account's list as the hub keeps and lists it: every name of a secret it\nhas a value for, never the value.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Sessions load it only while it is on.",
+            "type": "boolean"
+          },
+          "server": {
+            "$ref": "#/$defs/Spec"
+          }
+        },
+        "required": [
+          "id",
+          "enabled",
+          "server"
+        ],
+        "$defs": {
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Entry",
+        "description": "A server of the account's list as the hub keeps and lists it: every name of a secret it\nhas a value for, never the value.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Sessions load it only while it is on.",
+            "type": "boolean"
+          },
+          "server": {
+            "$ref": "#/$defs/Spec"
+          }
+        },
+        "required": [
+          "id",
+          "enabled",
+          "server"
+        ],
+        "$defs": {
+          "Spec": {
+            "description": "A server of the account's list, as the app and agents write it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What sessions call it, and what its tools are named after: letters, digits, `-` and `_`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The one project it loads in, as its repository (`github.com/owner/repo`); every project\nwhen absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transport": {
+                "$ref": "#/$defs/Reach"
+              }
+            },
+            "required": [
+              "name",
+              "transport"
+            ]
+          },
+          "Reach": {
+            "description": "How pinned starts or reaches a server of the account's list, as Claude Code's own config\nnames it. Environment and header values are secrets, so only their names are here.",
+            "oneOf": [
+              {
+                "description": "A program pinned starts beside the session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "The environment variables it gets. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ]
+              },
+              {
+                "description": "A streamable HTTP endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "description": "The headers sent with each request. The user types each value in the app.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
+                ]
+              },
+              {
+                "description": "A server-sent events endpoint.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "headers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "url"
                 ]
               }
             ]
@@ -48805,6 +50426,31 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and\nthe names of their environment and headers, never their values, for the app to import.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_importable"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -53595,6 +55241,31 @@
                   "cmd": {
                     "type": "string",
                     "const": "mcp_servers"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<mcp::Found>`: the servers `McpServers` lists, with their command, arguments and URL and\nthe names of their environment and headers, never their values, for the app to import.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mcp_importable"
                   },
                   "account": {
                     "type": [
