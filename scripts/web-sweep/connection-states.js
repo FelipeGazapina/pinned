@@ -175,6 +175,8 @@ async function signIn(page) {
     await page.evaluate(`(${seed})(${JSON.stringify({ rows: ROWS })})`);
     if (phone) await page.evaluate(() => toggleSidebar(true));
     await settle();
+    console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => [t.machine.slice(0, 4), t.view.cwd, t.view.status, t.view.title]))));
+    console.log(JSON.stringify(await page.evaluate(sidebarText)));
 
     await page.evaluate(() => { window.__ns = []; const o = noteThreadsSeen; noteThreadsSeen = (m, c) => { if (m.startsWith("e031")) window.__ns.push([c, machines.get(m)?.view.online, tabs.length, Date.now() % 100000]); o(m, c); }; });
     // 1. One machine away.
