@@ -7185,6 +7185,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("connect_upstash", json!({})),
         ("disconnect_upstash", json!({})),
         ("set_box_access", json!({ "access": { "worker": { "mode": "fresh" } } })),
+        ("set_repo_insight", json!({ "settings": { "on": true } })),
         ("delete_connector", json!({ "id": "c1" })),
         ("remove_machine", json!({ "id": machine })),
         ("pair_code", json!({})),
