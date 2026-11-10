@@ -267,7 +267,7 @@ impl Spec {
         if self.project.as_deref().is_some_and(|p| p.trim().is_empty() || p.trim() != p) {
             return Err("a project is its repository, as github.com/owner/repo".into());
         }
-        let mut keyed = false;
+        let keyed;
         let shown: Vec<&str> = match &self.transport {
             Reach::Stdio { command, args, .. } => {
                 if command.trim().is_empty() {
