@@ -762,7 +762,8 @@ impl Db {
             .map(drop)
     }
 
-    /// The account's audit rows, newest first: `limit` of them from before unix time `before`.
+    /// The account's audit rows, newest first: `limit` of them from unix second `before` and earlier.
+    /// A page repeats the rows of its boundary second, which the client drops by id.
     pub async fn audit_rows(&self, account: Uuid, before: Option<i64>, limit: i64) -> Result<Vec<AuditEntry>, String> {
         let rows = self
             .client()
@@ -770,7 +771,7 @@ impl Db {
             .query(
                 "select a.id, extract(epoch from a.at)::bigint, a.machine, coalesce(m.name, ''), a.tab, a.role, a.action, a.args, a.outcome, a.detail, a.request_id
                  from agent_actions a left join machines m on m.id = a.machine and m.account = a.account
-                 where a.account = $1 and ($2::bigint is null or a.at < to_timestamp($2)) order by a.at desc limit $3",
+                 where a.account = $1 and ($2::bigint is null or a.at < to_timestamp($2::bigint + 1)) order by a.at desc limit $3",
                 &[&account, &before, &limit],
             )
             .await

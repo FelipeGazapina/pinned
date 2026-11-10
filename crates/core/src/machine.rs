@@ -9008,6 +9008,53 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn an_agents_start_claude_makes_the_tab_its_worker_under_the_projects_limits() {
+        let (m, dir, captain) = limited_captain("act-start", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let start = |tab: &str| act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 }));
+        let first = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&first), Ok(json!(path)));
+        let view = m.view(&first).unwrap();
+        assert_eq!((view.role, view.spawned_by.as_deref(), view.running), (Some(Role::Worker), Some(captain.as_str()), true));
+        let task = m.tab(&first, |t| t.task.clone()).unwrap().expect("the started tab runs a task");
+
+        let second = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(start(&second), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()));
+        assert!(!m.view(&second).unwrap().running, "a refused start starts nothing");
+
+        m.task_cancel(Some(captain.clone()), None, &task, "not needed").unwrap();
+        let records = m.delegates.records();
+        let record = records.iter().find(|r| r.id == task).expect("the ended task's record for the metrics");
+        assert_eq!((record.delegator.kind, record.delegator.tab.as_deref(), record.outcome), (crate::delegate::DelegatorKind::Captain, Some(captain.as_str()), crate::delegate::TaskOutcome::Cancelled));
+        assert_eq!(start(&second), Ok(json!(path)), "an ended worker frees its place");
+
+        assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue starts work, and nothing holds it to the limits yet".into()));
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": captain, "cols": 80, "rows": 24 })), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker")));
+        let listed = act(json!({ "cmd": "tabs" })).unwrap();
+        assert_eq!(listed.as_array().map(Vec::len), Some(3), "a read runs as Machine::call runs it: {listed}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_is_queued_once_for_the_tab_or_the_tab_that_took_its_session() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
+        let notice = |tab: &str, session: Option<&str>, id: &str| m.call(Call::Notice { tab: tab.into(), session: session.map(Into::into), text: format!("[pinned] The user approved your remove_machine request ({id}): done."), id: id.into() });
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(notice(&tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(m.view(&tab).unwrap().queued, 1, "a repeat queues nothing");
+        assert_eq!(notice("tab-gone-9", Some("s-1"), "c-2"), Ok(json!(true)), "a restart's new tab id is found by the session");
+        assert_eq!(m.view(&tab).unwrap().queued, 2);
+        assert_eq!(notice("tab-gone-9", Some("s-other"), "c-3"), Ok(json!(false)));
+        let done = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: Some("s-1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true };
+        let (context, _) = m.take_notices(&done);
+        assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.\n[pinned] The user approved your remove_machine request (c-2): done.");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_worker_past_the_time_limit_is_stopped_and_task_status_says_why() {
         let (m, dir, captain) = limited_captain("limits-time", TastePatch { time_limit_min: Some(30), ..TastePatch::default() });
         let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" }, "limitMs": 7_200_000 });

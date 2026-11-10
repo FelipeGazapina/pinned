@@ -1095,7 +1095,8 @@ pub enum HubCall {
     /// asked; either way the session gets a notice.
     DecideConfirmation { id: String, approve: bool },
     /// `Vec<surface::AuditEntry>`: the account's audit trail of agents' acts, newest first, `limit`
-    /// rows (50, at most 200) from before unix time `before`.
+    /// rows (50, at most 200) from unix second `before` and earlier, so a page repeats the rows of
+    /// its boundary second, which the client drops by id.
     AgentAudit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<i64>,

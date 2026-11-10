@@ -275,7 +275,7 @@ pub const ACTIONS: &[Action] = &[
     h("act", Excluded, "the surface itself: call act"),
     h("confirmations", Read, "The actions waiting on the user's approval, then the last 20 decided, with what each came to.").wired(),
     h("decide_confirmation", Excluded, "only the user decides, in the app"),
-    h("agent_audit", Read, "The audit trail of agents' acts on this account, newest first: limit rows (50, at most 200) before unix time before.").wired(),
+    h("agent_audit", Read, "The audit trail of agents' acts on this account, newest first: limit rows (50, at most 200) from unix second before and earlier.").wired(),
 ];
 
 pub fn find(name: &str) -> Option<&'static Action> {

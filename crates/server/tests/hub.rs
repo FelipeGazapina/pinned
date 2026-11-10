@@ -4696,3 +4696,172 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     let minutes = |ms: &Value| (ms.as_f64().unwrap() / 60_000.0).round();
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
 }
+
+/// What a session's `act` tool answers: the hub's `ActAnswer`, or the refusal.
+fn act(dir: &Path, tab: &str, action: &str, args: Value) -> Result<Value, String> {
+    session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args }))
+}
+
+/// The context a session's Stop hook gets, which carries the notices queued for it.
+fn turn_end_context(dir: &Path, tab: &str) -> String {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", json!({ "kind": "agent", "status": "done", "tab": tab, "hook_feedback": true })).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    serde_json::from_str::<Result<String, String>>(&reply).unwrap().unwrap()
+}
+
+struct Agent {
+    client: Client,
+    node: Node,
+    dir: PathBuf,
+    machine: String,
+    tab: String,
+}
+
+/// An account's app, its machine `name` with a project `site` and a project `docs`, and an agent
+/// session in `site`.
+fn agent_of(url: &str, token: &str, email: &str, name: &str) -> Agent {
+    let mut client = Client::connect(url, token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = temp(&format!("surface-{name}"));
+    let (machine, machine_token) = account::register_machine(url, token, name, "macos").unwrap();
+    let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[(name, true)]);
+    for project in ["site", "docs"] {
+        std::fs::create_dir_all(dir.join(project)).unwrap();
+    }
+    node.machine.open_tab(Some(dir.join("docs").display().to_string()), false).unwrap();
+    let tab = node.machine.open_tab(Some(dir.join("site").display().to_string()), false).unwrap();
+    client.wait("the agent's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab));
+    Agent { client, node, dir, machine: machine.id, tab }
+}
+
+fn names(list: &Value) -> Vec<String> {
+    let mut names: Vec<String> = list.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves() {
+    let hub = TestHub::start_with("agent_surface", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let (spare, spare_token) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let docs = ana.dir.join("docs").canonicalize().unwrap().display().to_string();
+
+    let found = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions", "search": "machine" })).unwrap();
+    let listed: Vec<(&str, &str)> = found["actions"].as_array().unwrap().iter().map(|a| (a["name"].as_str().unwrap(), a["class"].as_str().unwrap())).collect();
+    assert!(listed.contains(&("machines", "read")) && listed.contains(&("rename_machine", "write")) && listed.contains(&("remove_machine", "confirm")), "{listed:?}");
+
+    let machines = act(&ana.dir, &ana.tab, "machines", json!({})).unwrap();
+    assert_eq!(machines["outcome"], "done");
+    assert_eq!(names(&machines["result"]), ["ana-mac", "ana-spare"]);
+    assert_eq!(act(&ana.dir, &ana.tab, "rename_machine", json!({ "id": ana.machine, "name": "Ana Mini" })).unwrap(), json!({ "outcome": "done", "result": null }));
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini", "ana-spare"], "the app sees the agent's rename");
+
+    let saved = act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })).unwrap();
+    assert_eq!((&saved["outcome"], &saved["result"]["title"]), (&json!("done"), &json!("Deploys")), "{saved}");
+    let read = act(&ana.dir, &ana.tab, "memory_search", json!({ "path": docs, "query": "deploy" })).unwrap();
+    assert_eq!(read["result"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Docs deploy from tags."]);
+    assert_eq!(session_tool(&ana.dir, &ana.tab, json!({ "name": "memory_search", "query": "deploy" })), Ok(json!("No memory matches that.")), "the memory went to docs, not the session's own project");
+
+    assert_eq!(act(&ana.dir, &ana.tab, "write_input", json!({ "tab": ana.tab, "data": "y" })), Err("write_input is not open to agents: the app's terminal plumbing".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "prompt", json!({ "tab": ana.tab, "text": "hi" })), Err("prompt is a write action that is not wired yet".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "rename_machine", json!({ "id": ana.machine, "name": "x", "token": "abc" })), Err("an agent never sends a password, key or token: token. The user enters it in the app.".into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "nope", json!({})), Err("no action nope; call actions to list them".into()));
+    assert_eq!(machine_result(&url, &spare_token, json!({ "cmd": "act", "act": { "tab": "tab-zz-1", "action": "machines" } })), Err("ana-spare runs no session tab-zz-1".into()), "a machine acts only for a session it reports");
+
+    let remove = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "remove_machine", "args": { "id": spare.id }, "request_id": "r-remove" })).unwrap();
+    assert_eq!(remove["outcome"], "pending", "{remove}");
+    let remove_id = remove["id"].as_str().unwrap().to_owned();
+    let pushed = ana.client.wait("the confirmation in the app", |f| f["type"] == "confirmations" && f["items"].as_array().unwrap().iter().any(|c| c["id"] == remove_id.as_str()));
+    let item = pushed["items"].as_array().unwrap().iter().find(|c| c["id"] == remove_id.as_str()).unwrap().clone();
+    assert_eq!((&item["action"], &item["args"], &item["tab"], &item["role"], &item["machine_name"]), (&json!("remove_machine"), &json!({ "id": spare.id }), &json!(ana.tab), &json!("session"), &json!("Ana Mini")));
+    let again = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "remove_machine", "args": { "id": spare.id }, "request_id": "r-remove" })).unwrap();
+    assert_eq!(again["id"], remove_id.as_str(), "the same request_id holds one confirmation");
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini", "ana-spare"], "nothing runs before the owner approves");
+
+    let invite = act(&ana.dir, &ana.tab, "create_invite", json!({})).unwrap();
+    let invite_id = invite["id"].as_str().unwrap().to_owned();
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": invite_id, "approve": true })).unwrap();
+    assert_eq!((&decided["decision"], &decided["outcome"]), (&json!("approved"), &json!("done")));
+    let code = decided["result"]["code"].as_str().unwrap().to_owned();
+    wait_for("the invite's notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
+    let told = turn_end_context(&ana.dir, &ana.tab);
+    assert!(told.starts_with(&format!("[pinned] The user approved your create_invite request ({invite_id}): done. Result: ")), "{told}");
+    assert!(told.contains(r#""code":"[hidden]""#) && !told.contains(&code), "the agent never gets the code: {told}");
+
+    let (bob_token, _) = account::signup_invited(&url, "bob@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let (_, bob_spare_token) = account::register_machine(&url, &bob_token, "bob-spare", "linux").unwrap();
+    assert_eq!(names(&act(&bob.dir, &bob.tab, "machines", json!({})).unwrap()["result"]), ["bob-mac", "bob-spare"]);
+    assert_eq!(act(&bob.dir, &bob.tab, "rename_machine", json!({ "id": ana.machine, "name": "mine" })), Err(format!("this account has no machine {}", ana.machine)));
+    assert_eq!(session_tool(&bob.dir, &bob.tab, json!({ "name": "act", "action": "memory_search", "args": { "path": docs, "query": "deploy" }, "machine": "ana-mac" })), Err("this account has no machine ana-mac".into()));
+    let bobs_remove = act(&bob.dir, &bob.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err(format!("no confirmation {remove_id} waits")), "bob's app can't decide ana's");
+    assert_eq!(machine_result(&url, &bob_spare_token, json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err("only the account's owner decides, in the app".into()));
+    let bobs_list = machine_result(&url, &bob_spare_token, json!({ "cmd": "confirmations" })).unwrap();
+    assert_eq!(bobs_list.as_array().unwrap().iter().map(|c| c["action"].as_str().unwrap()).collect::<Vec<_>>(), ["remove_machine"], "bob sees only his own: {bobs_list}");
+    assert_eq!(bobs_list[0]["id"], bobs_remove["id"]);
+    let denied = bob.client.hub(json!({ "cmd": "decide_confirmation", "id": bobs_remove["id"], "approve": false })).unwrap();
+    assert_eq!((&denied["decision"], &denied["outcome"]), (&json!("denied"), &json!("denied")));
+    let bobs_audit = act(&bob.dir, &bob.tab, "agent_audit", json!({})).unwrap()["result"].clone();
+    let rows: Vec<(&str, &str)> = bobs_audit.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap())).collect();
+    assert_eq!(rows, [("remove_machine", "denied"), ("remove_machine", "pending"), ("memory_search", "refused"), ("rename_machine", "failed"), ("machines", "done")], "bob's trail holds his acts only");
+    assert!(bobs_audit.as_array().unwrap().iter().all(|r| r["machine"] == bob.machine.as_str()));
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [remove_id.clone(), invite_id.clone()], "ana's waiting one, then her decided one; none of bob's");
+    ana.node.machine.call(Call::SetGlobalOrchestratorSettings { settings: pinned_core::global_orchestrator::Settings { host: true, ..Default::default() } }).unwrap();
+    let global = ana.node.machine.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+    ana.client.wait("the global tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == global.as_str()));
+    let waiting = session_tool(&ana.dir, &global, json!({ "name": "waiting" })).unwrap();
+    let confirm = waiting.as_array().unwrap().iter().find(|w| w["kind"] == "confirm").unwrap_or_else(|| panic!("{waiting}"));
+    assert_eq!((&confirm["title"], &confirm["tab"]), (&json!("Approve remove_machine?"), &json!(ana.tab)));
+
+    let approved = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })).unwrap();
+    assert_eq!((&approved["decision"], &approved["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": remove_id, "approve": true })), Err(format!("no confirmation {remove_id} waits")), "a second click decides nothing");
+    assert_eq!(names(&ana.client.hub(json!({ "cmd": "machines" })).unwrap()), ["Ana Mini"]);
+    ana.client.wait("the emptied list in the app", |f| f["type"] == "confirmations" && f["items"] == json!([]));
+    wait_for("the removal's notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
+    assert_eq!(turn_end_context(&ana.dir, &ana.tab), format!("[pinned] The user approved your remove_machine request ({remove_id}): done."));
+
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("remove_machine", "approved", "done"),
+            ("create_invite", "approved", "done"),
+            ("create_invite", "pending", ""),
+            ("remove_machine", "pending", ""),
+            ("machines", "refused", "ana-spare runs no session tab-zz-1"),
+            ("nope", "refused", "no action nope; call actions to list them"),
+            ("rename_machine", "refused", "an agent never sends a password, key or token: token. The user enters it in the app."),
+            ("prompt", "refused", "prompt is a write action that is not wired yet"),
+            ("write_input", "refused", "write_input is not open to agents: the app's terminal plumbing"),
+            ("memory_search", "done", ""),
+            ("memory_save", "done", ""),
+            ("rename_machine", "done", ""),
+            ("machines", "done", ""),
+        ],
+        "ana's trail, newest first, with none of bob's"
+    );
+    let secret = trail.as_array().unwrap().iter().find(|r| r["detail"].as_str().unwrap().starts_with("an agent never")).unwrap();
+    assert_eq!(secret["args"], format!(r#"{{"id":"{}","name":"x","token":"[hidden]"}}"#, ana.machine));
+    assert_eq!((&trail[0]["role"], &trail[0]["tab"], &trail[0]["machine_name"]), (&json!("session"), &json!(ana.tab), &json!("Ana Mini")));
+    assert_eq!(trail[4]["machine_name"], "", "a removed machine's rows stay, without its name");
+    assert_eq!(act(&bob.dir, &bob.tab, "agent_audit", json!({ "limit": 200 })).unwrap()["result"].as_array().unwrap().len(), 6, "bob's trail never shows ana's");
+    let ids = |page: &Value| page.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(&ana.client.hub(json!({ "cmd": "agent_audit", "limit": 2 })).unwrap()), ids(&trail)[..2]);
+    let oldest = &trail[12];
+    let page = ana.client.hub(json!({ "cmd": "agent_audit", "before": oldest["at"] })).unwrap();
+    assert!(ids(&page).contains(&oldest["id"].as_str().unwrap().to_owned()), "before keeps the rows of its own second: {page}");
+    drop(bob);
+}
