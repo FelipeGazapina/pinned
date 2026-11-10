@@ -1798,6 +1798,7 @@ mod tests {
     /// A worker writes notes into the main checkout's `.claude/research` and memories into its
     /// Claude memory dir, both outside its worktree. Writes there pass; deletes, secrets and
     /// self-grants there are still held.
+    #[cfg(unix)]
     #[test]
     fn extra_write_dirs_take_writes_and_nothing_else() {
         let f = fx();
