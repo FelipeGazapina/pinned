@@ -60,6 +60,9 @@
 .thread-row .l3 .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .thread-row .remote { display: flex; color: rgb(var(--g-side-muted-rgb) / 0.7); }
 .thread-row .remote .i { width: 14px; height: 14px; }
+/* A project on more than one machine names the machine on each card, as text a phone can read. */
+.thread-row .remote.named { align-items: center; gap: 4px; min-width: 0; font-size: 11px; white-space: nowrap; }
+.thread-row .remote.named .name { min-width: 0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
 .thread-row .account { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-side-muted); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-row .role { flex: none; font-size: 11px; font-weight: 500; padding: 0 5px; border-radius: 4px; background: rgb(var(--g-primary-rgb) / 0.14); color: var(--g-primary); }
 .thread-row .role.worker { display: flex; padding: 0; background: none; color: var(--g-side-muted); }
@@ -244,7 +247,11 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .drag-hint.drop-target { border-color: rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.05); color: var(--g-primary); }
 
 @media (max-width: 768px) {
-  #sidebar-resize, #chat-head .crumb .stats { display: none; }
+  #sidebar-resize { display: none; }
+  /* The cost stays in the header on a phone; a long label gives way before the title does. */
+  #chat-head .crumb .stats { flex: 0 1 auto; min-width: 0; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Its icon says which project; the name makes room for the title and the cost. */
+  #chat-head .crumb .project > span { display: none; }
   /* The row's actions are what the pointer came for. Drop the role badge while they show so they
    * never run past the overlay sidebar's right edge. */
   .thread-row:hover .role:not(.worker), .thread-row:focus-visible .role:not(.worker) { display: none; }
@@ -344,7 +351,9 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .project-head :is(.state, .where) { flex: none; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--g-side-muted); white-space: nowrap; }
 .project-head .state.running { color: var(--g-success); }
 .thread-row .remote.box.unavailable { color: var(--g-warning, rgb(var(--g-side-muted-rgb) / 0.7)); gap: 4px; font-size: 11px; white-space: nowrap; }
-.project-head .where { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.project-head .where { flex: 0 100 auto; min-width: 0; white-space: normal; text-align: right; }
+/* The machines break between names, never inside one. */
+.project-head .where .m { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 
 /* A machine that dropped: one line per machine at the top of the list, and the orchestrator's row
  * kept but unavailable when its machine is the one that is gone. */
@@ -365,3 +374,12 @@ body[data-hub="offline"] #reconnect-bar { display: flex; }
 body[data-hub="offline"] :is(.thread-row .stamp.status.info, .project-head .state.running, .thread-row .term-run) { opacity: 0.45; }
 body[data-hub="offline"] :is(.thread-row .stamp.status.info .i, .thread-row .term-run .i, #thread .shimmer) { animation-play-state: paused; }
 body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }
+
+/* The chat header's sidebar toggle shows what the closed sidebar holds: a pill with how many threads wait on you, and a dot on the icon while anything runs. */
+#chat-sidebar-toggle .glyph { position: relative; display: grid; place-items: center; }
+#chat-sidebar-toggle .running { position: absolute; top: -3px; right: -4px; width: 7px; height: 7px; border-radius: 50%; background: var(--g-success); box-shadow: 0 0 0 2px var(--g-canvas); }
+#chat-sidebar-toggle .count { flex: none; padding: 0 6px; border-radius: 4px; font-size: 11px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums;
+  color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
+body[data-sidebar="closed"] #chat-sidebar-toggle:has(.count) { display: flex !important; align-items: center; gap: 6px; width: auto; padding: 0 8px 0 6px; }
+@media (pointer: coarse) { #chat-sidebar-toggle:has(.count) { min-width: 40px; } }
+body[data-hub="offline"] #chat-sidebar-toggle .running { opacity: 0.45; }

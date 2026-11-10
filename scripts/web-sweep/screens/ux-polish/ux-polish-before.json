@@ -1,0 +1,194 @@
+{
+  "ux4-first-desktop": {
+    "sidebar": "open",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [],
+    "crumb": {
+      "w": 857,
+      "h": 29
+    }
+  },
+  "ux4-closed-desktop": {
+    "sidebar": "closed",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [],
+    "crumb": {
+      "w": 1085,
+      "h": 29
+    }
+  },
+  "ux4-thread-desktop": {
+    "sidebar": "closed",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [
+      "0s · $0.84+ · 2 workers"
+    ],
+    "crumb": {
+      "w": 1085,
+      "h": 29
+    }
+  },
+  "ux6-desktop": {
+    "heads": [
+      "sweep-node-2, sweep-node",
+      "sweep-node-2, sweep-node",
+      "sweep-node-2, sweep-node"
+    ],
+    "remotes": [
+      "sweep-node-2",
+      "sweep-node",
+      "sweep-node-2",
+      "sweep-node",
+      "sweep-node",
+      "sweep-node",
+      "sweep-node",
+      "sweep-node-2",
+      "sweep-node"
+    ]
+  },
+  "ux9-desktop": [
+    "sweep-node macos v0.17.23 Workers 2 of 5 CPU 67% Memory 2.6 GB free Disk 6.3 GB free claude codex · not ready cursor · not ready Update Rename Remove",
+    "sweep-node-2 macos v0.17.23 Workers 0 of 5 CPU 67% Memory 2.6 GB free Disk 6.3 GB free claude codex · not ready cursor · not ready Update Rename Remove"
+  ],
+  "ux12-desktop": {
+    "version": {
+      "top": 886,
+      "bottom": 898,
+      "left": 1393
+    },
+    "lastSetting": {
+      "top": 735,
+      "bottom": 790
+    },
+    "nameRow": 68,
+    "versionShown": "block"
+  },
+  "machine-note-desktop": {
+    "top": 136,
+    "listTop": 136,
+    "height": 42,
+    "scrollTop": 0,
+    "clipped": false
+  },
+  "ux9-offline-desktop": [
+    {
+      "text": "sweep-node macos v0.17.23 Workers 2 of 5 CPU 68% Memory 2.4 GB free Disk 6.3 GB free claude codex · not ready cursor · not ready Update Rename Remove",
+      "updateDisabled": false
+    },
+    {
+      "text": "sweep-node-2 macos · seen just now v0.17.23 Update Rename Remove",
+      "updateDisabled": false
+    }
+  ],
+  "reconnecting-desktop": [
+    {
+      "text": "1 working 40s",
+      "opacity": "0.45"
+    },
+    {
+      "text": "Working 40s",
+      "opacity": "0.45"
+    }
+  ],
+  "ux13-desktop": "Can't reach the hub at 127.0.0.1:8871. Check your connection and try again.",
+  "ux4-first-phone": {
+    "sidebar": "closed",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [],
+    "crumb": {
+      "w": 282,
+      "h": 40
+    }
+  },
+  "ux4-closed-phone": {
+    "sidebar": "closed",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [],
+    "crumb": {
+      "w": 282,
+      "h": 40
+    }
+  },
+  "ux4-thread-phone": {
+    "sidebar": "closed",
+    "toggle": "Toggle sidebar (⌘B)",
+    "badge": null,
+    "dot": false,
+    "stats": [],
+    "crumb": {
+      "w": 282,
+      "h": 40
+    }
+  },
+  "ux6-phone": {
+    "heads": [
+      "sweep-node-2, sweep-node",
+      "sweep-node",
+      "sweep-node"
+    ],
+    "remotes": [
+      "sweep-node",
+      "sweep-node",
+      "sweep-node",
+      "sweep-node-2",
+      "sweep-node",
+      "sweep-node",
+      "sweep-node"
+    ]
+  },
+  "ux9-phone": [
+    "sweep-node macos v0.17.23 Workers 2 of 5 CPU 68% Memory 2.4 GB free Disk 6.3 GB free claude codex · not ready cursor · not ready Update Rename Remove",
+    "sweep-node-2 macos v0.17.23 Workers 0 of 5 CPU 68% Memory 2.3 GB free Disk 6.0 GB free claude codex · not ready cursor · not ready Update Rename Remove"
+  ],
+  "ux12-phone": {
+    "version": {
+      "top": 830,
+      "bottom": 842,
+      "left": 343
+    },
+    "lastSetting": {
+      "top": 711,
+      "bottom": 766
+    },
+    "nameRow": 124,
+    "versionShown": "block"
+  },
+  "machine-note-phone": {
+    "top": 152,
+    "listTop": 152,
+    "height": 27,
+    "scrollTop": 0,
+    "clipped": false
+  },
+  "ux9-offline-phone": [
+    {
+      "text": "sweep-node macos v0.17.23 Workers 2 of 5 CPU 59% Memory 2.3 GB free Disk 6.1 GB free claude codex · not ready cursor · not ready Update Rename Remove",
+      "updateDisabled": false
+    },
+    {
+      "text": "sweep-node-2 macos · seen just now v0.17.23 Update Rename Remove",
+      "updateDisabled": false
+    }
+  ],
+  "reconnecting-phone": [
+    {
+      "text": "1 working 59s",
+      "opacity": "0.45"
+    },
+    {
+      "text": "Working 59s",
+      "opacity": "0.45"
+    }
+  ],
+  "ux13-phone": "Can't reach the hub at 127.0.0.1:8871. Check your connection and try again."
+}
