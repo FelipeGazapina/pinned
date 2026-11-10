@@ -5451,6 +5451,51 @@ fn a_notice_missed_while_its_machine_was_offline_is_tried_again_after_it_reconne
     assert_eq!(again.calls("notice"), 0, "a reconnect after the notice was taken sends it no more");
 }
 
+fn confirmation_notified(database: &str, id: &str) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let id: uuid::Uuid = id.parse().unwrap();
+        client.query_one("select notified from agent_confirmations where id = $1", &[&id]).await.unwrap().get(0)
+    })
+}
+
+#[test]
+fn a_notice_the_machine_took_but_the_hub_never_recorded_is_sent_again_without_reaching_the_session_twice() {
+    let mut hub = TestHub::start("notice_once");
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let (ana_spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let (bob_spare, _) = account::register_machine(&url, &bob_token, "bob-spare", "linux").unwrap();
+    let decide = |agent: &mut Agent, spare: &str| {
+        let id = act(&agent.dir, &agent.tab, "remove_machine", json!({ "id": spare })).unwrap()["id"].as_str().unwrap().to_owned();
+        agent.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        assert_eq!(agent.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap()["outcome"], "done");
+        wait_for("the notice in the agent's queue", || agent.node.machine.view(&agent.tab).unwrap().queued >= 1);
+        id
+    };
+    let (anas, bobs) = (decide(&mut ana, &ana_spare.id), decide(&mut bob, &bob_spare.id));
+    for (agent, id) in [(&ana, &anas), (&bob, &bobs)] {
+        let told = turn_end_context(&agent.dir, &agent.tab);
+        assert!(told.starts_with(&format!("[pinned] The user approved your remove_machine request ({id}): done")), "typed once: {told}");
+        wait_for("the hub to record the notice", || confirmation_notified(&hub.database, id));
+    }
+
+    // The answer that told the hub ana's machine took the notice never arrived, and the hub restarts.
+    admin_on(&hub.database, &format!("update agent_confirmations set notified = false where id = '{anas}'"));
+    hub.restart();
+
+    wait_long("the hub to send the notice again and record it", Duration::from_secs(40), || confirmation_notified(&hub.database, &anas));
+    assert_eq!(ana.node.machine.view(&ana.tab).unwrap().queued, 0, "the notice was queued for the session again");
+    assert_eq!(turn_end_context(&ana.dir, &ana.tab), "", "the session got the notice twice");
+    assert_eq!((bob.node.machine.view(&bob.tab).unwrap().queued, turn_end_context(&bob.dir, &bob.tab)), (0, String::new()), "bob's session heard of ana's confirmation");
+    assert!(confirmation_notified(&hub.database, &bobs));
+}
+
 /// `act` on `machine` (a name or id) instead of the session's own.
 fn act_on(dir: &Path, tab: &str, machine: &str, action: &str, args: Value) -> Result<Value, String> {
     session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }))

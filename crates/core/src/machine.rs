@@ -9960,6 +9960,60 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.\n[pinned] The user approved your remove_machine request (c-2): done.");
     }
 
+    fn notice_call(m: &Machine, tab: &str, session: Option<&str>, id: &str) -> Result<Value, String> {
+        m.call(Call::Notice { tab: tab.into(), session: session.map(Into::into), text: format!("[pinned] The user approved your remove_machine request ({id}): done."), id: id.into() })
+    }
+
+    fn done_event(tab: &str, session: &str) -> AgentEvent {
+        AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.into()), session: Some(session.into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: true, reply: None }
+    }
+
+    #[test]
+    fn a_notice_typed_into_the_session_is_not_queued_again_when_the_hub_sends_it_again() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
+        assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)));
+        let (context, _) = m.take_notices(&done_event(&tab, "s-1"));
+        assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.");
+        assert_eq!(m.view(&tab).unwrap().queued, 0, "the notice was typed");
+        assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)), "the hub marks it notified on this answer");
+        assert_eq!(m.view(&tab).unwrap().queued, 0, "a notice typed once queued again");
+        assert_eq!(m.take_notices(&done_event(&tab, "s-1")).0, "", "the session got the notice twice");
+        assert_eq!(notice_call(&m, &tab, None, "c-2"), Ok(json!(true)));
+        assert_eq!(m.view(&tab).unwrap().queued, 1, "another id still queues");
+    }
+
+    #[test]
+    fn a_notice_typed_before_a_restart_is_not_queued_again_after_it() {
+        let root = temp("notice-restart");
+        let first = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let tab = first.open_tab(None, false).unwrap();
+        first.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
+        assert_eq!(notice_call(&first, &tab, None, "c-1"), Ok(json!(true)));
+        assert_eq!(first.take_notices(&done_event(&tab, "s-1")).0, "[pinned] The user approved your remove_machine request (c-1): done.");
+        drop(first);
+
+        let second = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let back = second.open_tab(None, false).unwrap();
+        second.tab(&back, |t| t.claude_session = Some("s-1".into())).unwrap();
+        assert_eq!(notice_call(&second, &tab, Some("s-1"), "c-1"), Ok(json!(true)), "the tab that took it was found by its session");
+        assert_eq!(notice_call(&second, "tab-gone-9", None, "c-1"), Ok(json!(true)), "a repeat is answered even with no tab to find");
+        assert_eq!(second.view(&back).unwrap().queued, 0, "a restart made the notice type again");
+        assert_eq!(notice_call(&second, &tab, Some("s-1"), "c-2"), Ok(json!(true)));
+        assert_eq!(second.view(&back).unwrap().queued, 1, "a new id still queues");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_notice_with_the_same_id_for_another_tab_is_still_queued() {
+        let m = machine();
+        let (mine, other) = (m.open_tab(None, false).unwrap(), m.open_tab(None, false).unwrap());
+        assert_eq!(notice_call(&m, &mine, None, "c-1"), Ok(json!(true)));
+        assert_eq!(notice_call(&m, &other, None, "c-1"), Ok(json!(true)));
+        assert_eq!((m.view(&mine).unwrap().queued, m.view(&other).unwrap().queued), (1, 1), "one tab's notice kept another's out");
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_worker_past_the_time_limit_is_stopped_and_task_status_says_why() {
