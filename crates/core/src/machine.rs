@@ -2731,20 +2731,21 @@ impl Machine {
     /// Under `ReportPolicy::Auto` the Capitão's last reply goes up to the orchestrator and answers
     /// the messages in flight, but only once the Capitão is idle with none of its own tasks still at
     /// work and has something to say: a turn that ends on a tool call, or one that waits for a worker,
-    /// leaves them in flight for the turn that ends the work. A turn that failed reports at once.
+    /// leaves them in flight for the turn that ends the work. A task at work holds the report only
+    /// while the oldest message in flight is under `CAPTAIN_HOLD` old, so a Capitão that always has a
+    /// worker running still answers. A turn that failed reports at once.
     fn captain_turn_ended(&self, captain: &str, project: &Path, event: &AgentEvent) {
         if self.global_settings().reports != global::ReportPolicy::Auto {
             self.sent.lock().unwrap().answer(project);
             return;
         }
-        if self.sent.lock().unwrap().in_flight(project).is_empty() {
-            return;
-        }
+        let Some(oldest) = self.sent.lock().unwrap().in_flight(project).iter().map(|sent| sent.at).min() else { return };
         let text = match event.status {
             AgentStatus::Failed => format!("Parou com um erro: {}", event.message.as_deref().unwrap_or("desconhecido")),
             _ => {
                 let Some(reply) = self.reply_of(captain, event).filter(|reply| !reply.trim().is_empty()) else { return };
-                if self.delegates.working_for(&format!("tab:{captain}")) > 0 {
+                let waited = unix_now().saturating_sub(oldest);
+                if waited < CAPTAIN_HOLD.as_secs() && self.delegates.working_for(&format!("tab:{captain}")) > 0 {
                     return;
                 }
                 let machine = self.hub_id.lock().unwrap().clone();
@@ -5353,6 +5354,10 @@ const REPORT_CHARS: usize = 4000;
 /// keeps its first `REPORT_HEAD` and last `REPORT_TAIL` characters, since a summary or a table of
 /// results usually closes a message.
 const CAPTAIN_REPORT_CHARS: usize = 16_000;
+
+/// How long a Capitão's task at work holds its report back, counted from the oldest message in
+/// flight; after it the next reply goes up even with tasks still working.
+const CAPTAIN_HOLD: Duration = Duration::from_secs(600);
 const REPORT_HEAD: usize = 10_000;
 const REPORT_TAIL: usize = 5_000;
 
@@ -9579,6 +9584,32 @@ while True:
         wait_for("the report", || reports().len() == 1);
         assert_eq!(reports(), ["The form ships: PR #7."]);
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_report_goes_up_once_the_message_has_waited_ten_minutes_though_a_task_still_works() {
+        let (m, dir, path, capitao, reports) = report_stack("report-hold-ends");
+        let started = delegate_task(&m, &capitao, json!({
+            "task": "Run the pipeline.",
+            "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" },
+        }));
+        let task = started["taskId"].as_str().unwrap().to_owned();
+
+        captain_turn(&m, &dir, &path, &capitao, 1, "r-1", Some("Started the pipeline."));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(reports(), Vec::<String>::new(), "a fresh message is held while its task works");
+
+        m.sent.lock().unwrap().backdate("r-1", CAPTAIN_HOLD.as_secs() + 1);
+        append_transcript(&dir, "s1", &turn_lines(2, "[Orquestrador] reply now with the plan", Some("The plan: ship the form, then the report.")));
+        m.record_event(hook(&capitao, AgentStatus::Working));
+        m.record_event(hook(&capitao, AgentStatus::Done));
+        wait_for("the report", || reports().len() == 1);
+        assert_eq!(reports(), ["The plan: ship the form, then the report."]);
+        assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
+        assert!(m.delegates.working_for(&format!("tab:{capitao}")) > 0, "the task is still working");
+        m.delegates.fail(&task, "stopped for the test".into(), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
