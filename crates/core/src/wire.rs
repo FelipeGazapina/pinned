@@ -155,6 +155,10 @@ pub struct TabView {
     /// the next turn starts or fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// While the session waits on an approval or a question mid-turn: the tool call or the question
+    /// it waits on, read from its transcript, such as the command a permission prompt shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -347,6 +351,15 @@ pub enum Call {
     /// `null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`
     /// ended there. `from` is the hub's stamp of the machine that reports it.
     RemoteEnded { from: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// `null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits
+    /// on the user for `ask`, or, with none, waits on nothing now.
+    RemoteAsked {
+        from: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<crate::delegate::RemoteAsk>,
+    },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
@@ -1125,6 +1138,15 @@ pub enum HubCall {
     /// From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated
     /// here as `task`.
     RemoteEnded { to: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// From a machine: `true` once machine `to` took what the worker of the task its tab `tab`
+    /// delegated here as `task` waits on the user for. No `ask` says it waits on nothing now.
+    RemoteAsked {
+        to: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<crate::delegate::RemoteAsk>,
+    },
     /// `connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for
     /// boxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.
     SetBoxClaudeToken { name: String, token: String },
@@ -1521,6 +1543,7 @@ mod tests {
             orchestrator_turn: false,
             queued: 0,
             question: None,
+            ask_detail: None,
         }
     }
 

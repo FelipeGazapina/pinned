@@ -262,6 +262,21 @@ pub struct RemoteEnd {
     pub error: Option<String>,
 }
 
+/// What a task that runs on another machine waits on the user for: its thread there is blocked on
+/// an approval or a question. The machine that runs it reports it as it starts and again, as `None`,
+/// once it is answered, and the thread that delegated the task keeps it until then.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoteAsk {
+    pub kind: crate::global_orchestrator::AskKind,
+    /// The tool an approval is for, such as `Bash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What the thread asks, as its session said it.
+    pub ask: String,
+    /// Unix seconds the thread started to wait.
+    pub since: u64,
+}
+
 /// The delegation request, after the MCP arguments have been read once.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Request {
@@ -430,6 +445,8 @@ pub struct RemoteTarget {
     pub tab: Option<String>,
     /// When this machine last asked that machine how the task goes.
     pub looked: Option<Instant>,
+    /// What the worker there waits on the user for, while it does.
+    pub waiting: Option<RemoteAsk>,
 }
 
 /// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
@@ -2682,7 +2699,7 @@ exec '{real}' "$@"
             client_request_id: None,
             role: None,
         });
-        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None });
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
         assert_eq!(delegates.cards("tab-1"), vec![], "its thread on mini nests under tab-1 instead");
         let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None };
         assert!(!delegates.settle_remote(&task.id, "tab-1", "m-other", &end), "another machine can't end it");

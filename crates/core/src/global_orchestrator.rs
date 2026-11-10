@@ -411,6 +411,16 @@ pub struct Waiting {
     pub machine_name: String,
     pub tab: TabId,
     pub kind: WaitingKind,
+    /// Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that
+    /// predates it, and from any other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<AskKind>,
+    /// The tool an `approval` is for, such as `Bash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What the tool call or the question is, such as the command a permission prompt shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// The project folder the tab works in, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -432,6 +442,38 @@ pub enum WaitingKind {
     /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
     /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
     Confirm,
+}
+
+/// What a session that cannot go on without the user asks of them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    /// A tool waits on a permission prompt.
+    Approval,
+    /// The session asked a question (`AskUserQuestion`).
+    Question,
+}
+
+impl AskKind {
+    /// How a row or a notice names it.
+    pub fn word(self) -> &'static str {
+        match self {
+            AskKind::Approval => "approval",
+            AskKind::Question => "question",
+        }
+    }
+}
+
+/// What the notice `message` of a session blocked on the user asks: an approval, with the tool it
+/// is for, when Claude Code said it needs permission to use one, else a question. The sidebar's
+/// `askOf` in `ui/global-chat.js` follows the same cases, which `waiting_cases.json` lists.
+pub fn ask_of(message: Option<&str>) -> (AskKind, Option<String>) {
+    let message = message.unwrap_or_default();
+    if !message.to_ascii_lowercase().contains("permission") {
+        return (AskKind::Question, None);
+    }
+    let tool = message.split_once(" to use ").map(|(_, tool)| tool.trim().trim_end_matches('.').to_owned()).filter(|tool| !tool.is_empty());
+    (AskKind::Approval, tool)
 }
 
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
@@ -550,11 +592,15 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
                 _ => None,
             };
             if let Some(kind) = kind {
+                let (ask, tool) = if kind == WaitingKind::NeedsInput { let (ask, tool) = ask_of(tab.message.as_deref()); (Some(ask), tool) } else { (None, None) };
                 waiting.push(Waiting {
                     machine: session.machine.clone(),
                     machine_name: session.machine_name.clone(),
                     tab: session.id.clone(),
                     kind,
+                    ask,
+                    tool,
+                    detail: tab.ask_detail.clone().filter(|_| kind == WaitingKind::NeedsInput),
                     project: machine.projects.iter().any(|p| Path::new(&p.path) == Path::new(&session.project.path)).then(|| session.project.path.clone()),
                     title: session.title.clone(),
                     message: session.message.clone(),

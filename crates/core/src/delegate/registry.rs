@@ -466,10 +466,36 @@ impl Delegates {
     }
 
     /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
-    pub fn set_remote(&self, id: &str, remote: RemoteTarget) {
+    pub fn set_remote(&self, id: &str, mut remote: RemoteTarget) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            remote.waiting = remote.waiting.or_else(|| task.remote.as_ref().and_then(|was| was.waiting.clone()));
             task.remote = Some(remote);
         }
+    }
+
+    /// Notes what the worker of a task on another machine waits on the user for, or that it waits
+    /// on nothing now. Only a working task that `tab` owns and `from` runs takes it. `Some(changed)`
+    /// when it did, `None` when it did not.
+    pub fn set_remote_waiting(&self, id: &str, tab: &str, from: &str, ask: Option<RemoteAsk>) -> Option<bool> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter_mut().find(|task| task.id == id)?;
+        let owned = matches!(&task.parent, Parent::Tab(parent) if parent == tab);
+        let remote = task.remote.as_mut().filter(|remote| owned && !task.state.terminal() && remote.machine == from)?;
+        Some(std::mem::replace(&mut remote.waiting, ask.clone()) != ask)
+    }
+
+    /// Each working task a tab on another machine delegated here, with the thread that runs it:
+    /// this task, its origin machine, tab and own id for it, and the thread's tab.
+    pub fn remote_threads(&self) -> Vec<(String, String, String, String, String)> {
+        let tasks = self.tasks.lock().unwrap();
+        let mut found = vec![];
+        for task in tasks.iter().filter(|task| !task.state.terminal()) {
+            let Parent::Tab(key) = &task.parent else { continue };
+            let Some((machine, tab)) = Origin::of_key(key) else { continue };
+            let (Some(origin_task), Some(thread)) = (task.client_request_id.clone(), task.thread.as_ref().filter(|thread| thread.runs)) else { continue };
+            found.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, thread.tab.clone()));
+        }
+        found
     }
 
     /// The remote task's status as the machine running it last answered, when it is time to ask
@@ -494,6 +520,9 @@ impl Delegates {
             let owned = matches!(&task.parent, Parent::Tab(parent) if parent == tab);
             if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| remote.machine != from) {
                 return false;
+            }
+            if let Some(remote) = task.remote.as_mut() {
+                remote.waiting = None;
             }
             task.state = match end.state.as_str() {
                 "failed" => WorkState::Failed,
@@ -1375,12 +1404,23 @@ fn status_json(task: &Task) -> Value {
     if let Some(limit) = &task.limit {
         body["stoppedByLimit"] = json!(limit);
     }
+    if let Some((remote, ask)) = task.remote.as_ref().and_then(|remote| Some((remote, remote.waiting.as_ref()?))).filter(|_| !task.state.terminal()) {
+        body["waiting"] = json!({ "kind": ask.kind, "tool": ask.tool, "ask": ask.ask, "since": ask.since, "machine": remote.name, "tab": remote.tab });
+    }
     with_moved(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
+    } else if let Some((remote, ask)) = task.remote.as_ref().and_then(|remote| Some((remote, remote.waiting.as_ref()?))) {
+        json!(format!(
+            "its worker waits on the user ({}: {}); the user answers in its thread on {}, so do not cancel it for that; {}",
+            ask.kind.word(),
+            ask.ask,
+            remote.name,
+            working_next(task)
+        ))
     } else if task.summary.is_some() && !task.run.background.is_empty() {
         json!(format!(
             "it replied, and summary holds the reply so far; it still runs the work listed in background; pinned ends it when that work finishes and it replies again, or, when only shells are left, after {} with no activity; to stop it now, call task_cancel with taskId \"{}\"; otherwise {}",

@@ -49,6 +49,13 @@ const TASTE_WAIT: Duration = Duration::from_millis(500);
 const MCP_WAIT: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const MCP_WAIT: Duration = Duration::from_millis(500);
+/// What a remote worker waits on the user for, as its machine told the one that delegated it.
+struct SentAsk {
+    ask: Option<crate::delegate::RemoteAsk>,
+    at: Instant,
+    sent: bool,
+}
+
 /// How often a remote task's status asks the machine running it, and an end that did not get
 /// through is sent again.
 const REMOTE_LOOK: Duration = Duration::from_secs(3);
@@ -363,6 +370,8 @@ struct Tab {
     message: Option<String>,
     /// What the last finished turn asked the user, until the next turn starts or fails.
     question: Option<String>,
+    /// The tool call or question the session waits on while a turn is blocked on the user.
+    ask_detail: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
@@ -449,6 +458,7 @@ impl Tab {
             taste_chat: taste::is_chat(&self.env),
             queued: queued.get(id).copied().unwrap_or_default(),
             question: self.question.clone(),
+            ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
         }
     }
 
@@ -541,6 +551,9 @@ pub struct Machine {
     /// When the end of each task run here for another machine's tab was last sent, by task, so
     /// an end the hub could not pass on is sent again at most every `REMOTE_LOOK`.
     remote_ends: Mutex<HashMap<String, Instant>>,
+    /// What each task running here for another machine last told that machine its worker waits on,
+    /// by task id, and whether the hub passed it on.
+    remote_asks: Mutex<HashMap<String, SentAsk>>,
     memories: Arc<memory::Memories>,
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
@@ -725,6 +738,7 @@ impl Machine {
             agents: Mutex::default(),
             delegates,
             remote_ends: Mutex::default(),
+            remote_asks: Mutex::default(),
             memories,
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
@@ -994,6 +1008,7 @@ impl Machine {
             Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
             Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
             Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
+            Call::RemoteAsked { from, tab, task, ask } => json(self.remote_asked(&from, &tab, &task, ask)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
@@ -2622,6 +2637,9 @@ impl Machine {
                 since: u64::try_from(confirmation.at).ok(),
                 project: None,
                 kind: global::WaitingKind::Confirm,
+                ask: None,
+                tool: None,
+                detail: None,
                 machine: confirmation.machine,
                 machine_name: confirmation.machine_name,
                 tab: confirmation.tab,
@@ -3805,6 +3823,7 @@ impl Machine {
         // A thread's own session runs the child, so its steps are in the thread's transcript.
         if let Some(thread) = self.delegates.get(id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
             status["recentSteps"] = serde_json::json!(self.thread_steps(&thread.tab));
+            status["waiting"] = serde_json::json!(self.thread_ask(&thread.tab));
         }
         Ok(status.to_string())
     }
@@ -3986,14 +4005,14 @@ impl Machine {
         self.delegates.hold_to(&task.id, held);
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
-        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None });
+        self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
         let asked = HubCall::Delegate { tab, task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         match self.call_hub(asked) {
             Ok(answer) => {
                 let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
                 let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
                 let tab = answer["tabId"].as_str().map(str::to_owned);
-                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()) });
+                self.delegates.set_remote(&task.id, RemoteTarget { machine, name, tab, looked: Some(Instant::now()), waiting: None });
                 self.arm_delegate_pass();
                 self.remote_started(&task.id)
             }
@@ -4028,6 +4047,11 @@ impl Machine {
 
     /// Ends the remote task when `answer`, the status its machine gave, says it ended.
     fn settle_from(&self, tab: &str, id: &str, remote: &crate::delegate::RemoteTarget, answer: &Value) {
+        // A machine that keeps count of what its worker waits on says so in every status, `null`
+        // included; one that predates it sends no key, which leaves what a notice told.
+        if answer.get("waiting").is_some() {
+            self.apply_remote_ask(tab, id, &remote.machine, serde_json::from_value(answer["waiting"].clone()).ok());
+        }
         let state = answer["workState"].as_str().unwrap_or_default();
         if !matches!(state, "result_available" | "failed" | "cancelled") {
             return;
@@ -4050,6 +4074,96 @@ impl Machine {
         self.maybe_deliver(tab);
         self.emit_tabs();
         true
+    }
+
+    /// `Call::RemoteAsked`: the machine `from` runs this machine's task `task` for `tab`, and its
+    /// worker waits on the user for `ask`, or waits on nothing now.
+    fn remote_asked(&self, from: &str, tab: &str, task: &str, ask: Option<crate::delegate::RemoteAsk>) -> bool {
+        self.apply_remote_ask(tab, task, from, ask)
+    }
+
+    /// Keeps what a remote task's worker waits on the user for, and tells `tab` once when it starts
+    /// to wait. False when `tab` has no such working task on `from`.
+    fn apply_remote_ask(&self, tab: &str, id: &str, from: &str, ask: Option<crate::delegate::RemoteAsk>) -> bool {
+        let Some(changed) = self.delegates.set_remote_waiting(id, tab, from, ask.clone()) else { return false };
+        if let (true, Some(ask)) = (changed, &ask) {
+            self.tell_asked(tab, id, ask);
+        }
+        if changed {
+            self.emit_tabs();
+        }
+        true
+    }
+
+    /// Queues the news that a remote worker waits on the user for `ask` into `tab`, which types it
+    /// once idle, the way a task's end arrives. Each ask is told once, though the machine that runs
+    /// the worker may report it again.
+    fn tell_asked(&self, tab: &str, id: &str, ask: &crate::delegate::RemoteAsk) {
+        let Some(task) = self.delegates.get(id) else { return };
+        let place = task.remote.as_ref().map_or("another machine", |remote| remote.name.as_str());
+        let what = match (ask.kind, ask.tool.as_deref()) {
+            (global::AskKind::Approval, Some(tool)) => format!("approval to use {tool}"),
+            (kind, _) => kind.word().to_owned(),
+        };
+        let line = format!(
+            "[pinned] Worker \"{}\" on {place} waits on the user for {what}: {}. The user answers in its thread on {place}; it keeps its place, so do not cancel it for that.",
+            task.title, ask.ask
+        );
+        let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
+        if self.delegates.queue_notice(&format!("ask:{id}:{}", ask.since), tab, session, line) {
+            self.arm_delegate_pass();
+        }
+    }
+
+    /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
+    fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
+        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new())).ok()?;
+        if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
+            return None;
+        }
+        let (kind, tool) = global::ask_of(view.message.as_deref());
+        Some(crate::delegate::RemoteAsk { kind, tool, ask: view.ask_detail.or(view.message).unwrap_or_default(), since: view.updated.unwrap_or_default() })
+    }
+
+    /// The tool call or question the session of `tab` is blocked on: the latest call of its
+    /// transcript that has no result yet.
+    fn pending_ask(&self, tab: &str) -> Option<String> {
+        let file = self.transcript(tab).ok()?;
+        let page = thread::read(&file, thread::last_page(&file)).ok()?;
+        let (_, summary) = thread::pending_tool(&page.items)?;
+        Some(summary.to_owned()).filter(|summary| !summary.is_empty())
+    }
+
+    /// Tells the machine that delegated each task running here for another machine what its
+    /// worker waits on the user for, and that it waits on nothing once answered. Each change is
+    /// sent until the hub passes it on, at most every `REMOTE_LOOK`.
+    fn send_remote_asks(&self, now: Instant) {
+        let threads = self.delegates.remote_threads();
+        let asks: Vec<_> = threads.into_iter().map(|(id, machine, tab, task, thread)| (id, machine, tab, task, self.thread_ask(&thread))).collect();
+        let due: Vec<_> = {
+            let mut sent = self.remote_asks.lock().unwrap();
+            sent.retain(|id, _| asks.iter().any(|(task, ..)| task == id));
+            asks.into_iter()
+                .filter(|(id, _, _, _, ask)| match sent.get(id) {
+                    None => ask.is_some(),
+                    Some(was) => was.ask != *ask || (!was.sent && now.saturating_duration_since(was.at) >= REMOTE_LOOK),
+                })
+                .collect()
+        };
+        for (id, machine, tab, task, ask) in due {
+            self.remote_asks.lock().unwrap().insert(id.clone(), SentAsk { ask: ask.clone(), at: now, sent: false });
+            match self.call_hub(HubCall::RemoteAsked { to: machine.clone(), tab, task, ask: ask.clone() }) {
+                Ok(_) if ask.is_none() => {
+                    self.remote_asks.lock().unwrap().remove(&id);
+                }
+                Ok(_) => {
+                    if let Some(entry) = self.remote_asks.lock().unwrap().get_mut(&id) {
+                        entry.sent = true;
+                    }
+                }
+                Err(e) => eprintln!("pinned: could not tell {machine} what {id} waits on: {e}"),
+            }
+        }
     }
 
     /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
@@ -4707,6 +4821,7 @@ impl Machine {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
+                machine.send_remote_asks(Instant::now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
@@ -4944,6 +5059,7 @@ impl Machine {
             title: None,
             message: None,
             question: None,
+            ask_detail: None,
             held: vec![],
             turn_pending: None,
             background_wait: None,
@@ -5080,6 +5196,9 @@ impl Machine {
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
+        // Claude says it waits for input a while after every finished turn too, which asks nothing.
+        let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
+        let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at, t.held_at_limit);
             match event.status {
@@ -5108,6 +5227,7 @@ impl Machine {
             if event.status != AgentStatus::NeedsInput {
                 t.question = None;
             }
+            t.ask_detail = detail;
             t.status = Some(event.status);
             if event.title.is_some() {
                 t.title = event.title.clone();
@@ -10664,7 +10784,7 @@ Have another model review a risky change before it goes ahead.";
             client_request_id: None,
             role: None,
         });
-        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()) });
+        m.delegates.set_remote(&task.id, RemoteTarget { machine: machine.into(), name: name.into(), tab: None, looked: Some(Instant::now()), waiting: None });
         task.id
     }
 
