@@ -490,15 +490,16 @@ impl Delegates {
     }
 
     /// Ends a task that runs on another machine as that machine reports it. Only a working task
-    /// that `tab` owns, by the id it has now or the one it was delegated from, and `from` runs
-    /// takes it. Returns the tab that owns it now when it took it.
+    /// that `tab` owns, by the id it has now or the one it was delegated from, and `from` runs (or
+    /// that no machine is known to run yet) takes it. Returns the tab that owns it now when it took it.
     pub fn settle_remote(&self, id: &str, tab: &str, from: &str, end: &RemoteEnd) -> Option<String> {
         let parent = {
             let mut tasks = self.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|task| task.id == id)?;
             let Parent::Tab(parent) = &task.parent else { return None };
             let owned = parent == tab || task.remote_tab.as_deref() == Some(tab);
-            if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| remote.machine != from) {
+            // A task the hub is still starting has no machine yet: its first word is from the machine that runs it.
+            if !owned || task.state.terminal() || task.remote.as_ref().is_none_or(|remote| !remote.machine.is_empty() && remote.machine != from) {
                 return None;
             }
             let parent = parent.clone();
@@ -510,10 +511,21 @@ impl Delegates {
             task.summary = end.summary.clone();
             task.error = end.error.clone();
             task.ended = Some(unix_millis());
+            if let Some(usage) = end.usage {
+                task.usage = usage;
+            }
             parent
         };
         self.persist();
         Some(parent)
+    }
+
+    /// Shows what the worker of a remote task has used so far, as the machine that runs it
+    /// reported. Nothing is recorded from it: that machine records the run.
+    pub fn note_remote_usage(&self, id: &str, usage: TaskUsage) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id && !task.state.terminal() && task.remote.is_some()) {
+            task.usage = usage;
+        }
     }
 
     /// The end of each finished task that a tab on another machine delegated here and whose end
@@ -527,7 +539,8 @@ impl Delegates {
             let Parent::Tab(key) = &task.parent else { continue };
             let Some((machine, tab)) = Origin::of_key(key) else { continue };
             let Some(origin_task) = task.client_request_id.clone() else { continue };
-            let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone() };
+            let usage = TaskUsage { wall_ms: task.ended.unwrap_or(task.started).saturating_sub(task.started), ..task.usage };
+            let end = RemoteEnd { state: task.state.as_str().to_owned(), summary: task.summary.clone(), error: task.error.clone(), usage: Some(usage) };
             ends.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, end));
         }
         ends

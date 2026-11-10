@@ -226,10 +226,20 @@ impl Hub {
     /// would both see it stopped and start it twice. Locks nobody holds are dropped as others are
     /// taken, so the map stays small.
     pub async fn hold_captain(&self, account: &Account, machine: &str, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("{}:{machine}:{path}", account.id)).await
+    }
+
+    /// Held while the worker for task `task` of thread `tab` on `machine` starts elsewhere, so a
+    /// repeat of that start waits for the first and finds its worker instead of making another.
+    pub async fn hold_start(&self, account: &Account, machine: &str, tab: &str, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("start:{}:{machine}:{tab}:{task}", account.id)).await
+    }
+
+    async fn hold(&self, key: String) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.agent_locks.lock().unwrap();
             locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-            locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
         lock.lock_owned().await
     }
@@ -647,8 +657,10 @@ impl Hub {
                 let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
                 let now = pinned_core::connectors::unix_millis();
                 let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
-                let records = self.db.task_records(account.id, since).await?;
-                return json(pinned_core::delegate::aggregate(&records, now, days));
+                let (records, unreadable) = self.db.task_records(account.id, since).await?;
+                let mut stats = pinned_core::delegate::aggregate(&records, now, days);
+                stats.unreadable = unreadable;
+                return json(stats);
             }
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {

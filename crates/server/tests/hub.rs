@@ -4965,6 +4965,125 @@ fn a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mi
     wait_for("the box to go", || hub.boxes.live().is_empty());
 }
 
+/// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
+fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
+    let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let creds = account::pair(&hub.url, code["code"].as_str().unwrap(), name, "linux").unwrap();
+    let raw = RawMachine::start(&hub.url, &creds.machine_token, |_| RawReply::Ok(Value::Null));
+    client.wait_machines(machines);
+    raw
+}
+
+/// The `delegate` call a thread `tab` sends the hub for its task `task`.
+fn delegate_call(task: &str, target: Value, repo: &str) -> Value {
+    json!({ "cmd": "delegate", "tab": "tab-1", "task": task, "request": request(json!({ "task": "Run it.", "title": "Slow", "target": target })), "repo": repo, "access": "auto" })
+}
+
+#[test]
+fn a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second() {
+    let hub = TestHub::start_with_boxes("rbox_again", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-bloomtoken" })).unwrap();
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let caller = raw_caller(&hub, &mut ana.client, "caller", &[("caller", true)]);
+    let to_box = json!({ "box": { "size": "small", "repo": "acme/site" }, "providerInstanceId": "bloom" });
+
+    let first = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
+    assert_eq!((first["workState"].as_str(), first["box"].is_string()), (Some("working"), true), "{first}");
+    let again = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
+    assert_eq!(again, first, "the repeat of a start the caller gave up waiting on is answered with the box already starting");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1, "and the Box API saw one create");
+    assert_eq!(ana.rows(&hub), 1);
+
+    let other = caller.ask(delegate_call("task-2", to_box, SITE)).unwrap();
+    assert_ne!(other["box"], first["box"], "another task is another box: {other}");
+    assert_eq!((hub.boxes.state.lock().unwrap().created.len(), ana.rows(&hub)), (2, 2));
+}
+
+#[test]
+fn a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker() {
+    let mut fleet = Fleet::start("remote_again");
+    origin(&fleet.mini_dir.join("site"), SITE);
+    fleet.mini.machine.open_project(fleet.mini_dir.join("site"));
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    let caller = raw_caller(&fleet.hub, &mut fleet.client, "caller", &[("mac", true), ("mini", true), ("caller", true)]);
+    let to_mini = json!({ "machine": fleet.mini_id, "providerInstanceId": "work" });
+    let answers: Vec<Value> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..3).map(|_| scope.spawn(|| caller.ask(delegate_call("task-1", to_mini.clone(), SITE)).unwrap())).collect();
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+    assert!(answers.iter().all(|a| a["taskId"] == answers[0]["taskId"] && a["tabId"] == answers[0]["tabId"] && a["tabId"].is_string()), "{answers:?}");
+    let workers = fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count();
+    assert_eq!(workers, 1, "three asks for one task started one worker on mini");
+}
+
+#[test]
+fn a_remote_workers_usage_reaches_the_task_that_asked_and_is_recorded_once() {
+    let hub = TestHub::start_with_boxes("remote_usage", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("remote-usage-mac");
+    let (mac, mac_id, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let usage = |tokens: u64, cost: f64| json!({ "tokens_in": tokens, "tokens_out": 30, "cost_usd": cost, "wall_ms": 90_000 });
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ended = finished.clone();
+    let worker = RawMachine::start(&hub.url, &mini.machine_token, move |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" if ended.load(Ordering::SeqCst) => RawReply::Ok(json!({ "workState": "result_available", "summary": "Done.", "usage": { "tokens_in": 1200, "tokens_out": 30, "cost_usd": 0.42, "wall_ms": 90_000 } })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working", "usage": { "tokens_in": 500, "tokens_out": 10, "cost_usd": 0.1, "wall_ms": 30_000 } })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["usage"]["tokens_in"], 0, "nothing came back yet");
+    wait_for("the live usage to show", || task_status(&mac_dir, &captain, &task)["usage"]["tokens_in"] == 500);
+
+    finished.store(true, Ordering::SeqCst);
+    wait_for("the end to land", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!((status["usage"]["tokens_in"].as_u64(), status["usage"]["tokens_out"].as_u64(), status["usage"]["cost_usd"].as_f64()), (Some(1200), Some(30), Some(0.42)), "{status}");
+
+    // The machine that ran it records the run, and the delegating one records none of it.
+    let mut record = task_record("task-m", "claude-opus-5-5", "done", 2, Some(0.42), now_ms());
+    record["usage"]["tokens_in"] = json!(1200);
+    worker.ask(json!({ "cmd": "record_tasks", "records": [record] })).unwrap();
+    let again = delegate_from(&mac_dir, &captain, json!({ "task": "Run the next one.", "title": "Next", "target": { "machine": "mini" } })).unwrap();
+    let next = again["taskId"].as_str().unwrap().to_owned();
+    worker.ask(json!({ "cmd": "remote_ended", "to": mac_id, "tab": captain, "task": next, "end": { "state": "result_available", "summary": "ok", "usage": usage(900, 0.3) } })).unwrap();
+    let status = task_status(&mac_dir, &captain, &next);
+    assert_eq!((status["workState"].as_str(), status["usage"]["tokens_in"].as_u64(), status["usage"]["cost_usd"].as_f64()), (Some("result_available"), Some(900), Some(0.3)), "an end that carries usage lands it: {status}");
+    assert_eq!(mac.machine.local_delegation_stats(1).totals.runs, 0, "the delegating machine records no remote task");
+    let stats = ana.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["totals"]["cost_usd"].as_f64()), (Some(1), Some(0.42)), "the run counts once, from the machine that ran it: {stats}");
+}
+
+#[test]
+fn delegation_stats_counts_the_stored_records_it_cannot_read() {
+    let hub = TestHub::start("stats_unreadable");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now_ms())] })).unwrap();
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["unreadable"].as_u64()), (Some(1), Some(0)), "{stats}");
+
+    admin_on(&hub.database, &format!(
+        "insert into delegation_tasks (account, machine, id, ended, record) values ('{ana_account}', '{}', 'odd', {}, '{{\"id\":\"odd\",\"outcome\":\"a-new-outcome\"}}'), ('{ana_account}', '{}', 'odd-2', {}, '[]')",
+        machine.id,
+        now_ms(),
+        machine.id,
+        now_ms(),
+    ));
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["unreadable"].as_u64()), (Some(1), Some(2)), "two rows the hub cannot read are counted, not dropped without a word: {stats}");
+}
+
 #[test]
 fn task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account() {
     let hub = TestHub::start_with_boxes("remote_gone", Signup::Open, fast());

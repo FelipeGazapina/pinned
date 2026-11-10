@@ -1030,7 +1030,7 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
   if (live) {
     const compacting = /^\/compact\b/.test(turn.user?.text ?? "") && !turn.dividers.some((d) => d.kind === "compaction");
     const active = turn.steps.slice(turn.steps.findLastIndex((s) => s.kind === "text") + 1).filter((s) => (s.kind === "tool" || s.kind === "thinking") && !shown.includes(s));
-    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? Date.now() - turn.start : 0)}</span>`;
+    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? clockMs() - turn.start : 0)}</span>`;
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
@@ -1338,7 +1338,7 @@ threadView.addEventListener("scroll", () => {
 }, { passive: true });
 
 visibleInterval(() => {
-  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(Date.now() - Number(ticker.dataset.since));
+  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(clockMs() - Number(ticker.dataset.since));
 }, 1000);
 
 

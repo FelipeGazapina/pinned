@@ -87,9 +87,9 @@ impl Shared {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.pending.lock().unwrap().remove(&id);
-                Err("the hub did not answer within 60 seconds".into())
+                Err(HUB_TIMEOUT.into())
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the connection to the hub dropped".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(DROPPED.into()),
         }
     }
 
@@ -137,6 +137,15 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
 
 /// What a hub call answers while the link is down.
 pub const OFFLINE: &str = "not connected to the hub";
+/// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
+pub const HUB_TIMEOUT: &str = "the hub did not answer within 60 seconds";
+const DROPPED: &str = "the connection to the hub dropped";
+
+/// Whether a hub call failed for want of an answer, not because the hub refused it: it may have
+/// run anyway, and asking again is safe only for a call the hub answers the same way twice.
+pub fn is_unanswered(error: &str) -> bool {
+    matches!(error, HUB_TIMEOUT | OFFLINE | DROPPED)
+}
 
 impl Link {
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.

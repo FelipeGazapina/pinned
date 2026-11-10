@@ -187,6 +187,7 @@ function page() {
     refreshSyncStopped() {},
     resetAgentSurface() {},
     settingsOpen: () => false,
+    noteHubLink() {},
     render: () => sandbox.publishThreadWatch(),
     POLL_MS: 1200,
     visibleInterval: (tick) => (state.tick = tick),
