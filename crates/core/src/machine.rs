@@ -69,6 +69,9 @@ const START_RETRY: Duration = Duration::from_secs(5);
 /// How often this machine asks after each task it delegated elsewhere on its own, so one whose
 /// machine is gone, whose box never connected or whose end got lost ends here too.
 const REMOTE_CHECK: Duration = Duration::from_secs(60);
+/// How long a thread held for its delegated tasks stays idle with all of them ended before its own
+/// task ends, so the notice of the last one gets to start the turn that answers it.
+const HOLD_CLEAR: Duration = Duration::from_secs(5);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -123,6 +126,7 @@ impl Launch {
         let files = files.tempdir()?.keep();
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
+        hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -170,7 +174,8 @@ impl Launch {
                         cmd.args(configs);
                     }
                     cmd.arg("--settings");
-                    cmd.arg(&self.settings);
+                    // The global orchestrator's own: no Bash, and its file tools held to its folders.
+                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -246,18 +251,40 @@ struct Screen {
     viewers: Vec<(ViewerId, Sink)>,
     /// Counts starts, so a replaced session's last bytes can't land on its successor's screen.
     session: u64,
+    /// The session's terminal size, as (rows, cols).
+    size: (u16, u16),
+    /// Reads the screen while the session waits on a menu, to tell when the user answered it.
+    watch: Option<crate::menu_watch::MenuWatch>,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
+        self.watch = None;
         self.session += 1;
         self.session
+    }
+
+    fn watch_menu(&mut self) {
+        if self.watch.is_none() {
+            let (rows, cols) = self.size;
+            self.watch = Some(crate::menu_watch::MenuWatch::new(rows, cols, self.kept.make_contiguous(), Instant::now()));
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.size = (rows, cols);
+        if let Some(watch) = self.watch.as_mut() {
+            watch.resize(rows, cols);
+        }
     }
 
     fn push(&mut self, session: u64, bytes: &[u8]) {
         if session != self.session {
             return;
+        }
+        if let Some(watch) = self.watch.as_mut() {
+            watch.feed(bytes, Instant::now());
         }
         self.kept.extend(bytes);
         let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
@@ -302,6 +329,16 @@ struct ChildParent {
     /// Workers at once in the project, when this machine counts them.
     parallel: Option<u32>,
     delegator: crate::delegate::Delegator,
+    /// Where the caller's `delegate_task` placed it, when the caller is here.
+    placed: Option<crate::placement::Placed>,
+}
+
+/// How a start sent to another machine went.
+enum Sent {
+    /// The `delegate_task` answer.
+    Started(String),
+    /// That machine refused it, and the task is gone, so placement may try another.
+    Refused(String),
 }
 
 /// `delegate_task`'s answer when the project already runs as many workers as it allows.
@@ -326,6 +363,11 @@ struct ThreadChild<'a> {
 struct BackgroundWait {
     since: Instant,
     shells_only: bool,
+    /// The transcript listed background work still running at the turn's end. Claude Code starts
+    /// a turn when that work hands back, so only a wait on tasks alone ends from the delegate pass.
+    in_session: bool,
+    /// Since when nothing is left to wait on while the thread stays idle.
+    clear_since: Option<Instant>,
 }
 
 struct Tab {
@@ -490,7 +532,9 @@ impl Tab {
             Some(AgentStatus::Done) => true,
             Some(AgentStatus::NeedsInput) => !self.interrupted,
             None => self.claude_session.is_some(),
-            Some(AgentStatus::Working | AgentStatus::Failed) => false,
+            // A turn held for work it left running is over: a task's notice may wake it.
+            Some(AgentStatus::Working) => self.background_wait.is_some(),
+            Some(AgentStatus::Failed) => false,
         }
     }
 
@@ -1060,6 +1104,7 @@ impl Machine {
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
+            Call::RepoLook { path, look } => self.repo_look(&path, &look),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
             Call::MemorySave { path, title, text, kind, id } => {
                 let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
@@ -2180,7 +2225,11 @@ impl Machine {
             t.held.clear();
             (t.session.take(), t.screen.clone())
         })?;
-        let session = screen.lock().unwrap().restart();
+        let session = {
+            let mut screen = screen.lock().unwrap();
+            screen.size = (size.rows, size.cols);
+            screen.restart()
+        };
         // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
         // would otherwise reach the viewers. It kills it silently, so its exit can't be mistaken for the new one's.
         drop(old);
@@ -2309,6 +2358,8 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.resize(tab, cols, rows);
         }
+        let screen = self.tab(tab, |t| t.screen.clone())?;
+        screen.lock().unwrap().resize(rows, cols);
         self.tab(tab, |t| match t.session.as_ref() {
             Some(s) => s.resize(pty::size(cols, rows)),
             None => Ok(()),
@@ -2788,6 +2839,46 @@ impl Machine {
         }
     }
 
+    /// `repo_look::look` of a project folder of this machine, never the global orchestrator's own:
+    /// an overview also lists the project's latest memories.
+    fn repo_look(&self, path: &str, look: &crate::repo_look::RepoLook) -> Result<Value, String> {
+        let path = canonical(path);
+        if !self.projects.lock().unwrap().iter().any(|p| p.path == path) {
+            return Err(format!("{} is not a project on this machine", path.display()));
+        }
+        let mut out = crate::repo_look::look(&path, look)?;
+        if *look == crate::repo_look::RepoLook::Overview {
+            let memories = self.memories.search(&path, "", 10).unwrap_or_default();
+            let cut = |text: &str| crate::repo_look::redact(&text.chars().take(300).collect::<String>()).0;
+            out["memory"] = memories.iter().map(|m| json!({ "id": m.id, "title": m.title, "text": cut(&m.text) })).collect();
+        }
+        Ok(out)
+    }
+
+    /// Whether the global orchestrator's tool call may run. Every other session's may: only the
+    /// global orchestrator's settings send its calls here.
+    fn guard(&self, tab: &str, tool: &str, input: &Value) -> Result<String, String> {
+        let (cwd, global, account) = self.tab(tab, |t| (t.cwd.clone(), global::is_global(&t.env), t.account.clone()))?;
+        if !global {
+            return Ok(String::new());
+        }
+        let projects: Vec<PathBuf> = self.projects.lock().unwrap().iter().map(|p| p.path.clone()).collect();
+        let config = self.accounts.env(&account).into_iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map_or_else(|| home().join(".claude"), |(_, v)| PathBuf::from(v));
+        let roots = orchestrator_roots(&cwd, self.uploads.as_deref(), &config, &claude_tmp(), &projects);
+        crate::repo_look::guard(&roots, &cwd, tool, input).map(|()| String::new())
+    }
+
+    /// The global orchestrator's repo tools, always through the hub: it checks that the account
+    /// allows them, holds them to the read rate and writes each to the audit trail.
+    fn repo_tool(&self, tab: &str, project: &str, machine: Option<&str>, look: crate::repo_look::RepoLook) -> Result<String, String> {
+        let call = HubCall::RepoLook { tab: tab.to_owned(), project: project.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), look };
+        match self.call_hub(call) {
+            Ok(out) => text_json(out),
+            Err(e) if e == NOT_LINKED => Err("the repo tools read through the hub, and this machine is not signed in to one".into()),
+            Err(e) => Err(needs_update(e)),
+        }
+    }
+
     /// What waits on the user across the account's machines, for the `waiting` tool.
     fn waiting(&self) -> Result<Vec<global::Waiting>, String> {
         let mut waiting = self.projects_overview()?.waiting;
@@ -2973,6 +3064,18 @@ impl Machine {
             ProjectTool::ReadSession { id, machine, items } => {
                 only_global()?;
                 self.read_session(&id, machine.as_deref(), items)
+            }
+            ProjectTool::RepoOverview { project, machine } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Overview)
+            }
+            ProjectTool::RepoRead { project, machine, path, rev, from_line, lines } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Read { file: path, rev, from_line, lines })
+            }
+            ProjectTool::RepoSearch { project, machine, query, glob, regex, case, max } => {
+                only_global()?;
+                self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Search { query, glob, regex, case, max })
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
                 only_global()?;
@@ -3285,15 +3388,24 @@ impl Machine {
     /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
     /// is a worker.
     fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
+        self.caller_limits_from(&self.tastes(), tab)
+    }
+
+    /// `caller_limits` under tastes already read.
+    fn caller_limits_from(&self, tastes: &Tastes, tab: &str) -> Result<taste::Limits, String> {
         let cwd = self.tab(tab, |t| t.cwd.clone())?;
-        Ok(self.limits_in(tab, &history::project_of(&cwd)))
+        Ok(self.limits_from(tastes, tab, &history::project_of(&cwd)))
     }
 
     /// The limits for starting a session in `project` on behalf of `tab`: the project's, narrowed by
     /// the limits of the task `tab` itself runs, when it is a worker here.
     fn limits_in(&self, tab: &str, project: &Path) -> taste::Limits {
+        self.limits_from(&self.tastes(), tab, project)
+    }
+
+    fn limits_from(&self, tastes: &Tastes, tab: &str, project: &Path) -> taste::Limits {
         let own_task = self.tab(tab, |t| t.task.clone()).ok().flatten();
-        let limits = self.tastes().resolve(&captain_scope(project)).limits();
+        let limits = tastes.resolve(&captain_scope(project)).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
         outer.map_or(limits, |outer| limits.narrow(outer))
     }
@@ -3961,6 +4073,7 @@ impl Machine {
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
+                Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
             }
         })
@@ -4169,9 +4282,11 @@ impl Machine {
         Ok(body.to_string())
     }
 
-    /// `delegate_task` with `target.machine` or `target.box`: the hub runs it there, and this
-    /// machine keeps the task, under its own id, for the caller's `task_status` and notice.
-    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+    /// `delegate_task` with `target.machine` or `target.box`, or placed on another machine: the hub
+    /// runs it there, and this machine keeps the task, under its own id, for the caller's
+    /// `task_status` and notice. With `may_refuse`, a machine that refuses it leaves no task, so
+    /// placement can try another.
+    fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed, may_refuse: bool) -> Result<Sent, String> {
         use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
         let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
         let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
@@ -4182,7 +4297,7 @@ impl Machine {
         }
         let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
         let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
-        let place = request.target.machine.clone().unwrap_or_else(|| "an Upstash Box".into());
+        let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
         let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
@@ -4204,10 +4319,11 @@ impl Machine {
             client_request_id: request.client_request_id.clone(),
             role: request.role.clone(),
         }, Some(limits.parallel)) {
-            Claim::Existing(id) => return self.remote_started(&id),
+            Claim::Existing(id) => return self.remote_started(&id).map(Sent::Started),
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        self.delegates.set_placement(&task.id, placed);
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         self.delegates.hold_to(&task.id, held);
         self.delegates.describe(&task.id, delegator.clone(), effort);
@@ -4218,12 +4334,16 @@ impl Machine {
         match self.call_hub(asked.clone()) {
             Ok(answer) => {
                 self.remote_answered(&task.id, &answer);
-                self.remote_started(&task.id)
+                self.remote_started(&task.id).map(Sent::Started)
             }
             // The hub may still be starting it: a failed task here would let a retry start a second one.
             Err(error) if crate::link::is_unanswered(&error) => {
                 self.finish_start(tab, task.id.clone(), asked, begun);
-                self.remote_started(&task.id)
+                self.remote_started(&task.id).map(Sent::Started)
+            }
+            Err(error) if may_refuse => {
+                self.delegates.discard(&task.id);
+                Ok(Sent::Refused(needs_update(error)))
             }
             Err(error) => {
                 let error = needs_update(error);
@@ -4238,6 +4358,9 @@ impl Machine {
         let machine = answer["machine"].as_str().unwrap_or_default().to_owned();
         let name = answer["machineName"].as_str().map_or_else(|| machine.clone(), str::to_owned);
         let tab = answer["tabId"].as_str().map(str::to_owned);
+        if let Some(placed) = self.delegates.get(id).and_then(|task| task.placement) {
+            self.delegates.set_placement(id, crate::placement::Placed { machine: machine.clone(), machine_name: name.clone(), ..placed });
+        }
         self.delegates.set_remote(id, crate::delegate::RemoteTarget { machine, name, tab, looked: Some(Instant::now()), waiting: None });
         self.arm_delegate_pass();
     }
@@ -4568,7 +4691,7 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::Parent;
+        use crate::placement::{By, Placed, Route};
         let caller = Self::require_caller(tab, parent_task)?;
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
@@ -4581,22 +4704,88 @@ impl Machine {
         if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
             return self.remote_started(&id);
         }
-        let limits = self.caller_limits(caller.tab.as_deref().unwrap_or_default())?;
-        if request.target.machine.is_some() || request.target.boxed.is_some() {
-            return self.delegate_elsewhere(&caller, tool, request, limits);
+        let tastes = self.tastes();
+        let limits = self.caller_limits_from(&tastes, caller.tab.as_deref().unwrap_or_default())?;
+        match crate::placement::route(&tastes.placement, &request) {
+            Route::Explicit => {
+                let placed = Placed { machine: String::new(), machine_name: String::new(), by: By::Explicit, reason: "the request names it".into(), skipped: vec![] };
+                match self.delegate_elsewhere(&caller, tool, request, limits, placed, false)? {
+                    Sent::Started(body) => Ok(body),
+                    Sent::Refused(error) => Err(error),
+                }
+            }
+            Route::Here(by, reason) => {
+                let (machine, machine_name) = self.machine_ids();
+                self.start_here(&caller, tool, request, limits, Placed { machine, machine_name, by, reason, skipped: vec![] })
+            }
+            Route::Ask => self.place_and_start(&caller, tool, request, limits),
         }
-        let delegator = self.delegator(&caller);
+    }
+
+    /// Starts a worker on this machine for `caller`, placed as `placed` says.
+    fn start_here(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed) -> Result<String, String> {
+        use crate::delegate::Parent;
+        request.target.machine = None;
+        let delegator = self.delegator(caller);
         let parallel = Some(limits.parallel);
+        let placed = Some(placed);
         let side = if let Some(tab) = caller.tab.clone() {
             let (account, model, provider, auth, cwd, ceiling) = self.tab(&tab, |t| (t.account.id.clone(), t.model.clone(), t.account.provider, t.account.auth, t.cwd.clone(), t.child_access()))?;
-            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator }
+            ChildParent { parent: Parent::Tab(tab.clone()), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: Some(tab), origin: None, account: Some(account), inherited_model: model, provider, auth, cwd, ceiling, limits, parallel, delegator, placed }
         } else {
             let id = caller.task.clone().unwrap_or_default();
             let task = self.delegates.lineage(&id).ok_or_else(|| format!("no task {id}"))?;
             let auth = self.accounts.get(&task.account).map(|account| account.auth).unwrap_or_default();
-            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator }
+            ChildParent { parent: Parent::Task(id), caller_key: caller.key(), client_request_id: request.client_request_id.clone(), tab: None, origin: None, account: Some(task.account), inherited_model: task.model, provider: task.provider, auth, cwd: task.cwd, ceiling: task.access, limits, parallel, delegator, placed }
         };
         self.launch_child(side, tool, request)
+    }
+
+    /// Asks the hub where a heavy worker runs, and starts it there. A machine that refuses it is
+    /// left out of one more ask; when that one refuses too, or the hub can't place it, the worker
+    /// runs here. Placing never fails the task.
+    fn place_and_start(&self, caller: &crate::delegate::Caller, tool: Option<String>, request: crate::delegate::Request, limits: taste::Limits) -> Result<String, String> {
+        use crate::placement::{By, Need, Placed, Skip, Why};
+        let (own, own_name) = self.machine_ids();
+        let here = |reason: &str, skipped: Vec<Skip>| Placed { machine: own.clone(), machine_name: own_name.clone(), by: By::Fallback, reason: reason.to_owned(), skipped };
+        let Some(tab) = caller.tab.clone() else {
+            return self.start_here(caller, tool, request, limits, here("a worker's own worker runs on its machine", vec![]));
+        };
+        let Some(repo) = git_remote(&self.tab(&tab, |t| t.cwd.clone())?) else {
+            return self.start_here(caller, tool, request, limits, here("this thread's folder has no git origin, so no other machine can find its project", vec![]));
+        };
+        let need = Need { account: request.target.account.clone().filter(|id| !id.is_empty()), driver_kind: request.target.driver_kind.clone(), model: request.target.model.clone() };
+        let mut refused: Vec<Skip> = vec![];
+        loop {
+            let asked = HubCall::Place { repo: Some(repo.clone()), need: need.clone(), exclude: refused.iter().map(|skip| skip.machine.clone()).collect() };
+            let mut placed = match self.call_hub(asked).and_then(|answer| serde_json::from_value::<Placed>(answer).map_err(|e| e.to_string())) {
+                Ok(placed) => placed,
+                Err(e) => {
+                    eprintln!("pinned: the hub did not place a worker: {e}");
+                    here("the hub could not be reached to place it", refused.clone())
+                }
+            };
+            // The hub knows that a machine refused, and this machine knows why.
+            for skip in placed.skipped.iter_mut().filter(|skip| skip.why == Why::Refused) {
+                if let Some(why) = refused.iter().find(|done| done.machine == skip.machine) {
+                    skip.detail.clone_from(&why.detail);
+                }
+            }
+            if placed.machine == own {
+                return self.start_here(caller, tool, request, limits, placed);
+            }
+            let mut sent = request.clone();
+            sent.target.machine = Some(placed.machine.clone());
+            match self.delegate_elsewhere(caller, tool.clone(), sent, limits, placed.clone(), true)? {
+                Sent::Started(body) => return Ok(body),
+                Sent::Refused(error) => refused.push(Skip { machine: placed.machine, machine_name: placed.machine_name, why: Why::Refused, detail: error }),
+            }
+            if refused.len() > 1 {
+                let names: Vec<&str> = refused.iter().map(|skip| skip.machine_name.as_str()).collect();
+                let reason = format!("{} refused it, so it runs on the machine that asked", names.join(" and "));
+                return self.start_here(caller, tool, request, limits, here(&reason, refused));
+            }
+        }
     }
 
     /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
@@ -4631,6 +4820,7 @@ impl Machine {
             parallel: Some(own.parallel),
             delegator: origin.delegator.clone(),
             origin: Some(origin),
+            placed: None,
         };
         self.launch_child(side, None, request)
     }
@@ -4699,7 +4889,7 @@ impl Machine {
 
     fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, SpawnSpec};
-        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator } = side;
+        let ChildParent { parent, caller_key, client_request_id, tab: parent_tab, origin, account: account_id, inherited_model, provider: parent_provider, auth: parent_auth, mut cwd, ceiling, limits, parallel, delegator, placed } = side;
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
         } else if let Some(id) = account_id {
@@ -4746,6 +4936,9 @@ impl Machine {
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        if let Some(placed) = placed {
+            self.delegates.set_placement(&task.id, placed);
+        }
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         if let Some(moved) = moved {
             self.delegates.set_moved(&task.id, moved);
@@ -4934,9 +5127,18 @@ impl Machine {
         if let Some(session) = self.tab(tab, |t| t.claude_session.clone()).ok().flatten() {
             self.delegates.set_conversation(&task, session);
         }
+        let reply = self.reply_of(tab, event);
+        if error.is_none() {
+            self.delegates.turn_finished(&task, reply.clone(), vec![]);
+        }
         // The meter reads a working task only; this reads the turn that just ended before it settles.
         self.meter_workers();
-        let parent = self.delegates.settle_thread(&task, self.reply_of(tab, event), error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
+        // A cap the finished turn crossed ended the task with this reply; the pass delivers its notice.
+        if self.delegates.is_terminal(&task) {
+            self.arm_delegate_pass();
+            return true;
+        }
+        let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -4952,17 +5154,76 @@ impl Machine {
         }
     }
 
-    /// Whether the worker's turn that just ended left background work it started pending, which
-    /// Claude Code resumes the worker with once it hands back. Notes since when the worker waits.
-    fn waits_on_background(&self, tab: &str) -> bool {
-        let started = self.tab(tab, |t| t.started).ok().flatten();
+    /// Whether the thread's turn that just ended left work it started still running: background
+    /// shells or subagents, which Claude Code resumes it with once they hand back, or pinned tasks
+    /// it delegated whose end has not reached it. Notes since when it waits, and tells its own task
+    /// what it waits on and its reply so far.
+    fn waits_on_background(&self, tab: &str, event: &AgentEvent) -> bool {
+        let (started, task) = self.tab(tab, |t| (t.started, t.task.clone())).unwrap_or_default();
         let pending = self.transcript(tab).ok().and_then(|file| thread::pending_background(&file, started).ok()).unwrap_or_default();
-        let wait = (!pending.is_empty()).then(|| BackgroundWait { since: Instant::now(), shells_only: pending.iter().all(|b| *b == thread::Background::Shell) });
+        let children = self.delegates.waited_children(tab, task.as_deref());
+        let shells = pending.iter().filter(|b| **b == thread::Background::Shell).count();
+        let wait = (!pending.is_empty() || !children.is_empty()).then(|| BackgroundWait {
+            since: Instant::now(),
+            shells_only: children.is_empty() && shells == pending.len(),
+            in_session: !pending.is_empty(),
+            clear_since: None,
+        });
         let _ = self.tab(tab, |t| t.background_wait = wait);
-        if wait.is_some() {
-            self.arm_delegate_pass();
+        if wait.is_none() {
+            return false;
         }
-        wait.is_some()
+        if let Some(task) = task {
+            let mut held_on = vec![];
+            if shells > 0 {
+                held_on.push(crate::delegate::many_of(shells, "background shell"));
+            }
+            if pending.len() > shells {
+                held_on.push(crate::delegate::many_of(pending.len() - shells, "background subagent"));
+            }
+            self.delegates.turn_finished(&task, self.reply_of(tab, event), held_on);
+        }
+        self.arm_delegate_pass();
+        true
+    }
+
+    /// Ends the hold of each idle thread whose delegated tasks all ended and reached it, with no
+    /// background work of its own, once that stays so for `HOLD_CLEAR`: its latest reply is its end.
+    fn end_finished_holds(&self, now: Instant) {
+        let held: Vec<(String, Option<String>)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.background_wait.is_some_and(|w| !w.in_session) && t.turn_pending.is_none()).map(|(id, t)| (id.clone(), t.task.clone())).collect();
+        let mut ended = vec![];
+        for (tab, task) in held {
+            let clear = self.delegates.waited_children(&tab, task.as_deref()).is_empty();
+            let ripe = self.tab(&tab, |t| {
+                let Some(wait) = t.background_wait.as_mut() else { return false };
+                wait.clear_since = if clear { Some(wait.clear_since.unwrap_or(now)) } else { None };
+                if !wait.clear_since.is_some_and(|since| now.saturating_duration_since(since) >= HOLD_CLEAR) || t.turn_pending.is_some() {
+                    return false;
+                }
+                t.background_wait = None;
+                t.status = Some(AgentStatus::Done);
+                t.updated = Some(unix_now());
+                true
+            });
+            if ripe == Ok(true) {
+                ended.push(tab);
+            }
+        }
+        for tab in ended {
+            self.end_hold(&tab);
+        }
+    }
+
+    /// A held thread's wait is over: its task ends with its latest reply, or a worker without one reports.
+    fn end_hold(&self, tab: &str) {
+        let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        if !self.settle_thread_task(tab, &event) {
+            if let Ok(Some((Role::Worker, project))) = self.tab(tab, |t| role_of(&t.env)) {
+                self.report_worker(tab, &project, &event, Some(AgentStatus::Working));
+            }
+        }
+        self.maybe_deliver(tab);
+        self.emit_tabs();
     }
 
     /// Ends the wait of a worker left waiting only on background shells and quiet for as long as a
@@ -4970,25 +5231,58 @@ impl Machine {
     /// it is the worker's last.
     fn end_quiet_waits(&self, now: Instant) {
         let quiet = Duration::from_millis(crate::delegate::QUIET_AFTER_REPLY_MS);
-        let ended: Vec<(String, PathBuf)> = {
+        let ended: Vec<String> = {
             let mut tabs = self.tabs.lock().unwrap();
             let ripe = tabs.iter_mut().filter(|(_, t)| t.background_wait.is_some_and(|w| w.shells_only && now.saturating_duration_since(w.since) >= quiet));
-            ripe.filter_map(|(id, t)| {
+            ripe.map(|(id, t)| {
                 t.background_wait = None;
                 t.status = Some(AgentStatus::Done);
                 t.updated = Some(unix_now());
-                Some((id.clone(), role_of(&t.env)?.1))
+                id.clone()
             })
             .collect()
         };
-        for (tab, project) in ended {
-            let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
-            if !self.settle_thread_task(&tab, &event) {
-                self.report_worker(&tab, &project, &event, Some(AgentStatus::Working));
+        for tab in ended {
+            self.end_hold(&tab);
+        }
+    }
+
+    /// Each session that waited on the user mid-turn and whose menu the user answered works again
+    /// now, instead of at its next hook event: its ask clears and its task's time limit counts.
+    fn clear_answered_asks(&self, now: Instant) {
+        let asking: Vec<(String, Arc<Mutex<Screen>>)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).map(|(id, t)| (id.clone(), t.screen.clone())).collect();
+        let mut changed = false;
+        for (tab, screen) in asking {
+            {
+                let mut screen = screen.lock().unwrap();
+                if !screen.watch.as_ref().is_some_and(|watch| watch.answered(now)) {
+                    continue;
+                }
+                screen.watch = None;
             }
-            self.maybe_deliver(&tab);
+            changed |= self
+                .tab(&tab, |t| {
+                    let asked = t.status == Some(AgentStatus::NeedsInput) && t.interrupted;
+                    if asked {
+                        t.status = Some(AgentStatus::Working);
+                        t.message = None;
+                        t.ask_detail = None;
+                        t.updated = Some(unix_now());
+                    }
+                    asked
+                })
+                .unwrap_or(false);
+        }
+        if changed {
             self.emit_tabs();
         }
+    }
+
+    /// Pauses the time limit of each task whose thread here waits on the user mid-turn, and
+    /// resumes the others'. A task on another machine pauses on that machine's word.
+    fn note_user_waits(&self, now: Instant) {
+        let waiting: Vec<String> = self.tabs.lock().unwrap().values().filter(|t| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).filter_map(|t| t.task.clone()).collect();
+        self.delegates.note_user_waits(&waiting, now);
     }
 
     /// The last steps of a thread's conversation, as `task_status` lists them.
@@ -5097,6 +5391,8 @@ impl Machine {
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                machine.clear_answered_asks(Instant::now());
+                machine.note_user_waits(Instant::now());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.send_remote_asks(Instant::now());
@@ -5106,6 +5402,7 @@ impl Machine {
                 }
                 machine.follow_headless_threads();
                 machine.end_quiet_waits(Instant::now());
+                machine.end_finished_holds(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
@@ -5327,7 +5624,13 @@ impl Machine {
                 }
             }
             let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
-            let held = worker && event.status == AgentStatus::Done && self.waits_on_background(tab);
+            // A workflow's Run now has no role, but a task: it ends like a worker's.
+            let task = self.tab(tab, |t| t.task.clone()).ok().flatten();
+            let holds = worker || (role.is_none() && task.is_some());
+            let held = holds && event.status == AgentStatus::Done && self.waits_on_background(tab, &event);
+            if let (Some(task), AgentStatus::Working) = (&task, event.status) {
+                self.delegates.turn_started(task);
+            }
             self.record_status(tab, &event);
             if held {
                 let _ = self.tab(tab, |t| t.status = Some(AgentStatus::Working));
@@ -5342,7 +5645,8 @@ impl Machine {
                     }
                 }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
-                // A workflow's Run now is a task with no worker role: its first finished turn ends it too.
+                None if held => {}
+                // A workflow's Run now is a task with no worker role: its turn ends it like a worker's.
                 None => {
                     self.settle_thread_task(tab, &event);
                 }
@@ -5585,6 +5889,18 @@ impl Machine {
         });
         if changed == Ok(true) {
             self.save_sessions();
+        }
+        let asks = event.status == AgentStatus::NeedsInput && !was_done;
+        if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
+            let mut screen = screen.lock().unwrap();
+            if asks {
+                screen.watch_menu();
+            } else {
+                screen.watch = None;
+            }
+        }
+        if asks {
+            self.arm_delegate_pass();
         }
         if event.status == AgentStatus::NeedsInput && !was_done && self.tab(tab, |t| t.ask_detail.is_none()).unwrap_or(false) {
             self.find_ask_detail_later(tab);
@@ -5836,6 +6152,33 @@ fn canonical(path: &str) -> PathBuf {
 
 /// How many memories a search returns when not told.
 const SEARCH_LIMIT: usize = 8;
+
+/// Claude Code's name for a folder under `projects/` and its temp folder: every character but a
+/// letter or digit becomes `-`.
+fn claude_slug(path: &Path) -> String {
+    path.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Where Claude Code keeps each session's scratchpad: `/tmp/claude-<uid>`.
+fn claude_tmp() -> PathBuf {
+    #[cfg(unix)]
+    return PathBuf::from(format!("/tmp/claude-{}", unsafe { libc::getuid() }));
+    #[cfg(not(unix))]
+    return std::env::temp_dir().join("claude");
+}
+
+/// The folders the global orchestrator's own file tools reach. It reads the user's uploads, its
+/// scratchpad, its memory, its own folder and each Captain's scratchpad, and writes only the
+/// scratchpad, the memory and its own folder.
+fn orchestrator_roots(own: &Path, uploads: Option<&Path>, config: &Path, tmp: &Path, projects: &[PathBuf]) -> crate::repo_look::Roots {
+    let scratch = tmp.join(claude_slug(own));
+    let memory = config.join("projects").join(claude_slug(own)).join("memory");
+    let write = vec![scratch, memory, own.to_owned()];
+    let mut read = write.clone();
+    read.extend(uploads.map(Path::to_owned));
+    read.extend(projects.iter().map(|p| tmp.join(claude_slug(p))));
+    crate::repo_look::Roots { read, write }
+}
 
 /// Most of a worker's last message an orchestrator is sent; the rest stays in the thread.
 const REPORT_CHARS: usize = 4000;
@@ -9862,7 +10205,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", "s", "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", hooks::GLOBAL_SETTINGS, "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -10189,6 +10532,17 @@ while True:
         assert_eq!(reports(), Vec::<String>::new());
         assert_eq!(m.sent.lock().unwrap().in_flight(&PathBuf::from(&path)).len(), 2, "both messages still wait for a reply");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrators_file_tools_reach_its_folders_and_read_captains_scratchpads() {
+        let own = Path::new("/Users/ana/.pinned/orquestrador");
+        let roots = orchestrator_roots(own, Some(Path::new("/Users/ana/.pinned/uploads")), Path::new("/Users/ana/.claude"), Path::new("/tmp/claude-501"), &[PathBuf::from("/Users/ana/code/site.app")]);
+        let scratch = PathBuf::from("/tmp/claude-501/-Users-ana--pinned-orquestrador");
+        let memory = PathBuf::from("/Users/ana/.claude/projects/-Users-ana--pinned-orquestrador/memory");
+        assert_eq!(roots.write, [scratch.clone(), memory.clone(), own.to_owned()]);
+        assert_eq!(roots.read, [scratch, memory, own.to_owned(), PathBuf::from("/Users/ana/.pinned/uploads"), PathBuf::from("/tmp/claude-501/-Users-ana-code-site-app")]);
     }
 
     #[test]
@@ -12326,6 +12680,113 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A task the thread `tab` delegated, as `delegate_task` from it records one.
+    #[cfg(unix)]
+    fn task_from(m: &Machine, tab: &str, title: &str) -> String {
+        m.delegates
+            .begin(crate::delegate::NewTask {
+                parent: crate::delegate::Parent::Tab(tab.into()),
+                tool: None,
+                title: title.into(),
+                account: "work".into(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: std::env::temp_dir(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{tab}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_that_ends_its_turn_while_its_own_task_works_ends_after_that_task_with_its_latest_reply() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-waits-child");
+        let said = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let sub = task_from(&m, &child, "Rust half");
+        append(&transcript, &[said("The Rust half runs in its own task; I'll merge once it ends.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+
+        let held = status();
+        assert_eq!(held["workState"], "working", "{held}");
+        assert_eq!(held["summary"], "The Rust half runs in its own task; I'll merge once it ends.");
+        assert_eq!(held["waitsOn"]["tasks"], json!([{ "taskId": sub, "title": "Rust half", "workState": "working" }]));
+        assert_eq!(m.delegates.claim_notice(&captain), None, "the captain hears nothing yet");
+        m.end_finished_holds(Instant::now() + HOLD_CLEAR * 10);
+        assert_eq!(status()["workState"], "working", "its task still works");
+
+        m.delegates.settle_thread(&sub, Some("Rust half merged.".into()), None, None, vec![], None);
+        let (notice, _) = m.delegates.claim_notice(&child).expect("the sub-task's notice for the worker");
+        m.record_event(hook_event(&child, "working", &transcript, Some(&notice)));
+        append(&transcript, &[said("Both halves are in: PR #12 is green.")]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("Both halves are in: PR #12 is green.")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_worker_whose_tasks_all_ended_and_reached_it_ends_once_it_stays_idle() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-hold-clears");
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let sub = task_from(&m, &child, "Rust half");
+        append(&transcript, &[json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "Waiting on the Rust half." }] } })]);
+        m.record_event(hook_event(&child, "done", &transcript, None));
+        m.delegates.settle_thread(&sub, Some("Rust half merged.".into()), None, None, vec![], None);
+        m.delegates.claim_notice(&child).unwrap();
+
+        let now = Instant::now();
+        m.end_finished_holds(now);
+        m.end_finished_holds(now + HOLD_CLEAR - Duration::from_millis(1));
+        assert_eq!(status()["workState"], "working", "the last notice may still start a turn");
+        m.end_finished_holds(now + HOLD_CLEAR);
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["summary"].as_str()), (Some("result_available"), Some("Waiting on the Rust half.")));
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_answered_approval_clears_the_wait_while_the_turn_runs_and_the_time_limit_counts_again() {
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-approval-answered");
+        let screen = m.tab(&child, |t| t.screen.clone()).unwrap();
+        let put = |bytes: &[u8]| {
+            let mut screen = screen.lock().unwrap();
+            let session = screen.session;
+            screen.push(session, bytes);
+        };
+        screen.lock().unwrap().resize(24, 80);
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        put("\x1b[2J\x1b[H Bash command\r\n\r\n   cargo publish\r\n\r\n Do you want to proceed?\r\n \u{276f} 1. Yes\r\n   2. No, and tell Claude what to do differently (esc)\r\n".as_bytes());
+        m.record_event(AgentEvent { message: Some("Claude needs your permission to use Bash".into()), ..hook_event(&child, "needs-input", &transcript, None) });
+        let asked = Instant::now();
+        m.note_user_waits(asked);
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::NeedsInput));
+        assert_eq!(m.delegates.get(&task).unwrap().run.user_wait, Some(asked), "the time limit paused");
+
+        m.clear_answered_asks(asked + crate::menu_watch::SETTLE * 4);
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::NeedsInput), "the menu is still up");
+
+        put(b"\x1b[5;1H\x1b[J \xe2\x8f\xba Bash(cargo publish)\r\n   Running\xe2\x80\xa6\r\n");
+        let answered = Instant::now() + crate::menu_watch::SETTLE;
+        m.clear_answered_asks(answered);
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.message.clone()), (Some(AgentStatus::Working), None), "cleared while the turn runs, before any hook");
+        m.note_user_waits(answered);
+        let run = m.delegates.get(&task).unwrap().run;
+        assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn every_thread_fans_out_to_worker_threads_and_agents_lists_the_tree() {
@@ -13551,6 +14012,191 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(machines.len(), 1, "{caps}");
         assert_eq!((&machines[0]["isThisMachine"], &machines[0]["online"], &machines[0]["reported"]), (&json!(true), &json!(true), &json!(true)));
         assert!(machines[0]["providers"].as_array().unwrap().iter().any(|p| p["providerInstanceId"] == "work" && p["driverKind"] == "claude"), "{caps}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
+    /// `m-mini` for heavy work.
+    #[cfg(unix)]
+    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+        let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
+        let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
+        m.set_hub_id("m-book".into(), "MacBook".into());
+        (m, dir, captain)
+    }
+
+    /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
+    /// machine but those in `refuse`. Returns every call it saw.
+    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(call.clone());
+            match call {
+                HubCall::Place { .. } => answers.lock().unwrap().next().unwrap_or_else(|| Err("asked to place once too often".into())),
+                HubCall::Delegate { request, .. } => {
+                    let machine = request.target.machine.unwrap_or_default();
+                    let name = match machine.as_str() {
+                        "m-mini" => "mac-mini",
+                        "m-vps" => "vps",
+                        other => other,
+                    };
+                    match refuse.contains(&machine.as_str()) {
+                        true => Err(format!("{name} is full")),
+                        false => Ok(json!({ "machine": machine, "machineName": name, "workState": "working", "tabId": "tab-there" })),
+                    }
+                }
+                _ => Err("not this test's".into()),
+            }
+        }));
+        calls
+    }
+
+    fn placed_on(machine: &str, name: &str, by: &str, reason: &str, skipped: Value) -> Value {
+        json!({ "machine": machine, "machineName": name, "by": by, "reason": reason, "skipped": skipped })
+    }
+
+    /// The `Place` and `Delegate` calls a hub saw, as `place [excluded]` and `delegate machine`.
+    fn placing_calls(calls: &Mutex<Vec<HubCall>>) -> Vec<String> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call {
+                HubCall::Place { exclude, .. } => Some(format!("place {exclude:?}")),
+                HubCall::Delegate { request, .. } => Some(format!("delegate {}", request.target.machine.as_deref().unwrap_or("-"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn with(args: Value, extra: Value) -> Value {
+        let mut args = args;
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    }
+
+    const PREFERRED: &str = "first preferred machine that fits";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_light_worker_never_asks_the_hub_to_place_it() {
+        let (m, dir, captain) = placing_captain("place-light");
+        let calls = placing_hub(&m, vec![], &[]);
+        let started = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        assert_eq!(placing_calls(&calls), Vec::<String>::new());
+        assert_eq!(
+            started["placement"],
+            json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "light work stays on the machine that asked; pass heavy: true or target.machine \"auto\" to place it" })
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn with_an_empty_policy_a_heavy_worker_runs_here_and_never_asks_the_hub() {
+        let (m, dir, captain) = limited_captain("place-empty", TastePatch::default());
+        for args in [&["init", "-q"][..], &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "start"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
+        m.set_hub_id("m-book".into(), "MacBook".into());
+        let calls = placing_hub(&m, vec![], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), Vec::<String>::new());
+        assert_eq!(started["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "" }), "nothing changes for an account with no policy");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_heavy_worker_runs_where_the_hub_places_it_and_task_status_says_so() {
+        let (m, dir, captain) = placing_captain("place-heavy");
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([])))], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini"]);
+        let place = calls.lock().unwrap().iter().find_map(|call| match call {
+            HubCall::Place { repo, need, .. } => Some((repo.clone(), need.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            place,
+            Some((Some("https://github.com/acme/app.git".into()), crate::placement::Need { account: Some("work".into()), driver_kind: None, model: Some("claude-sonnet-5-5".into()) }))
+        );
+        assert_eq!((&started["machine"], &started["placement"]), (&json!("mac-mini"), &json!({ "machine": "m-mini", "machineName": "mac-mini", "by": "policy", "reason": PREFERRED })));
+        let status: Value = serde_json::from_str(&m.task_status(Some(captain), None, started["taskId"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(status["placement"], started["placement"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hub_that_cannot_place_it_leaves_the_worker_here_with_the_reason() {
+        let (m, dir, captain) = placing_captain("place-unreachable");
+        let calls = placing_hub(&m, vec![Err(crate::link::HUB_TIMEOUT.into())], &[]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true })));
+        assert_eq!(placing_calls(&calls), vec!["place []"]);
+        assert_eq!(started["workState"], "working", "{started}");
+        assert_eq!(started["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "fallback", "reason": "the hub could not be reached to place it" }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_explicit_machine_and_here_skip_the_policy() {
+        let (m, dir, captain) = placing_captain("place-explicit");
+        let calls = placing_hub(&m, vec![], &[]);
+        let there = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree", "target": { "providerInstanceId": "work", "machine": "vps" } })));
+        assert_eq!(placing_calls(&calls), vec!["delegate vps"]);
+        assert_eq!(there["placement"], json!({ "machine": "vps", "machineName": "vps", "by": "explicit", "reason": "the request names it" }));
+        let here = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true, "target": { "providerInstanceId": "work", "machine": "here" } })));
+        assert_eq!(placing_calls(&calls), vec!["delegate vps"], "here asks the hub nothing");
+        assert_eq!(here["placement"], json!({ "machine": "m-book", "machineName": "MacBook", "by": "here", "reason": "target.machine is \"here\"" }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_refused_start_is_placed_once_more_without_that_machine() {
+        let (m, dir, captain) = placing_captain("place-refused");
+        let refused = json!([{ "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini refused it" }]);
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([]))), Ok(placed_on("m-vps", "vps", "policy", PREFERRED, refused))], &["m-mini"]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "isolation": "worktree" })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini", "place [\"m-mini\"]", "delegate m-vps"]);
+        assert_eq!(
+            started["placement"],
+            placed_on("m-vps", "vps", "policy", PREFERRED, json!([{ "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini is full" }])),
+            "the refusal names why"
+        );
+        assert_eq!(m.delegates.running(), vec![started["taskId"].as_str().unwrap().to_owned()], "the refused start left no task");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_second_refusal_runs_the_worker_here_and_never_asks_a_third_time() {
+        let (m, dir, captain) = placing_captain("place-refused-twice");
+        let calls = placing_hub(&m, vec![Ok(placed_on("m-mini", "mac-mini", "policy", PREFERRED, json!([]))), Ok(placed_on("m-vps", "vps", "policy", PREFERRED, json!([])))], &["m-mini", "m-vps"]);
+        let started = delegate_task(&m, &captain, with(work(Some("claude-sonnet-5-5"), None), json!({ "heavy": true })));
+        assert_eq!(placing_calls(&calls), vec!["place []", "delegate m-mini", "place [\"m-mini\"]", "delegate m-vps"]);
+        assert_eq!(started["workState"], "working", "{started}");
+        assert_eq!(
+            started["placement"],
+            placed_on(
+                "m-book",
+                "MacBook",
+                "fallback",
+                "mac-mini and vps refused it, so it runs on the machine that asked",
+                json!([
+                    { "machine": "m-mini", "machineName": "mac-mini", "why": "refused", "detail": "mac-mini is full" },
+                    { "machine": "m-vps", "machineName": "vps", "why": "refused", "detail": "vps is full" },
+                ])
+            )
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

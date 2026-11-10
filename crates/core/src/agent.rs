@@ -127,6 +127,41 @@ pub enum ProjectTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// The global orchestrator's: `repo_look::RepoLook::Overview` of `project`'s checkout.
+    RepoOverview {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The global orchestrator's: `repo_look::RepoLook::Read` of `path` in `project`'s checkout.
+    RepoRead {
+        project: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_line: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<u32>,
+    },
+    /// The global orchestrator's: `repo_look::RepoLook::Search` in `project`'s checkout.
+    RepoSearch {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        glob: Option<String>,
+        #[serde(default)]
+        regex: bool,
+        #[serde(default)]
+        case: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
+    },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
     /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
@@ -348,6 +383,9 @@ pub enum Message {
     CancelReminder { id: u64 },
     /// Not flattened, since a tool's own `kind` argument would collide with the message's tag.
     Project { tab: String, tool: ProjectTool },
+    /// Claude Code's PreToolUse hook in the global orchestrator's session: may tool `tool` run
+    /// with `input`? Ok("") lets it, Err says why not.
+    Guard { tab: String, tool: String, input: serde_json::Value },
     Usage {
         #[serde(flatten)]
         usage: Usage,
