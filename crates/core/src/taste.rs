@@ -333,7 +333,9 @@ impl Taste {
     fn raise_parallel(&mut self) {
         for (profile, old) in OLD_PRESET_PARALLEL {
             let preset = profile.preset().unwrap();
-            if Taste { parallel: self.parallel, ..self.style() } == Taste { parallel: old, ..preset } {
+            let stored = Taste { parallel: self.parallel, ..self.style() };
+            let was_the_default = Taste { parallel: old, ..preset };
+            if stored == was_the_default {
                 self.parallel = preset.parallel;
             }
         }
@@ -830,7 +832,7 @@ pub fn load(dir: Option<&Path>) -> Option<Tastes> {
         Ok(bytes) => {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| eprintln!("pinned: {} is unreadable, so the default taste applies: {e}", dir.join(FILE).display()))
-                .map(|mut tastes| {
+                .map(|mut tastes: Tastes| {
                     tastes.take_raised_defaults();
                     tastes
                 })
