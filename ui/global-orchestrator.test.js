@@ -121,6 +121,9 @@ function page({ settings = {}, older = false, offline = false } = {}) {
       if (call.cmd === "open_global_orchestrator") return "g-1";
       return null;
     },
+    // The sidebar's, which the projects page reads: threads with no spawner stand on their own.
+    spawnTree: (list) => ({ roots: list, kids: new Map() }),
+    projectCostLabel: (roots) => (roots.some((t) => t.view.work) ? "$1.26 · 2 workers" : ""),
     esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
     console: { warn: () => {} },
     document: {
@@ -315,4 +318,15 @@ test("a project's machine opens its Captain tab when one is open", () => {
   const none = { dataset: { project: "site", machine: "local" }, disabled: true };
   click({ target: { closest: (sel) => (sel === ".gp-machine" ? none : null) } });
   assert.deepEqual(activated, [captain]);
+});
+
+test("a project's row shows what its threads and workers cost, and a project with no cost shows none", () => {
+  const { context, pages } = projectsPage();
+  context.projectGroups = () => [
+    { name: "site", tabs: [{ machine: "mm", view: { id: "t1", role: "orchestrator", work: { usd: 1.26, unknown: 0, workers: 2 } } }], checkouts: [] },
+    { name: "infra", tabs: [{ machine: "mm", view: { id: "t2" } }], checkouts: [] },
+  ];
+  context.renderGlobalProjectsPage();
+  const html = pages.at(-1);
+  assert.equal([...html.matchAll(/<span class="gp-cost"[^>]*>([^<]*)<\/span>/g)].map((m) => m[1]).join("|"), "$1.26 · 2 workers");
 });
