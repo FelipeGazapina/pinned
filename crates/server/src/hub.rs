@@ -607,7 +607,7 @@ impl Hub {
             HubCall::CancelBoxClaudeToken { machine, account: name } => {
                 return self.call_machine(account, &machine, Call::CancelSetupToken { account: name }, MACHINE_CALL_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e));
             }
-            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
+            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),

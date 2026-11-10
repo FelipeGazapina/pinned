@@ -344,9 +344,12 @@ function statsHtml(tab) {
   const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
   return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</span>` : "";
 }
+/** A menu on screen is a question, not an approval, when the hooks said the session needs input
+ * rather than permission (an AskUserQuestion menu). */
+const menuIsQuestion = (tab) => tab.view.status === "needs-input" && askOf(tab.view).kind === "question";
 function statusSlot(tab) {
   const phase = phaseOf(tab);
-  if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
+  if (phase === "asking") return menuIsQuestion(tab) ? { icon: "message-circle-question", text: "Question", tone: "input" } : { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
   if (phase === "delegating") {
     // The card's slot is narrow, so it says "2 working" beside the bot icon and keeps the full count in the title.
@@ -500,32 +503,62 @@ function globalSidebarTop() {
   return [...top, ...sections];
 }
 
-/** What each `waitingKindOf` answer reads as, its tone, and the dot's tone. The label is the text
- * that names the kind on the row, so colour is never the only sign. */
-const WAITING_LOOKS = { needs_input: ["Needs input", "question"], failed: ["Failed", "failed"] };
+/** What each kind of blocked thread reads as on its row: the word that names it, and the dot's tone.
+ * The word is text on the row, so colour is never the only sign. */
+const WAITING_LOOKS = { approval: ["Approval", "approval"], question: ["Question", "question"], failed: ["Failed", "failed"] };
 
-/** One row of the waiting area: a dot, the thread's title, and under it the kind in words, where the
- * thread is and since when. Clicking it opens the thread. */
-function waitingRow(tab, label, tone, extra = "") {
+/** The kind a blocked thread's row shows. `waitingKindOf` says it waits; a `needs_input` is an
+ * approval or a question by `askOf`; and a thread the hooks call failed whose card shows a
+ * permission menu is an approval, as its card says, so the card and the list never disagree. */
+function waitingLookOf(tab, kind) {
+  if (kind === "failed") return phaseOf(tab) === "asking" && !menuIsQuestion(tab) ? "approval" : "failed";
+  return askOf(tab.view).kind;
+}
+
+/** What the thread is blocked on, as the row's third line: the tool and the command an approval
+ * is for, the question, or the error that stopped it. Empty when the machine reported nothing but
+ * the generic notice. */
+function askedOf(tab, look) {
+  const view = tab.view;
+  const detail = String(view.ask_detail ?? "").trim();
+  if (look === "approval") {
+    const tool = askOf(view).tool;
+    return { tool, text: detail };
+  }
+  const message = String(view.message ?? "").trim();
+  const generic = /^claude needs your (input|attention)\.?$/i.test(message) || /waiting for your input/i.test(message);
+  return { tool: null, text: look === "question" ? detail || (generic ? "" : message) : message };
+}
+
+/** One row of the waiting area: a dot, the thread's title, under it the kind in words with where
+ * the thread is and since when, and, when there is one, what it asks. Clicking it opens the thread
+ * on its machine. */
+function waitingRow(tab, label, tone, extra = "", asked = { tool: null, text: "" }) {
   const row = document.createElement("div");
   row.className = `waiting-row${extra}`;
   row.dataset.waiting = tab.key;
   row.setAttribute("role", "button");
-  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
+  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)} on ${machineName(tab.machine)}`);
   row.tabIndex = 0;
   const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
-  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+  const what = asked.tool || asked.text ? `<span class="asked">${asked.tool ? `<span class="tool">${esc(asked.tool)}</span>` : ""}${esc(asked.text)}</span>` : "";
+  if (asked.tool || asked.text) row.title = [asked.tool, asked.text].filter(Boolean).join(" ");
+  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span>${what}</span>`;
   return row;
 }
 
-/** Every thread on every machine that is blocked on Felipe, newest first: a question or an approval
- * pending, or a failure, each with its title, where it is and since when. */
+/** Every thread on every machine that is blocked on Felipe, newest first: an approval or a question
+ * pending, or a failure, each with its title, the kind in words, where it is, since when and what it
+ * asks. A worker a Captain started on another machine shows here under that machine's name. */
 function globalWaitingRows() {
   return tabs
     .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
-    .map(({ tab, kind }) => waitingRow(tab, ...(WAITING_LOOKS[kind] ?? [kind, "other"])));
+    .map(({ tab, kind }) => {
+      const look = waitingLookOf(tab, kind);
+      return waitingRow(tab, ...(WAITING_LOOKS[look] ?? [look, "other"]), "", askedOf(tab, look));
+    });
 }
 
 /** The threads whose finished turn ended asking something, newest first, greyed: they wait on

@@ -166,7 +166,7 @@ const metaDot = `<span class="dot">·</span>`;
 /** ThreadStatusIndicators' pill, from the phase the sidebar reads too. */
 function paletteStatus(tab) {
   const phase = phaseOf(tab);
-  if (phase === "asking") return { label: "Pending Approval", tone: "warning" };
+  if (phase === "asking") return menuIsQuestion(tab) ? { label: "Awaiting Input", tone: "input" } : { label: "Pending Approval", tone: "warning" };
   if (phase === "input") return { label: "Awaiting Input", tone: "input" };
   if (phase === "working") return { label: "Working", tone: "info", pulse: true };
   if (phase === "failed") return { label: "Failed", tone: "error" };

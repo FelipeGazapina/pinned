@@ -20,6 +20,9 @@ pub struct Delegates {
     limits: ProviderLimits,
 }
 
+/// What the news that a remote worker waits on the user says between the worker and the ask.
+pub const ASK_NOTICE: &str = " waits on the user for ";
+
 /// A delegated task seen from the thread that runs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadEnd {
@@ -485,14 +488,43 @@ impl Delegates {
     }
 
     /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
-    pub fn set_remote(&self, id: &str, remote: RemoteTarget) {
+    pub fn set_remote(&self, id: &str, mut remote: RemoteTarget) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            remote.waiting = remote.waiting.or_else(|| task.remote.as_ref().and_then(|was| was.waiting.clone()));
             if let (Parent::Tab(tab), None) = (&task.parent, &task.remote_tab) {
                 task.remote_tab = Some(tab.clone());
             }
             task.remote = Some(remote);
         }
         self.persist();
+    }
+
+    /// Notes what the worker of a task on another machine waits on the user for, or that it waits
+    /// on nothing now. Only a working task that `tab` owns, by the id it has now or the one it was
+    /// delegated from, and `from` runs (or that no machine is known to run yet) takes it. Returns
+    /// the tab that owns it now and whether the ask changed, or None when the task did not take it.
+    pub fn set_remote_waiting(&self, id: &str, tab: &str, from: &str, ask: Option<RemoteAsk>) -> Option<(String, bool)> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter_mut().find(|task| task.id == id)?;
+        let Parent::Tab(parent) = &task.parent else { return None };
+        let owned = parent == tab || task.remote_tab.as_deref() == Some(tab);
+        let parent = parent.clone();
+        let remote = task.remote.as_mut().filter(|remote| owned && !task.state.terminal() && (remote.machine.is_empty() || remote.machine == from))?;
+        Some((parent, std::mem::replace(&mut remote.waiting, ask.clone()) != ask))
+    }
+
+    /// Each working task a tab on another machine delegated here, with the thread that runs it:
+    /// this task, its origin machine, tab and own id for it, and the thread's tab.
+    pub fn remote_threads(&self) -> Vec<(String, String, String, String, String)> {
+        let tasks = self.tasks.lock().unwrap();
+        let mut found = vec![];
+        for task in tasks.iter().filter(|task| !task.state.terminal()) {
+            let Parent::Tab(key) = &task.parent else { continue };
+            let Some((machine, tab)) = Origin::of_key(key) else { continue };
+            let (Some(origin_task), Some(thread)) = (task.client_request_id.clone(), task.thread.as_ref().filter(|thread| thread.runs)) else { continue };
+            found.push((task.id.clone(), machine.to_owned(), tab.to_owned(), origin_task, thread.tab.clone()));
+        }
+        found
     }
 
     /// The remote task's status as the machine running it last answered, when it is time to ask
@@ -522,6 +554,9 @@ impl Delegates {
                 return None;
             }
             let parent = parent.clone();
+            if let Some(remote) = task.remote.as_mut() {
+                remote.waiting = None;
+            }
             task.state = match end.state.as_str() {
                 "failed" => WorkState::Failed,
                 "cancelled" => WorkState::Cancelled,
@@ -988,6 +1023,38 @@ impl Delegates {
         }
         self.queue_report(tab, session, text);
         true
+    }
+
+    /// Queues the news that task `id`'s remote worker waits on the user, as `queue_notice` does, tied
+    /// to the task so it is dropped when the task ends and `withdraw_ask` can take it back.
+    pub fn queue_ask(&self, key: &str, tab: &str, session: Option<String>, text: String, id: &str) -> bool {
+        {
+            let mut notices = self.notices.lock().unwrap();
+            if notices.iter().any(|taken| taken == key) {
+                return false;
+            }
+            notices.push(key.to_owned());
+            if notices.len() > NOTICES_KEPT {
+                let extra = notices.len() - NOTICES_KEPT;
+                notices.drain(..extra);
+            }
+        }
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: Some(id.to_owned()), request: None });
+        true
+    }
+
+    /// Takes back the news `queue_ask` queued for task `id` and no tab typed yet: the worker was
+    /// answered since, so telling the tab it waits would be stale.
+    pub fn withdraw_ask(&self, id: &str) {
+        let before = {
+            let mut reports = self.reports.lock().unwrap();
+            let before = reports.len();
+            reports.retain(|report| report.claimed || report.task.as_deref() != Some(id) || !report.text.contains(ASK_NOTICE));
+            before - reports.len()
+        };
+        if before > 0 {
+            self.persist();
+        }
     }
 
     fn push_report(&self, report: Report) {
@@ -1488,12 +1555,23 @@ fn status_json(task: &Task) -> Value {
     if let Some(limit) = &task.limit {
         body["stoppedByLimit"] = json!(limit);
     }
+    if let Some((remote, ask)) = task.remote.as_ref().and_then(|remote| Some((remote, remote.waiting.as_ref()?))).filter(|_| !task.state.terminal()) {
+        body["waiting"] = json!({ "kind": ask.kind, "tool": ask.tool, "ask": ask.ask, "since": ask.since, "machine": remote.name, "tab": remote.tab });
+    }
     with_moved(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
+    } else if let Some((remote, ask)) = task.remote.as_ref().and_then(|remote| Some((remote, remote.waiting.as_ref()?))) {
+        json!(format!(
+            "its worker waits on the user ({}: {}); the user answers in its thread on {}, so do not cancel it for that; {}",
+            ask.kind.word(),
+            ask.ask,
+            remote.name,
+            working_next(task)
+        ))
     } else if task.summary.is_some() && !task.run.background.is_empty() {
         json!(format!(
             "it replied, and summary holds the reply so far; it still runs the work listed in background; pinned ends it when that work finishes and it replies again, or, when only shells are left, after {} with no activity; to stop it now, call task_cancel with taskId \"{}\"; otherwise {}",
@@ -1998,7 +2076,7 @@ impl SavedTask {
             thread: None,
             worker_session: self.worker_session,
             resuming: self.thread_runs && self.state == "working",
-            remote: self.remote.map(|remote| RemoteTarget { machine: remote.machine, name: remote.name, tab: remote.tab, looked: None }),
+            remote: self.remote.map(|remote| RemoteTarget { machine: remote.machine, name: remote.name, tab: remote.tab, looked: None, waiting: None }),
             remote_tab: self.remote_tab,
             limits: self.limits,
             usage: self.usage,

@@ -758,6 +758,7 @@ mod tests {
             queued: 0,
             work: None,
             question: None,
+            ask_detail: None,
         }
     }
 
