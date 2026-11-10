@@ -4736,7 +4736,7 @@ fn repo_with_secrets(dir: &Path, remote: &str) {
 
 #[test]
 fn the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited() {
-    let fleet = Fleet::start("repo_look");
+    let mut fleet = Fleet::start("repo_look");
     let app = fleet.mac_dir.join("app");
     repo_with_secrets(&app, "git@github.com:acme/app.git");
     fleet.mac.machine.open_project(app);
