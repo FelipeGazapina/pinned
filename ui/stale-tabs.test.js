@@ -363,3 +363,12 @@ test("a thread picked while the machine was away stays on screen when the machin
   list("box", restarted);
   assert.equal(context.active.key, "mini:tab-m-2");
 });
+
+test("a thread closed elsewhere does not come back when a later restart lists its session", () => {
+  const { context, list } = tabsContext();
+  list("box", [{ id: "tab-a-1", session: "s1", cwd: "/w" }]);
+  assert.equal(context.active.key, "mini:tab-m-1", "a neighbour fills the screen");
+  list("box", [], { forget: false });
+  list("box", restarted);
+  assert.equal(context.active.key, "mini:tab-m-1");
+});

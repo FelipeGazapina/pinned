@@ -98,11 +98,19 @@ function setTabs(machine, views, { forget = true } = {}) {
   views = views.filter((v) => !closing.has(keyOf(machine, v.id)));
   m.tabs = views;
   const keep = new Set(views.map((v) => keyOf(machine, v.id)));
+  const shown = active;
+  if (shown?.machine === machine && !keep.has(shown.key)) lost = { machine, key: shown.key, session: shown.view.session ?? null };
   for (const tab of tabs.filter((t) => t.machine === machine && !keep.has(t.key))) removeTab(tab, forget);
   for (const view of views) {
     const tab = tabByKey(keyOf(machine, view.id));
     if (tab) updateView(tab, view);
     else addTab(machine, view);
+  }
+  if (lost && active !== shown) lost.instead = active;
+  if (lost?.machine === machine && views.length) {
+    const back = tabs.find((t) => t.machine === machine && (t.key === lost.key || (!!lost.session && t.view.session === lost.session)));
+    if (back && active === lost.instead) activate(back);
+    lost = null;
   }
   placeTabs();
   const paths = views.map((v) => v.cwd).sort().join("\n");
@@ -113,6 +121,11 @@ function setTabs(machine, views, { forget = true } = {}) {
   render();
   noteTabs(machine);
 }
+
+/** The thread on screen when its machine took its tab away, and the one shown instead. When the
+ * machine lists that conversation again, under the same id or the new one a restart gives it, it
+ * comes back on screen, unless another thread was picked meanwhile. */
+let lost = null;
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
