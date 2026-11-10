@@ -14,8 +14,9 @@ use uuid::Uuid;
 /// Under the minute a machine waits on the hub, so the session hears why a slow machine failed.
 const ACT_WAIT: Duration = Duration::from_secs(50);
 const NOTICE_WAIT: Duration = Duration::from_secs(20);
-/// A machine that just connected restores its tabs before a notice can find one.
-const NOTICE_AFTER_CONNECT: Duration = Duration::from_secs(3);
+/// After a machine connects, when to try the notices it missed again: its tabs come back after
+/// the link, once the app restores them, and a notice finds its session only then.
+const NOTICE_TRIES: [Duration; 4] = [Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(90)];
 
 /// The session that acts, as its machine last reported its tab.
 struct Caller {
@@ -59,6 +60,14 @@ impl Trail<'_> {
         let row = Audit { account: self.account, machine: self.machine, tab: self.tab, role: self.role, action: self.action, args: &self.args, outcome, detail, request_id: self.request_id };
         self.hub.db.audit(&row).await
     }
+
+    /// The row of something that already ran. Failing to write it is logged, not answered, so the
+    /// session doesn't run the action again.
+    async fn ran(&self, outcome: AuditOutcome, detail: &str) {
+        if let Err(e) = self.write(outcome, detail).await {
+            eprintln!("pinned-server: account {}'s {} ran, and its audit row was not written: {e}", self.account, self.action);
+        }
+    }
 }
 
 fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
@@ -72,7 +81,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
     let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id };
     if let Some(id) = request_id {
-        match hub.db.audited(account.id, id).await? {
+        match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
             Some((AuditOutcome::Pending, _)) | None => {}
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
@@ -80,6 +89,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     let admitted = match admit(hub, account, origin, &caller, &act).await {
         Ok(admitted) => admitted,
         Err(refusal) => {
+            let refusal = surface::mask_secrets(&refusal);
             trail.write(AuditOutcome::Refused, &refusal).await?;
             return Err(refusal);
         }
@@ -96,7 +106,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             action: admitted.action.name.to_owned(),
             about: String::new(),
             args: if act.args.is_null() { Value::Object(Default::default()) } else { act.args.clone() },
-            target: act.machine.clone().filter(|m| !m.trim().is_empty() && admitted.action.side == Side::Node),
+            target: (!admitted.on_origin).then(|| admitted.target.clone()),
             request_id: request_id.map(str::to_owned),
             decision: None,
             decided_at: None,
@@ -117,11 +127,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     }
     match run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await {
         Ok(result) => {
-            trail.write(AuditOutcome::Done, "").await?;
+            trail.ran(AuditOutcome::Done, "").await;
             json(ActAnswer::Done { result: surface::redact(result, admitted.action.hides) })
         }
         Err(error) => {
-            trail.write(AuditOutcome::Failed, &error).await?;
+            let error = surface::mask_secrets(&error);
+            trail.ran(AuditOutcome::Failed, &error).await;
             Err(error)
         }
     }
@@ -184,30 +195,34 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
+    let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+    trail.write(if approve { AuditOutcome::Approved } else { AuditOutcome::Denied }, "").await?;
     let action = surface::find(&asked.action);
     let (decision, outcome, result) = match (approve, action) {
         (false, _) => (Decision::Denied, "denied".to_owned(), Value::Null),
         (true, None) => (Decision::Approved, format!("failed: no action {} any more", asked.action), Value::Null),
         (true, Some(action)) => match rerun(hub, account, action, asked).await {
             Ok(result) => (Decision::Approved, "done".to_owned(), result),
-            Err(e) => (Decision::Approved, format!("failed: {e}"), Value::Null),
+            Err(e) => (Decision::Approved, format!("failed: {}", surface::mask_secrets(&e)), Value::Null),
         },
     };
+    if decision == Decision::Approved {
+        match outcome.strip_prefix("failed: ") {
+            Some(error) => trail.ran(AuditOutcome::Failed, error).await,
+            None => trail.ran(AuditOutcome::Done, "").await,
+        }
+    }
     let shown = surface::redact(result.clone(), action.map_or(&[][..], |a| a.hides));
     hub.db.finish_confirmation(key, &outcome, &shown).await?;
-    let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
-    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
-    let (written, detail) = match decision {
-        Decision::Approved => (AuditOutcome::Approved, outcome.as_str()),
-        Decision::Denied => (AuditOutcome::Denied, ""),
-    };
-    trail.write(written, detail).await?;
     push_confirmations(hub, account).await;
     let decided = Held { confirmation: Confirmation { decision: Some(decision), outcome: Some(outcome.clone()), ..asked.clone() }, session: held.session.clone(), result: shown };
     let (hub_for_notice, account_for_notice) = (hub.clone(), account.clone());
     tokio::spawn(async move {
-        if let Err(e) = notify(&hub_for_notice, &account_for_notice, &decided).await {
-            eprintln!("pinned-server: the session that asked for confirmation {} gets its notice later: {e}", decided.confirmation.id);
+        match notify(&hub_for_notice, &account_for_notice, &decided).await {
+            Ok(true) => {}
+            Ok(false) => eprintln!("pinned-server: no tab runs the session that asked for confirmation {}; it gets its notice once its machine connects with it", decided.confirmation.id),
+            Err(e) => eprintln!("pinned-server: the session that asked for confirmation {} gets its notice later: {e}", decided.confirmation.id),
         }
     });
     json(Decided { decision, outcome, result })
@@ -225,25 +240,37 @@ async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, 
 }
 
 /// Tells the session that asked what the user decided, through the queue its worker reports use.
-async fn notify(hub: &Hub, account: &Account, held: &Held) -> Result<(), String> {
+/// False when no tab on its machine runs that session, so the notice waits.
+async fn notify(hub: &Hub, account: &Account, held: &Held) -> Result<bool, String> {
     let asked = &held.confirmation;
     let call = Call::Notice { tab: asked.tab.clone(), session: held.session.clone(), text: surface::notice_text(asked, &held.result), id: asked.id.clone() };
-    hub.call_machine(account, &asked.machine, call, NOTICE_WAIT).await.map_err(String::from)?;
+    let queued = hub.call_machine(account, &asked.machine, call, NOTICE_WAIT).await.map_err(String::from)?;
+    if queued != Value::Bool(true) {
+        return Ok(false);
+    }
     let id = Uuid::parse_str(&asked.id).map_err(|e| e.to_string())?;
-    hub.db.notified(id).await
+    hub.db.notified(id).await.map(|()| true)
 }
 
-/// Sends the notices a machine missed while it was offline, once it is back.
+/// Sends the notices a machine missed while it was offline, once it is back, and again while its
+/// tabs come back.
 pub async fn deliver_notices(hub: Arc<Hub>, account: Arc<Account>, machine: String) {
-    tokio::time::sleep(NOTICE_AFTER_CONNECT).await;
     let Ok(id) = Uuid::parse_str(&machine) else { return };
-    let missed = match hub.db.unnotified(account.id, id).await {
-        Ok(missed) => missed,
-        Err(e) => return eprintln!("pinned-server: could not read the notices machine {machine} missed: {e}"),
-    };
-    for held in missed {
-        if let Err(e) = notify(&hub, &account, &held).await {
-            return eprintln!("pinned-server: machine {machine} did not take the notice of confirmation {}: {e}", held.confirmation.id);
+    for wait in NOTICE_TRIES {
+        tokio::time::sleep(wait).await;
+        let missed = match hub.db.unnotified(account.id, id).await {
+            Ok(missed) => missed,
+            Err(e) => return eprintln!("pinned-server: could not read the notices machine {machine} missed: {e}"),
+        };
+        let mut waiting = false;
+        for held in missed {
+            match notify(&hub, &account, &held).await {
+                Ok(queued) => waiting |= !queued,
+                Err(e) => return eprintln!("pinned-server: machine {machine} did not take the notice of confirmation {}: {e}", held.confirmation.id),
+            }
+        }
+        if !waiting {
+            return;
         }
     }
 }

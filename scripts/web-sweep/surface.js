@@ -212,10 +212,10 @@ const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#
       openSettings();
       showPage("agent-activity");
     });
-    await waitFor("the audit trail", () => view.evaluate(() => document.querySelectorAll(".agent-audit-row").length >= 8));
+    await waitFor("the audit trail", () => view.evaluate(() => document.querySelectorAll(".agent-audit-row").length >= 10));
     const rows = await view.evaluate(() => [...document.querySelectorAll(".agent-audit-row")].map((r) => [r.querySelector(".head b").textContent, r.querySelector(".agent-outcome").textContent]));
     console.log(`${shot} trail:`, JSON.stringify(rows));
-    const expected = [["Create invite", "approved"], ["Remove machine", "approved"], ["Create invite", "pending"], ["Remove machine", "pending"], ["Write input", "refused"], ["Memory save", "done"], ["Rename machine", "done"], ["Machines", "done"]];
+    const expected = [["Create invite", "done"], ["Create invite", "approved"], ["Remove machine", "done"], ["Remove machine", "approved"], ["Create invite", "pending"], ["Remove machine", "pending"], ["Write input", "refused"], ["Memory save", "done"], ["Rename machine", "done"], ["Machines", "done"]];
     check(rows.length === expected.length && expected.every(([title, outcome], i) => rows[i][0].startsWith(title) && rows[i][1] === outcome), `${shot}: the trail lists every act, newest first`);
     if (shot === "phone") {
       const wide = await view.evaluate(() => document.querySelector("#settings-page").scrollWidth - document.querySelector("#settings-page").clientWidth);

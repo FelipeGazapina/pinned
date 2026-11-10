@@ -378,15 +378,18 @@ pub struct Action {
     pub starts_work: bool,      // held to the delegation limits (13.6)
     pub about: &'static str,    // the description agents read; for an excluded one, why
     pub hides: &'static [&'static str], // reply fields agents never get
+    pub check: Option<fn(&Parsed) -> Result<(), String>>, // refuses arguments that parse
 }
 ```
 
 - An action is named by its wire `cmd`. Where a `Call` and a `HubCall` share a `cmd`, the `HubCall` keeps the name and the `Call` is `node_<cmd>`. Today that is `clone` / `node_clone` and `read_session` / `node_read_session`.
 - Arguments are the variant's fields, as the wire enum's schemars schema describes them, without `cmd`. `act` builds `{"cmd": <cmd>, ...args}` and parses it into the `Call` or `HubCall`. A new action needs no hand-written argument schema.
 - `surface::tests::every_wire_call_has_one_action` reads the `cmd` of every variant from the schemars schemas of `Call` and `HubCall` and fails when one has no entry, or when an entry names no variant. A new variant does not pass the tests until its unit decides its class.
-- Other tests: names are unique, an excluded action is never wired, every `read` action is wired, and `hides` names fields only on wired actions.
+- Other tests: names are unique, an excluded action is never wired, every `read` action is wired, and a `HubCall` with `starts_work` is never wired (the hub has no limits path yet).
 
 **Adding or wiring an action.** Add the variant, then its entry. To wire one: make it work through `act`, prove it with a test that calls `act` as an agent does, then set `wired: true`. An action that starts work also needs its limits path (13.6) before it is wired.
+
+**Argument checks.** When the wire accepts arguments an agent must not send, give the entry a check with `.checks(f)`, where `f: fn(&Parsed) -> Result<(), String>` lives in the unit's own module. `parse` runs it on the call it built, after serde, so `f` matches its own variant and answers `Ok(())` for anything else. Its error is the refusal text the agent gets and the audit row keeps, so start it with the action's name. Example: P2's `mark_sessions` refuses changes to an archive entry with `h("mark_sessions", Write, "…").wired().checks(marks::agent_check)`. Test it through `act`, as for wiring.
 
 ### 13.2 Classes
 
@@ -418,7 +421,7 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 {"outcome":"repeat","earlier":"done","at":1794249424}
 ```
 
-`repeat` answers a `read` or `write` whose `request_id` this account already audited, without running it again. A `confirm` with a used `request_id` answers its first `pending` (or the decision, once made).
+`repeat` answers a `read` or `write` that the same session (machine and tab) already sent with the same action and `request_id`, without running it again. Another session's or another action's `request_id` is its own. A `confirm` with a used `request_id` answers its first `pending` (or the decision, once made).
 
 ### 13.4 How the hub runs an act
 
@@ -426,13 +429,15 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 
 1. The caller is the tab `act.tab` in the tabs the origin machine last reported. None: refused, `<machine> runs no session <tab>`. The hub reads the role and the Claude session from that `TabView`; the node sends neither.
 2. Role: `global_orchestrator` (`orchestrator_global`), `captain` (`Role::Orchestrator`), `worker` (`Role::Worker`), `taste_chat`, `workflow` (a `connector` tab), else `session`.
-3. Refusals, in order: no such action (`no action <name>; call actions to list them`), excluded (`<name> is not open to agents: <about>`), not wired (`<name> is a <class> action that is not wired yet`), a secret in the arguments (13.7), arguments that don't parse (`<name>: <serde error>`), a `starts_work` action on another machine (`<name> starts work only on this session's own machine for now`).
-4. `confirm`: a row in `agent_confirmations`, unique per (account, `request_id`), and `ToClient::Confirmations` to the account's clients. Answers `pending`.
+3. Refusals, in order: no such action (`no action <name>; call actions to list them`), excluded (`<name> is not open to agents: <about>`), not wired (`<name> is a <class> action that is not wired yet`), a secret in the arguments (13.7), arguments that don't parse (`<name>: <serde error>`) or that the action's check refuses (13.1), a `starts_work` action on another machine (`<name> starts work only on this session's own machine for now`).
+4. `confirm`: a row in `agent_confirmations`, unique per (account, machine, tab, action, `request_id`), and `ToClient::Confirmations` to the account's clients. A `machine` named for an action on a machine is resolved now and kept as its id, so a later rename can't move the action. Answers `pending`.
 5. `read` / `write`:
    - `HubCall`: `Hub::hub_call(account, call)`, the path a signed-in client's call takes.
    - `Call` on the origin machine (no `machine`, or `machine` naming the origin): `Call::ActFor { caller: act.tab, call }` to the origin machine.
    - `Call` on another machine of the account (`machine` is its id or its name, any case): the plain `Call` to that machine, as the app sends it. A machine of another account reads as `this account has no machine <m>`.
-6. The answer goes through `surface::redact` and the action's `hides`, then back as `done`. An error goes back as the tool error.
+6. The answer goes through `surface::redact` and the action's `hides`, then back as `done`. An error, and a refusal, go through `surface::mask_secrets`, then back as the tool error.
+
+The audit row of something that already ran is written after it runs. When that write fails, the hub logs it and still answers, so the session does not run the action twice.
 
 **Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal, or for a decision what running it came to.
 
@@ -446,7 +451,7 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 
 ### 13.5 Confirmations
 
-Table `agent_confirmations (id uuid, account, machine, tab, session text, role, title text, action, args jsonb, request_id text, created_at, decided_at, approved bool, outcome text, notified bool)`, unique (account, request_id). It lives on the hub, so a node restart loses nothing.
+Table `agent_confirmations (id uuid, account, machine, tab, session text, role, title text, action, args jsonb, request_id text, created_at, decided_at, approved bool, outcome text, notified bool, target text, result jsonb)`, unique (account, machine, tab, action, request_id). It lives on the hub, so a node restart loses nothing.
 
 `Confirmation` (outbound root):
 
@@ -454,7 +459,7 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 {"id":"<uuid>","at":1794249424,"machine":"<id>","machine_name":"MacBook","tab":"tab-2b-7","title":"Clean up old machines","role":"worker","action":"remove_machine","about":"Removes a machine from the account…","args":{"id":"<machine id>"},"request_id":"r-9","decision":"approved","decided_at":1794249500,"outcome":"done"}
 ```
 
-`decision`, `decided_at` and `outcome` are absent while it waits. `target` (an id or a name) is present when `act` named a `machine` for an action on a machine; approving runs it there. The table also keeps the redacted result for the notice.
+`decision`, `decided_at` and `outcome` are absent while it waits. `target` (the machine's id) is present when `act` named another `machine` for an action on a machine; approving runs it there. The table also keeps the redacted result for the notice.
 
 | Wire | From | Answer |
 |---|---|---|
@@ -466,10 +471,10 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 Deciding:
 
 1. The row is taken under one statement (`decided_at is null` and the account matches), so two clicks decide once.
-2. Approve runs the stored action as 13.4 step 5 does, for the original tab and machine, and records `outcome` (`done`, or `failed: <error>`). Deny runs nothing.
-3. One audit row: outcome `approved` (detail: what it came to) or `denied`.
+2. One audit row for the decision, `approved` or `denied`, written before anything runs.
+3. Approve runs the stored action as 13.4 step 5 does, for the original tab and machine, records `outcome` (`done`, or `failed: <error>`), and writes a second row for the run, `done` or `failed` with the error. Deny runs nothing.
 4. `ToClient::Confirmations` again.
-5. A notice to the calling session: `Call::Notice { tab, session, text, id }` to the origin machine. The text is `[pinned] The user approved your <action> request (<id>): <outcome>` plus the redacted result, or `[pinned] The user denied your <action> request (<id>). It did not run.` When the machine is offline or the call fails, `notified` stays false, and the hub sends the notice again when that machine connects.
+5. A notice to the calling session: `Call::Notice { tab, session, text, id }` to the origin machine. The text is `[pinned] The user approved your <action> request (<id>): <outcome>` plus the redacted result, or `[pinned] The user denied your <action> request (<id>). It did not run.` `notified` turns true only when the node answers `true`. When the machine is offline, the call fails, or no tab runs the session yet, the hub tries again 3, 10, 30 and 90 s after that machine next connects, while its tabs come back. A notice older than a week is not sent again.
 
 `Call::Notice` queues the text for the tab with `Delegates::queue_report`, the queue worker reports use: typed once the session is idle, or added to the hook context at its turn's end. When `tab` is gone, as after a node restart, the node finds the tab running Claude session `session`. A repeat `id` queues nothing. Answers `true` when it queued, `false` when no tab has that session.
 
@@ -481,20 +486,27 @@ The global orchestrator's `waiting` tool lists the waiting confirmations too, as
 
 `Call::ActFor { caller: TabId, call: Value }` runs `call` for the agent session in `caller` on this machine. `call` is a `Call` as JSON (a `Value`, so the enum does not contain itself).
 
-- `start_claude` (the action P1 wires through limits): the target tab becomes the caller's worker. `Delegates::claim` under the caller's project's workers-at-once limit (`caller_limits`), with the time limit and budget held to it as `delegate_task`'s are, the tab linked as the task's thread (`runs: true`, `task`, `spawned_by: caller`). Past the limit it answers the same refusal as `delegate_task`. Its first finished turn ends the task, the caller gets the task's notice, and the task's `TaskRecord` goes to the hub's metrics. A tab already running answers its folder and claims nothing.
+- `start_claude` (the action P1 wires through limits): the target tab becomes the caller's worker. `Delegates::claim` under the caller's project's workers-at-once limit (`caller_limits`), with the time limit and budget held to it as `delegate_task`'s are, the tab linked as the task's thread (`runs: true`, `task`, `spawned_by: caller`). Past the limit it answers the same refusal as `delegate_task`. Its first finished turn ends the task, the caller gets the task's notice, and the task's `TaskRecord` goes to the hub's metrics. A tab already running, or the thread of a task still working, answers its folder and claims nothing. A tab whose task ended claims a new one. It is refused, as `delegate_task` would be:
+  - for the global orchestrator: `the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain`;
+  - for a tab outside the caller's project (`history::project_of`), so a subfolder can't count apart: `<tab> works in <folder>, outside your project <project>: start_claude starts workers only in your own project`;
+  - for a tab with wider access than the caller's (`child_access`, `tighten`): `<tab> runs with full access, wider than your session's auto`.
 - Any other action with `starts_work: true` is refused by `ActFor` until its unit gives it a limits path: `<name> starts work, and nothing holds it to the limits yet`.
+- `restart_claude`, `set_model`, `set_bypass`, `rewind`, `switch_account` and `set_workspace` also start a stopped tab, so `ActFor` runs them only on a tab whose session runs: `<cmd> restarts a running session, and <tab> runs none: start_claude starts it as your worker`.
+- `set_bypass` with `on: true` runs only for a caller with full access: `set_bypass on skips a session's permission prompts, and your own session asks for them`.
 - Every other call runs as `Machine::call` runs it. `ActFor` waits as long as its inner call (`may_wait`).
 
 ### 13.7 Secrets
 
 - An argument object holding a non-empty string under a key named `key`, `token`, `password`, `secret`, `api_key`, `claude_token`, or ending in `_key`, `_token`, `_secret` or `_password`, at any depth, is refused: `an agent never sends a password, key or token: <field>. The user enters it in the app.`
-- `surface::redact` replaces, at any depth of an answer and of an audit summary: the values of keys named `token`, `password`, `secret`, `api_key`, `claude_token` or ending in `_token`, `_secret`, `_password`; and any string that holds something shaped like a secret (`sk-`, `ghp_`, `gho_`, `github_pat_`, `lin_api_`, `xoxb-`, `xoxp-`, `AKIA` and 16 more, a JWT, a PEM private key) with that part as `[hidden]`.
+- `surface::redact` replaces, at any depth of an answer and of an audit summary (and `surface::mask_secrets` in every error and refusal): the values of keys named `token`, `password`, `secret`, `api_key`, `claude_token` or ending in `_token`, `_secret`, `_password`; and any string that holds something shaped like a secret (`sk-`, `ghp_`, `gho_`, `github_pat_`, `lin_api_`, `xoxb-`, `xoxp-`, `AKIA` and 16 more, a JWT, a PEM private key) with that part as `[hidden]`.
 
 ### 13.8 What P1 wires
 
 Every `read` action, plus `rename_machine`, `memory_save` and `memory_forget` (any project of the account, through `path` and `machine`), `open_tab`, and `start_claude` (13.6). Confirm: `remove_machine` and `create_invite`. New reads: `agent_audit { before?, limit? }` (`Vec<AuditEntry>`, newest first, 50 by default, at most 200, the account's own rows only, from unix second `before` and earlier, so a page repeats the rows of its boundary second and the client drops them by id) and `confirmations`.
 
 P2 and P3 wire the rest by flipping `wired` with a test each. Each unit lists the actions it wired in its report.
+
+Classes P1 changed after review, so P2 and P3 wire them as these: `close_tab` is excluded (agents archive or delete a thread through P2's actions). `update_self` (it stops the machine's sessions), `extend_box` (it raises a spending cap), `pair_code` (it adds a machine; `hides: ["code", "command"]`), `set_taste` and `reset_taste_field` (they carry the limits workers run under) are confirm.
 
 ### 13.9 Account isolation
 

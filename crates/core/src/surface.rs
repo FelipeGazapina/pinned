@@ -46,6 +46,8 @@ pub struct Action {
     pub about: &'static str,
     /// Fields of its answer an agent never gets, at any depth.
     pub hides: &'static [&'static str],
+    /// Refuses arguments that parse but an agent may not send. Its error is the refusal.
+    pub check: Option<fn(&Parsed) -> Result<(), String>>,
 }
 
 impl Action {
@@ -65,6 +67,11 @@ impl Action {
         Action { hides, ..self }
     }
 
+    /// Adds the action's argument check, which `parse` runs on the call it built.
+    pub const fn checks(self, check: fn(&Parsed) -> Result<(), String>) -> Action {
+        Action { check: Some(check), ..self }
+    }
+
     /// `machine` for a `Call`, which `act` runs on the session's machine or the one it names.
     pub fn on(&self) -> &'static str {
         match self.side {
@@ -75,11 +82,11 @@ impl Action {
 }
 
 const fn n(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[] }
+    Action { name: cmd, side: Side::Node, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None }
 }
 
 const fn h(cmd: &'static str, class: Class, about: &'static str) -> Action {
-    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[] }
+    Action { name: cmd, side: Side::Hub, cmd, class, wired: false, starts_work: false, about, hides: &[], check: None }
 }
 
 use Class::{Confirm, Excluded, Read, Write};
@@ -103,7 +110,7 @@ pub const ACTIONS: &[Action] = &[
     n("restart_claude", Write, "Restarts a session on its conversation, so its skills, plugins and MCP servers load again."),
     n("write_input", Excluded, TERMINAL),
     n("resize_pty", Excluded, TERMINAL),
-    n("close_tab", Write, "Stops a session and closes its tab. Claude Code keeps the conversation."),
+    n("close_tab", Excluded, "closing a thread loses its place in the sidebar: agents archive it with archive_session, which the user can undo, or ask to delete it with delete_session"),
     n("set_folder", Write, "Moves a tab that has not started to another folder."),
     n("list_projects", Read, "The machine's projects, most recent first: folder, name, repo and the agent account its sessions run under.").wired(),
     n("project_history", Read, "The saved turns of the project at path, newest first, only one Claude session's when session is given.").wired(),
@@ -201,7 +208,7 @@ pub const ACTIONS: &[Action] = &[
     n("cancel_task", Write, "Stops a delegated task that the session in tab owns."),
     n("deliver_task", Excluded, "the app's send-now for a worker's notice: task_status reads it"),
     n("watch_threads", Excluded, "the app's live transcript updates"),
-    n("update_self", Write, "Updates pinned on the machine to the latest release and restarts it."),
+    n("update_self", Confirm, "Updates pinned on the machine to the latest release and restarts it, which stops the sessions it runs."),
     n("sync_stopped", Read, "Why the machine stopped syncing projects and plugins, or null while it syncs.").wired(),
     n("reset_sync", Write, "Sets an unreadable sync state aside, so the machine's next sync starts over as a new machine's."),
     n("delegate", Excluded, "the hub's way to start a worker here for another machine: call delegate_task with target.machine").named("node_delegate"),
@@ -239,11 +246,11 @@ pub const ACTIONS: &[Action] = &[
     h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model."),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo.").starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
-    h("extend_box", Write, "Adds extra_usd to the budget of the box behind machine."),
+    h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine."),
     h("machines", Read, "Every machine of the account: id, name, OS, whether it is online, when it was last seen, its pinned version and update, and its box.").wired(),
     h("rename_machine", Write, "Renames the account's machine id to name.").wired(),
     h("remove_machine", Confirm, "Removes a machine from the account: its sessions stop showing, and a box's machine is deleted with its box.").wired(),
-    h("pair_code", Write, "Makes a one-time code, and the command that uses it, to pair a new machine with the account."),
+    h("pair_code", Confirm, "Makes a one-time code, and the command that uses it, to pair a new machine with the account. You get its expiry; the user gets the code.").hides(&["code", "command"]),
     h("create_invite", Confirm, "Makes a single-use invite code that lets one person create an account on this hub. You get its id and expiry; the user gets the code.").wired().hides(&["code"]),
     h("invites", Read, "The hub's signup mode and the account's unused invite codes, named by their first characters.").wired(),
     h("revoke_invite", Confirm, "Stops an unused invite code from working."),
@@ -261,8 +268,8 @@ pub const ACTIONS: &[Action] = &[
     h("overview", Read, "Every project of the account on every machine with its Captain's state, what waits on the user, every machine, and every session.").wired(),
     h("read_captain", Read, "The latest replies of the Captain of the project at path on machine.").wired(),
     h("get_tastes", Read, "The account's way of working: the orchestrator's, the Captains' and each project's, with the delegation limits.").wired(),
-    h("set_taste", Write, "Changes fields of one scope of the account's way of working."),
-    h("reset_taste_field", Write, "Makes a field of one scope of the way of working inherit again."),
+    h("set_taste", Confirm, "Changes fields of one scope of the account's way of working."),
+    h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again."),
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
@@ -309,7 +316,11 @@ pub fn parse(action: &Action, args: &Value) -> Result<Parsed, String> {
         Side::Node => serde_json::from_value(call).map(Parsed::Node),
         Side::Hub => serde_json::from_value(call).map(Parsed::Hub),
     };
-    parsed.map_err(|e| format!("{}: {e}", action.name))
+    let parsed = parsed.map_err(|e| format!("{}: {e}", action.name))?;
+    if let Some(check) = action.check {
+        check(&parsed)?;
+    }
+    Ok(parsed)
 }
 
 /// One action as `actions` lists it.
@@ -757,11 +768,11 @@ mod tests {
     }
 
     #[test]
-    fn excluded_never_runs_every_read_runs_and_only_wired_actions_hide_fields() {
+    fn excluded_never_runs_every_read_runs_and_hub_work_waits_for_a_limits_path() {
         for action in ACTIONS {
             assert!(!(action.class == Excluded && (action.wired || action.starts_work)), "{} is excluded", action.name);
             assert!(action.class != Read || action.wired, "{} is a read that is not wired", action.name);
-            assert!(action.hides.is_empty() || action.wired, "{} hides fields but never runs", action.name);
+            assert!(!(action.side == Side::Hub && action.starts_work && action.wired), "{} starts work on the hub, where nothing holds it to the limits yet", action.name);
             assert!(!action.about.is_empty(), "{} says nothing", action.name);
         }
         let wired: Vec<&str> = ACTIONS.iter().filter(|a| a.wired && a.class != Read).map(|a| a.name).collect();
@@ -800,6 +811,19 @@ mod tests {
         assert!(missing.starts_with("rename_machine: missing field `name`"), "{missing}");
         let Err(shape) = parse(find("machines").unwrap(), &json!(["m1"])) else { panic!("an array") };
         assert_eq!(shape, "machines: args must be an object of the action's fields");
+    }
+
+    #[test]
+    fn an_actions_check_refuses_arguments_that_parse() {
+        fn no_blank_name(call: &Parsed) -> Result<(), String> {
+            match call {
+                Parsed::Hub(HubCall::RenameMachine { name, .. }) if name.trim().is_empty() => Err("rename_machine: name a machine with words".into()),
+                _ => Ok(()),
+            }
+        }
+        let checked = find("rename_machine").unwrap().checks(no_blank_name);
+        assert_eq!(parse(&checked, &json!({ "id": "m1", "name": " " })).err(), Some("rename_machine: name a machine with words".into()));
+        assert!(matches!(parse(&checked, &json!({ "id": "m1", "name": "Mini" })), Ok(Parsed::Hub(HubCall::RenameMachine { .. }))));
     }
 
     #[test]

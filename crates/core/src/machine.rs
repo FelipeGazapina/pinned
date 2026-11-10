@@ -2590,26 +2590,46 @@ impl Machine {
         if matches!(call, Call::ActFor { .. }) || surface::of_cmd(surface::Side::Node, &cmd).is_some_and(|action| action.starts_work) {
             return Err(format!("{cmd} starts work, and nothing holds it to the limits yet"));
         }
+        // These start a stopped tab as well as restart a running one, outside the limits.
+        if let Call::RestartClaude { tab, .. } | Call::SetModel { tab, .. } | Call::SetBypass { tab, .. } | Call::Rewind { tab, .. } | Call::SwitchAccount { tab, .. } | Call::SetWorkspace { tab, .. } = &call {
+            if !self.tab(tab, |t| t.session.is_some())? {
+                return Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker"));
+            }
+        }
+        if matches!(call, Call::SetBypass { on: true, .. }) && self.tab(caller, |t| t.child_access())? != crate::delegate::Access::Full {
+            return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
+        }
         self.call(call)
     }
 
     /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
-    /// a worker thread: a task under the project's workers-at-once limit and held to its tier, time
-    /// limit and budget, whose first finished turn ends it with a notice to the caller and a record in
-    /// the delegation metrics. A tab already running, or already some task's, just starts.
+    /// a worker thread: in the caller's project, no wider than the caller's access, a task under the
+    /// project's workers-at-once limit and held to its tier, time limit and budget, whose first
+    /// finished turn ends it with a notice to the caller and a record in the delegation metrics. A
+    /// tab already running, or the thread of a task still working, just starts.
     fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
-        let (busy, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+        let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
+        let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
             let plan = t.permission_mode.as_deref() == Some("plan");
-            (t.session.is_some() || t.starting || t.task.is_some(), role_of(&t.env).is_some() || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+            (t.session.is_some() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
         })?;
-        if busy {
+        if running || self.thread_task(tab, false).is_some() {
             return self.start_claude(tab, cols, rows);
         }
         if ruled {
             return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker"));
         }
-        let limits = self.limits_in(&cwd, caller)?;
+        if global {
+            return Err(NO_PROJECT_WORK.into());
+        }
+        if history::project_of(&cwd) != home {
+            return Err(format!("{tab} works in {}, outside your project {}: start_claude starts workers only in your own project", cwd.display(), home.display()));
+        }
+        if crate::delegate::tighten(ceiling, access) != access {
+            return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
+        }
+        let limits = self.caller_limits(caller)?;
         let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
@@ -2729,15 +2749,8 @@ impl Machine {
     /// tastes over the Captains', narrowed by the limits of the task the tab itself runs, when it
     /// is a worker.
     fn caller_limits(&self, tab: &str) -> Result<taste::Limits, String> {
-        let cwd = self.tab(tab, |t| t.cwd.clone())?;
-        self.limits_in(&cwd, tab)
-    }
-
-    /// The delegation limits of work in the folder `cwd` that the session in `tab` starts: that
-    /// project's, narrowed by the limits of the task `tab` itself runs.
-    fn limits_in(&self, cwd: &Path, tab: &str) -> Result<taste::Limits, String> {
-        let own_task = self.tab(tab, |t| t.task.clone())?;
-        let limits = self.tastes().resolve(&captain_scope(&history::project_of(cwd))).limits();
+        let (cwd, own_task) = self.tab(tab, |t| (t.cwd.clone(), t.task.clone()))?;
+        let limits = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
         let outer = own_task.and_then(|id| self.delegates.lineage(&id)).map(|task| task.limits);
         Ok(outer.map_or(limits, |outer| limits.narrow(outer)))
     }
@@ -9028,11 +9041,27 @@ Have another model review a risky change before it goes ahead.";
         let record = records.iter().find(|r| r.id == task).expect("the ended task's record for the metrics");
         assert_eq!((record.delegator.kind, record.delegator.tab.as_deref(), record.outcome), (crate::delegate::DelegatorKind::Captain, Some(captain.as_str()), crate::delegate::TaskOutcome::Cancelled));
         assert_eq!(start(&second), Ok(json!(path)), "an ended worker frees its place");
+        drop(m.tab(&first, |t| t.session.take()).unwrap());
+        assert_eq!(start(&first), Err("1 worker already runs in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.".into()), "a tab whose task ended claims a new one");
 
         assert_eq!(act(json!({ "cmd": "enqueue", "path": path, "text": "Ship it.", "request_id": "r-1" })), Err("enqueue starts work, and nothing holds it to the limits yet".into()));
         assert_eq!(act(json!({ "cmd": "start_claude", "tab": captain, "cols": 80, "rows": 24 })), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, which start_claude does not start as your worker")));
         let listed = act(json!({ "cmd": "tabs" })).unwrap();
         assert_eq!(listed.as_array().map(Vec::len), Some(3), "a read runs as Machine::call runs it: {listed}");
+
+        let docs = Path::new(&path).join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let outside = m.open_tab(Some(docs.display().to_string()), false).unwrap();
+        assert_eq!(start(&outside), Err(format!("{outside} works in {}, outside your project {path}: start_claude starts workers only in your own project", docs.display())));
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        let wide = m.open_tab(Some(path.clone()), true).unwrap();
+        assert_eq!(start(&wide), Err(format!("{wide} runs with full access, wider than your session's auto")));
+        assert_eq!(act(json!({ "cmd": "restart_claude", "tab": wide, "cols": 80, "rows": 24 })), Err(format!("restart_claude restarts a running session, and {wide} runs none: start_claude starts it as your worker")));
+        assert_eq!(act(json!({ "cmd": "set_bypass", "tab": second, "on": true, "cols": 80, "rows": 24 })), Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into()));
+        let global = m.open_global_orchestrator().unwrap();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(m.call(Call::ActFor { caller: global, call: json!({ "cmd": "start_claude", "tab": plain, "cols": 80, "rows": 24 }) }), Err(NO_PROJECT_WORK.into()));
+        assert!(!m.view(&outside).unwrap().running && !m.view(&wide).unwrap().running && !m.view(&plain).unwrap().running, "a refused start starts nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -4837,8 +4837,10 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!(
         rows,
         [
-            ("remove_machine", "approved", "done"),
-            ("create_invite", "approved", "done"),
+            ("remove_machine", "done", ""),
+            ("remove_machine", "approved", ""),
+            ("create_invite", "done", ""),
+            ("create_invite", "approved", ""),
             ("create_invite", "pending", ""),
             ("remove_machine", "pending", ""),
             ("machines", "refused", "ana-spare runs no session tab-zz-1"),
@@ -4856,12 +4858,18 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     let secret = trail.as_array().unwrap().iter().find(|r| r["detail"].as_str().unwrap().starts_with("an agent never")).unwrap();
     assert_eq!(secret["args"], format!(r#"{{"id":"{}","name":"x","token":"[hidden]"}}"#, ana.machine));
     assert_eq!((&trail[0]["role"], &trail[0]["tab"], &trail[0]["machine_name"]), (&json!("session"), &json!(ana.tab), &json!("Ana Mini")));
-    assert_eq!(trail[4]["machine_name"], "", "a removed machine's rows stay, without its name");
+    assert_eq!(trail[6]["machine_name"], "", "a removed machine's rows stay, without its name");
     assert_eq!(act(&bob.dir, &bob.tab, "agent_audit", json!({ "limit": 200 })).unwrap()["result"].as_array().unwrap().len(), 6, "bob's trail never shows ana's");
     let ids = |page: &Value| page.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     assert_eq!(ids(&ana.client.hub(json!({ "cmd": "agent_audit", "limit": 2 })).unwrap()), ids(&trail)[..2]);
-    let oldest = &trail[12];
+    let oldest = &trail[14];
     let page = ana.client.hub(json!({ "cmd": "agent_audit", "before": oldest["at"] })).unwrap();
     assert!(ids(&page).contains(&oldest["id"].as_str().unwrap().to_owned()), "before keeps the rows of its own second: {page}");
+
+    let keyed = |tab: &str, action: &str| session_tool(&ana.dir, tab, json!({ "name": "act", "action": action, "request_id": "r-same" })).unwrap()["outcome"].clone();
+    assert_eq!(keyed(&ana.tab, "machines"), "done");
+    assert_eq!(keyed(&ana.tab, "machines"), "repeat");
+    assert_eq!(keyed(&global, "machines"), "done", "another session's request_id is its own");
+    assert_eq!(keyed(&ana.tab, "confirmations"), "done", "and so is another action's");
     drop(bob);
 }

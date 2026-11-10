@@ -86,14 +86,14 @@ create table if not exists agent_actions (id uuid primary key, account uuid not 
   machine uuid not null, tab text not null, role text not null, action text not null, args text not null,
   outcome text not null, detail text not null default '', request_id text, at timestamptz not null default now());
 create index if not exists agent_actions_at on agent_actions (account, at desc);
-create index if not exists agent_actions_request on agent_actions (account, request_id) where request_id is not null;
+create index if not exists agent_actions_request on agent_actions (account, machine, tab, action, request_id) where request_id is not null;
 -- A confirm act that waits on the user's approval in the app, then what they decided and it came to.
 -- `notified` turns true once the session that asked has the notice.
 create table if not exists agent_confirmations (id uuid primary key, account uuid not null references accounts on delete cascade,
   machine uuid not null, tab text not null, session text, role text not null, title text not null default '',
   action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
   decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
-  target text, result jsonb, unique (account, request_id));
+  target text, result jsonb, unique (account, machine, tab, action, request_id));
 ";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
@@ -794,19 +794,22 @@ impl Db {
             .collect())
     }
 
-    /// What the account's first act with `request_id` came to, and when.
-    pub async fn audited(&self, account: Uuid, request_id: &str) -> Result<Option<(AuditOutcome, i64)>, String> {
+    /// What the first `action` with `request_id` from the session in `tab` on `machine` came to, and when.
+    pub async fn audited(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<(AuditOutcome, i64)>, String> {
         let row = self
             .client()
             .await?
-            .query_opt("select outcome, extract(epoch from at)::bigint from agent_actions where account = $1 and request_id = $2 order by at limit 1", &[&account, &request_id])
+            .query_opt(
+                "select outcome, extract(epoch from at)::bigint from agent_actions where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5 order by at limit 1",
+                &[&account, &machine, &tab, &action, &request_id],
+            )
             .await
             .map_err(err)?;
         Ok(row.map(|r| (AuditOutcome::parse(r.get(0)).unwrap_or(AuditOutcome::Failed), r.get(1))))
     }
 
-    /// Holds a confirm act for the user and answers its id, or the id of the account's confirmation
-    /// already held under the same `request_id`, with false.
+    /// Holds a confirm act for the user and answers its id, or, with false, the id of the one the same
+    /// session already asked for with the same action and `request_id`.
     pub async fn hold_confirmation(&self, account: Uuid, machine: Uuid, session: Option<&str>, asked: &Confirmation) -> Result<(Uuid, bool), String> {
         let client = self.client().await?;
         let id = Uuid::new_v4();
@@ -814,7 +817,7 @@ impl Db {
         let inserted = client
             .query_opt(
                 "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                 on conflict (account, request_id) do nothing returning id",
+                 on conflict (account, machine, tab, action, request_id) do nothing returning id",
                 &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
             )
             .await
@@ -822,7 +825,13 @@ impl Db {
         if inserted.is_some() {
             return Ok((id, true));
         }
-        let row = client.query_one("select id from agent_confirmations where account = $1 and request_id = $2", &[&account, &request_id]).await.map_err(err)?;
+        let row = client
+            .query_one(
+                "select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5",
+                &[&account, &machine, &asked.tab, &asked.action, &request_id],
+            )
+            .await
+            .map_err(err)?;
         Ok((row.get(0), false))
     }
 
@@ -862,11 +871,11 @@ impl Db {
         self.client().await?.execute("update agent_confirmations set outcome = $2, result = $3 where id = $1", &[&id, &outcome, result]).await.map_err(err).map(drop)
     }
 
-    /// The account's decided confirmations whose session on `machine` has no notice yet.
+    /// The account's confirmations decided in the last week whose session on `machine` has no notice yet.
     pub async fn unnotified(&self, account: Uuid, machine: Uuid) -> Result<Vec<Held>, String> {
         let query = format!(
             "select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account
-             where c.account = $1 and c.machine = $2 and c.decided_at is not null and c.outcome is not null and not c.notified order by c.decided_at"
+             where c.account = $1 and c.machine = $2 and c.decided_at > now() - interval '7 days' and c.outcome is not null and not c.notified order by c.decided_at"
         );
         Ok(self.client().await?.query(&query, &[&account, &machine]).await.map_err(err)?.iter().map(held).collect())
     }
