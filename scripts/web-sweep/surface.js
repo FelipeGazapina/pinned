@@ -2,7 +2,8 @@
 // Drives the agent capability surface (CONTRACTS.md 13) on the real page. An agent session lists its
 // actions and acts through `pinned-server mcp` as its claude runs it: a read, a write, and memory of
 // another project. It asks for two confirm actions, which wait in Waiting on you. The user approves
-// them there: the removal runs and the agent's thread gets the notice, and only the user sees the
+// them there. The app's login is locked, so the first approval asks for the account's password, which
+// the script types; the removal runs and the agent's thread gets the notice, and only the user sees the
 // invite's code. Settings › Agent activity lists every act. At 1440x900 and 390x844.
 //
 //   SWEEP_SIGNUP=invite SWEEP_DIR=... scripts/web-sweep/stack.sh start
@@ -115,6 +116,18 @@ const openWaiting = (page) => page.evaluate(() => {
 });
 const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#thread-list .agent-confirm .title")].map((t) => t.textContent));
 
+const PROMPT = "dialog[open] form";
+
+/** The password prompt the hub's LOCKED answer opens on the app's first approval: the account's
+ * password closes it, and the held call is sent again. Approvals after it on the page ask no more. */
+async function unlock(view, what) {
+  await waitFor(`${what}: the password prompt`, () => view.evaluate((p) => !!document.querySelector(`${p} [name=password]`), PROMPT));
+  check((await view.evaluate((p) => document.querySelector(`${p} h3`).textContent, PROMPT)) === "Enter your password", `${what}: the approval asks for the password`);
+  await view.fill(`${PROMPT} [name=password]`, PASSWORD);
+  await view.click(`${PROMPT} button.primary`);
+  await waitFor(`${what}: the prompt to close`, () => view.evaluate(() => !document.querySelector("dialog[open]")));
+}
+
 (async () => {
   const { token } = await post("/api/login", { email: EMAIL, password: PASSWORD });
   const spare = (await post("/api/machines", { name: "old-imac", os: "macos" }, token)).machine;
@@ -190,6 +203,7 @@ const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#
   await phone.screenshot({ path: path.join(SCREENS, "surface-waiting-phone.png") });
 
   await page.click(`#thread-list .agent-confirm[data-confirmation="${remove.id}"] [data-agent=approve]`);
+  await unlock(page, "the removal's approval");
   await waitFor("the removal to leave Waiting on you", async () => (await asksShown(page)).length === 1);
   check(await page.evaluate(async () => !(await hub.hub({ cmd: "machines" })).some((m) => m.name === "Old iMac")), "approving ran the removal");
   const told = `[pinned] The user approved your remove_machine request (${remove.id}): done.`;
@@ -200,6 +214,7 @@ const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#
 
   await page.click(`#thread-list .agent-confirm[data-confirmation="${invite.id}"] [data-agent=approve]`);
   const code = await waitFor("the invite's code for the user", () => page.evaluate(() => document.querySelector("#thread-list .agent-once code")?.textContent));
+  check(await page.evaluate(() => !document.querySelector("dialog[open]")), "the invite's approval asks for the password no more");
   check(/^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/.test(code), `the user sees the invite code: ${code}`);
   const invited = `[pinned] The user approved your create_invite request (${invite.id}): done.`;
   await waitFor("the invite's notice in the agent's thread", () => page.evaluate((t) => document.querySelector("#thread")?.innerText.includes(t), invited), 45000);
