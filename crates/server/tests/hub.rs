@@ -7088,3 +7088,154 @@ fn use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_
     let bobs = bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_claude_tokens"].clone();
     assert!(bobs.as_object().is_none_or(|kept| kept.is_empty()), "and bob keeps no token of ana's: {bobs}");
 }
+
+/// Registers a machine of the account `token` and the credentials a node for it signs in with.
+fn registered(url: &str, token: &str, email: &str, name: &str) -> (Credentials, String) {
+    let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
+    (Credentials { hub: url.to_owned(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token }, machine.id)
+}
+
+fn machine_rows(client: &mut Client) -> Vec<Value> {
+    client.hub(json!({ "cmd": "machines" })).unwrap().as_array().unwrap().clone()
+}
+
+fn state_of(client: &mut Client, id: &str) -> Option<Value> {
+    machine_rows(client).into_iter().find(|row| row["id"] == id).and_then(|row| row.get("state").cloned())
+}
+
+/// A machine socket that reports `state` and stays connected.
+fn reporting(url: &str, token: &str, state: Value) -> MachineSock {
+    let mut sock = MachineSock::connect(url, token, "0.17.24");
+    sock.send(json!({ "type": "event", "event": { "kind": "state", "state": state } }));
+    sock
+}
+
+fn the_minis_state() -> Value {
+    json!({
+        "load": { "cpus": 8, "cpu_percent": 37, "mem_total_mb": 16384, "mem_available_mb": 4096, "disk_total_mb": 471_040, "disk_free_mb": 24_576 },
+        "accounts": [
+            { "id": "claude", "driver_kind": "claude", "can_run_child_task": true, "models": ["claude-opus-5-5"] },
+            { "id": "cursor", "driver_kind": "cursor", "can_run_child_task": true, "limited": true, "models": ["grok-4.7"] }
+        ],
+        "sessions": 5, "workers": 2, "workers_at_once": 3
+    })
+}
+
+/// What `orchestrator_capabilities` answers a node's session.
+fn capabilities_of(home: &Path) -> Value {
+    let reply = ask_socket(home, &json!({ "kind": "capabilities", "search": "" }));
+    serde_json::from_str(reply["Ok"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
+}
+
+/// A delegate call as the origin machine sends it for `target`.
+fn delegate_call(id: u64, target: Value) -> Value {
+    let args = json!({ "task": "Fix the parser.", "title": "Parser", "target": target });
+    let request = pinned_core::delegate::parse_request(&args).unwrap();
+    json!({ "type": "call", "id": id, "call": { "cmd": "delegate", "tab": "tab-1", "task": "t-1", "request": request, "repo": "github.com/acme/app", "access": "auto" } })
+}
+
+fn reply_to(sock: &mut MachineSock, id: u64) -> Value {
+    loop {
+        let frame = sock.read_json();
+        if frame["type"] == "reply" && frame["id"] == id {
+            return frame;
+        }
+    }
+}
+
+#[test]
+fn a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capabilities() {
+    let hub = TestHub::start_with("machine_load", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (book_creds, book_id) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, mini_id) = registered(&url, &token, "ana@acme.dev", "mini");
+    let book_home = temp("machine-load-book");
+    let book = Node::start(&book_home, book_creds);
+    book.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true), ("mini", false)]);
+
+    assert_eq!(state_of(&mut client, &mini_id), None, "a machine that reported nothing shows none");
+    let _mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    wait_for("the hub keeps the mini's summary", || state_of(&mut client, &mini_id).is_some());
+    let kept = state_of(&mut client, &mini_id).unwrap();
+    assert!(kept["reported_at"].as_i64().unwrap() > 1_700_000_000, "the hub stamps when it heard: {kept}");
+    let mut expected = the_minis_state();
+    expected["reported_at"] = kept["reported_at"].clone();
+    expected["accounts"][0]["limited"] = json!(false);
+    assert_eq!(kept, expected);
+
+    wait_for("the book's own node reports", || state_of(&mut client, &book_id).is_some_and(|state| state["accounts"].as_array().is_some_and(|accounts| accounts.iter().any(|a| a["id"] == "claude" && a["can_run_child_task"] == true))));
+    let own = state_of(&mut client, &book_id).unwrap();
+    assert!(own["load"]["disk_free_mb"].as_u64().is_some() && own["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "{own}");
+
+    let machines = capabilities_of(&book_home)["machines"].clone();
+    let mini = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(mini_id)).unwrap_or_else(|| panic!("{machines}")).clone();
+    assert_eq!((&mini["name"], &mini["online"], &mini["isThisMachine"], &mini["workersRunning"], &mini["workersAtOnce"]), (&json!("mini"), &json!(true), &json!(false), &json!(2), &json!(3)));
+    assert_eq!(mini["load"]["disk_free_mb"], 24_576);
+    let ids: Vec<&Value> = mini["providers"].as_array().unwrap().iter().map(|p| &p["providerInstanceId"]).collect();
+    assert_eq!(ids, [&json!("claude"), &json!("cursor")], "the mini has no bloom account, and the caller can see that");
+    assert_eq!(mini["providers"][1]["limited"], true);
+    let this = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(book_id)).unwrap();
+    assert_eq!(this["isThisMachine"], true);
+    let text = machines.to_string();
+    assert!(!text.contains("ana@acme.dev") && !text.contains("token"), "{text}");
+}
+
+#[test]
+fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_it() {
+    let hub = TestHub::start_with("machine_refuse", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (origin_creds, _) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, _) = registered(&url, &token, "ana@acme.dev", "mac-mini");
+    let mut mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    let mut origin = MachineSock::connect(&url, &origin_creds.machine_token, "0.17.24");
+    client.wait_machines(&[("book", true), ("mac-mini", true)]);
+    wait_for("the hub keeps the mini's summary", || machine_rows(&mut client).iter().any(|row| row["name"] == "mac-mini" && row.get("state").is_some()));
+
+    origin.send(delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
+    assert_eq!(reply_to(&mut origin, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
+    origin.send(delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
+    assert_eq!(reply_to(&mut origin, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
+    origin.send(delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
+    assert_eq!(reply_to(&mut origin, 9)["err"], "mac-mini has no codex account that can run a worker; sign in there or pick another machine");
+    while let Some(frame) = mini.try_text() {
+        assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
+    }
+}
+
+#[test]
+fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
+    let hub = TestHub::start_with("machine_load_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let (ana_creds, ana_id) = registered(&url, &ana_token, "ana@acme.dev", "ana-mini");
+    let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
+    let _ana = reporting(&url, &ana_creds.machine_token, the_minis_state());
+    let bruno_home = temp("machine-load-bruno");
+    let bruno = Node::start(&bruno_home, bruno_creds.clone());
+    bruno.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana_client.wait_machines(&[("ana-mini", true)]);
+    bruno_client.wait_machines(&[("bruno-mac", true)]);
+    wait_for("Ana's summary is kept", || state_of(&mut ana_client, &ana_id).is_some());
+    wait_for("Bruno's node reports", || state_of(&mut bruno_client, &bruno_id).is_some());
+
+    let rows = machine_rows(&mut bruno_client);
+    assert_eq!(rows.iter().map(|row| row["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")]);
+    let machines = capabilities_of(&bruno_home)["machines"].clone();
+    assert_eq!(machines.as_array().unwrap().iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")], "{machines}");
+    assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("cursor"), "{machines}");
+    let mut origin = MachineSock::connect(&url, &bruno_creds.machine_token, "0.17.24");
+    origin.send(delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
+    assert_eq!(reply_to(&mut origin, 3)["err"], "this account has no machine ana-mini");
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && f.to_string().contains(&ana_id)).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine: {leaked:?}");
+}

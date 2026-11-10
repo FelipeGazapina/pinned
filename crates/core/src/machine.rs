@@ -11892,4 +11892,55 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((shown.limited, shown.limit_resume_at), (true, Some(reset)));
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[test]
+    #[cfg(unix)]
+    fn a_machine_that_is_full_refuses_a_worker_another_machine_sent_and_takes_it_once_one_ends() {
+        let (m, dir, captain) = limited_captain("remote-full", TastePatch { parallel: Some(1), ..TastePatch::default() });
+        let project = dir.join("app");
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&project).status().unwrap().success());
+        }
+        m.set_hub_id("m-mini".into(), "mac-mini".into());
+        let local = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let sent = |task: &str| {
+            let origin = crate::delegate::Origin { machine: "m-book".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), task: task.into(), access: crate::delegate::Access::Auto, delegator: Default::default(), limits: Default::default() };
+            let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+            m.call(Call::Delegate { origin, request: Box::new(request), repo: Some("https://github.com/acme/app.git".into()), token: None })
+        };
+        assert_eq!(
+            sent("t1"),
+            Err("mac-mini is full: 1 worker already runs in this project there, and its Workers at once allows 1. Wait for one to finish, raise Workers at once in Settings › Way of working, or pick another machine.".into()),
+            "the caller's machine had room, and this one counts its own"
+        );
+        m.task_cancel(Some(captain.clone()), None, local["taskId"].as_str().unwrap(), "not needed").unwrap();
+        assert_eq!(sent("t2").unwrap()["workState"], "working", "an ended worker frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_machine_reports_its_accounts_workers_and_workers_at_once_and_never_a_token_or_email() {
+        let (m, dir, captain) = limited_captain("reports-state", TastePatch { parallel: Some(4), ..TastePatch::default() });
+        delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let state = m.state();
+        let work_account = state.accounts.iter().find(|account| account.id == "work").expect("the added account is listed");
+        assert_eq!((work_account.driver_kind.as_str(), state.workers_at_once, state.workers), ("claude", 4, 1));
+        assert!(state.sessions >= 1, "{state:?}");
+        assert!(state.load.cpus.is_some_and(|cpus| cpus > 0) && state.load.disk_free_mb.is_some(), "{:?}", state.load);
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(!text.contains('@') && !text.contains("token"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capabilities_list_this_machine_under_machines_while_no_hub_answers() {
+        let (m, dir, captain) = limited_captain("caps-machines", TastePatch::default());
+        let caps: Value = serde_json::from_str(&m.capabilities(Some(&captain), None, "").unwrap()).unwrap();
+        let machines = caps["machines"].as_array().unwrap();
+        assert_eq!(machines.len(), 1, "{caps}");
+        assert_eq!((&machines[0]["isThisMachine"], &machines[0]["online"], &machines[0]["reported"]), (&json!(true), &json!(true), &json!(true)));
+        assert!(machines[0]["providers"].as_array().unwrap().iter().any(|p| p["providerInstanceId"] == "work" && p["driverKind"] == "claude"), "{caps}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
