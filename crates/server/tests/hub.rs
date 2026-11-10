@@ -171,13 +171,37 @@ struct Client {
 }
 
 impl Client {
+    /// An app older than the unlock: its login keeps every call it had.
     fn connect(hub: &str, token: &str) -> Client {
+        Client::auth(hub, json!({ "type": "auth", "token": token }))
+    }
+
+    /// The app as it signs in now: it locks its login, so the login alone runs no confirm-class call.
+    fn app(hub: &str, token: &str) -> Client {
+        let mut client = Client::auth(hub, json!({ "type": "auth", "token": token, "lock": true }));
+        client.wait("hello", |f| f["type"] == "hello");
+        client
+    }
+
+    fn auth(hub: &str, auth: Value) -> Client {
         let (mut ws, _) = tungstenite::connect(format!("{}/ws/client", hub.replace("http://", "ws://"))).unwrap();
         if let MaybeTlsStream::Plain(s) = ws.get_mut() {
             s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
         }
-        ws.send(Message::text(json!({ "type": "auth", "token": token }).to_string())).unwrap();
+        ws.send(Message::text(auth.to_string())).unwrap();
         Client { ws, frames: vec![], next: 1, closed: None }
+    }
+
+    /// Signed in, or None once the hub closes the socket.
+    fn signed_in(mut self) -> Option<Client> {
+        let start = Instant::now();
+        while !self.frames.iter().any(|f| f["type"] == "hello") {
+            if !self.pump() {
+                return None;
+            }
+            assert!(start.elapsed() < WAIT, "timed out waiting for hello or a close");
+        }
+        Some(self)
     }
 
     fn pump(&mut self) -> bool {
@@ -5032,4 +5056,69 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert_eq!((&latest["action"], &latest["detail"]), (&json!("open_tab"), &json!(format!("loosened permissions: the new tab in {docs} skips its permission prompts"))));
     assert_eq!(act(&ana.dir, &ana.tab, "session_marks", json!({})).unwrap(), json!({ "outcome": "done", "result": [] }), "a hub read runs as the app's call");
     drop(bob);
+}
+
+const LOCKED: &str = "unlock with your password in the app to do this";
+
+/// Every string an agent on a machine reads without its owner: each JSON value under the machine's
+/// config dir, where `account.json` lives, and its environment.
+fn readable_on(dir: &Path) -> Vec<String> {
+    fn strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) if !s.is_empty() => out.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            Value::Object(fields) => fields.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut found: Vec<String> = std::env::vars().map(|(_, value)| value).collect();
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(at) = dirs.pop() {
+        for path in std::fs::read_dir(&at).unwrap().flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Ok(value) = serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap_or_default()) {
+                strings(&value, &mut found);
+            }
+        }
+    }
+    found.retain(|s| !s.is_empty());
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_confirm_action() {
+    let hub = TestHub::start_with("owner_only", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let (spare, _) = account::register_machine(&url, &ana_token, "ana-spare", "linux").unwrap();
+    let mut app = Client::app(&url, &ana_token);
+    let asked = act(&ana.dir, &ana.tab, "remove_machine", json!({ "id": spare.id })).unwrap();
+    let id = asked["id"].as_str().unwrap().to_owned();
+    let decide = json!({ "cmd": "decide_confirmation", "id": id, "approve": true });
+
+    let found = readable_on(&ana.dir);
+    assert!(found.contains(&ana_token), "the desktop app keeps its login in account.json, which the agent reads");
+    let mut logins = 0;
+    for secret in &found {
+        let Some(mut agent) = Client::connect(&url, secret).signed_in() else { continue };
+        logins += 1;
+        assert_eq!(agent.hub(decide.clone()), Err(LOCKED.into()), "the agent approves nothing");
+        assert_eq!(agent.hub(json!({ "cmd": "remove_machine", "id": spare.id })), Err(LOCKED.into()), "nor runs the confirm action itself");
+        assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()));
+        assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
+    }
+    assert_eq!(logins, 1, "the app's login is the one login on the machine");
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mac", "ana-spare"], "nothing ran");
+
+    assert_eq!(app.hub(decide.clone()), Err(LOCKED.into()), "the app asks for the password before it decides");
+    let unlocked = app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let unlock = unlocked["token"].as_str().unwrap().to_owned();
+    assert!(!readable_on(&ana.dir).contains(&unlock), "the unlock lives in the app's memory only");
+    let approved = app.hub(decide.clone()).unwrap();
+    assert_eq!((&approved["decision"], &approved["outcome"]), (&json!("approved"), &json!("done")));
+    assert_eq!(names(&app.hub(json!({ "cmd": "machines" })).unwrap()), ["ana-mac"]);
 }
