@@ -235,7 +235,11 @@ function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
-  if (phase === "delegating") return { icon: "bot", text: agentsWorking(busyUnder(tab)), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
+  if (phase === "delegating") {
+    // The card's slot is narrow, so it says "2 working" beside the bot icon and keeps the full count in the title.
+    const n = busyUnder(tab);
+    return { icon: "bot", text: `${n} working`, title: agentsWorking(n), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
+  }
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };
@@ -394,7 +398,7 @@ function spawnTree(list) {
   const byId = new Map(list.map((t) => [`${t.machine}:${t.view.id}`, t]));
   const roots = [];
   const kids = new Map();
-  const parentOf = (t) => t.view.spawned_by && byId.get(`${t.machine}:${t.view.spawned_by}`);
+  const parentOf = (t) => t.view.spawned_by && byId.get(spawnerKey(t));
   // A thread whose spawner chain leads back to itself has no top to hang from, so it stands on its own.
   const loops = (tab) => {
     const seen = new Set();
@@ -699,7 +703,7 @@ function cardRow(tab) {
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot
-    ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
+    ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : slot.title ? ` title="${esc(slot.title)}"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${roleMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>

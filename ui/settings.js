@@ -269,6 +269,7 @@ function upstashCardHtml() {
     ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
     : connected
       ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         ${boxTokensHtml()}
          ${boxPermissionsHtml()}
          <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
          <p class="error" id="upstash-error"></p>`
@@ -285,6 +286,21 @@ function upstashCardHtml() {
       <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">Cloud sandboxes for runs. Pick who may open one.</div></div>
         <span class="badge" data-on="${!!connected}">${connected ? "Connected" : "Not connected"}</span></div>
       ${body}
+    </div>`;
+}
+
+/** The Claude token each pinned account signs a worker's box in with, which `delegate_task` picks
+ * by `providerInstanceId`. The token Connect took stays the default. */
+function boxTokensHtml() {
+  const kept = Object.entries(settings.box_claude_tokens || {});
+  const rows = kept.map(([name, hint]) => `<div class="row box-token"><span><b>${esc(name)}</b> · token <b>${esc(hint)}</b></span>
+      <button class="secondary" data-action="remove-box-token" data-name="${esc(name)}">Remove</button></div>`).join("");
+  return `<div class="box-tokens">
+      <p class="hint">Claude token per account. A worker's box signs in with the token of the account <code>delegate_task</code> names, else the default one above.</p>
+      ${rows}
+      <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false">
+        <input id="box-token" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
+        <button class="secondary" data-action="add-box-token">Add</button></div>
     </div>`;
 }
 
@@ -319,7 +335,8 @@ function boxAccess() {
 
 function boxAskRows() {
   return (settings.box_asks || []).map((ask) => {
-    const what = ask.subject.issue ? `issue ${ask.subject.issue}` : `thread ${ask.subject.thread}`;
+    const issue = ask.subject.issue;
+    const what = ask.connector === "delegate" || ask.connector === "captain" ? issue : issue ? `issue ${issue}` : `thread ${ask.subject.thread}`;
     return `<p class="hint">Allow a box for ${esc(what)}?
       <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
       <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
@@ -337,7 +354,7 @@ function boxPermissionsHtml() {
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows follow this now. Sessions, workers, and Captains keep the choice and follow it in the next update.</p>
+    <p class="hint">Workflows, workers, and Captains follow this now. Sessions keep the choice and follow it in the next update.</p>
     ${boxAsksHtml()}`;
 }
 
@@ -1629,6 +1646,25 @@ const actions = {
       document.getElementById("upstash-error").textContent = e;
     }
   },
+  async "add-box-token"() {
+    const name = document.getElementById("box-token-name").value;
+    const token = document.getElementById("box-token").value;
+    if (!name.trim() || !token.trim()) return;
+    try {
+      settings.box_claude_tokens = await connectorCall("set_box_claude_token", { name, token });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("upstash-error").textContent = e;
+    }
+  },
+  async "remove-box-token"(button) {
+    try {
+      settings.box_claude_tokens = await connectorCall("remove_box_claude_token", { name: button.dataset.name });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("upstash-error").textContent = e;
+    }
+  },
   async "answer-box"(button) {
     const id = button.dataset.id;
     const allow = button.dataset.allow === "yes";
@@ -2024,6 +2060,7 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
   if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
   if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
+  if (e.key === "Enter" && e.target.id === "box-token") actions["add-box-token"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();

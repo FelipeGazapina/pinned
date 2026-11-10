@@ -82,7 +82,10 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 ```json
 {"kind":"captain","machine":"<machine id>","path":"/w/site","text":"Ship it.","sender":"Orquestrador","busy":"queue"}
 {"kind":"orchestrator","report":{CaptainReport}}
+{"kind":"captain_box","repo":"github.com/acme/site","size":"medium","text":"Ship it.","sender":"Orquestrador","busy":"queue"}
 ```
+
+- `captain_box` direction: the hub takes it only from the host, as `captain`. It opens the Capitão of `repo` in an Upstash Box with the account's own connection (`Boxes::open_captain`): the Captains box permission (`BoxAccess.orchestrator`) decides (Off and One box, reused refuse, Ask files a question on the Upstash card), the account's box cap applies, and the row is `connector = "captain"`, subject `the Captain of <clone url>`. It answers at once `{"outcome":"iniciado","machine":"<box machine id>","machineName":"Box · Captain <name>","box":"<row id>"}`, boots the box in the background, then calls `Call::Clone { repo, token, dest: null }` and `Call::Enqueue` there. While that box runs, a later `captain_box` for the same repo goes to it and answers `{"outcome":"entregue","tab":...}` with the box fields; while it boots it is refused, `this project's box is still booting`. The box goes once its tabs stay idle for the box policy's idle limit.
 
 `crates/server/src/relay.rs` `serve` answers all three. `http.rs` `machine_frame` passes the sending machine as the source, and `hub.rs` `hub_call` passes a signed-in client. A client may call any machine of the account anyway, so the source checks below apply only to a machine.
 
@@ -214,14 +217,14 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 | Tool | Arguments | Result (tool text) |
 |---|---|---|
 | `projects` | none | `Overview` as one line of JSON |
-| `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine) | `Handoff` as one line of JSON |
+| `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine), `box` (optional `true` or `{ "size" }`: the Capitão runs in an Upstash Box, through `RelayTo::CaptainBox`, with the project's origin as `repo`) | `Handoff` as one line of JSON, or the `captain_box` answer |
 | `read_captain` | `project`, `machine` (optional), as `send_to_captain` takes them | the read as one line of JSON, from this machine or through `HubCall::ReadCaptain` |
 | `waiting` | none | `Vec<Waiting>` as one line of JSON |
 | `sessions` | `project` (optional: a key from `projects`, a name in any case, or a folder), `machine` (optional id or name, with or without `@`) | `{"sessions":[Session],"machines":[OverviewMachine]}` as one line of JSON |
 | `read_session` | `id` (a session's id), `machine` (optional), `items` (optional, 20, at most 50) | the read as one line of JSON with `id`, `machine` and `machine_name`: here when this machine has the tab, else through `HubCall::ReadSession` |
 | `tell_orchestrator` | `text` | `Handoff` as one line of JSON |
 
-`ProjectTool` variants (`crates/core/src/agent.rs`): `Projects`, `SendToCaptain { project, message, request_id, machine: Option }`, `ReadCaptain { project, machine: Option }`, `Waiting`, `Sessions { project: Option, machine: Option }`, `ReadSession { id, machine: Option, items: Option }`, `TellOrchestrator { text }`.
+`ProjectTool` variants (`crates/core/src/agent.rs`): `Projects`, `SendToCaptain { project, message, request_id, machine: Option, box: Option<BoxTarget> }`, `ReadCaptain { project, machine: Option }`, `Waiting`, `Sessions { project: Option, machine: Option }`, `ReadSession { id, machine: Option, items: Option }`, `TellOrchestrator { text }`.
 
 Resolution, for `send_to_captain` and `read_captain` alike:
 
@@ -230,9 +233,20 @@ Resolution, for `send_to_captain` and `read_captain` alike:
 3. Without the hub's overview only `<machine id>:<path>`, or an absolute path with `machine`, names a checkout.
 4. A path is absolute when macOS, Linux or Windows would read it so (`/…`, `\\…`, `C:\…`, `C:/…`), whatever this machine runs, so `<machine>:C:\w\site` names a folder on a Windows machine from a Mac. A machine whose name is one letter can't be a `<machine>:` prefix, because it reads as a drive.
 
+### `delegate_task` on another machine or in a box
+
+`target.machine` (an id or name of the account's machines) or `target.box` (`true` or `{ size, repo }`) runs the worker elsewhere. The calling node keeps the task under its own id (`Task::remote`, a `RemoteTarget` with the machine's hub id, its name and the thread there) and sends `HubCall::Delegate { tab, task, request, repo, access, delegator, limits }`, with `repo` its checkout's origin (or `box.repo`), `access` the caller's ceiling, and `limits` the caller's delegation limits. The caller counts the task against Workers at once and admits its effort and time limit before it sends; the target holds the worker to `limits` and records it under `delegator`. Only a tab delegates elsewhere; a headless child is refused.
+
+- Machine: the hub (`crates/server/src/remote.rs`) finds the machine among the account's own, refuses this machine itself and an offline one by name, and calls `Call::Delegate { origin, request, repo, token }` there, `origin.machine` stamped from the asking socket and `token` the account's GitHub token. The target finds its checkout of `repo` (`find_folder`, cloning when it has none) and opens the Worker thread as for a local child, with `Tab.origin` set: its `TabView` shows `spawned_by` = the caller's tab and `spawned_on` = the caller's machine, and its local `spawned_by` stays empty. Its registry task's parent is `remote:<machine>:<tab>` and its `client_request_id` the caller's task id, so a repeat starts nothing.
+- Box: `Boxes::open_delegate` with the Workers permission (`BoxAccess.worker`; Ask files `workers of <machine> <tab>`), the account's connection and cap, a row with `connector = "delegate"` and `BoxWork::Delegate`, and the Claude token the account keeps for `target.providerInstanceId` (`Connectors::box_claude_token`; none takes the connection's own). It answers `{"machine","machineName","box","workState":"working"}` at once and sends `Call::Delegate` once the box's node is online. A boot that fails ends the task on the caller with `Call::RemoteEnded`.
+- Ends: each delegate pass on the target sends every finished task of an origin as `HubCall::RemoteEnded { to, tab, task, end }`; the hub passes `Call::RemoteEnded { from, ... }` on. The caller settles only its own working task, owned by that tab and placed on `from`, and types the usual notice. An end the hub could not pass on is sent again every 3 s. A worker box goes once its end got through.
+- Status and cancel: `task_status` on the caller asks the target through `HubCall::RemoteTask` / `Call::RemoteTask` at most every 3 s, adds its `recentSteps`, and settles a finished answer. `task_cancel` forwards the cancel; a worker box is deleted with it, booting or not.
+- Box budget: a worker box and a Captain box take the Box budget of the project's taste (`boxes::box_budget`), as a session box does.
+- Record: the machine that ran the worker records it, with `target` `machine` (the box rule below turns it into `box`); the caller's copy, which holds `Task::remote`, leaves none.
+
 ### Delegation metrics
 
-Every delegated task leaves a `TaskRecord` (`crates/core/src/delegate/metrics.rs`) when it ends: delegator (`kind` global_orchestrator, captain, worker or session, with tab and project), provider, account, model, cost tier, effort, target (local or box), start and end, `usage` (the limits unit's `usage::TaskUsage`: tokens in and out, `cost_usd` when known, `wall_ms`, `box_usd` and `box_ms`), `outcome` (done, failed, limit, cancelled) with `reason` and `limit` (`time` or `budget`), and `review`. The node keeps it on the task in its delegates file and sends unsent ones with `RecordTasks` from the delegate pass and on each hub connect. The hub keeps them in `delegation_tasks`.
+Every delegated task leaves a `TaskRecord` (`crates/core/src/delegate/metrics.rs`) when it ends: delegator (`kind` global_orchestrator, captain, worker or session, with tab and project), provider, account, model, cost tier, effort, target (local, machine for a worker another machine's thread delegated, or box), start and end, `usage` (the limits unit's `usage::TaskUsage`: tokens in and out, `cost_usd` when known, `wall_ms`, `box_usd` and `box_ms`), `outcome` (done, failed, limit, cancelled) with `reason` and `limit` (`time` or `budget`), and `review`. The node keeps it on the task in its delegates file and sends unsent ones with `RecordTasks` from the delegate pass and on each hub connect. The hub keeps them in `delegation_tasks`.
 
 - Usage: a Claude thread child is metered from its transcript by `usage::Meter` (the limits unit), read once more just before the task settles. A headless child counts the `usage` of its stream's `result` / `turn.completed` lines; only Claude prints a cost there, so Cursor and Codex records have `cost_usd: None`.
 - Box work: a record from a machine that runs in one of the account's boxes is billed the box time since that box's previous task ended (the first task: since the box was made), at `BOX_USD_PER_HOUR`. A record sent again keeps that figure.

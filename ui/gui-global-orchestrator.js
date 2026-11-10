@@ -155,7 +155,8 @@ function globalProjectsCatalog() {
   const directory = machineDirectory();
   directory.localName = machines.get(LOCAL)?.hubView?.name ?? directory.localName;
   return tagCatalog({
-    groups: projectGroups(true),
+    // Threads started without a project share a "No project" group, which is not a project.
+    groups: projectGroups(true).filter((g) => !g.tabs.length || g.tabs.some(hasProject)),
     directory,
     phase: phaseOf,
     repoAt: (machine, path) => projectRepos.get(`${machine}:${path}`) ?? null,
