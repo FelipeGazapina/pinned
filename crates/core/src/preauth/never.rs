@@ -1809,7 +1809,7 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         let extra = [research.clone(), memory.clone()];
-        let ctx = AskCtx { extra_writes: &extra, ..ctx(&f, FOO) };
+        let wide = AskCtx { extra_writes: &extra, ..ctx(&f, FOO) };
         let r = research.display();
         let m = memory.display();
         let rows: Vec<(String, Option<NeverItem>)> = vec![
@@ -1828,12 +1828,12 @@ mod tests {
         let bad: Vec<String> = rows
             .iter()
             .filter_map(|(line, want)| {
-                let got = never(&ctx, &Ask::Bash { command: line }).map(|h| h.item);
+                let got = never(&wide, &Ask::Bash { command: line }).map(|h| h.item);
                 (got != *want).then(|| format!("{line:?}: wanted {want:?}, got {got:?}"))
             })
             .collect();
         assert!(bad.is_empty(), "\n{}", bad.join("\n"));
-        let edit = |p: PathBuf| never(&ctx, &Ask::Edit { path: &p }).map(|h| h.item);
+        let edit = |p: PathBuf| never(&wide, &Ask::Edit { path: &p }).map(|h| h.item);
         assert_eq!(edit(research.join("0.17.24/hook/NOTES.md")), None);
         assert_eq!(edit(memory.join("MEMORY.md")), None);
         assert_eq!(edit(research.join("x/.env")), Some(Secrets), "a secret stays a secret in a notes dir");
