@@ -8720,6 +8720,10 @@ Have another model review a risky change before it goes ahead.";
         let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-record");
         let usage = |id: &str| json!({ "type": "assistant", "message": { "id": id, "model": "claude-sonnet-5-5", "content": [{ "type": "text", "text": "Matches the boards." }], "usage": { "input_tokens": 12, "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 400, "output_tokens": 250 } } });
         append(&transcript, &[usage("m1"), usage("m1"), usage("m2")]);
+        // An Agent-tool subagent of the worker writes its own transcript beside the worker's.
+        let subagents = transcript.with_extension("").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), format!("{}\n", usage("m-sub"))).unwrap();
         let rates = json!({ "claude-sonnet-5-5": { "input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6, "cache_read_input_token_cost": 0.3e-6, "cache_creation_input_token_cost": 3.75e-6 } });
         std::fs::write(dir.join("config/usage-model-rates.json"), rates.to_string()).unwrap();
         let kept: Arc<Mutex<Vec<crate::delegate::TaskRecord>>> = Arc::default();
@@ -8742,11 +8746,11 @@ Have another model review a risky change before it goes ahead.";
         let record = kept.lock().unwrap().first().cloned().expect("the finished task reached the hub");
         assert_eq!(
             json!([record.id, record.title, record.delegator.kind, record.delegator.tab, record.delegator.project_name, record.account, record.outcome, record.thread, record.usage.tokens_in, record.usage.tokens_out]),
-            json!([task, "Board check", "captain", captain, "app", "work", "done", child, 2 * 3412, 500]),
-            "the turn that ended is metered before the task settles, and m1's two lines count once"
+            json!([task, "Board check", "captain", captain, "app", "work", "done", child, 3 * 3412, 750]),
+            "the turn that ended is metered before the task settles with its subagent's, and m1's two lines count once"
         );
         let cost = record.usage.cost_usd.expect("priced from the rates file");
-        assert!((cost - (24.0 * 3e-6 + 6000.0 * 0.3e-6 + 800.0 * 3.75e-6 + 500.0 * 15e-6)).abs() < 1e-9, "{cost}");
+        assert!((cost - (36.0 * 3e-6 + 9000.0 * 0.3e-6 + 1200.0 * 3.75e-6 + 750.0 * 15e-6)).abs() < 1e-9, "{cost}");
         assert!(m.delegates.unrecorded(10).is_empty(), "the hub took it");
 
         let answer: Value = serde_json::from_str(&m.delegation_stats(None).unwrap()).unwrap();
