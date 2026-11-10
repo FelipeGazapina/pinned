@@ -210,6 +210,8 @@ const rowState = () => {
       console.log(w, "folded:", JSON.stringify({ ...s, text: s.text.slice(0, 40) }));
       check(s.clamped && s.button === "Show more", `${w}: the long report is not folded: ${JSON.stringify({ ...s, text: "" })}`);
       check(s.height < 330, `${w}: a folded report is ${s.height}px tall`);
+      await p.evaluate(() => document.querySelector(".report-row").scrollIntoView({ block: "start" }));
+      await sleepMs(300);
       await p.screenshot(path.join(SCREENS, `real-folded-${name}.png`));
       await p.click(".report-row .show-full");
       await waitFor("the report to open", () => p.evaluate(() => !document.querySelector(".report-row .body.clamped")));
@@ -217,7 +219,7 @@ const rowState = () => {
       console.log(w, "open:", JSON.stringify({ ...s, text: s.text.slice(-60) }));
       check(s.button === "Show less" && s.text.includes("PR #659") && s.text.includes("Next: I merge the base"), `${w}: the whole report is not shown`);
       check(s.height > 900, `${w}: open height ${s.height}`);
-      await p.evaluate(() => { document.getElementById("thread").scrollTop = 0; });
+      await p.evaluate(() => document.querySelector(".report-row").scrollIntoView({ block: "start" }));
       await sleepMs(300);
       await p.screenshot(path.join(SCREENS, `real-open-${name}.png`));
       await p.click(".report-row .show-full");
