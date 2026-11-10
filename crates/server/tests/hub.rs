@@ -7740,3 +7740,74 @@ fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
     assert!(machine["state"]["accounts"].as_array().unwrap().iter().any(|a| a["id"] == "claude"), "{machine}");
     assert!(machine["state"]["workers_at_once"].as_u64().is_some_and(|n| n > 0), "{machine}");
 }
+
+/// A scripted machine that reports `state`, lists the `acme/app` checkout, and starts any worker.
+fn placing_machine(url: &str, token: &str, state: Value) -> RawMachine {
+    let answered = state.clone();
+    RawMachine::start_with(url, token, vec![json!({ "kind": "state", "state": state })], move |call| match call["cmd"].as_str().unwrap() {
+        "list_projects" => RawReply::Ok(json!([{ "path": "/work/app", "name": "app", "repo": "github.com/acme/app", "account": "claude" }])),
+        "tabs" => RawReply::Ok(json!([])),
+        "state" => RawReply::Ok(answered.clone()),
+        "delegate" => RawReply::Ok(json!({ "task": "t-1", "state": "running" })),
+        cmd => RawReply::Err(format!("unexpected {cmd}")),
+    })
+}
+
+fn place_call() -> Value {
+    json!({ "cmd": "place", "repo": "github.com/acme/app", "need": { "account": "claude" }, "exclude": [] })
+}
+
+#[test]
+fn placing_follows_the_accounts_policy_skips_a_machine_that_went_offline_and_never_sees_another_account() {
+    let hub = TestHub::start_with("place_policy", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = signed_in_client(&url, &ana_token);
+    let code = ana.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let (book_creds, book_id) = registered(&url, &ana_token, "ana@acme.dev", "book");
+    let (mini_creds, mini_id) = registered(&url, &ana_token, "ana@acme.dev", "mini");
+    let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
+    let book = placing_machine(&url, &book_creds.machine_token, the_minis_state());
+    let mini = placing_machine(&url, &mini_creds.machine_token, the_minis_state());
+    let bruno = placing_machine(&url, &bruno_creds.machine_token, the_minis_state());
+    ana.wait_machines(&[("book", true), ("mini", true)]);
+    wait_for("both of Ana's machines report", || state_of(&mut ana, &book_id).is_some() && state_of(&mut ana, &mini_id).is_some());
+    // The overview is how the hub learns which machine holds a checkout of the project.
+    ana.hub(json!({ "cmd": "overview" })).unwrap();
+
+    let prefer_mini = json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "placement": { "prefer": [mini_id] } } });
+    assert_eq!(ana.hub(prefer_mini).unwrap()["placement"], json!({ "prefer": [mini_id], "avoid": [], "heavy": "worktree" }));
+
+    let on_mini = book.ask(place_call()).unwrap();
+    assert_eq!(on_mini, json!({ "machine": mini_id, "machineName": "mini", "by": "policy", "reason": "first preferred machine that fits" }));
+    let target = json!({ "providerInstanceId": "claude", "machine": mini_id });
+    let started = book.ask(machine_delegate_call(7, target)["call"].clone()).unwrap();
+    assert_eq!((&started["machine"], &started["machineName"], &started["task"]), (&json!(mini_id), &json!("mini"), &json!("t-1")), "the worker starts on the preferred machine");
+    assert_eq!(mini.calls("delegate"), 1);
+
+    drop(mini);
+    ana.wait_machines(&[("book", true), ("mini", false)]);
+    let on_book = book.ask(place_call()).unwrap();
+    assert_eq!(
+        on_book,
+        json!({
+            "machine": book_id, "machineName": "book", "by": "ranked", "reason": "no preferred machine fits, so the least busy one that does",
+            "skipped": [{ "machine": mini_id, "machineName": "mini", "why": "offline", "detail": "mini is offline" }]
+        }),
+        "the worker starts on the machine that asked, and says the preferred one is offline"
+    );
+    assert!(!on_book.to_string().contains(&bruno_id), "Bruno's idle machine is never a candidate for Ana: {on_book}");
+
+    let mut exclude = place_call();
+    exclude["exclude"] = json!([book_id]);
+    let nothing = book.ask(exclude).unwrap();
+    assert_eq!(
+        (nothing["machine"].clone(), nothing["by"].clone(), nothing["skipped"].as_array().unwrap().iter().map(|skip| skip["why"].clone()).collect::<Vec<_>>()),
+        (json!(book_id), json!("fallback"), vec![json!("refused"), json!("offline")]),
+        "when nothing fits the worker runs where it was asked"
+    );
+
+    let bruno_placed = bruno.ask(place_call()).unwrap();
+    assert_eq!(bruno_placed, json!({ "machine": bruno_id, "machineName": "bruno-mac", "by": "ranked", "reason": "no preferred machine fits, so the least busy one that does" }), "Ana's policy and machines never reach Bruno");
+}

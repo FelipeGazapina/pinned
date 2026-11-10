@@ -17,7 +17,7 @@ const openTabs = ["m-mini/tab-7"];
 
 /** The page in a vm: `answer(cmd, args)` plays the backend, and each control is found in the HTML
  * the page last drew, so a click only reaches what a user could see. */
-function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = async () => "tab-1", stats = () => noStats(7) } = {}) {
+function page({ answer = () => tastesWith(), projects = {}, machineViews = null, skills = {}, chat = async () => "tab-1", stats = () => noStats(7) } = {}) {
   const listeners = {};
   const threads = [];
   const drawn = [];
@@ -41,7 +41,8 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     keyOf: (machine, tab) => `${machine}/${tab}`,
     tell: () => {},
     onlineMachines: () => Object.keys(projects),
-    machines: new Map(Object.keys(projects).map((id) => [id, { view: { online: true, name: id } }])),
+    LOCAL: "local",
+    machines: new Map(Object.entries(machineViews ?? Object.fromEntries(Object.keys(projects).map((id) => [id, { online: true, name: id }]))).map(([id, view]) => [id, { view }])),
     machineName: (id) => id,
     globalHostMachine: () => Object.keys(projects)[0] ?? "mm",
     globalSettings: { name: "Atlas" },
@@ -88,6 +89,7 @@ function page({ answer = () => tastesWith(), projects = {}, skills = {}, chat = 
     settle,
     show: async () => (context.SHELL_PAGES.taste.show(), settle()),
     click: async (pattern) => (fire("click", { target: { closest: () => control(pattern) } }), settle()),
+    place: async (list, value) => (fire("change", { target: { value, dataset: { placeAdd: list }, matches: (sel) => sel === "[data-place-add]" } }), settle()),
     pick: (attr, value) => fire("change", { target: { value, matches: (sel) => sel === `[${attr}]` } }),
     pickEffort: async (target) => (fire("change", { target }), settle()),
     type: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-note-input]" } }),
@@ -456,4 +458,100 @@ test("delegation metrics say when nothing ended and when the hub is too old", as
   const old = page({ stats: () => Promise.reject(new Error("unknown variant `delegation_stats`")) });
   await old.show();
   assert.match(old.html(), /Update pinned on the hub to see delegation metrics\./);
+});
+
+const MACHINES = { "m-mini": { online: true, name: "mac-mini", state: { workers: 2, workers_at_once: 5 } }, "m-vps": { online: false, name: "lypes-vps" }, "m-book": { online: true, name: "MacBook" } };
+const withPlacement = (placement) => ({ answer: () => tastesWith({ placement }), machineViews: MACHINES });
+const none = { prefer: [], avoid: [], heavy: "worktree" };
+const listOf = (html, label) => {
+  const [, body = ""] = new RegExp(`aria-label="${label}">(.*?)</(?:ol|ul)>`, "s").exec(html) ?? [];
+  return [...body.matchAll(/<li[^>]*>.*?<span class="name"[^>]*>(?:<s>)?([^<]+)/gs)].map(([, name]) => name);
+};
+
+test("Placement lists Prefer in order and Avoid, by machine name, with each machine's state", async () => {
+  const p = page(withPlacement({ prefer: ["m-vps", "m-mini"], avoid: ["m-book"], heavy: "worktree" }));
+  await p.show();
+  const html = p.html();
+  assert.deepEqual(listOf(html, "Prefer"), ["lypes-vps", "mac-mini"]);
+  assert.deepEqual(listOf(html, "Avoid"), ["MacBook"]);
+  assert.match(html, /<span class="pos">1<\/span><span class="name" title="m-vps">lypes-vps<\/span><span class="taste-chip" data-state="offline">offline<\/span>/);
+  assert.match(html, /data-state="online">online<\/span><span class="taste-quiet mach-meta">2 of 5 workers<\/span>/);
+  assert.match(html, /data-act="pmove" data-id="m-vps" data-step="-1" aria-label="Move lypes-vps up" disabled/);
+  assert.match(html, /aria-label="Move lypes-vps down">/);
+  assert.match(html, /data-act="pheavy" data-value="worktree" aria-pressed="true">A worker in its own worktree/);
+  assert.match(html, /If no machine fits, the worker runs on the machine that asked, and the reason is shown\./);
+  assert.match(html, /CPU is over 90% for 1 minute or it has under 2 GB of memory free\./);
+  assert.match(html, /A machine with under 10 GB of disk free takes no heavy worker\./);
+  assert.doesNotMatch(html, /data-act="[^"]*"[^>]*data-field="when_none"|Fail and say why/, "falling back to the asking machine has no switch");
+  assert.doesNotMatch(html, /Nothing is preferred or avoided/);
+  await p.click(/data-act="pmove" data-id="m-mini" data-step="-1"/);
+  assert.deepEqual(listOf(p.html(), "Prefer"), ["mac-mini", "lypes-vps"]);
+});
+
+test("an empty policy says every worker runs where it was asked", async () => {
+  const p = page(withPlacement(none));
+  await p.show();
+  assert.match(p.html(), /Nothing is preferred or avoided, so every worker runs on the machine it was asked on\./);
+  assert.deepEqual([listOf(p.html(), "Prefer"), listOf(p.html(), "Avoid")], [[], []]);
+  assert.doesNotMatch(p.html(), /taste-foot/);
+});
+
+test("a machine the account lost shows struck out with a way to remove it", async () => {
+  const p = page(withPlacement({ prefer: ["m-gone", "m-mini"], avoid: [], heavy: "worktree" }));
+  await p.show();
+  assert.match(p.html(), /<li class="gone"><span class="pos">1<\/span><span class="name" title="m-gone"><s>m-gone<\/s><\/span><span class="taste-chip">removed<\/span>/);
+  assert.doesNotMatch(p.html(), /<s>mac-mini/);
+  await p.click(/data-act="pdrop" data-list="prefer" data-id="m-gone"/);
+  assert.deepEqual(listOf(p.html(), "Prefer"), ["mac-mini"]);
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls[0], ["set_taste", { scope: { kind: "captains" }, patch: { placement: { prefer: ["m-mini"], avoid: [], heavy: "worktree" } } }]);
+});
+
+test("a machine can't be added to Prefer and Avoid at once", async () => {
+  const p = page(withPlacement({ prefer: ["m-mini"], avoid: ["m-book"], heavy: "worktree" }));
+  await p.show();
+  const avoidPicker = /<select data-place-add="avoid">(.*?)<\/select>/s.exec(p.html())[1];
+  assert.match(avoidPicker, /<option value="m-mini" disabled>mac-mini \(in Prefer\)<\/option>/);
+  assert.doesNotMatch(avoidPicker, /<option value="m-book"/, "a machine already in the list is not offered again");
+  assert.match(avoidPicker, /<option value="m-vps">lypes-vps<\/option>/);
+  await p.place("avoid", "m-mini");
+  assert.deepEqual([listOf(p.html(), "Prefer"), listOf(p.html(), "Avoid")], [["mac-mini"], ["MacBook"]]);
+  assert.doesNotMatch(p.html(), /taste-foot/, "the refused pick changed nothing");
+  await p.place("prefer", "m-book");
+  assert.deepEqual([listOf(p.html(), "Prefer"), listOf(p.html(), "Avoid")], [["mac-mini"], ["MacBook"]]);
+  await p.place("prefer", "m-vps");
+  assert.deepEqual(listOf(p.html(), "Prefer"), ["mac-mini", "lypes-vps"]);
+});
+
+test("saving the policy sends it with the Captains, and the hub's answer becomes the saved policy", async () => {
+  const saved = { prefer: ["m-mini"], avoid: ["m-book"], heavy: "all_workers" };
+  const p = page({ answer: (cmd) => (cmd === "set_taste" ? tastesWith({ placement: saved }) : tastesWith({ placement: none })), machineViews: MACHINES });
+  await p.show();
+  await p.place("prefer", "m-mini");
+  await p.place("avoid", "m-book");
+  await p.click(/data-act="pheavy" data-value="all_workers"/);
+  assert.match(p.html(), /Unsaved changes/);
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { placement: saved } }]]);
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
+  assert.match(p.html(), /data-act="pheavy" data-value="all_workers" aria-pressed="true"/);
+});
+
+test("the orchestrator tab shows the same policy, and a project tab points to the account's", async () => {
+  const p = page({ ...withPlacement({ prefer: ["m-mini"], avoid: [], heavy: "worktree" }), projects: { "m-mini": [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  await p.click(/data-kind="orchestrator"/);
+  assert.deepEqual(listOf(p.html(), "Prefer"), ["mac-mini"]);
+  await p.click(/data-kind="project" data-repo="github.com\/acme\/site"/);
+  assert.doesNotMatch(p.html(), /data-act="pmove"|data-place-add/);
+  assert.match(p.html(), /This is set for the whole account, under <button type="button" class="taste-link" data-act="scope" data-kind="captains">Captains \(all\)<\/button>/);
+});
+
+test("a hub that predates placement says so instead of drawing empty lists", async () => {
+  const p = page({ machineViews: MACHINES });
+  await p.show();
+  assert.match(p.html(), /Update pinned on the hub to choose where heavy work runs\./);
+  assert.doesNotMatch(p.html(), /data-place-add/);
 });

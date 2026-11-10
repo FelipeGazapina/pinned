@@ -290,9 +290,9 @@ fn delegation_tools() -> Vec<Value> {
                     "title": { "type": "string", "description": "Short label for the card. The first line of task is used when this is omitted." },
                     "target": {
                         "type": "object",
-                        "description": "Which account and model run the child, and where. Omit providerInstanceId to use this session's account. Omit machine and box to run it on this machine.",
+                        "description": "Which account and model run the child, and where. Omit providerInstanceId to use this session's account. Leave machine and box out and pinned places heavy workers by the account's placement policy, and runs the rest on this machine; name a machine to override it. The answer's placement says where it runs, who chose it and why.",
                         "properties": {
-                            "machine": { "type": "string", "description": "Another machine of this pinned account, by the id or name projects() lists. The worker runs there, in that machine's checkout of this repo (cloned when it has none), as a thread nested under this one; task_status, task_cancel and the end notice work from here. An offline or unknown machine is an error, never this machine." },
+                            "machine": { "type": "string", "description": "Another machine of this pinned account, by the id or name projects() lists. The worker runs there, in that machine's checkout of this repo (cloned when it has none), as a thread nested under this one; task_status, task_cancel and the end notice work from here. An offline or unknown machine is an error, never this machine. \"here\" keeps the worker on this machine on purpose, and \"auto\" places it by the policy even when it is not heavy." },
                             "box": {
                                 "description": "Run the worker in a new Upstash Box that the hub opens with this account's Upstash connection, cloning this repo (or repo). providerInstanceId picks which Claude token, stored on the Upstash card in Connectors, the box signs in with; the stored default when omitted. The box is deleted when the task ends or is cancelled. The Workers box permission in Connectors decides whether a box may open.",
                                 "oneOf": [
@@ -335,6 +335,7 @@ fn delegation_tools() -> Vec<Value> {
                         },
                     },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
+                    "heavy": { "type": "boolean", "description": "Whether the account's placement policy picks the machine for this worker when target names none. Left out, a worker with isolation worktree is heavy and a shared one is not." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
@@ -979,6 +980,7 @@ mod tests {
             vec![
                 "budgetMs".to_owned(),
                 "clientRequestId".into(),
+                "heavy".into(),
                 "interactionMode".into(),
                 "isolation".into(),
                 "limitMs".into(),

@@ -7,6 +7,7 @@ use crate::hub::{Account, Hub, Unanswered, RUN_WAIT};
 use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request};
 use pinned_core::github;
 use pinned_core::link::is_unknown_command;
+use pinned_core::placement::{Need, Seen};
 use pinned_core::wire::{Call, HubCall, TabId};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -26,6 +27,7 @@ pub async fn serve(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, call: Hub
         HubCall::RemoteTask { machine, tab, task, cancel } => remote_task(hub, account, from, &machine, tab, task, cancel).await,
         HubCall::RemoteEnded { to, tab, task, end } => ended(hub, account, from, &to, tab, task, end).await,
         HubCall::RemoteAsked { to, tab, task, ask } => asked(hub, account, from, &to, tab, task, ask).await,
+        HubCall::Place { repo, need, exclude } => place(hub, account, from, repo, &need, &exclude).await,
         _ => Err("that is not a delegate call".into()),
     }
 }
@@ -63,6 +65,39 @@ async fn delegate(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, origin: Or
     started["machine"] = json!(machine);
     started["machineName"] = json!(name);
     Ok(started)
+}
+
+/// The machine of `from`'s account that runs a heavy worker `from` would start, by the account's
+/// placement policy and what each machine last reported. Only this account's machines are seen,
+/// and never a box.
+async fn place(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, repo: Option<String>, need: &Need, exclude: &[String]) -> Result<Value, String> {
+    let policy = hub.db.tastes(account.id).await?.unwrap_or_default().placement;
+    let cloneable = match repo.as_deref() {
+        Some(repo) if github::hosts(repo) => hub.connectors(account).await?.github_token().is_some(),
+        _ => false,
+    };
+    let key = repo.as_deref().and_then(pinned_core::machine::repo_key);
+    let lists = |machine: &str| key.as_deref().is_some_and(|key| account.last_listed(machine).iter().any(|project| project.repo.as_deref().is_some_and(|repo| repo.eq_ignore_ascii_case(key))));
+    let mut machines = hub.machines(account).await?;
+    machines.retain(|machine| machine.upstash_box.is_none());
+    // What a machine reported up to 20 s ago can miss an account it just signed in to, so a
+    // machine is asked again before it is skipped for that.
+    for machine in machines.iter_mut().filter(|machine| machine.online) {
+        if machine.state.as_ref().is_some_and(|state| pinned_core::placement::lacks_account(&machine.name, need, state).is_some()) {
+            if let Ok(fresh) = hub.call_machine(account, &machine.id, Call::State, LOOK_WAIT).await {
+                if let Ok(state) = serde_json::from_value::<pinned_core::load::MachineState>(fresh) {
+                    account.note_state(&machine.id, state);
+                    machine.state = account.state_of(&machine.id);
+                }
+            }
+        }
+    }
+    let seen: Vec<Seen> = machines
+        .into_iter()
+        .map(|machine| Seen { has_repo: machine.id == from || cloneable || lists(&machine.id), id: machine.id, name: machine.name, online: machine.online, state: machine.state })
+        .collect();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    serde_json::to_value(pinned_core::placement::place(&policy, from, need, &seen, exclude, now)).map_err(|e| e.to_string())
 }
 
 /// A machine of the account by its hub id or its name, with or without `@`.
