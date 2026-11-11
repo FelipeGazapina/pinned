@@ -36,7 +36,8 @@
 //   left out until it wakes or asks something (`snoozedNow`); an ask always shows.
 //
 // navCounts() -> { needsYou, orchestrator, reviews, usage, machinesOnline, machinesTotal }
-//   `needsYou` counts needsYouItems() without reviews. `orchestrator` counts the Captains' reports
+//   `needsYou` counts the agents' requests and needsYouItems() without reviews, the cards the Needs
+//   you page draws less its finished and offered ones. `orchestrator` counts the Captains' reports
 //   in the global orchestrator's thread since the user last saw it. `reviews` is the open pull
 //   requests that ask the user's review, null until the first answer; it is fetched when tabs first
 //   arrive and then at most every 5 minutes while the page shows. `usage` is { percent, resetsAt,
@@ -260,7 +261,7 @@ visibleInterval(fetchReviews, REVIEWS_EVERY_MS);
 
 function navCounts() {
   return {
-    needsYou: needsYouItems().filter((i) => i.kind !== "review").length,
+    needsYou: agentConfirmations.length + needsYouItems().filter((i) => i.kind !== "review").length,
     orchestrator: unseenReports(),
     reviews: reviewCount,
     usage: usageNow(),

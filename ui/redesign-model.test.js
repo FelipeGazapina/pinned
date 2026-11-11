@@ -77,6 +77,7 @@ function page(world) {
     seenAt: world.seenAt ?? {},
     sideMarks: { snoozed: world.snoozed ?? {} },
     machines: world.machines ?? new Map(),
+    agentConfirmations: world.agents ?? [],
     DEFAULT_ACCOUNT: "claude",
     statusOf: (tab) => tab.view.status ?? "idle",
     threadOf: (tab) => tab.thread,
@@ -341,6 +342,8 @@ test("navCounts counts what waits, the unseen Captain reports, reviews once fetc
     ["book", "pull_requests", "reviewing", "open", ["/w/site"]],
   ]);
   assert.equal(p.run("navCounts().reviews"), 3, "a pull request two machines list counts once");
+  p.context.agentConfirmations.push({ id: "c-1", action: "pair_machine" }, { id: "c-2", action: "add_project" });
+  assert.equal(p.run("navCounts().needsYou"), 3, "an agent's request to act as the user counts as the Needs you page's card does");
   await p.run("fetchReviews()");
   assert.equal(p.calls.asked.length, 2, "a second fetch inside five minutes asks nobody");
   p.context.active = null;
