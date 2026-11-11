@@ -28,6 +28,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         hooks::STAGE_SUBCOMMAND => hooks::stage(first),
         hooks::SLACK_SUBCOMMAND => hooks::slack(rest),
         hooks::LINEAR_SUBCOMMAND => hooks::linear(rest),
+        hooks::RUN_SUBCOMMAND => hooks::run(rest),
         evidence::SUBCOMMAND => evidence::run(rest),
         mcp::RUN_SUBCOMMAND => mcp::run(rest),
         mcp::HEADERS_SUBCOMMAND => mcp::headers(rest),

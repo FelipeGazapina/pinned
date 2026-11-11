@@ -163,6 +163,7 @@ impl Link {
                 HubCall::LinearCreate { connector, channel, thread, title, description, assignee }
             }
             Message::LinearTake { connector, channel, thread, issue } => HubCall::LinearTake { connector, channel, thread, issue },
+            Message::RunSet { connector, subject, name, value } => HubCall::RunSet { connector, subject, name, value },
             _ => return Err("only a workflow session's callbacks go to the hub".into()),
         };
         match self.call_hub(call)? {

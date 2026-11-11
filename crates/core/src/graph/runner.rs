@@ -430,6 +430,31 @@ pub fn branch_without_session(library: &Library, connector: &str, from: &NodeId,
     acts
 }
 
+/// Whether the branch out of `port` files an issue after talking to the thread's session: it
+/// reaches a file-issue and a session or talk step, and no call, which may open a session of its
+/// own. A follow-up walks such a branch in the session the thread already has.
+pub fn branch_files_in_session(library: &Library, connector: &str, from: &NodeId, port: &PortId) -> bool {
+    let Some(graph) = library.get(connector) else {
+        return false;
+    };
+    let (mut files, mut talks, mut seen) = (false, false, BTreeSet::new());
+    let mut todo = targets_of(graph, from, port);
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(node) = graph.node(&id) else { return false };
+        match &node.kind {
+            NodeKind::Call { .. } | NodeKind::Trigger { .. } => return false,
+            NodeKind::Talk { .. } | NodeKind::Session(_) => talks = true,
+            NodeKind::FileIssue { .. } => files = true,
+            _ => {}
+        }
+        todo.extend(node.kind.ports().iter().flat_map(|port| targets_of(graph, &id, &port.id)));
+    }
+    files && talks
+}
+
 /// A follow-up run of `connector`'s graph for a later mention `input` in the thread `subject`,
 /// already past its routing classify with `answers`. The thread was claimed by its first run.
 pub fn start_follow_up(library: &Library, connector: &str, subject: Subject, input: Value, answers: Answers, at: &str) -> Run {
@@ -598,7 +623,7 @@ fn enter_call(
 }
 
 fn talk_effect(run: &mut Run, connector: &str, prompt: &str, session: &SessionSetup) -> Result<Effect, String> {
-    if run.follow_up {
+    if run.follow_up && !matches!(run.session, Session::Live { .. }) {
         return Err("a follow-up in the thread reached a step that needs a session, and the thread's session gets it instead".into());
     }
     if run.session_owner.is_none() {
