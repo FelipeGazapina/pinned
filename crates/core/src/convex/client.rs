@@ -277,7 +277,7 @@ pub async fn read(http: &dyn Http, key: &DeployKey, grant: &Grant, ask: Ask) -> 
         Ask::Tables { table: None } => tables(http, key, grant).await,
         Ask::Tables { table: Some(table) } => table_shape(http, key, grant, &table).await,
         Ask::Data { table, limit, cursor, oldest_first } => data(http, key, grant, &table, limit, cursor.as_deref(), oldest_first).await,
-        Ask::Query { code } => ran(call(http, key, url, Route::Adhoc { code: &code }).await?),
+        Ask::Query { code } => call(http, key, url, Route::Adhoc { code: &code }).await.and_then(ran),
         Ask::Run { function, args } => run(http, key, url, &function, &args).await,
         Ask::Logs { function, errors, limit } => logs(http, key, url, function.as_deref(), errors, limit).await,
     };
@@ -763,6 +763,15 @@ mod tests {
         assert_eq!(block_on(read(&echo, &key(), &everything(), Ask::Tables { table: None })), Err("Convex: bad admin key [hidden]".into()));
         let echo = fake(vec![(json!({ "code": "Nope", "message": "key eyJ2MiI6ImFkbWluIn0secret was revoked" }), 403)]);
         assert_eq!(block_on(resolve(&echo, &key())), Err("Convex answered 403: key [hidden] was revoked".into()));
+    }
+
+    #[test]
+    fn a_query_error_that_echoes_its_request_comes_out_scrubbed() {
+        // The ad hoc route is the one whose body holds the key, so its errors are the likeliest to echo it.
+        let query = |answer: (Value, u16)| block_on(read(&fake(vec![answer]), &key(), &everything(), Ask::Query { code: "return 1;".into() }));
+        assert_eq!(query((json!({ "code": "BadRequest", "message": format!("could not read adminKey {ADMIN}") }), 400)), Err("Convex answered 400: could not read adminKey [hidden]".into()));
+        assert_eq!(query((json!({ "code": "InvalidModules", "message": format!("bundle of {ADMIN} failed") }), 400)), Err("Convex could not compile the query: bundle of [hidden] failed".into()));
+        assert_eq!(query((json!({ "status": "error", "errorMessage": "Uncaught Error: eyJ2MiI6ImFkbWluIn0secret" }), 200)), Err("Convex: Uncaught Error: [hidden]".into()));
     }
 
     #[test]
