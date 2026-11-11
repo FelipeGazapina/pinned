@@ -7,6 +7,7 @@
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
 // PLAYWRIGHT names the playwright package when `require("playwright")` can't find it.
+// SWEEP_UNTIL ends the run after the first step whose name contains it.
 // Screenshots and sweep-<profile>.json land in SWEEP_DIR. Exits 1 when any step is not "works".
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +27,7 @@ const PROFILES = {
 };
 
 class Broken extends Error {}
+class Until extends Error {}
 class TouchUnusable extends Error {}
 const check = (ok, what) => {
   if (!ok) throw new Broken(what);
@@ -130,6 +132,8 @@ async function sweep(profileName) {
       await tapOrClick("#head-more");
       return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
     }
+    // A lane narrowed by the side panel rests the composer as one row, its footer hidden until the prompt has focus.
+    if (!touch && selector.startsWith("#composer-footer") && (await page.evaluate(() => composer.dataset.slim === "true"))) await page.focus("#prompt");
     return touch ? page.tap(selector) : page.click(selector);
   };
   const press = async (locator) => (touch ? locator.tap() : locator.click());
@@ -160,6 +164,21 @@ async function sweep(profileName) {
     await page.keyboard.type(keys);
   };
   const rect = (selector) => page.locator(selector).first().evaluate((el) => el.getBoundingClientRect().toJSON());
+  // A row names its project only when pinned; otherwise the project's head above it does.
+  const rowProject = (selector) =>
+    page.locator(selector).first().evaluate((row) => {
+      for (let el = row.previousElementSibling; el; el = el.previousElementSibling) if (el.matches(".project-head")) return el.querySelector(".name").textContent;
+      return row.querySelector(".project")?.textContent ?? "";
+    });
+  // A shelf's head as "Settled (1)": its label, and its count beside it.
+  const shelfText = (kind) =>
+    page.locator(`#thread-list .settled-head[data-shelf="${kind}"]`).first().evaluate((h) => `${h.querySelector(".label").textContent} (${h.querySelector(".count").textContent})`).catch(() => "");
+  // The topmost row of a thread in the project `name`.
+  const projectRow = async (name) => {
+    const key = await page.evaluate((n) => [...document.querySelectorAll("#thread-list .thread-row")].map((r) => tabByKey(r.dataset.tab)).find((t) => t && projectName(t) === n)?.key, name);
+    check(key, `no row in ${name}`);
+    return page.locator(`#thread-list .thread-row[data-tab="${key}"]`);
+  };
   const overflowing = () =>
     page.evaluate(() =>
       [...document.querySelectorAll("body *")]
@@ -235,6 +254,10 @@ async function sweep(profileName) {
     await page.screenshot({ path: path.join(shots, `${String(results.length + 1).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`) }).catch(() => {});
     results.push({ step: name, verdict, note, seen: [...new Set(seen)] });
     console.log(`${profileName.padEnd(7)} ${verdict.padEnd(17)} ${name}${note ? `: ${note}` : ""}`);
+    if (process.env.SWEEP_UNTIL && name.includes(process.env.SWEEP_UNTIL)) {
+      await browser.close();
+      throw Object.assign(new Until(), { results });
+    }
   }
 
   await page.goto(HUB);
@@ -612,6 +635,16 @@ async function sweep(profileName) {
     await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
     await waitFor("the sidebar", sidebarShown);
   };
+  // Pull requests and Usage are the sidebar's nav rows; a phone has them on its More screen.
+  const openNavPage = async (name) => {
+    if (!(await page.evaluate(() => narrow(768)))) {
+      await showSidebar();
+      return press(gui(`#side-nav [data-open-page="${name}"]`));
+    }
+    await tapOrClick('#phone-tabs [data-phone-tab="more"]');
+    await waitFor("the More screen", () => page.locator(`#page-view [data-more="${name}"]`).isVisible());
+    await tapOrClick(`#page-view [data-more="${name}"]`);
+  };
 
   await step("app view: switch from the terminal, threads in the sidebar", async () => {
     await typeInTerm("typed in the terminal");
@@ -623,7 +656,7 @@ async function sweep(profileName) {
     await showSidebar();
     const rows = await page.locator("#thread-list .thread-row").count();
     check(rows === 2, `${rows} threads in the sidebar, expected 2`);
-    check(/alpha/.test(await text("#thread-list .thread-row.active .project")), "the active row is not alpha");
+    check(/alpha/.test(await rowProject("#thread-list .thread-row.active")), "the active row is not alpha");
     if (touch) await page.tap("#workspace", { position: { x: (await rect("#workspace")).width - 4, y: 300 } });
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
@@ -903,24 +936,25 @@ async function sweep(profileName) {
     return `${before.head} then ${during.head} then ${after.head}`;
   });
 
-  await step("app view: spawned agents show as live cards, and the thread reads in progress until they finish", async () => {
+  await step("app view: spawned agents show as live rows in the Workers block, and the thread reads in progress until they finish", async () => {
     const beta = await page.evaluate(() => active.key);
-    const card = (name) => page.locator("#thread .turn:last-of-type .agents .agent-card", { hasText: name });
-    const stepLine = (name) => card(name).locator(".agent-step .label").textContent();
+    const block = "#thread .turn:last-of-type .workers";
+    const card = (name) => page.locator(`${block} .worker-row`, { hasText: name });
+    const stepLine = (name) => card(name).locator(".worker-step").textContent();
     const rowStatus = () => page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).textContent().catch(() => "");
     await sendPrompt("spawn agents");
-    await waitFor("two agent cards", async () => (await page.locator("#thread .turn:last-of-type .agents .agent-card").count()) === 2, 6000);
-    check((await card("Map the parser").locator(".chip").textContent()) === "Explore · haiku", `the first card's chip reads ${await card("Map the parser").locator(".chip").textContent()}`);
-    check((await card("Check the tests").getAttribute("data-state")) === "running", "the second card is not running");
+    await waitFor("two worker rows", async () => (await page.locator(`${block} .worker-row`).count()) === 2, 6000);
+    check((await card("Map the parser").locator(".worker-model").textContent()) === "haiku", `the first row's model reads ${await card("Map the parser").locator(".worker-model").textContent()}`);
+    check((await card("Check the tests").getAttribute("data-state")) === "working", "the second row is not working");
     const first = await stepLine("Check the tests");
-    await waitFor("the card's step to move on", async () => (await stepLine("Check the tests")) !== first, 5000);
+    await waitFor("the row's step to move on", async () => (await stepLine("Check the tests")) !== first, 5000);
     const later = await stepLine("Check the tests");
     check(/^cargo test batch_\d$/.test(later), `the step line reads ${later}`);
     await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
     check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
     check(/^Worked( for .+)?$/.test(await lastTurn(".work > summary .label").textContent()), `the turn's own work did not settle: ${await lastTurn(".work > summary").textContent()}`);
-    const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
-    check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
+    const working = (await text(`${block} .workers-working`)).replace(/\s+/g, " ");
+    check(/^2 working · \d/.test(working), `the block's head reads ${working}`);
     check(/^2 working/.test((await rowStatus()).trim()), `the sidebar row reads ${await rowStatus()}`);
     check((await page.locator("#composer").getAttribute("data-working")) === "false", "the composer acts as if claude's turn were running");
     await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-running.png") });
@@ -930,37 +964,63 @@ async function sweep(profileName) {
     await waitFor("the row to show an unread finish", () => page.evaluate((k) => unseenDone(tabByKey(k)), beta), 12000);
     check((await page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).count()) === 0, "the finished row still shows a status");
     await page.evaluate((k) => activate(tabByKey(k)), beta);
-    await waitFor("both cards done", async () => (await page.locator('#thread .agent-card[data-state="done"]').count()) === 2, 4000);
-    check((await page.locator("#thread .agents-working").count()) === 0, "the agents footer outlived the agents");
+    await waitFor("both rows done", async () => (await page.locator('#thread .worker-row[data-state="done"]').count()) === 2, 4000);
+    check((await page.locator("#thread .workers-working").count()) === 0, "the block's working count outlived the agents");
+    check((await text(`${block} .workers-count`)) === "2 of 2 done", `the block's head reads ${await text(`${block} .workers-count`)}`);
     const done = await stepLine("Check the tests");
-    check(done === "Check the tests: all clear.", `the finished card's step reads ${done}`);
-    await press(card("Check the tests").locator(".agent-head"));
-    const rows = await card("Check the tests").locator(".agent-steps .tool").count();
-    check(rows === 5, `the open card shows ${rows} tool rows`);
+    check(done === "Check the tests: all clear.", `the finished row's step reads ${done}`);
+    await press(card("Check the tests").locator(".worker-toggle"));
+    const rows = await card("Check the tests").locator(".worker-body .worker-line").count();
+    check(rows === 5, `the open row shows ${rows} tool steps`);
     await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-done.png") });
-    await press(card("Check the tests").locator(".agent-head"));
+    await press(card("Check the tests").locator(".worker-toggle"));
     return `${first} → ${later}`;
   });
 
-  await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
+  await step("app view: changed files list flat up to 8, and past 8 show as a folder tree, with 1.2k counts", async () => {
     await sendPrompt("tree");
     await answered("Wrote the tree.");
     await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
-    const card = lastTurn(".changes");
+    const flat = lastTurn(".changes.flat");
+    check(/^4 changed files\s*\+1\.2k/.test(await flat.locator(":scope > .head").textContent()), `the flat card reads ${await flat.locator(":scope > .head").textContent()}`);
+    const paths = (await flat.locator("li .path").allTextContents()).join("|");
+    check(paths === "README.md|docs/guide.md|src/app/lib.rs|src/app/main.rs", `the flat card lists ${paths}`);
+    // Nine files fold into folders. A scripted turn holds on a Bash approval while they are written in
+    // its folder, so its diff holds them, and the approval ends it.
+    fs.writeFileSync(path.join(HOME, "fake-turns.json"), JSON.stringify([{ prompt: "grow the tree", say: "Grew the tree.", ask: { command: "true", description: "Finish the tree" } }]));
+    // A turn's changes go to the last turn that started by the second they ended in, so each turn here starts a second later.
+    await sleep(1100);
+    await sendPrompt("grow the tree");
+    await waitFor("the scripted approval", () => page.evaluate(() => pendingAsk(active)?.kind === "approval"), 10000);
+    const cwd = await page.evaluate(() => active.view.cwd);
+    fs.mkdirSync(path.join(cwd, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, "docs/api.md"), Array.from({ length: 1200 }, (_, i) => `line ${i}`).join("\n") + "\n");
+    for (const name of ["a", "b", "c", "d", "e", "f", "g"]) fs.writeFileSync(path.join(cwd, `src/app/${name}.rs`), `fn ${name}() {}\n`);
+    fs.writeFileSync(path.join(cwd, "CHANGELOG.md"), "# changelog\n");
+    check(await page.evaluate(() => answerAsk(active, "approve")), "the scripted approval took no answer");
+    fs.rmSync(path.join(HOME, "fake-turns.json"));
+    await waitFor("the scripted turn to end", () => page.evaluate(() => statusOf(active) === "done"), 10000);
+    // The page reads a thread's changes again when a turn stops working, which a turn that ended on an
+    // approval never does, so the next turn brings them.
+    await sleep(1100);
+    await sendPrompt("after the tree");
+    await answered("echo: after the tree");
+    const card = page.locator("#thread .turn", { hasText: "Grew the tree." }).locator(".changes").first();
+    await waitFor("the folder tree card", async () => (await card.count()) > 0 && !(await card.evaluate((el) => el.classList.contains("flat"))), 10000);
     check(/\+1\.2k/.test(await card.locator("summary").textContent()), `the card reads ${await card.locator("summary").textContent()}`);
     await press(card.locator("summary .show"));
     await waitFor("the tree", async () => (await card.locator("li").count()) > 0);
     const shifted = await page.evaluate(() => [...document.querySelectorAll("#expanded, #workspace")].map((el) => el.scrollLeft).join(","));
     check(shifted === "0,0", `opening the card scrolled the view sideways: ${shifted}`);
     const rows = async () => (await card.locator("li").allTextContents()).map((r) => r.replace(/[+−].*/, "").trim());
-    check((await rows()).join("|") === "docs|guide.md|src/app|lib.rs|main.rs|README.md", `rows: ${(await rows()).join("|")}`);
+    check((await rows()).join("|") === "docs|api.md|src/app|a.rs|b.rs|c.rs|d.rs|e.rs|f.rs|g.rs|CHANGELOG.md", `rows: ${(await rows()).join("|")}`);
     check((await card.locator("summary").evaluate((el) => getComputedStyle(el).position)) === "sticky", "the card's header doesn't stick");
     await press(card.locator("[data-all-dirs]"));
-    await waitFor("folders to collapse", async () => (await rows()).join("|") === "docs|src/app|README.md");
+    await waitFor("folders to collapse", async () => (await rows()).join("|") === "docs|src/app|CHANGELOG.md");
     await press(card.locator('li[data-dir="docs"]'));
-    await waitFor("docs to open", async () => (await rows()).join("|") === "docs|guide.md|src/app|README.md");
+    await waitFor("docs to open", async () => (await rows()).join("|") === "docs|api.md|src/app|CHANGELOG.md");
     await press(card.locator("[data-all-dirs]"));
-    await waitFor("folders to expand", async () => (await card.locator("li[data-file]").count()) === 4);
+    await waitFor("folders to expand", async () => (await card.locator("li[data-file]").count()) === 9);
     return (await rows()).join(" | ");
   });
 
@@ -1144,7 +1204,7 @@ async function sweep(profileName) {
     await waitFor("a rare language's grammar", () => page.evaluate(() => shikiLangs.has("cobol")), 8000);
   });
 
-  await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {
+  await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters above phone width", async () => {
     // The typed fields, without the font list Chromium could offer once a field takes focus.
     await page.evaluate(() => {
       Object.assign(installedFonts, { status: "unavailable", families: [] });
@@ -1210,9 +1270,10 @@ async function sweep(profileName) {
         await sleep(150);
         return page.evaluate(() => getComputedStyle(threadView).paddingLeft);
       };
-      const gutters = [await gutter(700), await gutter(600)];
+      // At 768px and below the phone shell takes over, with the phone board's 16px gutters.
+      const gutters = [await gutter(800), await gutter(600)];
       await page.setViewportSize(profile.viewport);
-      check(gutters.join("|") === "48px|12px", `gutters at 700 and 600px: ${gutters.join(" | ")}`);
+      check(gutters.join("|") === "48px|16px", `gutters at 800 and 600px: ${gutters.join(" | ")}`);
     }
   });
 
@@ -1767,9 +1828,14 @@ async function sweep(profileName) {
     }
   });
 
+  // Settings and the other pages behind the sidebar footer's account menu.
+  const fromAccountMenu = async (item) => {
+    if (await page.locator("#account-menu").isHidden()) await press(page.locator("#account-pages"));
+    await press(page.locator(`#account-menu ${item}`));
+  };
   const openSettingsFromSidebar = async () => {
     if (touch) await page.evaluate(() => settingsOpen() || toggleSettings());
-    else if (!(await page.evaluate(() => settingsOpen()))) await press(page.locator("#gui-settings"));
+    else if (!(await page.evaluate(() => settingsOpen()))) await fromAccountMenu("#gui-settings");
     await waitFor("Settings", () => page.evaluate(() => settingsOpen()));
   };
 
@@ -2074,11 +2140,11 @@ async function sweep(profileName) {
     await sendPrompt("icons");
     await answered("Wrote two files.");
     await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
-    const card = lastTurn(".changes");
-    await press(card.locator("summary .show"));
-    await waitFor("the tree", async () => (await card.locator("li[data-file]").count()) === 2);
+    // Two files list flat, by path.
+    const card = lastTurn(".changes.flat");
+    await waitFor("the rows", async () => (await card.locator("li[data-file]").count()) === 2);
     const icons = await card.locator("li[data-file]").evaluateAll((rows) => rows.map((r) => `${r.dataset.file}=${r.querySelector("svg.pierre use")?.getAttribute("href")}`));
-    check(icons.join(" ") === "web/app.ts=#file-tree-builtin-typescript Cargo.toml=#t3-file-icon-toml", `icons: ${icons.join(" ")}`);
+    check(icons.join(" ") === "Cargo.toml=#t3-file-icon-toml web/app.ts=#file-tree-builtin-typescript", `icons: ${icons.join(" ")}`);
     const drawn = await card.locator('li[data-file="web/app.ts"] svg.pierre').evaluate((el) => [getComputedStyle(el).color, Math.round(el.getBoundingClientRect().width)]);
     check(drawn.join("|") === "rgb(105, 177, 255)|14", `the TypeScript icon draws as ${drawn.join(" ")}`);
     check(await page.evaluate(() => markdown("@web/app.ts", promptMarked).includes("#file-tree-builtin-typescript")), "a mention chip has no file-type icon");
@@ -2572,8 +2638,8 @@ async function sweep(profileName) {
 
   await step("app view: diff scopes, hidden whitespace, file tree and highlighting", async () => {
     await sendPrompt("code");
-    await waitFor("the code turn's changes", async () => (await page.locator("#thread .turn:last-of-type", { hasText: "I wrote app.js" }).locator("summary .open-diff").count()) === 1, 15000);
-    await press(page.locator("#thread .turn:last-of-type summary .open-diff"));
+    await waitFor("the code turn's changes", async () => (await page.locator("#thread .turn:last-of-type", { hasText: "I wrote app.js" }).locator(".changes .open-diff").count()) === 1, 15000);
+    await press(page.locator("#thread .turn:last-of-type .changes .open-diff"));
     await waitFor("app.js in the diff", () => page.locator('#panel-body .file[data-path="app.js"]').isVisible());
     const open = await page.locator("#panel-body .file").evaluateAll((els) => els.filter((e) => !e.hasAttribute("data-collapsed")).map((e) => e.dataset.path));
     check(!open.length, `open by default: ${open.join(", ")}`);
@@ -4926,15 +4992,15 @@ async function sweep(profileName) {
   });
 
   await step("composer: a draft stays with its thread, and ⌘S stashes it", async () => {
-    const row = (name) => page.locator("#thread-list .thread-row", { hasText: name }).first();
+    const row = projectRow;
     await page.fill("#prompt", "half-written idea");
     await showSidebar();
-    await press(row("beta"));
+    await press(await row("beta"));
     await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
     check((await page.inputValue("#prompt")) === "", "beta shows alpha's draft");
     await showSidebar();
-    check(await row("alpha").locator(".draft-pen").isVisible(), "alpha's row has no draft pen");
-    await press(row("alpha"));
+    check(await (await row("alpha")).locator(".draft-pen").isVisible(), "alpha's row has no draft pen");
+    await press(await row("alpha"));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
     check((await page.inputValue("#prompt")) === "half-written idea", `alpha's draft came back as ${JSON.stringify(await page.inputValue("#prompt"))}`);
     if (touch) {
@@ -4954,7 +5020,7 @@ async function sweep(profileName) {
 
   await step("composer: an empty thread centers the composer, and Send spins until claude takes it", async () => {
     await showSidebar();
-    await press(page.locator("#thread-list .thread-row", { hasText: "beta" }).first());
+    await press(await projectRow("beta"));
     await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
     // The timeline's steps filled beta's thread, so this step and the next run in a new one.
     await page.evaluate(() => newThread(true));
@@ -5016,7 +5082,7 @@ async function sweep(profileName) {
     await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
     await showSidebar();
-    await press(page.locator("#thread-list .thread-row", { hasText: "alpha" }).first());
+    await press(await projectRow("alpha"));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
     return refs.join(", ");
   });
@@ -5826,27 +5892,27 @@ async function sweep(profileName) {
     }
   });
 
-  await step("composer: on a phone the unfocused composer collapses to one Ask anything... row", async () => {
-    const state = () => page.evaluate(() => composer.dataset.collapsed);
+  // Phone-Thread draws the open box, so a phone's composer no longer collapses to one row when unfocused.
+  await step("composer: on a phone the unfocused composer keeps its full box", async () => {
+    const collapsed = () => page.evaluate(() => composer.dataset.collapsed === "true");
     await page.evaluate(() => (prompt.blur(), rest()));
     if (touch) await tapOutsideComposer();
     if (!touch) {
-      check((await state()) === "false", "a desktop composer collapsed");
+      check(!(await collapsed()), "a desktop composer collapsed");
       return "a desktop composer stays open";
     }
-    await waitFor("the collapsed row", async () => (await state()) === "true");
-    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything...", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
-    check(!(await page.locator("#composer-attach").isVisible()) && (await page.locator("#send").isVisible()), "the row shows more than the prompt and Send");
-    const row = await rect("#composer .box");
-    check(row.height <= 52, `the row is ${Math.round(row.height)}px tall`);
+    await sleep(400);
+    check(!(await collapsed()), "the unfocused phone composer collapsed");
+    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything, @tag files/folders, $use skills, or / for commands", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
+    check((await page.locator("#composer-attach").isVisible()) && (await page.locator("#send").isVisible()), "the unfocused box lost its controls");
+    const box = await rect("#composer .box");
+    check(box.height > 52, `the box is ${Math.round(box.height)}px tall`);
     await page.fill("#prompt", "a draft");
-    await waitFor("the composer to open on focus", async () => (await state()) === "false" && (await page.locator("#composer-attach").isVisible()));
     await page.evaluate(() => prompt.blur());
-    await waitFor("the row again, with the draft", async () => (await state()) === "true" && (await page.inputValue("#prompt")) === "a draft");
-    await tapOrClick("#prompt");
-    await waitFor("the composer to open on a tap", async () => (await state()) === "false");
+    await sleep(400);
+    check(!(await collapsed()) && (await page.inputValue("#prompt")) === "a draft" && (await page.locator("#composer-attach").isVisible()), "the box with a draft collapsed or lost it");
     await page.fill("#prompt", "");
-    return `${Math.round(row.height)}px row`;
+    return `${Math.round(box.height)}px box`;
   });
 
   await step("composer: a fenced block in the prompt draws as a highlighted code block with T3 Code's language picker", async () => {
@@ -5910,10 +5976,10 @@ async function sweep(profileName) {
 
   await step("app view: the sidebar switches threads", async () => {
     await showSidebar();
-    await press(page.locator("#thread-list .thread-row", { hasText: "beta" }).first());
+    await press(await projectRow("beta"));
     await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
     await showSidebar();
-    await press(page.locator("#thread-list .thread-row", { hasText: "alpha" }).first());
+    await press(await projectRow("alpha"));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
   });
 
@@ -5946,8 +6012,9 @@ async function sweep(profileName) {
 
   await step("app view: rows carry project icons, ⌘1-9 follow the visible rows", async () => {
     await showSidebar();
-    const marks = await page.locator("#thread-list .thread-row .monogram").allTextContents();
-    check(marks.length === 2 && marks.includes("AA") && marks.includes("BA"), `monograms: ${marks.join(", ")}`);
+    // Each project's head carries its icon, the first two letters of a one-word name.
+    const marks = await page.locator("#thread-list .project-head .monogram").allTextContents();
+    check(marks.length === 2 && marks.includes("AL") && marks.includes("BE"), `monograms: ${marks.join(", ")}`);
     check((await page.locator("#chat-head .crumb .monogram").count()) === 1 && (await crumbProject()) === "alpha", "the header's project has no icon");
     const order = await sideOrder();
     if (touch) return order.join(", ");
@@ -5996,7 +6063,7 @@ async function sweep(profileName) {
       await rowMenu(rowSel(beta));
       await menuPick("Settle thread");
     } else await rowAct(beta, "settle");
-    await waitFor("the settled shelf", async () => (await text('#thread-list .settled-head[data-shelf="settled"]')) === "Settled (1)");
+    await waitFor("the settled shelf", async () => (await shelfText("settled")) === "Settled (1)");
     check(!(await page.locator(rowSel(beta)).count()), "beta shows while the shelf is collapsed");
     await press(gui('#thread-list .settled-head[data-shelf="settled"]'));
     await waitFor("beta's slim row", () => page.locator(`${rowSel(beta)}.slim`).isVisible());
@@ -6044,7 +6111,7 @@ async function sweep(profileName) {
     await rowMenu(rowSel(beta));
     await menuPick("Snooze");
     await menuPick("In 1 hour");
-    await waitFor("the snoozed shelf", async () => (await text('#thread-list .settled-head[data-shelf="snoozed"]')) === "Snoozed (1)");
+    await waitFor("the snoozed shelf", async () => (await shelfText("snoozed")) === "Snoozed (1)");
     await press(gui('#thread-list .settled-head[data-shelf="snoozed"]'));
     await waitFor("beta's wake time", async () => /^\d+m$/.test(await text(`${rowSel(beta)} .wake-at`)));
     const wakeAt = await text(`${rowSel(beta)} .wake-at`);
@@ -6062,7 +6129,7 @@ async function sweep(profileName) {
     await rowMenu(rowSel(alpha));
     await menuPick("Mark unread");
     await waitFor("alpha's time marked unread", () => page.locator(`${rowSel(alpha)} .stamp.when.unread`).count());
-    check((await tone(`${rowSel(alpha)} .stamp.when`)) === "rgb(254, 154, 0)", `the unread time is ${await tone(`${rowSel(alpha)} .stamp.when`)}`);
+    check((await tone(`${rowSel(alpha)} .stamp.when`)) === "rgb(255, 185, 0)", `the unread time is ${await tone(`${rowSel(alpha)} .stamp.when`)}`);
     await rowMenu(rowSel(alpha));
     await menuPick("Copy");
     await menuPick("Path");
@@ -6176,8 +6243,8 @@ async function sweep(profileName) {
     check(width === want, `the sidebar is ${width}px after a drag to ${want}`);
     check((await page.evaluate(() => load("gui-sidebar-width"))) === String(want), "the width wasn't saved");
     await page.dblclick("#sidebar-resize");
-    check(Math.round((await rect("#sidebar")).width) === 256, "double-click didn't reset the width");
-    return `${want}px, then 256px`;
+    check(Math.round((await rect("#sidebar")).width) === 264, "double-click didn't reset the width to the board's 264px");
+    return `${want}px, then 264px`;
   });
 
   // T3 Code's sidebar, round 2: PR state everywhere, auto-settle and its settings, the Working shelf.
@@ -6208,7 +6275,8 @@ async function sweep(profileName) {
     const badge = `${rowSel(alpha)} .pr`;
     await waitFor("alpha's badge to read open overall", async () => (await prState(badge)) === "open" && /#42 - Merged/.test((await attr(badge, "aria-label")) ?? ""), 10000);
     check((await text(badge)) === "+2", `the badge reads ${await text(badge)}`);
-    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the badge is ${await tone(badge)}`);
+    // Sidebar.dc.html draws a row's third line in one meta color, a PR's state in its words and label.
+    check((await tone(badge)) === (await tone(`${rowSel(alpha)} .l3`)), `the badge is ${await tone(badge)}, its line ${await tone(`${rowSel(alpha)} .l3`)}`);
     check((await attr(badge, "aria-label")) === "PR #42 - Merged: Add notes, and 1 more linked; overall open", `aria-label: ${await attr(badge, "aria-label")}`);
     await waitFor("the composer's badge to read merged", async () => (await prState("#composer-footer .pr")) === "merged");
     check((await tone("#composer-footer .pr")) === "rgba(196, 181, 253, 0.9)", `the composer's badge is ${await tone("#composer-footer .pr")}`);
@@ -6242,9 +6310,10 @@ async function sweep(profileName) {
     await page.fill("#prompt", "unsent words");
     await openRow(beta);
     await showSidebar();
-    const lead = await page.locator(`${rowSel(alpha)} .l1 > *`).first().getAttribute("class");
-    check(lead === "draft-pen", `line 1 starts with ${lead}`);
-    check(!(await page.locator(`${rowSel(alpha)} .l2 .draft-pen`).count()), "the pen is still on the title line");
+    // Sidebar.dc.html says "Unsent draft" in words, leading the row's second line, under the title.
+    const lead = await page.locator(`${rowSel(alpha)} .l3 > :not(.warn, .role, .pin, .term-run)`).first().evaluate((el) => `${el.className}: ${el.textContent}`);
+    check(lead === "draft-pen: Unsent draft", `the second line starts with ${lead}`);
+    check(!(await page.locator(`${rowSel(alpha)} .l1 .draft-pen`).count()), "the draft is on the title line");
     if (!touch) {
       await page.hover(`${rowSel(alpha)} .l2`);
       await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
@@ -6272,14 +6341,17 @@ async function sweep(profileName) {
     fs.writeFileSync(file, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#e11d48"/></svg>');
     await page.evaluate(() => dispatchEvent(new Event("focus")));
     await showSidebar();
-    await waitFor("beta's favicon", async () => ((await attr(`${rowSel(beta)} img.favicon`, "src")) ?? "").startsWith("data:image/svg+xml;base64,"), 10000);
-    check(!(await page.locator(`${rowSel(beta)} .monogram`).count()), "beta kept its monogram");
-    check((await page.locator(`${rowSel(await keyFor("alpha"))} .monogram`).count()) === 1, "alpha, with no favicon, lost its monogram");
-    const size = await page.locator(`${rowSel(beta)} img.favicon`).evaluate((el) => `${el.getBoundingClientRect().width}x${el.getBoundingClientRect().height}`);
+    // A project's icon is on its head in the sidebar, above its rows.
+    const head = (name) => page.locator("#thread-list .project-head").filter({ has: page.locator(".name", { hasText: new RegExp(`^${name}$`) }) });
+    check(beta, "no beta thread");
+    await waitFor("beta's favicon", async () => ((await head("beta").locator("img.favicon").getAttribute("src").catch(() => null)) ?? "").startsWith("data:image/svg+xml;base64,"), 10000);
+    check(!(await head("beta").locator(".monogram").count()), "beta kept its monogram");
+    check((await head("alpha").locator(".monogram").count()) === 1, "alpha, with no favicon, lost its monogram");
+    const size = await head("beta").locator("img.favicon").evaluate((el) => `${el.getBoundingClientRect().width}x${el.getBoundingClientRect().height}`);
     check(size === "16x16", `the favicon is ${size}`);
     fs.unlinkSync(file);
     await page.evaluate(() => dispatchEvent(new Event("focus")));
-    await waitFor("the monogram back", async () => (await page.locator(`${rowSel(beta)} .monogram`).count()) === 1, 10000);
+    await waitFor("the monogram back", async () => (await head("beta").locator(".monogram").count()) === 1, 10000);
   });
 
   await step("app view: the project filter is T3's searchable combobox, each project with its settings gear", async () => {
@@ -6429,7 +6501,7 @@ async function sweep(profileName) {
     const alpha = await keyFor("alpha");
     await openRow(alpha);
     await sendPrompt("think");
-    await waitFor("the Working shelf", async () => (await text('#thread-list .settled-head[data-shelf="working"]')) === "Working (1)", 8000);
+    await waitFor("the Working shelf", async () => (await shelfText("working")) === "Working (1)", 8000);
     await showSidebar();
     check(await page.locator(`#thread-list .settled-head[data-shelf="working"] ~ .thread-row[data-tab="${alpha}"].tall`).isVisible(), "the open thread isn't under the Working shelf");
     await answered("Done thinking.");
@@ -6445,7 +6517,7 @@ async function sweep(profileName) {
     await answered("I opened a pull request.");
     const badge = `${rowSel(beta)} .pr`;
     await waitFor("beta's open #43", async () => (await prState(badge)) === "open", 10000);
-    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the open badge is ${await tone(badge)}`);
+    check(/^#43 open$/.test(await text(badge)) && (await tone(badge)) === (await tone(`${rowSel(beta)} .l3`)), `the open badge reads ${await text(badge)} in ${await tone(badge)}`);
     check((await sectionIn(beta, 30)) === "active", "an open PR let inactivity settle beta");
     fs.writeFileSync(path.join(HOME, ".fake-gh-43"), `closed ${new Date().toISOString()}`);
     await page.evaluate(() => dispatchEvent(new Event("focus")));
@@ -6579,16 +6651,16 @@ async function sweep(profileName) {
       const sheet = await rect("#sidebar");
       check(Math.round(sheet.width) === width - 12, `the sheet is ${sheet.width}px on a ${width}px screen`);
     } else {
-      const usage = await tip('#sidebar footer [data-open-page="usage"]');
-      check(usage.text === "Usage" && usage.box.bottom <= usage.at.top, `Usage's tooltip: ${usage.text} at ${usage.box.top}`);
-      check((await tip('#sidebar footer [data-open-page="pull-requests"]')).text === "Pull Requests", "Pull Requests has no tooltip");
-      check((await page.getAttribute('#sidebar footer [data-open-page="usage"]', "title")) === null, "Usage keeps a native tooltip");
+      // Pull requests and Usage are nav rows that name themselves, so they need no tooltip.
+      const nav = (await page.locator("#side-nav .nav-row .label").allTextContents()).join("|");
+      check(nav === "Orchestrator|Needs you|Pull requests|Usage", `the nav rows read ${nav}`);
+      check((await page.getAttribute('#side-nav [data-open-page="usage"]', "title")) === null, "Usage keeps a native tooltip");
       const pencil = await tip("#new-thread");
       check(pencil.text === "New thread (⌘N)New thread in current project: Shift+click (⌘⇧N)", `the pencil's tooltip: ${pencil.text}`);
       check((await tip("#add-project")).text === "Add project", "Add project has no tooltip");
       await page.mouse.move(0, 0);
     }
-    await press(gui('#sidebar footer [data-open-page="pull-requests"]'));
+    await openNavPage("pull-requests");
     await waitFor("the Pull requests page", () => page.evaluate(() => document.body.dataset.page === "pull-requests"));
     await page.evaluate(() => openPage("usage"));
     await waitFor("the Usage page", () => page.evaluate(() => document.body.dataset.page === "usage"));
@@ -6635,12 +6707,13 @@ async function sweep(profileName) {
     await openRow(alpha);
   });
 
-  await step("app view: line 3 as T3's: the branch at muted/40, a running command's terminal pulses, and several pull requests read +N or as a stack", async () => {
+  await step("app view: the second line: the branch in its meta color, a running command's terminal pulses, and several pull requests read +N or as a stack", async () => {
     const alpha = await keyFor("alpha");
     const beta = await keyFor("beta");
     await openRow(alpha);
     await showSidebar();
-    check((await tone(`${rowSel(alpha)} .l3 .branch`)) === "rgba(129, 129, 129, 0.4)", `the branch is ${await tone(`${rowSel(alpha)} .l3 .branch`)}`);
+    // Sidebar.dc.html draws the second line, the branch with it, in one meta color.
+    check((await tone(`${rowSel(alpha)} .l3 .branch`)) === (await tone(`${rowSel(alpha)} .l3`)), `the branch is ${await tone(`${rowSel(alpha)} .l3 .branch`)}, its line ${await tone(`${rowSel(alpha)} .l3`)}`);
 
     // The phone's sidebar sheet covers the chat header's Options menu, which opens the panel there.
     if (touch) await hideSidebar();
@@ -6671,7 +6744,7 @@ async function sweep(profileName) {
     await showSidebar();
     check((await text(badge)) === "+2", `alpha's two pull requests read ${await text(badge)}`);
     check(/^PR #4[12] - \w+: .+, and 1 more linked; overall open$/.test(await attr(badge, "aria-label")), `label: ${await attr(badge, "aria-label")}`);
-    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the badge is ${await tone(badge)}`);
+    check((await tone(badge)) === (await tone(`${rowSel(alpha)} .l3`)), `the badge is ${await tone(badge)}, its line ${await tone(`${rowSel(alpha)} .l3`)}`);
     await page.evaluate((k) => {
       const tab = tabByKey(k);
       linkPr(tab, "https://github.com/example/alpha/pull/43");
@@ -6713,7 +6786,7 @@ async function sweep(profileName) {
     await closeSettings();
     await showSidebar();
     // The shelf is open since the snooze step pressed it, so its head counts nothing; beta's row shows under it either way.
-    await waitFor("beta snoozed until the limit lifts", async () => /^Snoozed( \(1\))?$/.test(await text('#thread-list .settled-head[data-shelf="snoozed"]')) && (await page.locator(`${rowSel(beta)} .wake-at`).count()) === 1, 5000);
+    await waitFor("beta snoozed until the limit lifts", async () => /^Snoozed( \(1\))?$/.test(await shelfText("snoozed")) && (await page.locator(`${rowSel(beta)} .wake-at`).count()) === 1, 5000);
     await rowMenu(rowSel(beta));
     await menuPick("Wake thread");
     await waitFor("beta awake", async () => !(await page.locator('#thread-list .settled-head[data-shelf="snoozed"]').count()));
@@ -6957,8 +7030,7 @@ async function sweep(profileName) {
   await step("shell: the Usage page shows limits, cost and tokens from the transcripts", async () => {
     seedUsage();
     await page.evaluate(() => save("gui-usage-page", null));
-    await showSidebar();
-    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await openNavPage("usage");
     await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
     check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
     await showSidebar();
@@ -7024,8 +7096,7 @@ async function sweep(profileName) {
   });
 
   await step("shell: a model's details on Usage, and a price set for an unpriced one", async () => {
-    await showSidebar();
-    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await openNavPage("usage");
     await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
     await usagePick("metric", "cost");
     await usagePick("days", "30");
@@ -7071,8 +7142,7 @@ async function sweep(profileName) {
 
   const openUsage = async (metric, days) => {
     if (!(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible())) {
-      await showSidebar();
-      await tapOrClick('#sidebar footer [data-open-page="usage"]');
+      await openNavPage("usage");
       await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
     }
     await usagePick("metric", metric);
@@ -7369,8 +7439,7 @@ async function sweep(profileName) {
   };
   await step("shell: the Pull requests page lists the open projects' pull requests", async () => {
     fs.writeFileSync(path.join(HOME, "gh.log"), "");
-    await showSidebar();
-    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await openNavPage("pull-requests");
     await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
     await waitFor("three groups", async () => (await page.locator("#page-view .pr-group").count()) === 3, 15000);
     const groups = await page.locator("#page-view .pr-group h3 > span:nth-child(2)").allTextContents();
@@ -7445,8 +7514,7 @@ async function sweep(profileName) {
 
   await step("shell: Pull requests load more, condense the header, copy a link and list checks", async () => {
     fs.writeFileSync(path.join(HOME, "gh.log"), "");
-    await showSidebar();
-    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await openNavPage("pull-requests");
     await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
     await page.fill("#page-view .pr-search input", "label:many");
     await waitFor("GitHub's first page", async () => (await prNumbers()).length === 100, 15000);
@@ -7726,7 +7794,7 @@ async function sweep(profileName) {
     const row = page.locator("#palette .group:has(.label:text-is('Recent Threads')) .item", { has: page.locator(`.name:text-is("${title}")`) }).first();
     const sub = (await row.locator(".sub").textContent()).replace(/\s+/g, "");
     const machine = await page.evaluate((k) => machineLabel(tabByKey(k).machine), alpha);
-    check(sub.startsWith(`AAalpha·${machine}·`) && sub.endsWith("··Currentthread"), `subtitle: ${sub}`);
+    check(sub.startsWith(`ALalpha·${machine}·`) && sub.endsWith("··Currentthread"), `subtitle: ${sub}`);
     check(await row.locator(".sub .agent").isVisible(), "no Claude icon in the subtitle");
     await page.fill("#palette input", "#42");
     await waitFor("#42's thread with its PR number", async () => (await page.locator("#palette .item .pr-num").allTextContents()).includes("#42"));
@@ -8069,8 +8137,7 @@ async function sweep(profileName) {
   });
 
   const openPulls = async () => {
-    await showSidebar();
-    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await openNavPage("pull-requests");
     await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
   };
   const leavePulls = async () => {
@@ -8940,7 +9007,7 @@ async function sweep(profileName) {
 
   const accountsInApp = async () => {
     await showSidebar();
-    await tapOrClick("#gui-settings");
+    await openSettingsFromSidebar();
     await tapOrClick('#settings-nav [data-page="accounts"]');
   };
   await step("Accounts: Remove waits for the thread to leave Spare, which its row menu moves back", async () => {
@@ -9021,7 +9088,7 @@ async function sweep(profileName) {
   const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(PROFILES);
   let failed = false;
   for (const name of names) {
-    const results = await sweep(name);
+    const results = await sweep(name).catch((e) => (e instanceof Until ? e.results : Promise.reject(e)));
     failed ||= results.some((r) => r.verdict !== "works");
     console.log(`\n| ${name} step | result | console / network |\n|---|---|---|`);
     for (const r of results) console.log(`| ${r.step} | ${r.verdict}${r.note ? `: ${r.note}` : ""} | ${r.seen.join("; ").slice(0, 300) || "clean"} |`);
