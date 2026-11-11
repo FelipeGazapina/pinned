@@ -2,7 +2,7 @@
 //! reported, and nowhere else.
 
 use super::{Ask, Connection, Offer, UNKNOWN_TAB};
-use crate::agent::{CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, EXTERNAL_CONNECTOR_PREFIX, INTERACTIVE_CONNECTOR};
+use crate::agent::{Role, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, EXTERNAL_CONNECTOR_PREFIX, INTERACTIVE_CONNECTOR};
 use crate::wire::TabView;
 use std::collections::BTreeSet;
 
@@ -57,9 +57,6 @@ pub fn decide(
     ask: &Ask,
 ) -> Result<Grant, String> {
     let calling = find(machine, tab).ok_or(UNKNOWN_TAB)?;
-    if calling.orchestrator_global || calling.taste_chat {
-        return Err("The global orchestrator and the taste chat do no project work, so they read no Convex data.".into());
-    }
     let run = walk(machine, calling, find, step)?;
     let repo = repo.ok_or("This folder has no git origin, so it cannot be connected to Convex yet.")?;
     let connection = connections
@@ -81,9 +78,17 @@ pub fn decide(
     Ok(Grant { connection: connection.clone(), scope })
 }
 
+const PARENT_GONE: &str = "The session that started this one is gone, so pinned cannot tell who it works for. It reads no Convex data.";
+
+/// Who the calling tab works for. Every tab on the way up is checked, so a session that a refused
+/// one started is refused too. A worker with no parent lost it, to a restart or a closed tab, and
+/// is refused rather than read as opened by hand.
 fn walk(machine: &str, calling: TabView, find: &dyn Fn(&str, &str) -> Option<TabView>, step: &dyn Fn(&str) -> Option<Option<Step>>) -> Result<Run, String> {
     let (mut on, mut tab) = (machine.to_owned(), calling);
     for _ in 0..WALK_MAX {
+        if tab.orchestrator_global || tab.taste_chat {
+            return Err("The global orchestrator and the taste chat do no project work, so they and the sessions they start read no Convex data.".into());
+        }
         match tab.connector.as_deref() {
             Some(id) if step(id).is_some() => return Ok(Run::Workflow(id.to_owned())),
             Some(id) if id.starts_with(EXTERNAL_CONNECTOR_PREFIX) => return Err("An external agent drives this session, so it reads no Convex data.".into()),
@@ -93,9 +98,11 @@ fn walk(machine: &str, calling: TabView, find: &dyn Fn(&str, &str) -> Option<Tab
             Some(INTERACTIVE_CONNECTOR | DELEGATE_CONNECTOR | CAPTAIN_CONNECTOR) | None => {}
             Some(id) => return Err(format!("This session runs under `{id}`, which is no workflow pinned knows, so it reads no Convex data.")),
         }
-        let Some(parent) = tab.spawned_by.clone() else { return Ok(Run::ByHand) };
+        let Some(parent) = tab.spawned_by.clone() else {
+            return if tab.role == Some(Role::Worker) { Err(PARENT_GONE.into()) } else { Ok(Run::ByHand) };
+        };
         on = tab.spawned_on.clone().unwrap_or(on);
-        tab = find(&on, &parent).ok_or("The session that started this one is gone, so pinned cannot tell who it works for. It reads no Convex data.")?;
+        tab = find(&on, &parent).ok_or(PARENT_GONE)?;
     }
     Err(format!("This session sits more than {WALK_MAX} sessions below the one that started the work, so pinned cannot tell who it works for."))
 }
@@ -114,7 +121,6 @@ fn admit(scope: &Scope, ask: &Ask) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Role;
     use crate::convex::Kind;
     use serde_json::json;
 
@@ -185,6 +191,13 @@ mod tests {
             workflow("unknown", "agent-session-7"),
             with("global", |t| t.orchestrator_global = true),
             with("taste", |t| t.taste_chat = true),
+            with("restored-worker", |t| t.role = Some(Role::Worker)),
+            with("global-worker", |t| {
+                t.role = Some(Role::Worker);
+                t.spawned_by = Some("global".into());
+            }),
+            child("taste-child", "taste"),
+            child("global-grandchild", "global-worker"),
         ];
         let m2 = [with("delegate-box", |t| {
             t.connector = Some(DELEGATE_CONNECTOR.into());
@@ -200,6 +213,7 @@ mod tests {
         let everything = Ok(Scope::Everything);
         let limited: Result<Scope, String> = Ok(Scope::Tables(["customers".to_string(), "invoices".to_string()].into()));
         let no_step = Err("This workflow has no Read Convex data step.".to_string());
+        let no_project_work: Result<Scope, String> = Err("The global orchestrator and the taste chat do no project work, so they and the sessions they start read no Convex data.".to_string());
         let tables = Ask::Tables { table: None };
         type Row<'a> = (&'a str, &'a str, Option<&'a str>, Ask, Result<Scope, String>);
         let rows: Vec<Row> = vec![
@@ -231,8 +245,12 @@ mod tests {
             ("m1", "captain-box", Some(SITE), tables.clone(), Err("This session runs in an Upstash Box that nothing in pinned started, so it cannot be tied to who opened it. It reads no Convex data.".into())),
             ("m1", "external", Some(SITE), tables.clone(), Err("An external agent drives this session, so it reads no Convex data.".into())),
             ("m1", "unknown", Some(SITE), tables.clone(), Err("This session runs under `agent-session-7`, which is no workflow pinned knows, so it reads no Convex data.".into())),
-            ("m1", "global", Some(SITE), tables.clone(), Err("The global orchestrator and the taste chat do no project work, so they read no Convex data.".into())),
-            ("m1", "taste", Some(SITE), tables.clone(), Err("The global orchestrator and the taste chat do no project work, so they read no Convex data.".into())),
+            ("m1", "global", Some(SITE), tables.clone(), no_project_work.clone()),
+            ("m1", "taste", Some(SITE), tables.clone(), no_project_work.clone()),
+            ("m1", "global-worker", Some(SITE), tables.clone(), no_project_work.clone()),
+            ("m1", "global-grandchild", Some(SITE), Ask::Query { code: "return 1;".into() }, no_project_work.clone()),
+            ("m1", "taste-child", Some(SITE), tables.clone(), no_project_work.clone()),
+            ("m1", "restored-worker", Some(SITE), Ask::Query { code: "return 1;".into() }, Err("The session that started this one is gone, so pinned cannot tell who it works for. It reads no Convex data.".into())),
             ("m1", "tab-9", Some(SITE), Ask::Offer, Err(UNKNOWN_TAB.into())),
             ("m2", "thread", Some(SITE), Ask::Offer, Err(UNKNOWN_TAB.into())),
         ];
