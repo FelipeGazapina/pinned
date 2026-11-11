@@ -118,14 +118,34 @@ const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
 
 test("the Workers sheet answers a one-tap ask in place and offers Open for one it can't", () => {
   const app = load();
-  const oneTap = app.workerCardHtml({ key: "w1", title: "Tidy the README", model: "Haiku 5.5", since: Date.now() - 120000, ask: approval(["approve", "decline", "always"]) });
-  assert.equal(text(oneTap), "Tidy the README Needs your approval · waiting 2m Haiku 5.5 git push origin readme-tidy Decline Approve");
+  const oneTap = app.workerCardHtml({ key: "w1", title: "Tidy the README", model: "Haiku 5.5", since: 1794420480000, ask: approval(["approve", "decline", "always"]) });
+  assert.equal(text(oneTap), "Tidy the README Needs your approval · waiting Haiku 5.5 git push origin readme-tidy Decline Approve");
+  assert.match(oneTap, /waiting <span class="ticker" data-since="1794420480000"><\/span>/, "the clock is left to the ticker");
   assert.match(oneTap, /data-ws-answer="decline" data-ws-row="w1"/);
   assert.match(oneTap, /data-ws-answer="approve" data-ws-row="w1"/);
   const openOnly = app.workerCardHtml({ key: "w2", title: "Pick a color", model: null, since: null, ask: { kind: "question", text: "Which color?", command: null, choices: null, typed: false } });
   assert.equal(text(openOnly), "Pick a color Has a question Which color? Open");
   assert.match(openOnly, /data-ws-open="w2"/);
   assert.doesNotMatch(openOnly, /data-ws-answer/);
+});
+
+test("a Workers sheet row's markup does not change as its clock runs, so a repaint keeps the row under a tap", () => {
+  const clock = { now: 1794420540000 };
+  const app = {
+    Date: { now: () => clock.now },
+    esc: (t) => String(t ?? ""),
+    glyphHtml: () => "",
+    durationLabel: (s) => `${Math.round(s / 60)}m`,
+    duration: (ms) => `${ms}ms`,
+    phoneSvg: () => "",
+  };
+  vm.createContext(app);
+  vm.runInContext(`${src.slice(src.indexOf("const sheetTicker"), src.indexOf("/** The workers being answered"))}${src.slice(src.indexOf("/** Any other worker:"), src.indexOf("const stoppable"))}\nglobalThis.workerSheetRowHtml = workerSheetRowHtml;`, app);
+  const row = { key: "ci", state: "working", since: 1794420480000, title: "Run the CI on main", step: "cargo test", tab: {} };
+  const first = app.workerSheetRowHtml(row);
+  clock.now += 60000;
+  assert.equal(app.workerSheetRowHtml(row), first);
+  assert.match(first, /<span class="ws-time"><span class="ticker" data-since="1794420480000"><\/span><\/span>/);
 });
 
 test("the Workers sheet puts the waiting workers first, the reviewed one leading", () => {

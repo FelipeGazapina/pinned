@@ -120,7 +120,9 @@ function threadActionsOf(tab) {
   return { primary, tools, actions };
 }
 
-const sheetTicker = (since) => `<span class="ticker" data-since="${since}">${durationLabel(Math.max(0, Date.now() - since) / 1000)}</span>`;
+/** An empty clock that sheetTickers fills, so a row's markup stays the same from one second to the
+ * next and a repaint never replaces the row under a tap. */
+const sheetTicker = (since) => `<span class="ticker" data-since="${since}"></span>`;
 /** The workers being answered from the Workers sheet, whose buttons wait meanwhile. */
 const sheetAnswering = new Set();
 
@@ -243,6 +245,7 @@ function paintWorkersSheet() {
   const el = workersSheet.sheet.el;
   setHtml(el.querySelector(".ws-count"), `${s.done} of ${s.total} done`);
   setHtml(el.querySelector(".ws-list"), [...cards.map(workerCardHtml), ...rest.map(workerSheetRowHtml)].join(""));
+  sheetTickers();
   const stop = el.querySelector("[data-ws=stop]");
   const running = stoppable(rows).length;
   stop.hidden = !running;
