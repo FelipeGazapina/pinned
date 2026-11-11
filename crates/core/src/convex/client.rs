@@ -362,7 +362,7 @@ fn type_text(t: &Value) -> String {
 async fn data(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &str, limit: Option<u32>, cursor: Option<&str>, oldest_first: bool) -> Result<String, String> {
     let limit = limit.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
     let page = value(call(http, key, &grant.connection.url, Route::TableData { table, oldest_first, cursor, limit }).await?)?;
-    let documents: Vec<Value> = page["page"].as_array().cloned().unwrap_or_default().into_iter().map(clean).collect();
+    let documents: Vec<Value> = page["page"].as_array().cloned().unwrap_or_default().into_iter().map(clean).map(whole_or_stub).collect();
     if documents.is_empty() && cursor.is_none() {
         let names = visible(http, key, grant).await?;
         if !names.iter().any(|name| name == table) {
@@ -371,13 +371,27 @@ async fn data(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &str, limi
     }
     let mut answer = json!({ "table": table });
     let (documents, truncated) = fit(documents);
+    let kept = documents.len();
     answer["documents"] = Value::Array(documents);
     if truncated {
+        // The cursor points past the dropped documents, so the agent asks again for the ones that fit.
         answer["truncated"] = true.into();
+        answer["retry_with_limit"] = kept.into();
     } else if page["isDone"] == false {
         answer["next_cursor"] = page["continueCursor"].clone();
     }
     Ok(answer.to_string())
+}
+
+/// `document`, or what stands for one too large to return: its id, when it was made and its size.
+/// So one large document never empties a page.
+fn whole_or_stub(document: Value) -> Value {
+    let size = document.to_string().len();
+    if size < CAP_BYTES {
+        return document;
+    }
+    let note = format!("This document is {size} bytes, and a read returns at most {} KB.", CAP_BYTES / 1024);
+    json!({ "_id": document["_id"], "_creationTime": document["_creationTime"], "note": note })
 }
 
 /// The leading documents that fit under `CAP_BYTES`, and whether any were dropped.
@@ -414,13 +428,15 @@ async fn run(http: &dyn Http, key: &DeployKey, url: &str, function: &str, args: 
 
 /// A function's value and log lines, once the value fits under `CAP_BYTES`.
 fn ran(body: Value) -> Result<String, String> {
-    let logs = body.get("logLines").cloned().unwrap_or_default();
+    let logs = body.get("logLines").cloned().map(clean).filter(|lines| lines.as_array().is_some_and(|l| !l.is_empty()));
     let value = clean(value(body)?);
-    let size = value.to_string().len();
+    let logged = logs.as_ref().map_or(0, |lines| lines.to_string().len());
+    let size = value.to_string().len() + logged;
     if size > CAP_BYTES {
-        return Err(format!("The answer is {size} bytes, over the {} KB a read may return. Return less: fewer documents, fewer fields or a count.", CAP_BYTES / 1024));
+        let less = if logged > 0 { "Return less and log less." } else { "Return less: fewer documents, fewer fields or a count." };
+        return Err(format!("The answer is {size} bytes, over the {} KB a read may return. {less}", CAP_BYTES / 1024));
     }
-    Ok(json!({ "value": value, "logs": if logs.is_null() { json!([]) } else { logs } }).to_string())
+    Ok(json!({ "value": value, "logs": logs.unwrap_or_else(|| json!([])) }).to_string())
 }
 
 async fn logs(http: &dyn Http, key: &DeployKey, url: &str, function: Option<&str>, errors: bool, limit: Option<u32>) -> Result<String, String> {
@@ -442,7 +458,16 @@ async fn logs(http: &dyn Http, key: &DeployKey, url: &str, function: Option<&str
     if runs.is_empty() {
         return Ok(NONE.into());
     }
-    let entries: Vec<Value> = runs[runs.len().saturating_sub(limit)..].iter().map(|e| log_entry(e)).collect();
+    let mut entries: Vec<Value> = runs[runs.len().saturating_sub(limit)..].iter().map(|e| log_entry(e)).collect();
+    // Under the cap the newest runs stay, and a run whose own lines pass it keeps all but those.
+    let mut size: usize = entries.iter().map(|entry| entry.to_string().len() + 1).sum();
+    while size > CAP_BYTES && entries.len() > 1 {
+        size -= entries.remove(0).to_string().len() + 1;
+    }
+    if size > CAP_BYTES {
+        let dropped = entries[0]["lines"].to_string().len();
+        entries[0]["lines"] = json!([format!("[{dropped} bytes of log lines left out: a read returns at most {} KB]", CAP_BYTES / 1024)]);
+    }
     Ok(json!({ "entries": entries }).to_string())
 }
 
@@ -715,6 +740,58 @@ mod tests {
         let functions: Vec<&str> = answer["entries"].as_array().unwrap().iter().map(|e| e["function"].as_str().unwrap()).collect();
         assert_eq!(functions, (980..1000).map(|n| format!("f:n{n}")).collect::<Vec<_>>());
         assert!(text.len() < CAP_BYTES, "{}", text.len());
+    }
+
+    #[test]
+    fn log_lines_count_against_the_cap_and_the_newest_runs_stay() {
+        let run = |n: usize, lines: Vec<String>| json!({ "kind": "Completion", "udfType": "Query", "identifier": format!("f.js:n{n}"), "logLines": lines, "timestamp": 1794370877.0 + n as f64, "error": null, "executionTime": 0.001 });
+        let logs = |entries: Vec<Value>| {
+            let canned = fake(vec![(json!({ "entries": entries, "newCursor": 1 }), 200)]);
+            let text = block_on(read(&canned, &key(), &everything(), Ask::Logs { function: None, errors: false, limit: Some(50) })).unwrap();
+            (text.len(), serde_json::from_str::<Value>(&text).unwrap())
+        };
+        let (size, answer) = logs((0..50).map(|n| run(n, vec!["l".repeat(1500)])).collect());
+        let functions: Vec<&str> = answer["entries"].as_array().unwrap().iter().map(|e| e["function"].as_str().unwrap()).collect();
+        assert!(size <= CAP_BYTES + 20, "{size}");
+        assert_eq!((functions.len(), functions[0], functions[functions.len() - 1]), (20, "f:n30", "f:n49"), "the oldest runs go first");
+
+        let (size, answer) = logs(vec![run(0, vec!["a".into()]), run(1, (0..30).map(|_| "m".repeat(1900)).collect())]);
+        assert!(size < 1000, "{size}");
+        assert_eq!(answer["entries"].as_array().unwrap().len(), 1);
+        assert_eq!((&answer["entries"][0]["function"], &answer["entries"][0]["lines"]), (&json!("f:n1"), &json!(["[57091 bytes of log lines left out: a read returns at most 32 KB]"])));
+
+        let loud = fake(vec![(json!({ "status": "success", "value": 1, "logLines": (0..40).map(|_| "x".repeat(1000)).collect::<Vec<_>>() }), 200)]);
+        assert_eq!(
+            block_on(read(&loud, &key(), &everything(), Ask::Query { code: "return 1;".into() })),
+            Err("The answer is 40122 bytes, over the 32 KB a read may return. Return less and log less.".into())
+        );
+        let long_line = fake(vec![(json!({ "status": "success", "value": 1, "logLines": ["z".repeat(CAP_STRING + 7)] }), 200)]);
+        let text = block_on(read(&long_line, &key(), &everything(), Ask::Query { code: "return 1;".into() })).unwrap();
+        assert!(text.ends_with("… [clipped, 7 more characters]\"]}"), "a log line is clipped like any string: {}", &text[text.len() - 60..]);
+    }
+
+    #[test]
+    fn one_large_document_becomes_a_stub_and_a_cut_page_says_what_limit_fits() {
+        let page = |documents: Vec<Value>| {
+            let canned = fake(vec![(json!({ "status": "success", "value": { "page": documents, "isDone": false, "continueCursor": "c" } }), 200)]);
+            let text = block_on(read(&canned, &key(), &everything(), Ask::Data { table: "notes".into(), limit: Some(100), cursor: None, oldest_first: false })).unwrap();
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        let embedding: Vec<f64> = (0..6000).map(|n| n as f64 + 0.123456).collect();
+        let big = json!({ "_id": "j57big", "_creationTime": 1794370889263.0466, "embedding": embedding });
+        let small = |n: u32| json!({ "_id": format!("j57small{n}"), "_creationTime": 1794370889263.0466, "n": n });
+        let answer = page(vec![big.clone(), small(1)]);
+        let size = clean(big.clone()).to_string().len();
+        assert_eq!(
+            answer,
+            json!({ "table": "notes", "documents": [{ "_id": "j57big", "_creationTime": 1794370889263.0466, "note": format!("This document is {size} bytes, and a read returns at most 32 KB.") }, { "_id": "j57small1", "_creationTime": 1794370889263.0466, "n": 1 }], "next_cursor": "c" }),
+            "the page reads on past a document too large to return"
+        );
+        assert_eq!(page(vec![big])["documents"].as_array().unwrap().len(), 1, "alone on its page it still answers");
+
+        let cut = page((0..100).map(|n| json!({ "n": n, "text": "x".repeat(600) })).collect());
+        assert_eq!((&cut["truncated"], &cut["retry_with_limit"], cut.get("next_cursor")), (&json!(true), &json!(52), None));
+        assert_eq!(cut["documents"].as_array().unwrap().len(), 52);
     }
 
     #[test]
