@@ -245,6 +245,17 @@ pub struct Headless<'a> {
     pub strip: &'a [&'a str],
 }
 
+/// Appends `bytes` to `kept` and keeps its last `limit` bytes. Room is made before the bytes go
+/// in: a buffer that held the old ones and the new ones for a moment grew to twice what it keeps,
+/// and every tab and shell has one.
+pub(crate) fn keep_last(kept: &mut VecDeque<u8>, bytes: &[u8], limit: usize) {
+    kept.reserve_exact(limit.saturating_sub(kept.len()));
+    let bytes = &bytes[bytes.len().saturating_sub(limit)..];
+    let excess = (kept.len() + bytes.len()).saturating_sub(limit);
+    kept.drain(..excess);
+    kept.extend(bytes);
+}
+
 #[derive(Default)]
 struct Screen {
     kept: VecDeque<u8>,
@@ -286,9 +297,7 @@ impl Screen {
         if let Some(watch) = self.watch.as_mut() {
             watch.feed(bytes, Instant::now());
         }
-        self.kept.extend(bytes);
-        let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
-        self.kept.drain(..excess);
+        keep_last(&mut self.kept, bytes, OUTPUT_KEEP);
         for (_, sink) in &self.viewers {
             sink(bytes);
         }
@@ -6935,6 +6944,20 @@ pub(crate) mod tests {
         screen.attach("late".into(), sink);
         assert_eq!(seen.lock().unwrap().len(), 256 * 1024);
         assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
+        assert_eq!(screen.kept.capacity(), 256 * 1024, "the buffer holds no more room than it keeps");
+    }
+
+    #[test]
+    fn a_write_longer_than_a_screen_keeps_leaves_its_last_256_kib() {
+        let mut screen = Screen::default();
+        let session = screen.restart();
+        screen.push(session, b"earlier output");
+        let output: Vec<u8> = (0..700 * 1024).map(|i| (i % 241) as u8).collect();
+        screen.push(session, &output);
+        let (seen, sink) = viewer();
+        screen.attach("late".into(), sink);
+        assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
+        assert_eq!(screen.kept.capacity(), 256 * 1024);
     }
 
     #[cfg(unix)]
