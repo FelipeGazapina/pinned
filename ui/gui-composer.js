@@ -795,9 +795,9 @@ function rest() {
   const phone = narrow(640);
   const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
   const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
-  // A lane narrowed by the side panel rests as one row with the model, the mic and Send. A press or
-  // an open menu keeps it, so the control pressed stays where it was.
-  const slim = !narrow(768) && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
+  // A lane narrowed by the side panel rests as one row with the model, the mic and Send. A press in
+  // the composer, or a menu open from it, holds the row or the full box, so what it points at stays put.
+  const slim = composerPressed || !composerMenu.hidden ? composer.dataset.slim === "true" : !narrow(768) && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
   const resting = collapsed || (!phone && !slim && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
   if (composer.dataset.slim !== String(slim)) composer.dataset.slim = slim;
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;

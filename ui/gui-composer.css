@@ -694,10 +694,11 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
   #worker-banner:not([hidden]) { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid rgb(var(--g-warning-rgb) / 0.28); border-bottom: 0; border-radius: 12px 12px 0 0;
     background: linear-gradient(rgb(var(--g-warning-rgb) / 0.07), rgb(var(--g-warning-rgb) / 0.07)), var(--g-bg); font-size: 12.5px; line-height: 1.45; }
   #worker-banner .lead { flex: none; width: 15px; height: 15px; color: var(--g-warning-fg); }
-  #worker-banner .text { display: flex; flex: 1; gap: 4px; min-width: 0; white-space: nowrap; }
+  #worker-banner .text { display: flex; flex: 1; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
   #worker-banner .tone { flex: none; font-weight: 600; color: var(--g-warning-fg); }
-  #worker-banner :is(.who, .cmd) { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; }
-  #worker-banner .who { flex-shrink: 0; max-width: 45%; }
+  #worker-banner :is(.who, .cmd) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The command gives way first; the title keeps up to 40% of the line. */
+  #worker-banner .who { flex-shrink: 0; max-width: 40%; }
   #worker-banner .what { flex: none; }
   #worker-banner button { flex: none; height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
   #worker-banner .outline { border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: transparent; color: var(--g-fg); }
