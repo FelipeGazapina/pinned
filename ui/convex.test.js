@@ -129,7 +129,7 @@ test("a project whose dotenv names an unconnected deployment is listed and picke
   assert.match(html, /placeholder="dev:quick-lemur-789\|…"/);
   assert.match(html, /data-action="open-convex-keys">Open Convex ↗/);
   for (const permission of ["deployment:data:view", "deployment:functions:runInternalQueries", "deployment:functions:runTestQuery", "deployment:logs:view"]) {
-    assert.match(html, new RegExp(`<li><code>${permission}</code></li>`));
+    assert.match(html, new RegExp(`<span class="convex-permissions">.*<code>${permission}</code>`));
   }
 });
 

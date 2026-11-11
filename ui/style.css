@@ -220,8 +220,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .badge.convex-kind[data-kind="dev"] { color: var(--working); }
 .badge.convex-kind[data-kind="prod"] { color: var(--needs-input); }
 .badge.convex-kind[data-kind="preview"] { color: var(--done); }
-.convex-permissions { margin: 4px 0 0; padding-left: 16px; }
-.convex-found { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.convex-permissions { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.convex-found button { margin-left: 6px; }
 .convex-scope { display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
 .convex-scope .chips, #convex-chosen { margin: 0; }
 #convex-step-tables { display: flex; flex-direction: column; gap: 6px; }

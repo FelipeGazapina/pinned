@@ -85,7 +85,7 @@ function convexFormHtml() {
   return `${agentAskingHtml("connect_convex")}<ol class="steps">
       <li>Open the deployment's settings in Convex and create a deploy key with these permissions.
         <button class="secondary" data-action="open-convex-keys">Open Convex ↗</button>
-        <ul class="convex-permissions">${CONVEX_PERMISSIONS.map((name) => `<li><code>${name}</code></li>`).join("")}</ul></li>
+        <span class="convex-permissions">${CONVEX_PERMISSIONS.map((name) => `<code>${name}</code>`).join("")}</span></li>
       <li>Pick the project whose agents read it, and paste the key. Pinned reads the deployment from the key.
         <div class="row"><select id="convex-project" aria-label="Project"${asking ? " disabled" : ""}>${options(repos, (repo) => (repo ? convexProjectLabel(projects, repo) : "No project yet"), chosen)}</select></div>
         <div class="row"><input id="convex-key" type="password" placeholder="${esc(found ?? "dev:…")}|…" autocomplete="off" spellcheck="false">
