@@ -50,7 +50,7 @@ function convexRowHtml(c) {
   const projects = convexProjects();
   const repos = c.repos ?? [];
   const nameOf = (repo) => projects.find((p) => p.repo === repo)?.name ?? repo.split("/").pop();
-  const chips = repos.map((repo) => `<span class="chip convex-repo" title="${esc(repo)}">${esc(nameOf(repo))}<button type="button" data-action="convex-remove-repo" data-id="${esc(c.id)}" data-repo="${esc(repo)}" aria-label="Stop reading it in ${esc(nameOf(repo))}">×</button></span>`);
+  const chips = repos.map((repo) => `<span class="chip convex-repo" title="${esc(repo)}">${esc(nameOf(repo))}<button type="button" data-action="convex-remove-repo" data-id="${esc(c.id)}" data-repo="${esc(repo)}" aria-label="Remove ${esc(nameOf(repo))}">×</button></span>`);
   const addable = projects.filter((p) => !repos.includes(p.repo)).map((p) => p.repo);
   const add = addable.length
     ? `<select data-convex-add="${esc(c.id)}" aria-label="Add a project">${options(["", ...addable], (repo) => (repo ? convexProjectLabel(projects, repo) : "Add a project…"), "")}</select>`
@@ -132,7 +132,6 @@ async function loadConvexProjects() {
   if (JSON.stringify(convexProjects()) !== before) redrawConvexCard();
 }
 
-/** Opens the card with `repo` picked, from a thread's banner or a step's panel. */
 async function convexOpenCard(repo) {
   convexUi.prefill = repo;
   await openSettings("integrations");
@@ -178,7 +177,6 @@ settingsPage.addEventListener("change", (e) => {
 /** Repos whose banner was dismissed this boot. */
 const convexDismissed = new Set();
 
-/** The banner a thread shows while its project names a deployment that no connection serves. */
 function convexBannerFor(tab) {
   if (!account || !tab) return null;
   const path = projectPathOf(tab);
