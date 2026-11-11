@@ -13,7 +13,7 @@ module.exports = {
     { name: "sheet", x: 0, y: 368, width: 390, height: 476 },
   ],
   async open(page, ctx) {
-    await openThread(page, ctx, ctx.threads.release);
+    await openThread(page, ctx, ctx.threads.release, true);
     await page.tap("#workers-pill");
     await ctx.waitFor("the Workers sheet", () => page.evaluate(() => !!document.querySelector(".workers-sheet .ws-card")), 15000);
   },
