@@ -10,8 +10,8 @@
 // `web` runs a hub and a node, and counts the page's renderer process in Chrome. `app` runs the desktop
 // binary under a HOME of its own and counts its process plus its WebKit helpers; its window
 // shows on screen for the length of the run. One JSON line per run, then a summary with the
-// median of each figure. A run that walked fewer sessions than the state holds, or logged a
-// page error, exits 1.
+// median of each figure. A run that walked fewer sessions than the state holds, logged a page
+// error, or whose window was shrunk or covered when it was read, counts as failed and exits 1.
 //
 // `app` also loads the memory search's vector model when --models names a folder that holds it
 // (default: the installed app's), since the desktop app holds it from the first prompt on. The
@@ -485,7 +485,7 @@ ${TRY}
     }
     await stop();
     const errors = [...(result.booted?.errors ?? []), ...(result.walked?.errors ?? [])];
-    const ok = !result.failed && !result.walked?.failed && result.walked?.visited === manifest.sessions && result.walked?.loaded === manifest.sessions && errors.length === 0;
+    const ok = !result.failed && !result.walked?.failed && result.walked?.visited === manifest.sessions && result.walked?.loaded === manifest.sessions && errors.length === 0 && result.booted?.shown && result.walked?.shown;
     failed ||= !ok;
     console.log(JSON.stringify({ run, kind, ok, ...result }));
     if (ok) results.push(result);

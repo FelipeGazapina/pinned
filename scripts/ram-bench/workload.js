@@ -32,6 +32,8 @@ window.ramBench = (() => {
     loaded: tabs.filter((t) => threadOf(t).loaded).length,
     items: tabs.reduce((n, t) => n + threadOf(t).items.length, 0),
     nodes: document.getElementsByTagName("*").length,
+    // A window shrunk to its pill or covered by another draws nothing, and holds less.
+    shown: document.body.dataset.view === "expanded" && document.visibilityState === "visible",
     errors,
   });
 
