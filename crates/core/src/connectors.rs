@@ -1994,7 +1994,6 @@ impl Connectors {
         let Some(token) = self.key(SLACK_KEY) else { return Ok(note("Slack is not connected: connect it in pinned's Connectors settings".into())) };
         let posts = match slack::thread(&token, channel, thread).await {
             Ok(posts) => posts,
-            Err(e) if slack::lacks_files_scope(&e) => return Ok(note(slack::NO_FILES_SCOPE.into())),
             Err(e) => match self.trigger_posts(connector, subject) {
                 Some(posts) => posts,
                 None => return Ok(note(format!("pinned could not read the Slack thread: {e}"))),
@@ -2006,7 +2005,9 @@ impl Connectors {
     /// The posts the live graph run on `subject` started from.
     fn trigger_posts(&self, connector: &str, subject: &Subject) -> Option<Vec<slack::Post>> {
         let runs = self.runs.lock().unwrap();
-        let run = runs.iter().rev().find(|run| run.connector == connector && &run.subject == subject && matches!(run.status, Status::Running | Status::Waiting))?;
+        let run = runs.iter().rev().find(|run| {
+            run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector && &run.subject == subject && matches!(run.status, Status::Running | Status::Waiting)
+        })?;
         let TriggerInput::Slack { posts, .. } = trigger_of(run).ok()? else { return None };
         Some(posts.into_iter().map(|post| slack::Post { ts: post.ts, author: post.author, text: post.text, files: post.files }).collect())
     }
@@ -8540,28 +8541,33 @@ mod tests {
     }
 
     #[test]
-    fn slack_files_without_the_files_scope_says_so_and_leaves_the_run_alone() {
+    fn slack_files_reports_a_thread_read_that_lacks_a_scope_as_what_it_is_and_leaves_the_run_alone() {
         let _api = slack::lock_api();
         let _restore = RestoreSlack;
         install_rustls();
         let (connectors, dir) = slack_files_connectors("slack-files-scope");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        for error in ["missing_scope", "not_allowed_token_type"] {
+            let (root, _) = serve_files(json!({ "ok": false, "error": error }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+            slack::set_api_root(Some(root));
+            let without_run = block_on(connectors.slack_files("c2", &slack_thread()));
+            assert_eq!(
+                without_run,
+                Ok(slack::Downloads { files: vec![], notes: vec![format!("pinned could not read the Slack thread: Slack: {error}")] }),
+                "a missing history scope is not a missing files:read"
+            );
+        }
         let mut lib = runner::Library::new();
         lib.insert("c2".into(), migrate(&slack_connector()));
         let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
         connectors.runs.lock().unwrap().push(runner::start(&lib, "c2", slack_thread(), trigger, "2026-10-19T08:54:10Z"));
         let status = || connectors.runs.lock().unwrap()[0].status.clone();
         let before = status();
-        for error in ["missing_scope", "not_allowed_token_type"] {
-            let (root, _) = serve_files(json!({ "ok": false, "error": error }), vec![]);
-            slack::set_api_root(Some(root));
-            let downloads = block_on(connectors.slack_files("c2", &slack_thread()));
-            assert_eq!(downloads, Ok(slack::Downloads { files: vec![], notes: vec![slack::NO_FILES_SCOPE.into()] }), "{error}");
-            let printed = slack::save_downloads(Some(&dir.join("uploads")), Ok(serde_json::to_string(&downloads.unwrap()).unwrap()));
-            assert_eq!(
-                printed,
-                "pinned could not read this thread's files: the Slack app lacks the files:read scope; ask the workspace admin to reinstall it with files:read."
-            );
-        }
+        let (root, _) = serve_files(json!({ "ok": false, "error": "missing_scope" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!((names, downloads.files[0].data.0.clone(), downloads.notes), (vec!["export-500.png"], png, Vec::<String>::new()), "the live run's trigger stands in for the thread");
         assert_eq!(status(), before);
         assert_eq!(connectors.runs.lock().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
@@ -8698,6 +8704,101 @@ mod tests {
                 notes: vec![],
             }
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_fall_back_to_the_run_whose_session_the_calling_workflow_owns() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-owner");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        let (root, _) = serve_files(json!({ "ok": false, "error": "channel_not_found" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let mut lib = runner::Library::new();
+        lib.insert("c9".into(), migrate(&slack_connector()));
+        let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
+        let mut run = runner::start(&lib, "c9", slack_thread(), trigger, "2026-10-19T08:54:10Z");
+        run.session_owner = Some("c2".into());
+        connectors.runs.lock().unwrap().push(run);
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!((names, downloads.notes), (vec!["export-500.png"], Vec::<String>::new()), "c2 owns the session of c9's run");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Slack stand-in whose file answers send no Content-Length: `size` bytes then a close, or,
+    /// when `stall`, the headers and then nothing for a while.
+    fn serve_unsized_file(replies: Value, size: usize, stall: bool) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let replies = replies.clone();
+                std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut tmp) {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                    if path.contains("/files-pri/") {
+                        let _ = std::io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n");
+                        if stall {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            return;
+                        }
+                        let chunk = vec![7u8; 64 << 10];
+                        let mut sent = 0;
+                        while sent < size && std::io::Write::write_all(&mut stream, &chunk[..chunk.len().min(size - sent)]).is_ok() {
+                            sent += chunk.len();
+                        }
+                        return;
+                    }
+                    let body = if path.contains("users.info") { json!({ "ok": true, "user": { "name": "ana", "profile": { "display_name": "ana" } } }) } else { replies };
+                    let body = body.to_string();
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                });
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn slack_files_stops_reading_a_file_with_no_length_at_the_limit() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-unsized");
+        // Slack says 5 bytes, and sends no Content-Length for the 25 MB it streams.
+        let big = slack_file("F0BIG", "big.bin", "application/octet-stream", 5);
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> logs", "files": [file_json(&big)] }]});
+        slack::set_api_root(Some(serve_unsized_file(replies, 25 << 20, false)));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(downloads, slack::Downloads { files: vec![], notes: vec!["skipped big.bin: it is over the 20.0 MB limit for one file".into()] });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_gives_up_on_a_file_slack_does_not_send_in_time_and_goes_on() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-stall");
+        let slow = slack_file("F0SLOW", "slow.bin", "application/octet-stream", 5);
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> logs", "files": [file_json(&slow)] }]});
+        slack::set_api_root(Some(serve_unsized_file(replies, 0, true)));
+        slack::set_file_wait(std::time::Duration::from_secs(1));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(downloads, slack::Downloads { files: vec![], notes: vec!["skipped slow.bin: Slack did not send it within 1 seconds".into()] });
         let _ = std::fs::remove_dir_all(dir);
     }
 
