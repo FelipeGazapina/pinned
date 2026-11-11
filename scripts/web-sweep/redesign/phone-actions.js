@@ -1,8 +1,11 @@
 // Phone-Actions.dc.html: the thread actions sheet over "Fix hero spacing on mobile": its next
 // steps, the tools that open beside it, then the thread's actions. Seed gives the site project the
-// board's "dev" script through the script editor's save; the live side opens the hero thread, taps
-// ⋯ and waits for the tiles' hints to be read.
+// board's "dev" script through the script editor's save, and macbook a second signed-in account,
+// which the board's "Move to account" row needs; the live side opens the hero thread, taps ⋯ and
+// waits for the tiles' hints to be read.
 const { openThread } = require("./phone-thread");
+const { workAccount } = require("./phone-inbox");
+const world = require("./world");
 
 const DEV = { id: "dev", name: "dev", command: "npm run dev", icon: "play", runOnWorktreeCreate: false, runOnSettle: false };
 
@@ -18,6 +21,7 @@ module.exports = {
   ],
   async seed(page, ctx) {
     const key = ctx.threads.hero;
+    await workAccount(page, ctx, world.WORLD.threads.hero.machine);
     await ctx.waitFor("the site project's scripts", () => page.evaluate((k) => {
       const tab = tabByKey(k);
       return !!threadOf(tab).workspace && !projectScripts(tab).loading;

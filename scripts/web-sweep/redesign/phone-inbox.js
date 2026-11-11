@@ -56,9 +56,9 @@ const unlock = (page) =>
     return true;
   }, world.PASSWORD);
 
-async function seedLimit(page, ctx) {
-  const vps = T.rate.machine;
-  const machine = ctx.machines[vps];
+/** A claude account named "Work" on the node `name`, signed in as the fake CLI reads it. */
+async function workAccount(page, ctx, name) {
+  const machine = ctx.machines[name];
   const accounts = await page.evaluate((m) => callOn(m, { cmd: "list_accounts" }), machine);
   if (!accounts.some((a) => a.name === "Work" && a.signed_in)) {
     let work = accounts.find((a) => a.name === "Work");
@@ -67,11 +67,16 @@ async function seedLimit(page, ctx) {
       await ctx.waitFor("the account added", () => unlock(page).then(() => Promise.race([added, new Promise((r) => setTimeout(r, 300))])), 20000);
       work = await added;
     }
-    const home = path.join(ctx.dir, `node-${vps}`, "accounts", work.id);
+    const home = path.join(ctx.dir, `node-${name}`, "accounts", work.id);
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(path.join(home, "signed-in"), "");
   }
-  await ctx.waitFor("Work signed in on vps", () => page.evaluate(async (m) => setAccounts(m, await callOn(m, { cmd: "list_accounts" })).some((a) => a.name === "Work" && a.signed_in), machine), 20000);
+  await ctx.waitFor(`Work signed in on ${name}`, () => page.evaluate(async (m) => setAccounts(m, await callOn(m, { cmd: "list_accounts" })).some((a) => a.name === "Work" && a.signed_in), machine), 20000);
+}
+
+async function seedLimit(page, ctx) {
+  const vps = T.rate.machine;
+  await workAccount(page, ctx, vps);
   const key = ctx.threads.rate;
   // redesign-needs-you.js leaves the thread under Work; the board limits it under the default account.
   if (await page.evaluate((k) => tabByKey(k).view.account !== DEFAULT_ACCOUNT, key)) {
@@ -106,6 +111,7 @@ module.exports = {
   ],
   QUESTION_TITLE,
   unlock,
+  workAccount,
   async seed(page, ctx) {
     ctx.threads.question = await seedQuestion(page, ctx);
     await seedLimit(page, ctx);
