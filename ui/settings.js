@@ -1419,8 +1419,9 @@ function graphNodePanel(c) {
       <p class="hint">Moves the run's Linear issue to the named column.</p>`;
   } else if (type === "proof") {
     body = `<p class="hint">Requires a proof video on the pull request, like the connector's proof flag. The session drives the change in a Playwright script, records a video and posts it as a comment on the pull request. The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>`;
-  } else if (type === "convex-data") body = convexStepPanel(node);
-  else if (type === "call") {
+  } else if (type === "convex-data") {
+    body = convexStepPanel(node);
+  } else if (type === "call") {
     const i = graphNodeIndex(node.id);
     const targets = settings.connectors.filter((k) => k.id !== c.id);
     body = `<label>Workflow ${select(`graph.nodes.${i}.workflow`, ["", ...targets.map((k) => k.id)], (id) => targets.find((k) => k.id === id)?.name ?? id, node.workflow ?? "")}</label>`;

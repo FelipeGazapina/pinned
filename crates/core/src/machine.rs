@@ -2843,7 +2843,7 @@ impl Machine {
         let repo = git_remote(&history::project_of(&cwd)).and_then(|remote| repo_key(&remote));
         let offer = ask == Ask::Offer;
         if offer && repo.is_none() {
-            return Err("This folder has no git origin, so it cannot be connected to Convex yet.".into());
+            return Err(crate::convex::NO_ORIGIN.into());
         }
         let started = Instant::now();
         let answer = loop {

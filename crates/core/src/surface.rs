@@ -935,7 +935,10 @@ fn convex_key(text: &str) -> Option<usize> {
     let name = rest.chars().take_while(|c| named(*c) || (*c == ':' && prefix == "preview:")).count();
     let tail = rest[name..].strip_prefix('|')?;
     let run = tail.chars().take_while(|c| token(*c)).count();
-    let enough = if prefix.is_empty() { deployment_name(&rest[..name]).then_some(40)? } else { 16 };
+    if prefix.is_empty() && !deployment_name(&rest[..name]) {
+        return None;
+    }
+    let enough = if prefix.is_empty() { 40 } else { 16 };
     (name > 0 && run >= enough).then(|| prefix.len() + name + 1 + run)
 }
 

@@ -4215,10 +4215,8 @@ fn convex_note(connection: &convex::Connection, tables: Option<&[String]>) -> St
 fn repo_keys(repos: Vec<String>) -> Result<Vec<String>, String> {
     let mut keys: Vec<String> = vec![];
     for repo in repos {
-        // A machine names a project by `repo_key`: lowercase, with no scheme, user or `.git`. Any
-        // other spelling would be stored and never match a session's project.
-        let spelled = repo.to_lowercase() == repo && !repo.ends_with(".git") && !repo.ends_with('/') && !repo.contains("://") && !repo.contains('@');
-        if repo.trim().is_empty() || repo.trim() != repo || !repo.contains('/') || repo.chars().any(char::is_whitespace) || !spelled {
+        // Only the spelling a machine gives a project matches a session's project later.
+        if !repo.contains('/') || crate::machine::repo_key(&repo).as_deref() != Some(repo.as_str()) {
             return Err("a project is its repository, as github.com/owner/repo".into());
         }
         if !keys.contains(&repo) {

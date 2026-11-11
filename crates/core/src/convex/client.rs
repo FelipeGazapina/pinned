@@ -36,13 +36,19 @@ pub trait Http: Send + Sync {
     fn send<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<Response, String>>;
 }
 
-/// No Debug: `auth` and a test-function body hold the key.
+/// `auth` and a test-function body hold the key, so `Debug` shows neither.
 pub struct Request {
     pub method: Method,
     pub url: String,
     /// The whole `Authorization` header.
     pub auth: Option<String>,
     pub body: Option<Value>,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Request({} {})", self.method, self.url)
+    }
 }
 
 pub struct Response {
@@ -118,7 +124,7 @@ fn api_base() -> String {
 /// follows no redirect: a 307 would resend a body that holds the key to wherever it points.
 pub struct Reqwest;
 
-/// How much of an answer `Reqwest` reads. Convex's own answers stay well under it.
+/// How much of an answer `Reqwest` reads.
 const BODY_MAX: usize = 8 * 1024 * 1024;
 
 /// The one client every request shares, so a read's requests reuse a connection.
@@ -213,8 +219,11 @@ impl Http for Replay {
     }
 }
 
+/// One exchange with Convex. Every text Convex or the transport sends back enters here, so the key
+/// is scrubbed from it here and no caller has to remember to.
 async fn call(http: &dyn Http, key: &DeployKey, deployment: &str, route: Route<'_>) -> Result<Value, String> {
-    outcome(key.deployment(), http.send(route.request(key, deployment)).await?)
+    let sent = http.send(route.request(key, deployment)).await;
+    sent.and_then(|response| outcome(key.deployment(), response)).map_err(|e| key.scrub(&e))
 }
 
 /// The answer's body, or the error the agent reads.
@@ -242,10 +251,6 @@ fn server_error(message: &str) -> String {
 
 /// Resolves the address, team and project of a key, then lists the tables to prove the key reads.
 pub async fn resolve(http: &dyn Http, key: &DeployKey) -> Result<Connection, String> {
-    resolved(http, key).await.map_err(|e| key.scrub(&e))
-}
-
-async fn resolved(http: &dyn Http, key: &DeployKey) -> Result<Connection, String> {
     let url = call(http, key, "", Route::UrlForKey).await?;
     let url = url.as_str().filter(|u| encrypted(u, &api_base())).ok_or("Convex sent no address for this deploy key.")?;
     let url = url.trim_end_matches('/').to_owned();
@@ -263,7 +268,7 @@ fn encrypted(url: &str, api: &str) -> bool {
 
 /// Table names for the workflow step's panel, sorted. The owner asks, so no rule applies.
 pub async fn table_names(http: &dyn Http, key: &DeployKey, connection: &Connection) -> Result<Vec<String>, String> {
-    names(http, key, &connection.url).await.map_err(|e| key.scrub(&e))
+    names(http, key, &connection.url).await
 }
 
 async fn names(http: &dyn Http, key: &DeployKey, url: &str) -> Result<Vec<String>, String> {
@@ -293,7 +298,7 @@ fn value(body: Value) -> Result<Value, String> {
 /// A read for an admitted grant, as the JSON text the agent sees.
 pub async fn read(http: &dyn Http, key: &DeployKey, grant: &Grant, ask: Ask) -> Result<String, String> {
     let url = grant.connection.url.as_str();
-    let answer = match ask {
+    match ask {
         Ask::Offer => Ok(json!(grant.offer()).to_string()),
         Ask::Tables { table: None } => tables(http, key, grant).await,
         Ask::Tables { table: Some(table) } => table_shape(http, key, grant, &table).await,
@@ -301,8 +306,7 @@ pub async fn read(http: &dyn Http, key: &DeployKey, grant: &Grant, ask: Ask) -> 
         Ask::Query { code } => call(http, key, url, Route::Adhoc { code: &code }).await.and_then(ran),
         Ask::Run { function, args } => run(http, key, url, &function, &args).await,
         Ask::Logs { function, errors, limit } => logs(http, key, url, function.as_deref(), errors, limit).await,
-    };
-    answer.map_err(|e| key.scrub(&e))
+    }
 }
 
 /// The table names the grant may see.

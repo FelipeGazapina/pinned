@@ -1,7 +1,7 @@
-//! Which Convex reads a session may make. The hub decides here, from the tab list its machine
-//! reported, and nowhere else.
+//! Which Convex reads a session may make. The hub decides here and nowhere else, from the tab list
+//! its machine reported and the repo key that machine names for the tab.
 
-use super::{Ask, Connection, Offer, UNKNOWN_TAB};
+use super::{Ask, Connection, Offer, NO_ORIGIN, UNKNOWN_TAB};
 use crate::agent::{Role, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, EXTERNAL_CONNECTOR_PREFIX, INTERACTIVE_CONNECTOR};
 use crate::wire::TabView;
 use std::collections::BTreeSet;
@@ -58,7 +58,7 @@ pub fn decide(
 ) -> Result<Grant, String> {
     let calling = find(machine, tab).ok_or(UNKNOWN_TAB)?;
     let run = walk(machine, calling, find, step)?;
-    let repo = repo.ok_or("This folder has no git origin, so it cannot be connected to Convex yet.")?;
+    let repo = repo.ok_or(NO_ORIGIN)?;
     let connection = connections
         .iter()
         .find(|c| c.repos.iter().any(|r| r == repo))

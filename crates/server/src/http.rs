@@ -733,8 +733,8 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    // A session's Convex tool. The hub decides from the tabs this machine reported, and logs
-    // nothing of it: an answer or a refusal may quote the account's data.
+    // A session's Convex tool. Nothing of it is logged: an answer or a refusal may quote the
+    // account's data.
     if let HubCall::Convex { tab, repo, ask } = call {
         let result = hub.convex(&account, &machine, &tab, repo.as_deref(), ask).await;
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));

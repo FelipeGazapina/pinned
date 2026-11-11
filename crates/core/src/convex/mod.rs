@@ -8,9 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-/// Where the user creates a deploy key for a deployment.
-pub const KEY_PAGE: &str = "https://dashboard.convex.dev/deployment/settings";
-
 /// A deployment's kind, as its deploy key names it.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -54,11 +51,18 @@ pub struct Connection {
     pub repos: Vec<String>,
 }
 
-/// A pasted deploy key. No Debug, no Serialize, no Clone: nothing prints or copies it by accident.
+/// A pasted deploy key. No Serialize and no Clone, and `Debug` shows its hint, so nothing prints
+/// or copies it by accident.
 pub struct DeployKey {
     text: String,
     deployment: String,
     kind: Kind,
+}
+
+impl std::fmt::Debug for DeployKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DeployKey({} {})", self.deployment, self.hint())
+    }
 }
 
 const NOT_A_KEY: &str = "That is not a Convex deploy key. Create one under Deploy keys in the deployment's settings: https://dashboard.convex.dev/deployment/settings";
@@ -113,8 +117,7 @@ impl DeployKey {
         DeployKey::parse(&storage.key(&key_name(deployment)).ok_or_else(gone)?).map_err(|_| gone())
     }
 
-    /// `text` with this key, and the secret after its `|`, replaced by `[hidden]`. Every error text
-    /// passes through it.
+    /// `text` with this key, and the secret after its `|`, replaced by `[hidden]`.
     pub fn scrub(&self, text: &str) -> String {
         let secret = self.text.split_once('|').map_or("", |(_, secret)| secret);
         let text = text.replace(&self.text, "[hidden]");
@@ -125,7 +128,7 @@ impl DeployKey {
     }
 }
 
-/// Where the hub keeps the deploy key of `deployment`. It has no `:`, so it is a file name on Windows too.
+/// Where the hub keeps the deploy key of `deployment`.
 pub fn key_name(deployment: &str) -> String {
     format!("convex-key-{deployment}")
 }
@@ -195,6 +198,7 @@ pub struct Offer {
 /// The refusal the machine retries at offer time: it reports a new tab just after it starts it.
 pub const UNKNOWN_TAB: &str = "the hub does not know this session's tab yet";
 pub const SIGNED_OUT: &str = "Convex needs pinned signed in: the hub keeps the deploy keys.";
+pub const NO_ORIGIN: &str = "This folder has no git origin, so it cannot be connected to Convex yet.";
 
 pub const TOOLS: [&str; 5] = ["convex_tables", "convex_data", "convex_query", "convex_run", "convex_logs"];
 
@@ -340,6 +344,15 @@ mod tests {
     fn a_key_is_kept_under_a_name_without_a_colon() {
         assert_eq!(key_name("quick-lemur-789"), "convex-key-quick-lemur-789");
         assert!(!key_name(DeployKey::parse("dev:quick-lemur-789|t").unwrap().deployment()).contains(':'));
+    }
+
+    #[test]
+    fn debug_shows_a_keys_deployment_and_hint_and_a_requests_address_never_the_key() {
+        let text = "dev:quick-lemur-789|eyJ2MiI6ImExYjIifQsecretZ9";
+        let key = DeployKey::parse(text).unwrap();
+        assert_eq!(format!("{key:?}"), "DeployKey(quick-lemur-789 …etZ9)");
+        let request = client::Request { method: reqwest::Method::POST, url: "https://quick-lemur-789.convex.cloud/api/query".into(), auth: Some(format!("Convex {text}")), body: Some(json!({ "adminKey": text })) };
+        assert_eq!(format!("{request:?}"), "Request(POST https://quick-lemur-789.convex.cloud/api/query)");
     }
 
     #[test]

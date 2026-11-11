@@ -441,7 +441,7 @@ impl Hub {
     }
 
     /// A Convex tool's ask from the session in `tab` on `machine`, decided from the tabs the
-    /// account's machines reported, never from the call.
+    /// account's machines reported and the repo key `machine` names for that tab.
     pub async fn convex(&self, account: &Arc<Account>, machine: &str, tab: &str, repo: Option<&str>, ask: pinned_core::convex::Ask) -> Result<Value, String> {
         let find = |on: &str, id: &str| account.tab(on, id);
         self.connectors(account).await?.convex(&*self.convex_http, machine, tab, repo, &find, ask).await
