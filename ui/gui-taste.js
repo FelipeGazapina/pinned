@@ -216,7 +216,7 @@ function tasteBoxSizeHtml() {
   const inherits = scope.kind === "project" && !own ? `Inherits ${tasteBoxSizeName(size)} from ${from === "account" ? "Captains (all)" : "the built-in default"}. ` : "";
   return `<div class="taste-field"><div class="taste-label"><span>${TASTE_FIELD_LABELS.box_size}</span>${tag}</div>
     <div class="taste-seg" role="group" aria-label="Default box size">${sizes}</div>
-    <span class="taste-quiet"><output aria-live="polite">${tasteBoxSizeText(draft, scope)}</output> ${inherits}Boxes opened with no size named start at this size. A size named for one box wins.</span></div>`;
+    <span class="taste-quiet"><output aria-live="polite">${tasteBoxSizeText(draft, scope)}</output>. ${inherits}Boxes opened with no size named start at this size. A size named for one box wins.</span></div>`;
 }
 
 function tasteLimitsHtml(t) {
