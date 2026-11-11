@@ -7,7 +7,9 @@ use base64::Engine;
 use futures_util::future::BoxFuture;
 use reqwest::Method;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const CALL_WAIT: Duration = Duration::from_secs(20);
@@ -116,22 +118,41 @@ fn api_base() -> String {
 /// follows no redirect: a 307 would resend a body that holds the key to wherever it points.
 pub struct Reqwest;
 
+/// How much of an answer `Reqwest` reads. Convex's own answers stay well under it.
+const BODY_MAX: usize = 8 * 1024 * 1024;
+
+/// The one client every request shares, so a read's requests reuse a connection.
+fn client() -> Result<&'static reqwest::Client, reqwest::Error> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+    Ok(CLIENT.get_or_init(|| built))
+}
+
 impl Http for Reqwest {
     fn send<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<Response, String>> {
         Box::pin(async move {
             let host = reqwest::Url::parse(&request.url).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_default();
             let failed = |e: reqwest::Error| if e.is_timeout() { TIMED_OUT.to_owned() } else { format!("Convex at {host} is unreachable.") };
-            let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|_| format!("Convex at {host} is unreachable."))?;
-            let mut builder = client.request(request.method, &request.url).timeout(CALL_WAIT);
+            let mut builder = client().map_err(failed)?.request(request.method, &request.url).timeout(CALL_WAIT);
             if let Some(auth) = &request.auth {
                 builder = builder.header(reqwest::header::AUTHORIZATION, auth);
             }
             if let Some(body) = &request.body {
                 builder = builder.json(body);
             }
-            let response = builder.send().await.map_err(failed)?;
+            let mut response = builder.send().await.map_err(failed)?;
             let status = response.status().as_u16();
-            let text = response.text().await.map_err(failed)?;
+            let mut bytes: Vec<u8> = vec![];
+            while let Some(chunk) = response.chunk().await.map_err(failed)? {
+                if bytes.len() + chunk.len() > BODY_MAX {
+                    return Err(format!("Convex sent more than {} MB, which pinned does not read. Ask for less.", BODY_MAX / (1024 * 1024)));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
             let body = if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
             Ok(Response { status, body })
         })
@@ -318,7 +339,11 @@ async fn table_shape(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &st
     let Some(declared) = declared.filter(|t| t["documentType"]["type"] == "object") else {
         return Ok(json!({ "table": table, "fields": null, "note": "No schema. Read a few documents to see its shape." }).to_string());
     };
-    let fields: Map<String, Value> = declared["documentType"]["value"].as_object().into_iter().flatten().map(|(name, field)| field_entry(name, field)).collect();
+    let allowed = match &grant.scope {
+        Scope::Everything => None,
+        Scope::Tables(allowed) => Some(allowed),
+    };
+    let fields: Map<String, Value> = declared["documentType"]["value"].as_object().into_iter().flatten().map(|(name, field)| field_entry(name, field, allowed)).collect();
     let indexes: Vec<String> = declared["indexes"]
         .as_array()
         .into_iter()
@@ -332,29 +357,34 @@ async fn table_shape(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &st
 }
 
 /// A field as `name` (or `name?` when optional) and its type, rendered short.
-fn field_entry(name: &str, field: &Value) -> (String, Value) {
+fn field_entry(name: &str, field: &Value, allowed: Option<&BTreeSet<String>>) -> (String, Value) {
     let name = if field["optional"] == true { format!("{name}?") } else { name.to_owned() };
-    (name, Value::String(type_text(&field["fieldType"])))
+    (name, Value::String(type_text(&field["fieldType"], allowed)))
 }
 
-fn type_text(t: &Value) -> String {
-    let each = |list: &Value| list.as_array().into_iter().flatten().map(type_text).collect::<Vec<_>>();
+/// A type, rendered short. Under a table limit (`allowed`), an id of a table outside it is a plain
+/// `id`, so the limit names no table it does not let the run read.
+fn type_text(t: &Value, allowed: Option<&BTreeSet<String>>) -> String {
+    let each = |list: &Value| list.as_array().into_iter().flatten().map(|item| type_text(item, allowed)).collect::<Vec<_>>();
     match t["type"].as_str().unwrap_or("any") {
         "literal" => t["value"].to_string(),
-        "id" => format!("id({})", t["tableName"].as_str().unwrap_or_default()),
+        "id" => match t["tableName"].as_str().unwrap_or_default() {
+            table if allowed.is_some_and(|allowed| !allowed.contains(table)) => "id".to_owned(),
+            table => format!("id({table})"),
+        },
         "union" => each(&t["value"]).join(" | "),
-        "array" => match type_text(&t["value"]) {
+        "array" => match type_text(&t["value"], allowed) {
             inner if inner.contains(" | ") => format!("({inner})[]"),
             inner => format!("{inner}[]"),
         },
         "object" => {
             let fields: Vec<String> = t["value"].as_object().into_iter().flatten().map(|(name, field)| {
-                let (name, kind) = field_entry(name, field);
+                let (name, kind) = field_entry(name, field, allowed);
                 format!("{name}: {}", kind.as_str().unwrap_or_default())
             }).collect();
             format!("{{ {} }}", fields.join(", "))
         }
-        "record" => format!("record({}, {})", type_text(&t["keys"]), type_text(&t["values"]["fieldType"])),
+        "record" => format!("record({}, {})", type_text(&t["keys"], allowed), type_text(&t["values"]["fieldType"], allowed)),
         other => other.to_owned(),
     }
 }
@@ -624,6 +654,15 @@ mod tests {
         assert_eq!(read_all(&everything(), Ask::Tables { table: Some("customers".into()) }), Ok(r#"{"table":"customers","fields":{"name":"string","plan":"string"},"indexes":[]}"#.into()));
         assert_eq!(read_all(&everything(), Ask::Tables { table: Some("nope".into()) }), Err("No table nope. Tables: customers, invoices.".into()));
         assert_eq!(read_all(&only(&["invoices"]), Ask::Tables { table: Some("nope".into()) }), Err("No table nope. Tables: invoices.".into()), "a limit names only its tables");
+        assert_eq!(
+            read_all(&only(&["invoices"]), Ask::Tables { table: Some("invoices".into()) }),
+            Ok(r#"{"table":"invoices","fields":{"customer":"id","number":"number","paidAt":"number | null","status":"\"pending\" | \"paid\""},"indexes":["by_number(number, _creationTime)"]}"#.into()),
+            "an id of a table outside the limit does not name it"
+        );
+        assert!(read_all(&only(&["invoices", "customers"]), Ask::Tables { table: Some("invoices".into()) }).unwrap().contains(r#""customer":"id(customers)""#));
+        let limit: BTreeSet<String> = ["invoices".to_string()].into();
+        let nested = json!({ "type": "array", "value": { "type": "union", "value": [{ "type": "id", "tableName": "payouts" }, { "type": "id", "tableName": "invoices" }] } });
+        assert_eq!(type_text(&nested, Some(&limit)), "(id | id(invoices))[]");
     }
 
     #[test]
@@ -637,7 +676,7 @@ mod tests {
             block_on(read(&canned, &key(), &everything(), Ask::Tables { table: Some("invoices".into()) })),
             Ok(r#"{"table":"invoices","fields":null,"note":"No schema. Read a few documents to see its shape."}"#.into())
         );
-        let field = |t: Value| type_text(&t);
+        let field = |t: Value| type_text(&t, None);
         assert_eq!(field(json!({ "type": "array", "value": { "type": "union", "value": [{ "type": "string" }, { "type": "null" }] } })), "(string | null)[]");
         assert_eq!(field(json!({ "type": "object", "value": { "a": { "fieldType": { "type": "boolean" }, "optional": true } } })), "{ a?: boolean }");
         assert_eq!(field(json!({ "type": "record", "keys": { "type": "string" }, "values": { "fieldType": { "type": "int64" } } })), "record(string, int64)");
@@ -943,6 +982,33 @@ mod tests {
 
         let refused = block_on(Reqwest.send(Route::Logs.request(&key(), "http://127.0.0.1:9")));
         assert_eq!(refused.err(), Some("Convex at 127.0.0.1 is unreachable.".into()));
+    }
+
+    #[test]
+    fn reqwest_stops_reading_an_answer_past_its_bound() {
+        use std::io::{Read, Write};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut seen = vec![0u8; 0];
+            let mut buf = [0u8; 4096];
+            while !String::from_utf8_lossy(&seen).contains("\"numItems\"") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            let body = format!("\"{}\"", "a".repeat(BODY_MAX));
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+            // The client hangs up once it has read its bound, so the rest of the write may fail.
+            let _ = stream.write_all(body.as_bytes());
+        });
+        let answer = block_on(Reqwest.send(Route::Tables { cursor: None }.request(&key(), &address)));
+        served.join().unwrap();
+        assert_eq!(answer.err(), Some("Convex sent more than 8 MB, which pinned does not read. Ask for less.".into()));
     }
 
     /// Answers each request with the next canned response, then with a timeout.
