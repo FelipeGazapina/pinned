@@ -4,7 +4,8 @@
 // a typed answer reach the site thread's question, Approve plan answers a plan, Snooze takes the
 // usage limit off the page until it wakes, Continue under Work moves the api thread to that
 // account, Deny and Approve decide an agent's request, and Open opens each kind of thread. No
-// answer leaves the page. It also shoots the page at 1440x900 and 360x740.
+// answer leaves the page, and the open thread's ask sheet shows only on that thread's screen. It
+// also shoots the page at 1440x900 and 360x740.
 //
 //   export SWEEP_DIR=... SWEEP_HUB_PORT=... SWEEP_PG_PORT=... SWEEP_GO_PORT=...
 //   export CARGO=true CARGO_TARGET_DIR=<a checkout's target>
@@ -156,8 +157,13 @@ async function shoot(browser, ctx, size, viewport) {
     await page.evaluate(() => {
       window.__nyListeners = () => modelListeners.size;
     });
+    await page.evaluate((key) => activate(tabByKey(key)), question);
     await reopen(page);
     await waitFor("the four cards", () => page.evaluate(() => document.querySelectorAll("#page-view .ny-card").length >= 4));
+    await page.waitForTimeout(300);
+    check(await page.evaluate((key) => active?.key === key && !!tabByKey(key).menu && !document.querySelector(".sheet-panel"), question), "the open thread's question sheet stays off the Needs you page");
+    // An open thread counts as seen, and the question's card must turn Finished once answered.
+    await page.evaluate((key) => (activate(tabByKey(key)), openPage("needs-you")), ctx.threads.updater);
     console.log(`  cards:\n    ${(await page.evaluate(cardsText)).join("\n    ")}`);
     check((await page.evaluate(() => document.querySelector(".ny-title .ny-count").textContent)) === "4 threads on 3 machines", "the summary reads 4 threads on 3 machines");
 
@@ -252,6 +258,11 @@ async function shoot(browser, ctx, size, viewport) {
     await card(page, k(readme)).getByRole("button", { name: "Open" }).click();
     await waitFor("the worker open", () => page.evaluate((key) => active?.key === key && !document.body.dataset.page, readme));
     check(true, "Open on an approval opened the worker's thread");
+    await waitFor("the worker's approval sheet", () => page.evaluate(() => !!document.querySelector(".sheet-panel.ask-sheet")));
+    check(true, "the worker's approval sheet rose on its thread's screen");
+    await reopen(page);
+    await page.waitForTimeout(300);
+    check(await page.evaluate(() => !document.querySelector(".sheet-panel")), "back on Needs you, the thread's sheet closed");
     await context.close();
 
     await shoot(browser, ctx, "1440x900", { width: 1440, height: 900 });

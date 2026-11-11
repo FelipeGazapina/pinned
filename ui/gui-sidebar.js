@@ -1018,7 +1018,8 @@ function stampHtml(tab, child = false) {
     const clock = phaseOf(tab) === "working" && slot.since ? `<span class="since" data-since="${slot.since}"></span>` : "";
     const text = child && clock ? "" : slot.text;
     const attrs = woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : slot.title ? ` title="${esc(slot.title)}"` : "";
-    return `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${attrs}>${text}${text && clock ? " " : ""}${clock}</span>`;
+    // A phone shows a clock alone (gui-phone.css), as its dot already says the thread works.
+    return `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${attrs}>${text && clock ? `<span class="word">${text}</span> ` : text}${clock}</span>`;
   }
   if (child && threadState(tab) === "done") return `<span class="stamp when done">Done</span>`;
   return `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
@@ -1055,8 +1056,17 @@ function cardRow(tab) {
     worked ? `<span class="time">${esc(worked)}</span>` : "",
   ].filter(Boolean).join(`<span class="sep" aria-hidden="true">·</span>`);
   row.innerHTML = `${glyphHtml(state)}<span class="lines"><span class="l1"><span class="l2">${titleHtml(tab)}</span><span class="slot">${stampHtml(tab)}${rowActs(tab, draft)}</span></span>
-    <span class="l3">${roleMark(tab)}${pinMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}${terminalPulse(tab)}${sub}</span></span>`;
+    <span class="l3">${roleMark(tab)}${pinMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}${terminalPulse(tab)}${sub}${phoneSubHtml(tab, state, draft, pr)}</span></span>`;
   return row;
+}
+/** What a phone's row says on its second line in place of the branch and time, when that differs:
+ * how far a Captain's workers are, or that an unread thread finished. gui-phone.css swaps it in. */
+function phoneSubHtml(tab, state, draft, pr) {
+  const workers = isOrchestrator(tab) ? workersSummary(workersOf(tab)) : null;
+  const lead = workers?.total ? `${workers.done} of ${workers.total} ${workers.total === 1 ? "worker" : "workers"} done` : state === "unread" ? "Finished" : "";
+  if (!lead) return "";
+  const parts = [draft ? `<span class="draft-pen">Unsent draft</span>` : "", `<span>${lead}</span>`, workers?.total ? "" : pr].filter(Boolean);
+  return `<span class="phone-sub">${parts.join(`<span class="sep" aria-hidden="true">·</span>`)}</span>`;
 }
 /** A worker under its Captain on one line: its dot, title, and how long it has worked or what it waits on. */
 function childRow(tab) {
@@ -2159,11 +2169,20 @@ async function newThreadIn(tab) {
     tell(`Couldn't open a thread: ${esc(e)}`, 6000);
   }
 }
+/** On a phone the thread list gives way to the palette, and comes back when the palette is cancelled. */
+function paletteFromList() {
+  if (!narrow(768)) return null;
+  const list = ui.sidebarOpen;
+  toggleSidebar(false);
+  return list ? () => {
+    document.activeElement?.blur();
+    toggleSidebar(true);
+  } : null;
+}
 /** T3 Code's chat.new: with more than one project the palette asks where, otherwise the thread opens here. */
 function newThread(here = false) {
-  if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  openPalette({ mode: "new-thread-in" });
+  openPalette({ mode: "new-thread-in", onCancel: paletteFromList() });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
@@ -2173,8 +2192,7 @@ function newThreadWithoutProject() {
 }
 /** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
 function addProject(machine = active?.machine) {
-  if (narrow(768)) toggleSidebar(false);
-  openPalette({ mode: "add-project", machine });
+  openPalette({ mode: "add-project", machine, onCancel: paletteFromList() });
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
 document.getElementById("add-project").onclick = () => addProject();

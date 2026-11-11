@@ -413,9 +413,26 @@ function closeAskSheet() {
   shown?.sheet.close();
 }
 
+/** The sheets belong to the open thread's screen, the Orchestrator's included. An ask's sheet also
+ * waits while the palette is up, which it would cover. */
+const onThreadScreen = () => typeof phoneScreen === "function" && ["thread", "orchestrator"].includes(phoneScreen());
+const askSheetMayShow = () => onThreadScreen() && !(typeof paletteOpen === "function" && paletteOpen());
+
+/** Off a thread's screen its sheets close; back on it, its ask's sheet opens again. */
+function syncPhoneSheets() {
+  syncPhoneAsk();
+  if (!onThreadScreen()) openedSheet?.close();
+}
+let sheetsScreen;
+new MutationObserver(() => {
+  if (document.body.dataset.phoneScreen === sheetsScreen) return;
+  sheetsScreen = document.body.dataset.phoneScreen;
+  syncPhoneSheets();
+}).observe(document.body, { attributeFilter: ["data-phone-screen"] });
+
 function syncPhoneAsk() {
   const tab = active;
-  const key = guiOn() && onPhone() && tab && !terminalOnly(tab) ? askKeyOf(tab) : "";
+  const key = guiOn() && onPhone() && askSheetMayShow() && tab && !terminalOnly(tab) ? askKeyOf(tab) : "";
   if (!key) {
     askCard.hidden = true;
     if (askSheet) closeAskSheet();
@@ -492,7 +509,7 @@ function actionButtonHtml(a, cls) {
   const attrs = `${a.disabled ? " disabled" : ""}${a.pressed ? ` aria-pressed="true"` : ""}${a.hint && cls === "act-primary" ? ` title="${esc(a.hint)}"` : ""}`;
   if (cls === "act-tile") return `<button type="button" class="act-tile" data-act="${a.id}"${attrs}><span class="label">${esc(a.label)}</span><span class="hint">${esc(a.hint || " ")}</span></button>`;
   if (cls === "act-primary") return `<button type="button" class="act-primary${a.tone === "primary" ? " primary" : " outline"}" data-act="${a.id}"${attrs}><span>${esc(a.label)}</span></button>`;
-  return `<button type="button" class="act-row${a.tone === "danger" ? " danger" : ""}" data-act="${a.id}"${attrs}><span class="label">${esc(a.label)}</span>${a.hint ? `<span class="hint">${esc(a.hint)}</span>` : ""}${a.items ? phoneSvg("right", 16, "end") : ""}</button>`;
+  return `<button type="button" class="act-row${a.tone === "danger" ? " danger" : ""}" data-act="${a.id}"${attrs}${a.items ? ` aria-haspopup="menu"` : ""}><span class="label">${esc(a.label)}</span>${a.hint ? `<span class="hint">${esc(a.hint)}</span>` : ""}</button>`;
 }
 
 /** A list of rowMenuItems entries, as the sheet shows one under its title with a way back. */

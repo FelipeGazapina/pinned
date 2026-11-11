@@ -22,7 +22,7 @@
   #chat-head #head-sub:empty { display: none; }
 
   /* The Workers pill under the header. */
-  #chat #workers-pill:not([hidden]) { display: flex; flex: none; align-items: center; gap: 10px; height: 44px; margin: 0 12px 4px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1);
+  #chat #workers-pill:not([hidden]) { display: flex; flex: none; align-items: center; gap: 10px; height: 46px; margin: 0 12px 4px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1);
     border-radius: 12px; background: var(--g-raised); color: var(--g-fg); font-size: 14px; line-height: 1.4; text-align: left; }
   #workers-pill .status-glyph { --glyph-ring: 2px; }
   #workers-pill .count { font-weight: 600; }
@@ -33,7 +33,7 @@
 
   /* The Workers block in the chat: a row each that opens its worker, its counts in the pill. */
   #thread { padding: 10px 16px 200px; }
-  #thread .turn .bubble { max-width: min(300px, 80%); padding: 10px 14px; border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.065); }
+  #thread .turn .bubble { max-width: min(328px, calc(100% - 30px)); padding: 10px 14px; border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.065); }
   #thread .turn :is(.bubble .md, .assistant, .narration) { font-size: 16px; line-height: 1.4; }
   #thread .turn .assistant { color: rgb(var(--g-fg-rgb) / 0.92); }
   #thread .work > summary { font-size: 14px; }
@@ -89,6 +89,11 @@
   .sheet-root:has(.ask-sheet) .sheet-scrim { background: transparent; }
   /* The header names a worker's parent and its back button opens it. */
   #thread .worker-of { display: none; }
+  /* A worker's brief, as Phone-Approval draws it. */
+  #thread .brief { gap: 4px; padding: 10px 14px; border-radius: 16px; }
+  #thread .brief-head { font-size: 13px; }
+  #thread .brief-from { color: var(--g-side-muted); }
+  #thread .brief-text { font-size: 16px; }
 
   /* The Workers sheet. */
   .workers-sheet { font-size: 16px; line-height: 1.4; }
@@ -164,7 +169,7 @@
   .actions-sheet :is(.act-main, .act-sub) { display: contents; }
   .actions-sheet :is(.act-main, .act-sub)[hidden] { display: none; }
   .actions-sheet .act-primaries { display: flex; gap: 8px; }
-  .actions-sheet .act-primary { flex: 1; min-width: 0; height: 48px; padding: 0 8px; border-radius: 14px; font-weight: 600; white-space: nowrap; }
+  .actions-sheet .act-primary { flex: 1 1 auto; min-width: 0; height: 48px; padding: 0 8px; border-radius: 14px; font-weight: 600; white-space: nowrap; }
   .actions-sheet .act-primary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .actions-sheet .act-primary.primary { border: 0; background: var(--g-primary); color: var(--g-on-primary); box-shadow: none; }
   .actions-sheet .act-primary.outline { border: 1px solid rgb(var(--g-ink-rgb) / 0.16); background: transparent; color: var(--g-fg); }

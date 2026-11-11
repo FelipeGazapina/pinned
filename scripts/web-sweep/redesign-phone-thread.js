@@ -4,7 +4,10 @@
 // Message all, Stop the running one, a row that opens its worker, back), the README worker's
 // approval sheet (Show in terminal, its card, Decline by typing, Approve, Always allow, Decline), a
 // question's sheet, the hero thread's actions sheet (each primary action, tile and action), the
-// composer chip's pickers, and Send. Then it shoots each sheet at 360x740 into $SWEEP_DIR/phone-360.
+// composer chip's pickers, and Send. It checks that each sheet closes when another screen takes its
+// place and the ask comes back with its thread, that cancelling the palette that New thread or Add
+// project opened goes back to the thread list, and that the owner's password prompt shows and
+// unlocks over every phone screen. Then it shoots each sheet at 360x740 into $SWEEP_DIR/phone-360.
 // Each answer goes to the worker's real session; the README worker is put back to waiting on its
 // push and the CI worker back to running, so the redesign world stays as the boards show it. The
 // git action, the script, archive and delete are watched, not run, so the world keeps its tree.
@@ -257,7 +260,9 @@ async function actionsSheet(page, keys) {
   const primary = await page.evaluate(() => [...document.querySelectorAll(".actions-sheet .act-primary")].map((b) => b.textContent));
   check(primary.length === 3 && primary[1] === "Run dev" && primary[2] === "PR #12", `the primary row: ${primary.join(" | ")}`);
   const actions = await page.evaluate(() => [...document.querySelectorAll(".actions-sheet .act-main .act-row")].map((b) => b.querySelector(".label").textContent));
-  check(JSON.stringify(actions) === JSON.stringify(["Pin thread", "Settle", "Snooze", "Rename, mark unread, copy", "Archive or delete"]), `the actions: ${actions.join(" | ")}`);
+  const movable = await page.evaluate(() => switchItems(active).length > 0);
+  const listed = ["Pin thread", "Settle", "Snooze", "Rename, mark unread, copy", ...(movable ? ["Move to account"] : []), "Archive or delete"];
+  check(JSON.stringify(actions) === JSON.stringify(listed), `the actions: ${actions.join(" | ")}`);
   await page.tap(".actions-sheet .act-primary[data-act=git]");
   check(JSON.stringify(await calls()) === '[["runGitAction","commit_push"]]', "the git action runs runGitAction as the header's does");
   await tap(".actions-sheet .act-primary[data-act=script]");
@@ -382,6 +387,96 @@ async function send(page, keys) {
   await page.evaluate(({ k, title }) => changeMarks(threadKey(tabByKey(k)), () => (sideMarks.titles[threadKey(tabByKey(k))] = title)), { k: keys.updater, title: T.updater.title });
 }
 
+const screenIs = (page, screen) => waitFor(`the ${screen} screen`, () => page.evaluate((screen) => document.body.dataset.phoneScreen === screen, screen));
+
+/** Each sheet belongs to its thread's screen: another screen closes it, and the thread's ask comes
+ * back with its screen. */
+async function sheetsStayOnTheirScreen(page, keys) {
+  await restoreWorkers(page, keys);
+  await open(page, keys.readme);
+  await sheetOpen(page, "ask-sheet");
+  for (const screen of ["needs-you", "more", "threads", "orchestrator"]) {
+    await page.evaluate((screen) => phoneGo(screen), screen);
+    await screenIs(page, screen);
+    await sheetGone(page);
+    check(true, `the approval sheet closed on the ${screen} screen`);
+    await open(page, keys.readme);
+    await sheetOpen(page, "ask-sheet");
+    check(true, `and rose again back on the worker's screen from ${screen}`);
+  }
+  await page.evaluate(() => openedSheet.close());
+
+  await open(page, keys.release);
+  await page.tap("#workers-pill");
+  await sheetOpen(page, "workers-sheet");
+  await page.evaluate(() => phoneGo("needs-you"));
+  await sheetGone(page);
+  check(true, "the Workers sheet closed when Needs you took the screen");
+
+  await open(page, keys.hero);
+  await page.tap("#head-more");
+  await sheetOpen(page, "actions-sheet");
+  await page.evaluate(() => phoneGo("threads"));
+  await sheetGone(page);
+  check(true, "the actions sheet closed when the thread list took the screen");
+}
+
+/** New thread and Add project open the palette from the thread list; cancelling it goes back there,
+ * with the tab bar and nothing focused, whatever thread was open before. */
+async function paletteCancel(page, keys) {
+  await open(page, keys.release);
+  const cancels = [
+    ["New thread", "#phone-new", "a tap beside it", () => page.touchscreen.tap(195, 820)],
+    ["New thread", "#phone-new", "Escape", () => page.keyboard.press("Escape")],
+    ["Add project", "#phone-chips [data-add-project]", "a tap beside it", () => page.touchscreen.tap(195, 820)],
+  ];
+  for (const [what, opener, how, cancel] of cancels) {
+    await page.evaluate(() => phoneGo("threads"));
+    await screenIs(page, "threads");
+    await page.tap(opener);
+    await waitFor("the palette", () => page.evaluate(() => paletteOpen()));
+    await cancel();
+    await waitFor("the palette to close", () => page.evaluate(() => !paletteOpen()));
+    const back = await waitFor("the thread list", () => page.evaluate(() => document.body.dataset.phoneScreen === "threads" && document.body.hasAttribute("data-phone-tabs") && document.activeElement === document.body && "ok"));
+    check(back === "ok", `${what}, cancelled by ${how}, went back to the thread list with its tab bar`);
+  }
+}
+
+/** The owner's password prompt that an owner-only call opens shows over each phone screen and
+ * unlocks from there. Each screen gets a new page, which starts locked. */
+async function ownerPrompt(browser, keys) {
+  const opens = { threads: () => phoneGo("threads"), "needs-you": () => phoneGo("needs-you"), more: () => phoneGo("more"), orchestrator: () => phoneGo("orchestrator"), thread: (key) => (activate(tabByKey(key)), toggleSidebar(false)) };
+  for (const [screen, go] of Object.entries(opens)) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, colorScheme: "dark", isMobile: true, hasTouch: true });
+    const page = await context.newPage();
+    try {
+      await login(page);
+      await phoneInsets(page);
+      await waitFor("the threads", () => page.evaluate((key) => !!tabByKey(key), keys.updater));
+      await page.evaluate(`(${go})(${JSON.stringify(keys.updater)})`);
+      await screenIs(page, screen);
+      await page.evaluate(() => {
+        window.__owner = hub.hub({ cmd: "revoke_invite", id: "no-such-invite" }).then(() => "ok", (e) => String(e));
+      });
+      await waitFor("the password prompt", () => page.evaluate(() => document.querySelector("#side-dialog[open] [name=password]")));
+      const shown = await page.evaluate(() => {
+        const dialog = document.getElementById("side-dialog");
+        const r = dialog.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 20);
+        return r.width > 0 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && dialog.contains(hit);
+      });
+      check(shown, `the password prompt shows whole and on top over the ${screen} screen`);
+      await page.tap("#side-dialog [name=password]");
+      await page.keyboard.type(world.PASSWORD);
+      await page.tap("#side-dialog button.primary");
+      const answer = await waitFor("the owner-only call's answer", () => page.evaluate(() => window.__owner && Promise.race([window.__owner, new Promise((r) => setTimeout(() => r(null), 200))])));
+      check(!/password/.test(answer) && (await page.evaluate(() => !document.querySelector("#side-dialog[open]"))), `it unlocked from the ${screen} screen, and the hub answered the call: ${answer}`);
+    } finally {
+      await context.close();
+    }
+  }
+}
+
 async function shoot360(browser, ctx, keys) {
   const out = path.join(DIR, "phone-360");
   fs.mkdirSync(out, { recursive: true });
@@ -438,7 +533,10 @@ async function shoot360(browser, ctx, keys) {
     await actionsSheet(page, keys);
     await chip(page, keys);
     await send(page, keys);
+    await sheetsStayOnTheirScreen(page, keys);
+    await paletteCancel(page, keys);
     await context.close();
+    await ownerPrompt(browser, keys);
     await shoot360(browser, ctx, keys);
     check(!errors.length, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);
   } catch (e) {
