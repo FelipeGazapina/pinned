@@ -262,6 +262,7 @@ function integrationsHtml() {
     ${githubCardHtml()}
     ${vercelCardHtml()}
     ${upstashCardHtml()}
+    ${convexCardHtml()}
     ${externalAgentsCardHtml()}`;
 }
 
@@ -2182,6 +2183,7 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
   if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
   if (e.key === "Enter" && e.target.id === "box-token") actions["add-box-token"]();
+  if (e.key === "Enter" && e.target.id === "convex-key") actions["connect-convex"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
@@ -2279,13 +2281,14 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
   { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
   { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector permission fresh fixed ask"] },
+  { title: "Convex", terms: ["database tables documents deploy key logs query connector"], id: "convex" },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
