@@ -693,13 +693,24 @@ workflow has until you add it. The step names the connection:
   are off for that run.
 
 Use a table list for a workflow that outside text starts, such as a Slack message or a
-Linear issue. A model that drafts a workflow for you never adds the step.
+Linear issue. Only you set the step, in the app. pinned refuses an agent's save that adds
+the step or widens it, and a model that drafts a workflow for you never adds it.
 
-The table list limits the tools. It is not a sandbox: a session has a shell on its machine,
-and a process there can ask pinned as another session of the same machine.
+pinned offers no Convex tools to a session in an Upstash Box that you opened by hand, a
+session that an external agent drives, the global orchestrator, the taste chat, or a session
+that one of these started. A worker session that outlives the session that started it, for
+example across a restart, also loses its Convex tools.
 
-These sessions get no Convex tools: a session in an Upstash Box that you opened by hand, a
-session that an external agent drives, the global orchestrator and the taste chat.
+The project binding and the table list decide which tools pinned offers and which calls it
+answers. They are not a security boundary:
+
+- A process with your rights on a linked machine can ask the hub as another session or
+  another project of that machine.
+- A session with no Convex tools can ask a session that has them, such as the project's
+  Captain, through pinned's own messaging.
+
+So connect a deployment only when every agent session on your machines may read it, and
+limit the deploy key's permissions in Convex.
 
 ## Updates
 
