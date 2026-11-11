@@ -305,6 +305,9 @@ function renderGui() {
     lastShown = active;
     if (active) threadOf(active).shownAt = ++shownClock;
     lightenThreads();
+    // What was drawn for the thread that left is not drawn again, and was most of what these held.
+    rendered.clear();
+    highlighted.clear();
   }
   markThreadSeen(active);
   noteVisit();

@@ -105,6 +105,7 @@ function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
 function modelName(tab) { return tab.model ?? "Default"; }
 function highlightLines(lines) { return lines; }
+const highlighted = new Map();
 function threadKey(tab) { return tab.key; }
 function limitBanner() { return null; }
 const LOCAL = "local";
@@ -509,6 +510,24 @@ test("a thread off screen keeps only what the sidebar reads once its first read 
   await net.drain();
   assert.deepEqual(kinds(background), ["user", "tool", "text"]);
   assert.equal(net.reads, reads + 1, "one read from the start brings the thread back");
+});
+
+test("what was drawn for a thread is forgotten when another thread comes on screen, and kept while it stays", async () => {
+  clearScreen();
+  const [first, second] = [tabFor("tab-1", "idle"), tabFor("tab-2", "idle")];
+  const net = network({ "tab-1": transcript(), "tab-2": transcript() });
+  sandbox.tabs = [first, second];
+  sandbox.active = first;
+  sandbox.renderGui();
+  await net.drain();
+  vm.runInContext('rendered.set("# a", "<h1>a</h1>"); highlighted.set("rs:let a", ["let a"]);', sandbox);
+  const kept = () => vm.runInContext('[rendered.has("# a"), highlighted.has("rs:let a")].join()', sandbox);
+  sandbox.renderGui();
+  assert.equal(kept(), "true,true");
+  sandbox.active = second;
+  sandbox.renderGui();
+  await net.drain();
+  assert.equal(kept(), "false,false");
 });
 
 test("a background tab's agents arrive during its turn and keep it watched after", async () => {
