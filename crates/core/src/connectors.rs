@@ -8032,5 +8032,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn slack_files_stops_at_40_mb_in_all() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-total");
+        let shots: Vec<slack::SlackFile> = (1..=3).map(|n| slack_file(&format!("F0BIG{n}"), &format!("big{n}.png"), "image/png", 15 << 20)).collect();
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> shots", "files": shots.iter().map(file_json).collect::<Vec<_>>() }]});
+        let big = vec![7u8; 15 << 20];
+        let (root, heads) = serve_files(
+            replies,
+            vec![("/files-pri/T1-F0BIG1/big1.png", 200, "image/png", big.clone()), ("/files-pri/T1-F0BIG2/big2.png", 200, "image/png", big.clone())],
+        );
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["big1.png", "big2.png"]);
+        assert!(downloads.files.iter().all(|f| f.data.0 == big));
+        assert_eq!(downloads.notes, ["skipped big3.png: the files before it already make up the 40.0 MB pinned downloads at a time"]);
+        assert!(!heads.lock().unwrap().iter().any(|h| h.contains("big3.png")), "the file over the total is never downloaded");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_falls_back_to_the_live_run_s_trigger_when_slack_wont_list_the_thread() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-trigger");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        let (root, _) = serve_files(json!({ "ok": false, "error": "channel_not_found" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let without_run = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(without_run.notes, ["pinned could not read the Slack thread: Slack: channel_not_found"]);
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
+        connectors.runs.lock().unwrap().push(runner::start(&lib, "c2", slack_thread(), trigger, "2026-10-19T08:54:10Z"));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(
+            downloads,
+            slack::Downloads {
+                files: vec![slack::Download {
+                    name: "export-500.png".into(),
+                    mimetype: "image/png".into(),
+                    author: "ana".into(),
+                    ts: "1792400050.000200".into(),
+                    data: crate::wire::Bytes(png),
+                }],
+                notes: vec![],
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     include!("legacy_outcome.rs");
 }
