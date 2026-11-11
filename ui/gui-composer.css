@@ -451,6 +451,7 @@ body[data-mode="gui"] #terms .term.split-next.vertical { border-left: 0; padding
   color: rgb(var(--g-fg-rgb) / 0.8); text-align: left; }
 #details-card .row:hover:not(:disabled) { background: rgb(var(--g-ink-rgb) / 0.08); }
 #details-card .row:disabled { cursor: default; }
+#details-card .row.static:hover { background: none; }
 #details-card .row .i, #details-card .row .editor-mark svg { width: 16px; height: 16px; color: var(--g-muted); }
 #details-card .row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; }
 #details-card .row .label .head { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

@@ -3315,6 +3315,23 @@ detailsButton.onclick = () => toggleDetails();
 onGuiKey("b", () => toggleDetails(), { shift: true });
 window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #head-more, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
+/** Where the thread runs, which the sidebar row's hover card says with a mouse and this says on any
+ * screen: its machine, an Upstash Box's age and cost, and its account with the provider behind it. */
+function detailsRunsOnHtml(tab) {
+  const account = tab.view.account ?? DEFAULT_ACCOUNT;
+  const named = accountOf(tab.machine, account);
+  const provider = named?.auth === "opencode-go" ? PROVIDERS["opencode-go"] : PROVIDERS[named?.provider] ?? PROVIDERS.claude;
+  const box = tab.machine !== LOCAL && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
+  const budget = box?.budget_usd != null ? ` of $${box.budget_usd.toFixed(2)}` : "";
+  const boxText = box ? `${boxAgeText(box.age_secs)} online · $${boxSpent(box).toFixed(2)}${budget}` : tab.machine !== LOCAL && boxDown.has(tab.machine) ? "Box cost unavailable" : "";
+  const line = (detail, glyph, label, dim = "") => `<div class="row static" data-detail="${detail}">${glyph}<span class="label">${esc(label)}</span>${dim ? `<span class="dim">${esc(dim)}</span>` : ""}</div>`;
+  return `<section aria-label="Runs on">
+      ${line("machine", icon("monitor"), machineName(tab.machine))}
+      ${boxText ? line("box", icon("server"), boxText) : ""}
+      ${line("account", icon(named?.auth === "opencode-go" ? "opencode" : "claude"), accountName(tab.machine, account), provider)}
+    </section>`;
+}
+
 function renderDetails(tab) {
   if (detailsCard.hidden || !tab) return;
   const t = threadOf(tab);
@@ -3328,7 +3345,7 @@ function renderDetails(tab) {
   const prs = [...new Map(t.items.filter((i) => i.kind === "pr").map((p) => [p.url, p])).values()];
   const row = (attrs, inner, chevron = false) => `<button type="button" class="row${/ class="more"/.test(attrs) ? " more" : ""}"${attrs.replace(' class="more"', "")}>${inner}${chevron ? icon("chevron-down", "chev") : ""}</button>`;
   const split = (main, more) => `<div class="split-row">${main}<span class="seam"></span>${more}</div>`;
-  const html = `<section aria-label="Workspace">
+  const html = `${detailsRunsOnHtml(tab)}<section aria-label="Workspace">
       ${row(` data-act="workspace"${open ? "" : " disabled"} title="${esc(tab.view.cwd)}"`, `${icon(tab.machine !== LOCAL ? "monitor" : where.icon)}<span class="label">${esc(tab.machine !== LOCAL ? `${machineName(tab.machine)} · ${where.label}` : where.label)}</span>`, open)}
       ${editor ? split(row(` data-act="open-in"`, `<span class="editor-mark">${editorIcon(editor.id) || icon("square-arrow-out-up-right")}</span><span class="label">Open in ${esc(editor.name)}</span>`), row(` data-act="editors" class="more" aria-label="Choose the editor"`, icon("chevron-down"))) : ""}
       ${known && !known.loading ? primary ? split(row(` data-act="run" title="Run ${esc(primary.name)}"`, `${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span>`), row(` data-act="scripts" class="more" aria-label="Script actions"`, icon("chevron-down")))
