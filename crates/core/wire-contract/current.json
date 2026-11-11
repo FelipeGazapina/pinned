@@ -6043,6 +6043,63 @@
                 ]
               },
               {
+                "description": "From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_set"
+                  },
+                  "connector": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "connector",
+                  "name",
+                  "value"
+                ],
+                "anyOf": [
+                  {
+                    "title": "LinearIssue",
+                    "description": "Linear's id for the issue, which `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "issue": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "issue"
+                    ]
+                  },
+                  {
+                    "title": "SlackThread",
+                    "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "channel": {
+                        "type": "string"
+                      },
+                      "thread": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "channel",
+                      "thread"
+                    ]
+                  }
+                ]
+              },
+              {
                 "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
                 "type": "object",
                 "properties": {
@@ -15845,6 +15902,63 @@
                 ]
               },
               {
+                "description": "From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_set"
+                  },
+                  "connector": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "connector",
+                  "name",
+                  "value"
+                ],
+                "anyOf": [
+                  {
+                    "title": "LinearIssue",
+                    "description": "Linear's id for the issue, which `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "issue": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "issue"
+                    ]
+                  },
+                  {
+                    "title": "SlackThread",
+                    "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "channel": {
+                        "type": "string"
+                      },
+                      "thread": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "channel",
+                      "thread"
+                    ]
+                  }
+                ]
+              },
+              {
                 "description": "`ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.",
                 "type": "object",
                 "properties": {
@@ -21832,6 +21946,63 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              },
+              {
+                "description": "From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_set"
+                  },
+                  "connector": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "connector",
+                  "name",
+                  "value"
+                ],
+                "anyOf": [
+                  {
+                    "title": "LinearIssue",
+                    "description": "Linear's id for the issue, which `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "issue": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "issue"
+                    ]
+                  },
+                  {
+                    "title": "SlackThread",
+                    "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "channel": {
+                        "type": "string"
+                      },
+                      "thread": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "channel",
+                      "thread"
+                    ]
+                  }
                 ]
               },
               {
@@ -28435,6 +28606,63 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              },
+              {
+                "description": "From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "run_set"
+                  },
+                  "connector": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "connector",
+                  "name",
+                  "value"
+                ],
+                "anyOf": [
+                  {
+                    "title": "LinearIssue",
+                    "description": "Linear's id for the issue, which `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "issue": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "issue"
+                    ]
+                  },
+                  {
+                    "title": "SlackThread",
+                    "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                    "type": "object",
+                    "properties": {
+                      "channel": {
+                        "type": "string"
+                      },
+                      "thread": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "channel",
+                      "thread"
+                    ]
+                  }
                 ]
               },
               {
