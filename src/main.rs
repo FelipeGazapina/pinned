@@ -52,7 +52,7 @@ enum View {
 fn settle(app: &AppHandle, moment: Moment) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let on = handle.state::<Background>().is_on();
+        let on = handle.state::<Arc<Machine>>().background().unwrap_or(false);
         let signed_in = handle.state::<account::Account>().is_signed_in();
         if background::has_window(moment, on, signed_in) {
             if let Err(e) = open_main(&handle) {
@@ -127,9 +127,10 @@ impl AppWindow for DesktopWindow {
     }
 }
 
+/// None where the app can't run without its window, so its settings show no switch.
 #[tauri::command]
-fn get_background(background: State<Background>) -> bool {
-    background.is_on()
+fn get_background(machine: State<Arc<Machine>>) -> Option<bool> {
+    machine.background()
 }
 
 /// Shows or hides the app in the Dock and the Cmd-Tab switcher (macOS). The window is an
@@ -552,7 +553,12 @@ fn main() {
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             machine.set_installer(Arc::new(DesktopUpdate { app: updater }));
             app.manage(Background::load(config.clone()));
-            machine.set_window(Arc::new(DesktopWindow { app: app.handle().clone() }));
+            // Only macOS brings the window back when the app is opened again. Elsewhere a second
+            // launch is a second process, which would come up with no window too and take over the
+            // same sessions and the same hub link, so the setting is not offered there.
+            if cfg!(target_os = "macos") {
+                machine.set_window(Arc::new(DesktopWindow { app: app.handle().clone() }));
+            }
             app.manage(machine.clone());
             app.manage(Panel {
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
@@ -602,7 +608,7 @@ fn main() {
                 },
             })?;
             let signed_in = app.state::<account::Account>().is_signed_in();
-            if background::has_window(Moment::Settle, app.state::<Background>().is_on(), signed_in) {
+            if background::has_window(Moment::Settle, machine.background().unwrap_or(false), signed_in) {
                 open_main(app.handle())?;
             } else {
                 // The window's boot reopens the sessions still going at the last quit; with no

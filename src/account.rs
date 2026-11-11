@@ -228,10 +228,9 @@ pub async fn sign_out(app: AppHandle) -> Result<(), String> {
         let state = app.state::<Account>();
         let Some(signed_in) = state.signed_in.write().unwrap().take() else { return Ok(()) };
         state.forget(signed_in);
-        app.state::<crate::background::Background>().save(false)?;
         let machine = app.state::<Arc<Machine>>().inner().clone();
         *state.watcher.lock().unwrap() = Some(watch_connectors(app.clone(), machine));
-        Ok(())
+        app.state::<crate::background::Background>().save(false)
     })
     .await
     .map_err(|e| e.to_string())?

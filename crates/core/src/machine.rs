@@ -961,6 +961,8 @@ impl Machine {
     fn set_background(&self, on: bool) -> Result<bool, String> {
         let window = self.window.get().ok_or("this machine runs pinned without the app, so it has no window")?;
         window.set_background(on)?;
+        // What is saved now, which a switch from elsewhere at the same moment may have changed.
+        let on = window.background();
         self.emit(MachineEvent::Background { on });
         Ok(on)
     }
