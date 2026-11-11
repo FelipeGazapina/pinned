@@ -484,8 +484,8 @@ code. Each Slack workflow can also file a Linear issue and fix the bug, as below
 
 To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
 `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`,
-`chat:write` and `reactions:write`. Add `usergroups:read` if a category mentions a user group
-by its handle, as in [Sort messages with a decision model](#sort-messages-with-a-decision-model).
+`chat:write`, `reactions:write` and `files:read`, which downloads the images a thread
+attaches. Add `usergroups:read` if a category mentions a user group by its handle, as in [Sort messages with a decision model](#sort-messages-with-a-decision-model).
 Install the app, invite the bot to the channel with
 `/invite @your-bot`, and paste the Bot User OAuth Token (`xoxb-…`) under **Connectors**.
 pinned keeps it in `slack-key` next to `linear-key`.

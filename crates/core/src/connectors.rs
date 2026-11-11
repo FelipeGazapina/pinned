@@ -1160,6 +1160,8 @@ pub struct TriggerPost {
     pub ts: String,
     pub author: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<slack::SlackFile>,
 }
 
 /// Direct answers from one classify model, in question order. A decide's pick is not one of these.
@@ -2153,6 +2155,7 @@ fn slack_run(
     prompt += c.box_note();
     let input = transcript(posts);
     prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n{input}");
+    prompt += &files_line("thread", posts.iter().map(|p| p.files.len()).sum());
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
@@ -2169,7 +2172,15 @@ fn reply_header(author: &str) -> String {
 
 /// A later message of the thread, as its session receives it.
 fn reply_block(post: &slack::Post) -> String {
-    format!("{}\n{}", reply_header(&post.author), post.text)
+    format!("{}\n{}{}", reply_header(&post.author), post.text, files_line("message", post.files.len()))
+}
+
+/// Tells a session that `what` attaches `count` files and how to get them. Empty when it has none.
+fn files_line(what: &str, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    format!("\n\nThis {what} has {count} attached file(s); run `pinned slack files` to download them.")
 }
 
 fn routed_note(router: &str, category: &str) -> String {
@@ -2185,7 +2196,7 @@ fn filed_note(filed: &Filed) -> String {
 }
 
 fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
-    posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
+    posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone(), files: post.files.clone() }).collect()
 }
 
 fn subject_key(subject: &Subject) -> String {
@@ -2782,7 +2793,7 @@ pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[Class
             run(owner, &issue, exe)
         }
         TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned, .. } => {
-            let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
+            let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone(), files: post.files.clone() }).collect();
             let mut opened = slack_run(owner, channel, channel_name, thread, &posts, note.as_deref(), exe);
             opened.mentioned = mentioned.clone();
             opened
@@ -5166,8 +5177,8 @@ mod tests {
 
     fn posts() -> [slack::Post; 2] {
         [
-            slack::Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned export 500s since today\nsee the log".into() },
-            slack::Post { ts: "1792400060.000000".into(), author: "bruno".into(), text: "same here".into() },
+            slack::Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned export 500s since today\nsee the log".into(), files: vec![] },
+            slack::Post { ts: "1792400060.000000".into(), author: "bruno".into(), text: "same here".into(), files: vec![] },
         ]
     }
 
@@ -5410,7 +5421,7 @@ mod tests {
 
     #[test]
     fn later_messages_reach_the_session_under_their_author() {
-        let post = slack::Post { ts: "1792400090.000000".into(), author: "Ana Lima".into(), text: "yes, create the task\n@pinned thanks".into() };
+        let post = slack::Post { ts: "1792400090.000000".into(), author: "Ana Lima".into(), text: "yes, create the task\n@pinned thanks".into(), files: vec![] };
         assert_eq!(reply_block(&post), "[Slack reply from Ana Lima in the thread]\nyes, create the task\n@pinned thanks");
     }
 
@@ -6343,7 +6354,7 @@ mod tests {
             channel: "C0123ABCD".into(),
             channel_name: "support".into(),
             thread: "1792400050.000200".into(),
-            posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text }).collect(),
+            posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text, files: post.files }).collect(),
             note,
             mentioned: vec!["1792400050.000200".into()],
             request: None,
@@ -7040,7 +7051,7 @@ mod tests {
     }
 
     fn mention_in_thread(ts: &str, text: &str) -> GraphInbox {
-        let post = slack::Post { ts: ts.into(), author: "ana".into(), text: text.into() };
+        let post = slack::Post { ts: ts.into(), author: "ana".into(), text: text.into(), files: vec![] };
         GraphInbox {
             channel: "C0123ABCD".into(),
             thread: "1792400050.000200".into(),
@@ -7639,6 +7650,129 @@ mod tests {
             let drafted = generated("convex-generated", json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-mention", "channel": "support" } }, { "name": "Reply", "type": "convex-data", "connection": "quick-lemur-789" }]));
             assert_eq!(drafted.unwrap_err(), "step \"Reply\" is a \"convex-data\" step, which new maps do not use");
         }
+    }
+
+    fn screenshot() -> slack::SlackFile {
+        slack::SlackFile {
+            id: "F0SCREEN1".into(),
+            name: "export-500.png".into(),
+            mimetype: "image/png".into(),
+            size: 48213,
+            url_private: "https://files.slack.com/files-pri/T1-F0SCREEN1/export-500.png".into(),
+        }
+    }
+
+    fn console() -> slack::SlackFile {
+        slack::SlackFile {
+            id: "F0CONSOLE2".into(),
+            name: "console.jpg".into(),
+            mimetype: "image/jpeg".into(),
+            size: 120004,
+            url_private: "https://files.slack.com/files-pri/T1-F0CONSOLE2/console.jpg".into(),
+        }
+    }
+
+    /// Answers `conversations.replies` with `replies` and `users.info` with one name, once per call.
+    fn serve_replies(replies: String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut tmp) {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = if String::from_utf8_lossy(&buf).contains("conversations.replies") {
+                    replies.clone()
+                } else {
+                    r#"{"ok":true,"user":{"name":"ana","profile":{"display_name":"ana"}}}"#.to_owned()
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn a_thread_read_keeps_the_files_of_each_post_even_before_the_mention() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let file = |f: slack::SlackFile| json!({ "id": f.id, "name": f.name, "mimetype": f.mimetype, "size": f.size, "url_private": f.url_private, "filetype": "png" });
+        let replies = json!({ "ok": true, "messages": [
+            { "ts": "1792400050.000200", "user": "U1", "text": "export 500s, screenshot attached", "files": [file(screenshot())] },
+            { "ts": "1792400070.000000", "user": "U1", "text": "<@UBOT> can you look?" },
+            { "ts": "1792400090.000000", "user": "U1", "text": "and the console", "files": [file(console())] },
+        ]});
+        slack::set_api_root(Some(serve_replies(replies.to_string())));
+        let posts = block_on(slack::thread("xoxb-test", "C0123ABCD", "1792400050.000200")).unwrap();
+        let files: Vec<(&str, Vec<(&str, &str, &str, u64)>)> = posts
+            .iter()
+            .map(|p| (p.ts.as_str(), p.files.iter().map(|f| (f.id.as_str(), f.name.as_str(), f.mimetype.as_str(), f.size)).collect()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("1792400050.000200", vec![("F0SCREEN1", "export-500.png", "image/png", 48213)]),
+                ("1792400070.000000", vec![]),
+                ("1792400090.000000", vec![("F0CONSOLE2", "console.jpg", "image/jpeg", 120004)]),
+            ]
+        );
+        assert_eq!(posts[0].files[0].url_private, "https://files.slack.com/files-pri/T1-F0SCREEN1/export-500.png");
+    }
+
+    #[test]
+    fn a_stored_post_without_files_still_loads_and_one_with_none_writes_no_files_key() {
+        let old: TriggerPost = serde_json::from_str(r#"{"ts":"1792400050.000200","author":"ana","text":"it broke"}"#).unwrap();
+        assert_eq!(old, TriggerPost { ts: "1792400050.000200".into(), author: "ana".into(), text: "it broke".into(), files: vec![] });
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"ts":"1792400050.000200","author":"ana","text":"it broke"}"#);
+        let with = TriggerPost { files: vec![screenshot()], ..old };
+        assert_eq!(serde_json::from_str::<TriggerPost>(&serde_json::to_string(&with).unwrap()).unwrap(), with);
+    }
+
+    #[test]
+    fn a_thread_with_files_tells_its_session_how_to_download_them() {
+        let prompt = |posts: &[slack::Post]| slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", posts, None, "/bin/pinned").args.last().unwrap().clone();
+        let plain = prompt(&posts());
+        assert!(!plain.contains("attached file"), "{plain}");
+        let [mut first, mut second] = posts();
+        first.files = vec![screenshot()];
+        second.files = vec![console()];
+        let line = "\n\nThis thread has 2 attached file(s); run `pinned slack files` to download them.";
+        let with = prompt(&[first, second]);
+        assert_eq!(with, format!("{plain}{line}"));
+        let opened = graph_opening(&slack_connector(), &slack_trigger_with(&[screenshot()]), &[], "", None, "/bin/pinned").unwrap();
+        assert!(opened.args.last().unwrap().ends_with("same here\n\nThis thread has 1 attached file(s); run `pinned slack files` to download them."));
+    }
+
+    fn slack_trigger_with(files: &[slack::SlackFile]) -> TriggerInput {
+        let [mut first, second] = posts();
+        first.files = files.to_vec();
+        TriggerInput::Slack {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            posts: trigger_posts(&[first, second]),
+            note: None,
+            mentioned: vec![],
+            request: None,
+        }
+    }
+
+    #[test]
+    fn a_later_reply_with_files_says_so_in_its_block() {
+        let post = slack::Post { ts: "1792400090.000000".into(), author: "ana".into(), text: "here it is".into(), files: vec![screenshot()] };
+        assert_eq!(
+            reply_block(&post),
+            "[Slack reply from ana in the thread]\nhere it is\n\nThis message has 1 attached file(s); run `pinned slack files` to download them."
+        );
     }
 
     include!("legacy_outcome.rs");

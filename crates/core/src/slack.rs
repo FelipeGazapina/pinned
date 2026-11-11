@@ -68,6 +68,36 @@ pub struct Post {
     pub ts: String,
     pub author: String,
     pub text: String,
+    /// What the message attaches, as `conversations.replies` lists it.
+    pub files: Vec<SlackFile>,
+}
+
+/// A file a message attaches. `url_private` downloads it with the bot token.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SlackFile {
+    pub id: String,
+    pub name: String,
+    pub mimetype: String,
+    pub size: u64,
+    pub url_private: String,
+}
+
+/// The files one message attaches.
+fn files(message: &Value) -> Vec<SlackFile> {
+    let text = |file: &Value, key: &str| file[key].as_str().unwrap_or_default().to_owned();
+    message["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|file| file["id"].is_string())
+        .map(|file| SlackFile {
+            id: text(file, "id"),
+            name: text(file, "name"),
+            mimetype: text(file, "mimetype"),
+            size: file["size"].as_u64().unwrap_or_default(),
+            url_private: text(file, "url_private"),
+        })
+        .collect()
 }
 
 fn api_root() -> String {
@@ -413,7 +443,7 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
             for (id, n) in names {
                 text = text.replace(&format!("<@{id}>"), &format!("@{n}"));
             }
-            Post { ts: m["ts"].as_str().unwrap_or_default().to_owned(), author, text }
+            Post { ts: m["ts"].as_str().unwrap_or_default().to_owned(), author, text, files: files(m) }
         })
         .collect()
 }
@@ -626,8 +656,8 @@ mod tests {
         assert_eq!(
             posts(&thread, &names),
             [
-                Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned it broke for <@U9>".into() },
-                Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into() },
+                Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned it broke for <@U9>".into(), files: vec![] },
+                Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into(), files: vec![] },
             ]
         );
     }
