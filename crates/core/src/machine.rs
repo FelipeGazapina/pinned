@@ -168,6 +168,10 @@ impl Launch {
         for key in INHERITED_SESSION_ENV {
             cmd.env_remove(key);
         }
+        // A session's role is what its tab's env names, never the role of the session pinned runs in.
+        for key in [crate::agent::ROLE_ENV, crate::agent::PROJECT_ENV] {
+            cmd.env_remove(key);
+        }
         if account.auth == Auth::OpenCodeGo {
             for key in crate::opencode_go::STRIP_ENV {
                 cmd.env_remove(key);
