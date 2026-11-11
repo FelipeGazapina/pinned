@@ -22,9 +22,26 @@ pub struct Issue {
     pub url: String,
 }
 
+fn api() -> String {
+    #[cfg(test)]
+    if let Some(root) = API_ROOT.lock().unwrap().clone() {
+        return root;
+    }
+    API.to_owned()
+}
+
+/// Points Linear calls at `url` for a test. `None` restores the real API.
+#[cfg(test)]
+pub fn set_api(url: Option<String>) {
+    *API_ROOT.lock().unwrap() = url;
+}
+
+#[cfg(test)]
+static API_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
     let response = reqwest::Client::new()
-        .post(API)
+        .post(api())
         .header("Authorization", key)
         .json(&json!({ "query": query, "variables": variables }))
         .send()
