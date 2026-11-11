@@ -64,6 +64,7 @@ const REPO = path.resolve(flag("repo", path.join(__dirname, "..", "..")));
 const RUNS = Number(flag("runs", 3));
 const SETTLE = Number(flag("settle", 400));
 const IDLE = Number(flag("idle", 30));
+const WEB_IDLE = Number(flag("idle", 8));
 const PORT = Number(process.env.RAM_BENCH_PORT || 55210);
 const TARGET = path.join(process.env.CARGO_TARGET_DIR || path.join(REPO, "target"), "debug");
 const IDENTIFIER = "dev.personal-harness.pinned-bench";
@@ -219,20 +220,23 @@ async function web() {
     await page.goto(hub);
     await page.waitForSelector("#login [name=email]");
     const shell = argv.includes("--floors") ? await measureRenderers(browser) : undefined;
+    await page.evaluate(WORKLOAD);
     if (TRY) await page.evaluate(TRY);
     await page.fill("#login [name=email]", EMAIL);
     await page.fill("#login [name=password]", PASSWORD);
     await page.click("#login .primary");
     await page.waitForFunction(() => document.body.dataset.hub === "online", null, { timeout: 60000 });
-    await page.evaluate(WORKLOAD);
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("Performance.enable");
     const browserCdp = await browser.newBrowserCDPSession();
     const read = async () => {
       // Two collections: the first frees what the second's weak references still held.
       for (let i = 0; i < 2; i++) await cdp.send("HeapProfiler.collectGarbage");
-      await sleep(8000);
       const { processInfo } = await browserCdp.send("SystemInfo.getProcessInfo");
+      for (let waited = 0; waited < WEB_IDLE; waited += 4) {
+        await sleep(4000);
+        if (argv.includes("--trace")) console.error(`idle ${waited + 4}s`, Math.max(...[...footprint(processInfo.filter((p) => p.type === "renderer").map((p) => p.id)).values()].map((p) => mb(p.bytes))));
+      }
       const groups = { renderer: [], gpu: [], browser: [] };
       for (const p of processInfo) if (p.type === "renderer" || p.type === "GPU" || p.type === "browser") groups[p.type.toLowerCase()].push(p.id);
       // Chrome keeps a spare renderer and may run the service worker in one of its own; the page's is the largest.

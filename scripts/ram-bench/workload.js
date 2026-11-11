@@ -1,6 +1,7 @@
 // The RAM bench's walk through the app, the same in the web app and the desktop app. run.js
 // evaluates this file in the page: it leaves `ramBench` on the window.
-// `boot` waits for every saved session to be open and running, with the first thread painted.
+// `boot` waits for every saved session to be open and running, the first thread painted, and
+// every other thread read once for the sidebar.
 // `walk` is a day of use: it opens every thread once, shows three terminals, opens each page of
 // the sidebar's footer, and comes back to the first thread. With `memory`, it first saves one
 // project memory, which loads the vector model as the first prompt in a project with memories does.
@@ -14,9 +15,15 @@ window.ramBench = (() => {
     for (const end = Date.now() + ms; Date.now() < end; await sleep(50)) if (test()) return;
     throw new Error(`timed out waiting for ${what}`);
   };
+  /** The thread on screen with its whole transcript read, as it is once someone has stayed on it:
+   * the page reads a long transcript a part at a time, one part each time it polls. */
   const painted = async (tab) => {
     const t = threadOf(tab);
-    await until(() => t.loaded && !t.fetching, 120000, `the thread of ${tab.key}`);
+    for (let read = -1; read !== t.next; ) {
+      await until(() => t.loaded && !t.fetching, 120000, `the thread of ${tab.key}`);
+      read = t.next;
+      await fetchThread(tab);
+    }
     await frame();
     await frame();
   };
@@ -34,6 +41,7 @@ window.ramBench = (() => {
     if (!guiOn()) setMode("gui");
     activate(tabs[0]);
     await painted(tabs[0]);
+    await until(() => tabs.every((t) => threadOf(t).loaded), 180000, "every thread's first read");
     return counts();
   }
 
