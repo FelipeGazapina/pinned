@@ -127,6 +127,15 @@ pub enum NodeKind {
     /// Requires a proof video on the pull request: like the connector's proof flag, it appends
     /// the proof instructions to the session's opening prompt. The session still records the video.
     Proof,
+    /// Lets the run's session read the Convex deployment `connection` names: every table, or only
+    /// `tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the
+    /// workflow's own graph, and it adds a note to the session's opening prompt.
+    ConvexData {
+        #[serde(default)]
+        connection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tables: Option<Vec<String>>,
+    },
     /// Walks another connector's graph inside this run, with this run's session.
     Call { workflow: String },
     /// Ends this branch on purpose. A port with no edge also ends its branch.
@@ -301,6 +310,7 @@ impl NodeKind {
             | NodeKind::TakeIssue { .. }
             | NodeKind::MoveColumn { .. }
             | NodeKind::Proof
+            | NodeKind::ConvexData { .. }
             | NodeKind::Call { .. } => {
                 vec![out_port()]
             }
@@ -323,12 +333,21 @@ impl Graph {
     pub fn validate(&self, called: &dyn Fn(&str) -> bool) -> Result<(), String> {
         let mut ids = BTreeSet::new();
         let mut trigger = None;
+        let mut convex = None;
         for node in &self.nodes {
             if !ids.insert(node.id.0.clone()) {
                 return Err(format!("\"{}\" reuses the id \"{}\"", node.name, node.id.0));
             }
             if matches!(node.kind, NodeKind::Trigger { .. }) && trigger.replace(node).is_some() {
                 return Err(format!("\"{}\" is a second trigger", node.name));
+            }
+            if let NodeKind::ConvexData { tables, .. } = &node.kind {
+                if convex.replace(node).is_some() {
+                    return Err(format!("\"{}\" is a second Read Convex data step", node.name));
+                }
+                if tables.as_ref().is_some_and(Vec::is_empty) {
+                    return Err(format!("\"{}\" limits Convex to no tables: pick some, or all tables", node.name));
+                }
             }
         }
         let Some(trigger) = trigger else {
@@ -454,6 +473,7 @@ mod tests {
         assert_eq!(NodeKind::Session(SessionSetup::default()).ports(), vec![out(), error()]);
         assert_eq!(NodeKind::StagePicked.ports(), vec![out()]);
         assert_eq!(NodeKind::Stop.ports(), vec![]);
+        assert_eq!(NodeKind::ConvexData { connection: String::new(), tables: None }.ports(), vec![out()], "reading Convex has one way on");
         assert_eq!(
             classify(None, &[("bug", "Bug")], Gate::Decide { unsure_below: 0.6, page_at: 0.85 }, Fallback::Extra).ports(),
             vec![Port { id: PortId("out".into()), label: "out".into() }],
@@ -515,6 +535,17 @@ mod tests {
         assert_eq!(
             Graph { nodes: vec![trigger.clone(), reused], edges: vec![] }.validate(&|_| true),
             Err("\"Talk\" reuses the id \"trigger\"".into())
+        );
+        let convex = |id: &str, tables: Option<Vec<String>>| node(id, "Read Convex data", NodeKind::ConvexData { connection: "quick-lemur-789".into(), tables });
+        let reads = Graph { nodes: vec![trigger.clone(), convex("c", None), talk.clone()], edges: vec![edge("trigger", "out", "c"), edge("c", "out", "talk")] };
+        assert_eq!(reads.validate(&|_| false), Ok(()));
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), convex("c", Some(vec!["invoices".into()])), convex("d", None)], edges: vec![] }.validate(&|_| true),
+            Err("\"Read Convex data\" is a second Read Convex data step".into())
+        );
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), convex("c", Some(vec![]))], edges: vec![] }.validate(&|_| true),
+            Err("\"Read Convex data\" limits Convex to no tables: pick some, or all tables".into())
         );
         let call = node("route", "Route", NodeKind::Call { workflow: "gone".into() });
         assert_eq!(
