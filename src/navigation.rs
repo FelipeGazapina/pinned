@@ -48,13 +48,13 @@ pub fn open_in_panel(window: tauri::WebviewWindow, url: &Url) {
     });
 }
 
-pub fn install_main_window(app: &tauri::App, frames: Arc<Mutex<Option<Url>>>) -> tauri::Result<()> {
+pub fn install_main_window(app: &tauri::AppHandle, frames: Arc<Mutex<Option<Url>>>) -> tauri::Result<tauri::WebviewWindow> {
     let config = app.config().app.windows.iter().find(|window| window.label == "main").cloned().expect("main window");
     let nav_frames = frames.clone();
     let slot = Arc::new(Mutex::new(None));
     let nav_slot = slot.clone();
     let popup_slot = slot.clone();
-    let built = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+    let built = tauri::WebviewWindowBuilder::from_config(app, &config)?
         .on_navigation(move |url| {
             let mut permit = nav_frames.lock().unwrap();
             if main_window_allows(url, &mut permit) {
@@ -75,8 +75,8 @@ pub fn install_main_window(app: &tauri::App, frames: Arc<Mutex<Option<Url>>>) ->
             tauri::webview::NewWindowResponse::Deny
         })
         .build()?;
-    *slot.lock().unwrap() = Some(built);
-    Ok(())
+    *slot.lock().unwrap() = Some(built.clone());
+    Ok(built)
 }
 
 #[tauri::command]

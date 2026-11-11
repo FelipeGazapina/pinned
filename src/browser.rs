@@ -212,6 +212,21 @@ pub fn browser_close(app: AppHandle, keep: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Forgets every page and closes every page window, for the main window going away: the pages in
+/// it close with it, and a page window would outlive the panel that opened it.
+pub fn close_all(app: &AppHandle) {
+    for (name, webview) in app.webviews() {
+        if name.starts_with("preview-") {
+            let _ = webview.with_webview(|pw| native::forget(&pw));
+        }
+    }
+    for (name, window) in app.webview_windows() {
+        if name.starts_with("preview-window-") {
+            let _ = window.destroy();
+        }
+    }
+}
+
 #[tauri::command]
 pub fn browser_state(app: AppHandle, id: String) -> Result<(), String> {
     page(&app, &id)?;
