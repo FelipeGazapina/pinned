@@ -281,7 +281,7 @@ pub const ACTIONS: &[Action] = &[
     h("delete_connector", Confirm, "Deletes a workflow.").wired(),
     h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model.").wired(),
     h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
-    h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
+    h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Without size it opens at the default box size that get_box_size answers. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
     h("extend_box", Write, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project.").wired(),
     h("machines", Read, "Every machine of the account: id, name, OS, whether it is online, when it was last seen, its pinned version and update, and its box.").wired(),
@@ -308,6 +308,8 @@ pub const ACTIONS: &[Action] = &[
     h("set_taste", Confirm, "Changes fields of one scope of the account's way of working.").wired(),
     h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again.").wired(),
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
+    h("get_box_size", Read, "The size a box cloning repo opens at when its call names none, and which setting chose it: call, project, account or built_in. Without repo, the account's. With size, what a call naming that size gets.").wired(),
+    h("set_box_size", Confirm, "Sets the default box size, small, medium or large, of repo's project, or the account's without repo. Leaving size out clears it: the project follows the account's again, and the account's goes back to small.").wired(),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),
     h("repo_look", Excluded, "the global orchestrator's own repo tools: it calls repo_overview, repo_read and repo_search"),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
@@ -1059,13 +1061,13 @@ mod tests {
                 "disconnect_upstash", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
                 "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
-                "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
+                "reset_taste_field", "set_box_size", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
                 "connect_convex", "set_convex_repos", "disconnect_convex",
             ]
         );
-        for name in ["set_taste", "reset_taste_field", "delete_connector"] {
+        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");

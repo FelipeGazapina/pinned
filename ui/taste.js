@@ -6,10 +6,14 @@
 /** The knobs a profile sets. `parallel` is also a delegation limit. */
 const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion"];
 /** The delegation limits besides `parallel`, which pinned enforces and no profile sets. */
-const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents"];
+const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
 const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS];
 const TASTE_MAX_PARALLEL = 100;
 const TASTE_TIERS = ["low", "mid", "high"];
+/** The sizes an Upstash Box opens at, smallest first. A box with none chosen opens small. */
+const TASTE_BOX_SIZES = ["small", "medium", "large"];
+const TASTE_BOX_FROM = { project: "this project", account: "account default", built_in: "built-in" };
+const tasteBoxSizeName = (size) => size[0].toUpperCase() + size.slice(1);
 const TASTE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 /** The values a stepper moves through; a value set elsewhere steps to its neighbours here. */
 const TASTE_STEPS = {
@@ -172,8 +176,25 @@ function tasteSetFields(tastes, scope, fields) {
 
 const tasteSetField = (tastes, scope, field, value) => tasteSetFields(tastes, scope, { [field]: value });
 
-/** A project inherits the field again. The orchestrator and the Captains have nothing to inherit. */
+/** The size a box opens at for this scope when no call names one, and which setting chose it: the
+ * project's own, else the account's (the Captains'), else small. Rust's `Tastes::box_size`. */
+function tasteBoxSize(tastes, scope) {
+  const own = scope.kind === "project" ? tastes.projects?.[scope.repo]?.box_size : null;
+  if (own != null) return { size: own, from: "project" };
+  if (tastes.captains.box_size != null) return { size: tastes.captains.box_size, from: "account" };
+  return { size: "small", from: "built_in" };
+}
+
+/** "Medium (account default)": the size and where it comes from. */
+function tasteBoxSizeText(tastes, scope) {
+  const { size, from } = tasteBoxSize(tastes, scope);
+  return `${tasteBoxSizeName(size)} (${TASTE_BOX_FROM[from]})`;
+}
+
+/** A project inherits the field again. The orchestrator has nothing to inherit, and the Captains
+ * have only the box size to clear: the account goes back to the built-in small. */
 function tasteResetField(tastes, scope, field) {
+  if (scope.kind === "captains" && field === "box_size") return tasteSetField(tastes, scope, field, null);
   if (scope.kind !== "project") return tastes;
   const { [field]: _, ...patch } = tastes.projects?.[scope.repo] ?? {};
   return tasteWithPatch(tastes, scope.repo, patch);
@@ -197,6 +218,7 @@ function tasteSaveCalls(saved, draft) {
   for (const kind of ["orchestrator", "captains"]) {
     const patch = tasteChanged(saved[kind], draft[kind]);
     if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
+    if (kind === "captains" && saved.captains.box_size != null && draft.captains.box_size == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field: "box_size" });
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
   const repos = [...new Set([...Object.keys(saved.projects ?? {}), ...Object.keys(draft.projects ?? {})])].sort();

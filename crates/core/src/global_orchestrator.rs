@@ -828,8 +828,9 @@ pub enum RelayTo {
     /// connection, or the box that already runs it. Taken only from the global orchestrator's host.
     CaptainBox {
         repo: String,
-        #[serde(default)]
-        size: crate::connectors::BoxSize,
+        /// None follows the project's and the account's default box size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<crate::connectors::BoxSize>,
         text: String,
         #[serde(default)]
         sender: String,

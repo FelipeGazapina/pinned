@@ -19,7 +19,7 @@ use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
-use pinned_core::taste::TasteScope;
+use pinned_core::taste::{BoxSizeChoice, TasteScope, Tastes};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -303,6 +303,20 @@ enum Boot {
 /// What a box for `repo` may spend: `asked`, at most the Box budget of the account's tastes for
 /// that project, which is also the default. A box with no repo, or one no project names, takes the
 /// Captains' budget.
+/// The size a box that clones `repo` opens at: `asked` when the call names one, else the
+/// project's and then the account's default box size in the way of working, else small. Every
+/// path that opens a box takes its size from here.
+pub async fn box_size(hub: &Hub, account: &Account, repo: Option<&str>, asked: Option<BoxSize>) -> Result<BoxSizeChoice, String> {
+    Ok(choose_box_size(&hub.db.tastes(account.id).await?.unwrap_or_default(), repo, asked))
+}
+
+/// `box_size` on tastes already read.
+fn choose_box_size(tastes: &Tastes, repo: Option<&str>, asked: Option<BoxSize>) -> BoxSizeChoice {
+    // A workflow may name its repo as owner/repo, which `repo_key` does not read.
+    let repo = repo.map(|repo| origin_repo(repo).unwrap_or_else(|| repo.to_owned()));
+    tastes.box_size(repo.as_deref(), asked)
+}
+
 pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked: Option<f64>) -> Result<Option<f64>, String> {
     let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
     let scope = repo.and_then(machine::repo_key).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo });
@@ -552,6 +566,12 @@ fn origin_repo(origin: &str) -> Option<String> {
     normalize_repo(origin.strip_prefix("git@github.com:").or_else(|| origin.strip_prefix("github.com/")).unwrap_or(origin))
 }
 
+/// The key the way of working keeps `repo`'s project under, as in `github.com/acme/site`, from
+/// any form a box takes: owner/repo, a clone URL, or the key itself.
+pub fn project_key(repo: &str) -> Option<String> {
+    origin_repo(repo).as_deref().and_then(machine::repo_key)
+}
+
 /// `Box · <the session's name>`, as the run names its tab.
 fn machine_name(spec: &RunSpec) -> String {
     let named = spec.args.iter().position(|a| a == "--name").and_then(|i| spec.args.get(i + 1));
@@ -655,7 +675,7 @@ impl Boxes {
     /// session permission of off refuses.
     /// An agent's `open_box` passes its `opener`, so the box is that session's task once it ends.
     /// Its ask is a question on the Upstash card for that session, which only the user answers.
-    pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: BoxSize, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
+    pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: Option<BoxSize>, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         match (connectors.box_access().session, &opener) {
@@ -674,6 +694,7 @@ impl Boxes {
             None => project_account(hub, account, None, Some(&repo)).await?,
         };
         token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
+        let size = box_size(hub, account, Some(&repo), size).await?.size();
         let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
         if let Some(budget) = budget_usd {
             if !(budget >= BOX_USD_PER_HOUR) {
@@ -770,7 +791,7 @@ impl Boxes {
     /// opened with the account's connection, started on `text`. A box that already runs that
     /// project's Captain takes the message as a Captain on a machine does.
     #[allow(clippy::too_many_arguments)]
-    pub async fn open_captain(&self, hub: &Arc<Hub>, account: &Arc<Account>, request_id: String, repo: &str, size: BoxSize, text: String, sender: String, busy: Option<BusyPolicy>) -> Result<serde_json::Value, String> {
+    pub async fn open_captain(&self, hub: &Arc<Hub>, account: &Arc<Account>, request_id: String, repo: &str, size: Option<BoxSize>, text: String, sender: String, busy: Option<BusyPolicy>) -> Result<serde_json::Value, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         let repo = origin_repo(repo).ok_or("a box clones a GitHub repository, and this project's origin is none")?;
@@ -798,10 +819,12 @@ impl Boxes {
         Ok(serde_json::json!({ "outcome": "iniciado", "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id }))
     }
 
-    /// Writes a row for `work` and boots its box in the background. A row the subject already has
-    /// is answered as it is, so a repeat opens nothing.
+    /// Writes a row for `work` and boots its box in the background, at `size` or the default box
+    /// size of `spec`'s repo. A row the subject already has is answered as it is, so a repeat
+    /// opens nothing.
     #[allow(clippy::too_many_arguments)]
-    async fn reserve_work(&self, hub: &Arc<Hub>, account: &Arc<Account>, connector: &str, subject: Subject, spec: RunSpec, size: BoxSize, work: BoxWork, keys: &Keys) -> Result<BoxRow, String> {
+    async fn reserve_work(&self, hub: &Arc<Hub>, account: &Arc<Account>, connector: &str, subject: Subject, spec: RunSpec, size: Option<BoxSize>, work: BoxWork, keys: &Keys) -> Result<BoxRow, String> {
+        let size = box_size(hub, account, spec.repo.as_deref(), size).await?.size();
         let fresh = BoxRow { id: new_row_id(), account: account.id, machine: Uuid::new_v4(), upstash: None, connector: connector.into(), subject, spec, size, phase: Phase::Creating, age: Duration::ZERO, work };
         if self.drive_guard(&fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
@@ -959,6 +982,13 @@ impl Boxes {
                 return Err(format!("Upstash Box: {e}"));
             }
         };
+        let size = match box_size(hub, account, spec.repo.as_deref(), step.size).await {
+            Ok(choice) => choice.size(),
+            Err(e) => {
+                self.give_back(hub, account, claimed.as_deref()).await;
+                return Err(format!("Upstash Box: {e}"));
+            }
+        };
         let fresh = BoxRow {
             id: claimed.clone().unwrap_or_else(new_row_id),
             account: account.id,
@@ -967,7 +997,7 @@ impl Boxes {
             connector: run.connector.clone(),
             subject: run.subject.clone(),
             spec: spec.clone(),
-            size: step.size,
+            size,
             phase: Phase::Creating,
             age: Duration::ZERO,
             work: BoxWork::Run,
@@ -1659,5 +1689,32 @@ mod tests {
         let quoted = tail(&long);
         assert_eq!(quoted.chars().count(), TAIL);
         assert!(quoted.ends_with("last linecurl: (22) 404"));
+    }
+
+    #[test]
+    fn each_kind_of_box_takes_its_size_from_the_way_of_working() {
+        use pinned_core::taste::{BoxSizeSource, TastePatch};
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        tastes.set(&TasteScope::Project { repo: "github.com/acme/site".into() }, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }).unwrap();
+        let sized = |repo: &str, asked: Option<BoxSize>| {
+            let choice = choose_box_size(&tastes, Some(repo), asked);
+            (choice.size(), choice.from())
+        };
+        // A delegate box: `open_delegate` turns target.box.repo into the clone URL its RunSpec keeps.
+        let delegate = origin_repo("acme/site").unwrap();
+        assert_eq!(delegate, "https://github.com/acme/site.git");
+        assert_eq!(sized(&delegate, None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&delegate, Some(BoxSize::Small)), (BoxSize::Small, BoxSizeSource::Call));
+        // A Captain's box: `open_captain` reads the project's origin, an SSH one too.
+        let captain = origin_repo("git@github.com:acme/site.git").unwrap();
+        assert_eq!(sized(&captain, None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&origin_repo("git@github.com:acme/api.git").unwrap(), None), (BoxSize::Medium, BoxSizeSource::Account));
+        // A workflow's box: `open_new` passes the workflow's repo as it is written, owner/repo included.
+        assert_eq!(sized("acme/site", None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized("acme/api", None), (BoxSize::Medium, BoxSizeSource::Account));
+        assert_eq!(sized("acme/site", Some(BoxSize::Medium)), (BoxSize::Medium, BoxSizeSource::Call));
+        let none = choose_box_size(&Tastes::default(), Some("acme/site"), None);
+        assert_eq!((none.size(), none.from()), (BoxSize::Small, BoxSizeSource::BuiltIn));
     }
 }

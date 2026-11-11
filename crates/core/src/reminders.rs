@@ -314,7 +314,7 @@ fn delegation_tools() -> Vec<Value> {
                                     {
                                         "type": "object",
                                         "properties": {
-                                            "size": { "type": "string", "enum": ["small", "medium", "large"] },
+                                            "size": { "type": "string", "enum": ["small", "medium", "large"], "description": "Leave it out to use the default box size: the project's, else the account's in Settings › Way of working, else small." },
                                             "repo": { "type": "string", "description": "owner/repo or a GitHub clone URL. Defaults to this checkout's origin." },
                                         },
                                     },
@@ -533,7 +533,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                         "description": "Open the Capitão in a new Upstash Box instead of on a machine: the hub clones the project's repo there with the account's own Upstash and GitHub connections and starts the Capitão on this message; a later message goes to the box that runs it. Answers iniciado with the box's machine at once; it boots in a few minutes and goes once its Capitão stays idle. The Captains box permission in Connectors decides whether a box may open.",
                         "oneOf": [
                             { "type": "boolean" },
-                            { "type": "object", "properties": { "size": { "type": "string", "enum": ["small", "medium", "large"] } } },
+                            { "type": "object", "properties": { "size": { "type": "string", "enum": ["small", "medium", "large"], "description": "Leave it out to use the default box size: the project's, else the account's in Settings › Way of working, else small." } } },
                         ],
                     },
                 },
@@ -653,6 +653,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                             "budget_cents": { "type": "integer", "minimum": 0, "description": "What one worker may spend, in US cents; 0 sets no cap." },
                             "time_limit_min": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Minutes a worker runs before pinned stops it." },
                             "box_budget_cents": { "type": "integer", "minimum": 0, "description": "A box's budget in US cents, its default and its most; 0 sets neither." },
+                            "box_size": { "type": "string", "enum": ["small", "medium", "large"], "description": "The size of a box opened with none named: captains sets the account's, a project overrides it, the orchestrator takes none. Small when nothing sets it." },
                         },
                     },
                 },
@@ -666,7 +667,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },
