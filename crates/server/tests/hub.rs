@@ -2343,7 +2343,7 @@ impl BoxAccount {
     }
 
     fn box_run(&self, subject: Subject) -> Work {
-        self.run(subject, RunsOn::FreshBox(BoxStep { size: BoxSize::Small }))
+        self.run(subject, RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }))
     }
 
     fn rows(&self, hub: &TestHub) -> usize {
@@ -7546,7 +7546,7 @@ fn every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_
         "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
     } })).unwrap()["id"].as_str().unwrap().to_owned();
     let triggered = |issue_id: &str| {
-        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: BoxSize::Small }), input: String::new() };
+        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new() };
         hub.runtime.block_on(hub.hub().open(ana.id, Work::Run(run)))
     };
     let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));

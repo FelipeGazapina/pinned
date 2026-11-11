@@ -207,8 +207,9 @@ pub struct Target {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 pub struct BoxTarget {
-    #[serde(default)]
-    pub size: crate::connectors::BoxSize,
+    /// None follows the project's and the account's default box size when the box opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<crate::connectors::BoxSize>,
     /// The repository the box clones. None clones the caller's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
@@ -867,10 +868,10 @@ mod tests {
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
         assert_eq!(on(json!({"machine": " mini "})), Ok((Some("mini".into()), None)));
-        assert_eq!(on(json!({"box": true})), Ok((None, Some(BoxTarget { size: crate::connectors::BoxSize::Medium, repo: None }))));
+        assert_eq!(on(json!({"box": true})), Ok((None, Some(BoxTarget { size: None, repo: None }))));
         assert_eq!(
             on(json!({"box": {"size": "large", "repo": "acme/site"}})),
-            Ok((None, Some(BoxTarget { size: crate::connectors::BoxSize::Large, repo: Some("acme/site".into()) })))
+            Ok((None, Some(BoxTarget { size: Some(crate::connectors::BoxSize::Large), repo: Some("acme/site".into()) })))
         );
         assert_eq!(on(json!({"box": false})), Ok((None, None)));
         assert_eq!(on(json!({"box": "yes"})), Err("target.box must be true or { size, repo }, not \"yes\"".into()));

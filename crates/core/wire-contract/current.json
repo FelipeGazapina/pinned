@@ -3880,8 +3880,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
@@ -3890,10 +3897,7 @@
                   "null"
                 ]
               }
-            },
-            "required": [
-              "size"
-            ]
+            }
           },
           "BoxSize": {
             "description": "Serialized names match Upstash's `size`.",
@@ -5643,8 +5647,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size (`Tastes::box_size`).",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "budget_usd": {
                     "type": [
@@ -5656,8 +5667,7 @@
                 },
                 "required": [
                   "cmd",
-                  "repo",
-                  "size"
+                  "repo"
                 ]
               },
               {
@@ -6319,6 +6329,64 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "`taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,\nor none, and which setting chose it. Without `repo`, a box of no project: the account's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once the default box size of `repo`'s project, or the account's without\n`repo`, is `size`. No `size` clears it: the project inherits the account's again, and the\naccount's goes back to the built-in small.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -7794,13 +7862,19 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "kind",
-                  "size"
+                  "kind"
                 ]
               }
             ]
@@ -8646,8 +8720,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "text": {
                     "type": "string"
@@ -8670,7 +8751,6 @@
                 "required": [
                   "kind",
                   "repo",
-                  "size",
                   "text",
                   "sender"
                 ]
@@ -8811,6 +8891,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
@@ -8953,7 +9044,8 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "placement"
+              "placement",
+              "box_size"
             ]
           },
           "Tastes": {
@@ -8989,7 +9081,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "captains": {
@@ -9021,7 +9114,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "projects": {
@@ -9164,6 +9258,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -9181,7 +9287,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "box_size"
             ]
           },
           "TaskRecord": {
@@ -13784,8 +13891,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
@@ -15511,8 +15625,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size (`Tastes::box_size`).",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "budget_usd": {
                     "type": [
@@ -16178,6 +16299,64 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "`taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,\nor none, and which setting chose it. Without `repo`, a box of no project: the account's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once the default box size of `repo`'s project, or the account's without\n`repo`, is `size`. No `size` clears it: the project inherits the account's again, and the\naccount's goes back to the built-in small.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -17619,8 +17798,15 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -18442,8 +18628,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "text": {
                     "type": "string"
@@ -18606,6 +18799,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
                 "anyOf": [
@@ -18742,7 +18946,8 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "placement"
+              "placement",
+              "box_size"
             ]
           },
           "Tastes": {
@@ -18778,7 +18983,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "captains": {
@@ -18810,7 +19016,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "projects": {
@@ -18947,6 +19154,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             }
           },
@@ -21549,8 +21768,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size (`Tastes::box_size`).",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "budget_usd": {
                     "type": [
@@ -21562,8 +21788,7 @@
                 },
                 "required": [
                   "cmd",
-                  "repo",
-                  "size"
+                  "repo"
                 ]
               },
               {
@@ -22225,6 +22450,64 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "`taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,\nor none, and which setting chose it. Without `repo`, a box of no project: the account's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once the default box size of `repo`'s project, or the account's without\n`repo`, is `size`. No `size` clears it: the project inherits the account's again, and the\naccount's goes back to the built-in small.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -23700,13 +23983,19 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "kind",
-                  "size"
+                  "kind"
                 ]
               }
             ]
@@ -24561,8 +24850,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "text": {
                     "type": "string"
@@ -24585,7 +24881,6 @@
                 "required": [
                   "kind",
                   "repo",
-                  "size",
                   "text",
                   "sender"
                 ]
@@ -24834,6 +25129,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
                 "anyOf": [
@@ -25006,7 +25312,8 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "placement"
+              "placement",
+              "box_size"
             ]
           },
           "Tastes": {
@@ -25042,7 +25349,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "captains": {
@@ -25074,7 +25382,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "projects": {
@@ -25217,6 +25526,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -25234,7 +25555,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "box_size"
             ]
           },
           "RepoLook": {
@@ -25493,8 +25815,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
@@ -25503,10 +25832,7 @@
                   "null"
                 ]
               }
-            },
-            "required": [
-              "size"
-            ]
+            }
           },
           "Isolation": {
             "type": "string",
@@ -28218,8 +28544,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size (`Tastes::box_size`).",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "budget_usd": {
                     "type": [
@@ -28885,6 +29218,64 @@
                 "required": [
                   "cmd",
                   "tastes"
+                ]
+              },
+              {
+                "description": "`taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,\nor none, and which setting chose it. Without `repo`, a box of no project: the account's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "get_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once the default box size of `repo`'s project, or the account's without\n`repo`, is `size`. No `size` clears it: the project inherits the account's again, and the\naccount's goes back to the built-in small.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_size"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -30326,8 +30717,15 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -31158,8 +31556,15 @@
                     "type": "string"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "None follows the project's and the account's default box size.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "text": {
                     "type": "string"
@@ -31427,6 +31832,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
                 "anyOf": [
@@ -31594,7 +32010,8 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "placement"
+              "placement",
+              "box_size"
             ]
           },
           "Tastes": {
@@ -31630,7 +32047,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "captains": {
@@ -31662,7 +32080,8 @@
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
-                  "box_budget_cents": 0
+                  "box_budget_cents": 0,
+                  "box_size": null
                 }
               },
               "projects": {
@@ -31799,6 +32218,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             }
           },
@@ -32048,8 +32479,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
@@ -34540,13 +34978,19 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "kind",
-                  "size"
+                  "kind"
                 ]
               }
             ]
@@ -35743,8 +36187,15 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -43233,13 +43684,19 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "kind",
-                  "size"
+                  "kind"
                 ]
               }
             ]
@@ -44864,8 +45321,15 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -47003,7 +47467,8 @@
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
-              "box_budget_cents": 0
+              "box_budget_cents": 0,
+              "box_size": null
             }
           },
           "captains": {
@@ -47035,7 +47500,8 @@
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
-              "box_budget_cents": 0
+              "box_budget_cents": 0,
+              "box_size": null
             }
           },
           "projects": {
@@ -47178,6 +47644,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -47195,7 +47673,8 @@
               "max_effort",
               "budget_cents",
               "time_limit_min",
-              "box_budget_cents"
+              "box_budget_cents",
+              "box_size"
             ]
           },
           "Strategy": {
@@ -47289,6 +47768,15 @@
               "high",
               "xhigh",
               "max"
+            ]
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
             ]
           },
           "TastePatch": {
@@ -47426,6 +47914,17 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
                 "anyOf": [
@@ -47523,7 +48022,8 @@
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
-              "box_budget_cents": 0
+              "box_budget_cents": 0,
+              "box_size": null
             }
           },
           "captains": {
@@ -47555,7 +48055,8 @@
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
-              "box_budget_cents": 0
+              "box_budget_cents": 0,
+              "box_size": null
             }
           },
           "projects": {
@@ -47692,6 +48193,18 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              },
+              "box_size": {
+                "description": "The size of a box opened with none named: the Captains' is the account's default, a\nproject's overrides it. None is the built-in default, small. The orchestrator's is never\nset, since every box belongs to a project. Always written, null included, so a page tells a\nhub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             }
           },
@@ -47786,6 +48299,15 @@
               "high",
               "xhigh",
               "max"
+            ]
+          },
+          "BoxSize": {
+            "description": "Serialized names match Upstash's `size`.",
+            "type": "string",
+            "enum": [
+              "small",
+              "medium",
+              "large"
             ]
           },
           "TastePatch": {
@@ -47922,6 +48444,17 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "box_size": {
+                "description": "A project's box size over the account's. A patch can set it but not clear it; resetting\nthe field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "placement": {
                 "description": "The account's placement policy. Only the Captains' and the orchestrator's scope take it:\nit belongs to the account, and a project's own comes later.",
@@ -49991,13 +50524,19 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "kind",
-                  "size"
+                  "kind"
                 ]
               }
             ]
@@ -53151,8 +53690,15 @@
                     "$ref": "#/$defs/UpstashBoxKind"
                   },
                   "size": {
-                    "$ref": "#/$defs/BoxSize",
-                    "default": "medium"
+                    "description": "Left out when the workflow names none. A workflow saved before the default box size\nalways has one, since the old app wrote its default, medium, out.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BoxSize"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -58486,8 +59032,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
@@ -58496,10 +59049,7 @@
                   "null"
                 ]
               }
-            },
-            "required": [
-              "size"
-            ]
+            }
           },
           "BoxSize": {
             "description": "Serialized names match Upstash's `size`.",
@@ -63905,8 +64455,15 @@
             "type": "object",
             "properties": {
               "size": {
-                "$ref": "#/$defs/BoxSize",
-                "default": "medium"
+                "description": "None follows the project's and the account's default box size when the box opens.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BoxSize"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "repo": {
                 "description": "The repository the box clones. None clones the caller's.",
