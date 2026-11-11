@@ -212,6 +212,21 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .agent-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 #mcp-endpoint { font: 12px ui-monospace, Menlo, monospace; }
 .badge.box { margin-left: 6px; }
+.convex-list .chips { margin: 6px 0 0; align-items: center; }
+#settings .convex-list select { width: auto; min-width: 0; max-width: 100%; }
+#settings #convex-project { flex: 1 1 auto; min-width: 0; }
+.chip:is(.convex-repo, .convex-table) { display: inline-flex; align-items: center; gap: 4px; color: var(--fg); }
+.chip:is(.convex-repo, .convex-table) button { padding: 0 2px; color: var(--muted); }
+.badge.convex-kind { margin-left: 0; border-color: currentColor; }
+.badge.convex-kind[data-kind="dev"] { color: var(--working); }
+.badge.convex-kind[data-kind="prod"] { color: var(--needs-input); }
+.badge.convex-kind[data-kind="preview"] { color: var(--done); }
+.convex-permissions { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.convex-found button { margin-left: 6px; }
+.convex-scope { display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
+.convex-scope .chips, #convex-chosen { margin: 0; }
+#convex-step-tables { display: flex; flex-direction: column; gap: 6px; }
+.convex-table-list { max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }
 .logo.cursor { background: #111; }
@@ -238,6 +253,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="called"] { --tone: #0e7c6b; }
 [data-tone="switch"] { --tone: #3d6bf5; }
 [data-tone="vercel"] { --tone: #000; }
+[data-tone="convex"] { --tone: #0891b2; }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 #settings .icon[data-logo] { background: none; }

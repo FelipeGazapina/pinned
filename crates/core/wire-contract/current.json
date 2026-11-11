@@ -6917,6 +6917,118 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`convex::Connection`, once Convex took the deploy key: connects its deployment to `repos`\n(repo keys, as `github.com/owner/repo`) beside the ones it had. A repo moves off any other\ndeployment. Only the hub keeps Convex keys, so this has no Tauri command.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_convex"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "repos"
+                ]
+              },
+              {
+                "description": "`convex::Connection`: sets the repos whose sessions read the deployment `id`, moving each\noff any other deployment.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_convex_repos"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "repos"
+                ]
+              },
+              {
+                "description": "Forgets the deployment `id` and its key. Succeeds when it is already gone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_convex"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The table names of the deployment `id`, sorted, for the Read Convex data step.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex_tables"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "From a machine only: what a Convex tool of the session in `tab` asks, in the project whose\nrepo key is `repo`. A read answers its text; `offer` answers what the session may read.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/ConvexAsk"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "repo",
+                  "ask"
+                ]
               }
             ]
           },
@@ -7893,6 +8005,33 @@
                 },
                 "required": [
                   "type"
+                ]
+              },
+              {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "connection"
                 ]
               },
               {
@@ -9589,6 +9728,157 @@
                 }
               }
             }
+          },
+          "ConvexAsk": {
+            "description": "What a session asks. Tool `convex_<op>` sends `{\"op\":\"<op>\",…}`. `Offer` has no tool.",
+            "oneOf": [
+              {
+                "description": "What this tab may read, asked by `pinned mcp` at tools/list.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "offer"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "With no table: the table names. With a table: its fields and indexes.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "tables"
+                  },
+                  "table": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "table"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "data"
+                  },
+                  "table": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "oldest_first": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "op",
+                  "table",
+                  "limit",
+                  "cursor",
+                  "oldest_first"
+                ]
+              },
+              {
+                "description": "The body of `async (ctx) => { … }`, run as a read-only query.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "query"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "A deployed query by path, `invoices:byNumber`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run"
+                  },
+                  "function": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function",
+                  "args"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "logs"
+                  },
+                  "function": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "errors": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function",
+                  "errors",
+                  "limit"
+                ]
+              }
+            ]
           },
           "Target3": {
             "type": "object",
@@ -16410,6 +16700,116 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`convex::Connection`, once Convex took the deploy key: connects its deployment to `repos`\n(repo keys, as `github.com/owner/repo`) beside the ones it had. A repo moves off any other\ndeployment. Only the hub keeps Convex keys, so this has no Tauri command.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_convex"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key"
+                ]
+              },
+              {
+                "description": "`convex::Connection`: sets the repos whose sessions read the deployment `id`, moving each\noff any other deployment.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_convex_repos"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "repos"
+                ]
+              },
+              {
+                "description": "Forgets the deployment `id` and its key. Succeeds when it is already gone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_convex"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The table names of the deployment `id`, sorted, for the Read Convex data step.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex_tables"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "From a machine only: what a Convex tool of the session in `tab` asks, in the project whose\nrepo key is `repo`. A read answers its text; `offer` answers what the session may read.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/ConvexAsk"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "ask"
+                ]
               }
             ]
           },
@@ -17342,6 +17742,32 @@
                   "type": {
                     "type": "string",
                     "const": "proof"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -18989,6 +19415,149 @@
                 }
               }
             }
+          },
+          "ConvexAsk": {
+            "description": "What a session asks. Tool `convex_<op>` sends `{\"op\":\"<op>\",…}`. `Offer` has no tool.",
+            "oneOf": [
+              {
+                "description": "What this tab may read, asked by `pinned mcp` at tools/list.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "offer"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "With no table: the table names. With a table: its fields and indexes.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "tables"
+                  },
+                  "table": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "data"
+                  },
+                  "table": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "oldest_first": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "op",
+                  "table"
+                ]
+              },
+              {
+                "description": "The body of `async (ctx) => { … }`, run as a read-only query.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "query"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "A deployed query by path, `invoices:byNumber`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run"
+                  },
+                  "function": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "logs"
+                  },
+                  "function": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "errors": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              }
+            ]
           },
           "Target3": {
             "type": "object",
@@ -22106,6 +22675,118 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`convex::Connection`, once Convex took the deploy key: connects its deployment to `repos`\n(repo keys, as `github.com/owner/repo`) beside the ones it had. A repo moves off any other\ndeployment. Only the hub keeps Convex keys, so this has no Tauri command.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_convex"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "repos"
+                ]
+              },
+              {
+                "description": "`convex::Connection`: sets the repos whose sessions read the deployment `id`, moving each\noff any other deployment.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_convex_repos"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "repos"
+                ]
+              },
+              {
+                "description": "Forgets the deployment `id` and its key. Succeeds when it is already gone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_convex"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The table names of the deployment `id`, sorted, for the Read Convex data step.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex_tables"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "From a machine only: what a Convex tool of the session in `tab` asks, in the project whose\nrepo key is `repo`. A read answers its text; `offer` answers what the session may read.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/ConvexAsk"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "repo",
+                  "ask"
+                ]
               }
             ]
           },
@@ -23091,6 +23772,33 @@
                 },
                 "required": [
                   "type"
+                ]
+              },
+              {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "connection"
                 ]
               },
               {
@@ -25477,6 +26185,157 @@
                 }
               }
             }
+          },
+          "ConvexAsk": {
+            "description": "What a session asks. Tool `convex_<op>` sends `{\"op\":\"<op>\",…}`. `Offer` has no tool.",
+            "oneOf": [
+              {
+                "description": "What this tab may read, asked by `pinned mcp` at tools/list.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "offer"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "With no table: the table names. With a table: its fields and indexes.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "tables"
+                  },
+                  "table": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "table"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "data"
+                  },
+                  "table": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "oldest_first": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "op",
+                  "table",
+                  "limit",
+                  "cursor",
+                  "oldest_first"
+                ]
+              },
+              {
+                "description": "The body of `async (ctx) => { … }`, run as a read-only query.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "query"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "A deployed query by path, `invoices:byNumber`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run"
+                  },
+                  "function": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function",
+                  "args"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "logs"
+                  },
+                  "function": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "errors": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function",
+                  "errors",
+                  "limit"
+                ]
+              }
+            ]
           }
         }
       },
@@ -28400,6 +29259,116 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`convex::Connection`, once Convex took the deploy key: connects its deployment to `repos`\n(repo keys, as `github.com/owner/repo`) beside the ones it had. A repo moves off any other\ndeployment. Only the hub keeps Convex keys, so this has no Tauri command.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_convex"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key"
+                ]
+              },
+              {
+                "description": "`convex::Connection`: sets the repos whose sessions read the deployment `id`, moving each\noff any other deployment.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_convex_repos"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "repos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "repos"
+                ]
+              },
+              {
+                "description": "Forgets the deployment `id` and its key. Succeeds when it is already gone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_convex"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The table names of the deployment `id`, sorted, for the Read Convex data step.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex_tables"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "From a machine only: what a Convex tool of the session in `tab` asks, in the project whose\nrepo key is `repo`. A read answers its text; `offer` answers what the session may read.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "convex"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/ConvexAsk"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "ask"
+                ]
               }
             ]
           },
@@ -29341,6 +30310,32 @@
                   "type": {
                     "type": "string",
                     "const": "proof"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -31663,6 +32658,149 @@
                 }
               }
             }
+          },
+          "ConvexAsk": {
+            "description": "What a session asks. Tool `convex_<op>` sends `{\"op\":\"<op>\",…}`. `Offer` has no tool.",
+            "oneOf": [
+              {
+                "description": "What this tab may read, asked by `pinned mcp` at tools/list.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "offer"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "With no table: the table names. With a table: its fields and indexes.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "tables"
+                  },
+                  "table": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "data"
+                  },
+                  "table": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "oldest_first": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "op",
+                  "table"
+                ]
+              },
+              {
+                "description": "The body of `async (ctx) => { … }`, run as a read-only query.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "query"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "A deployed query by path, `invoices:byNumber`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run"
+                  },
+                  "function": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op",
+                  "function"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "logs"
+                  },
+                  "function": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "errors": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              }
+            ]
           }
         }
       }
@@ -33403,6 +34541,33 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "connection"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -34569,6 +35734,32 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -34951,6 +36142,127 @@
               "from",
               "port",
               "to"
+            ]
+          }
+        }
+      }
+    },
+    "ConvexConnection": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ConvexConnection",
+        "description": "One connected deployment, as Settings shows it. Never holds the key.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ConvexKind"
+          },
+          "url": {
+            "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+            "type": "string"
+          },
+          "team": {
+            "description": "The Convex team's slug.",
+            "type": "string",
+            "default": ""
+          },
+          "project": {
+            "description": "The Convex project's slug, the name the card shows.",
+            "type": "string",
+            "default": ""
+          },
+          "key_hint": {
+            "description": "The key's last characters, as `…a1b2`.",
+            "type": "string"
+          },
+          "repos": {
+            "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "url",
+          "team",
+          "project",
+          "key_hint",
+          "repos"
+        ],
+        "$defs": {
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ConvexConnection",
+        "description": "One connected deployment, as Settings shows it. Never holds the key.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ConvexKind"
+          },
+          "url": {
+            "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+            "type": "string"
+          },
+          "team": {
+            "description": "The Convex team's slug.",
+            "type": "string",
+            "default": ""
+          },
+          "project": {
+            "description": "The Convex project's slug, the name the card shows.",
+            "type": "string",
+            "default": ""
+          },
+          "key_hint": {
+            "description": "The key's last characters, as `…a1b2`.",
+            "type": "string"
+          },
+          "repos": {
+            "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "url",
+          "key_hint"
+        ],
+        "$defs": {
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
             ]
           }
         }
@@ -39747,6 +41059,13 @@
             "description": "The account its sessions run under, the default one unless the user picked another.",
             "type": "string",
             "default": "claude"
+          },
+          "convex": {
+            "description": "The Convex deployment the folder's `.env.local` or `.env` names in `CONVEX_DEPLOYMENT`, as\nwritten: `dev:quick-lemur-789`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -39777,6 +41096,13 @@
             "description": "The account its sessions run under, the default one unless the user picked another.",
             "type": "string",
             "default": "claude"
+          },
+          "convex": {
+            "description": "The Convex deployment the folder's `.env.local` or `.env` names in `CONVEX_DEPLOYMENT`, as\nwritten: `dev:quick-lemur-789`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -40968,6 +42294,13 @@
               "$ref": "#/$defs/BoxAsk"
             }
           },
+          "convex": {
+            "description": "The connected Convex deployments, each with its key's last characters and the projects\nwhose sessions read it. Only the hub keeps their keys.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ConvexConnection"
+            }
+          },
           "repo_insight": {
             "description": "Absent on the wire while it is off.",
             "$ref": "#/$defs/RepoInsight"
@@ -41859,6 +43192,33 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "connection"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -42428,6 +43788,63 @@
               }
             ]
           },
+          "ConvexConnection": {
+            "description": "One connected deployment, as Settings shows it. Never holds the key.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/ConvexKind"
+              },
+              "url": {
+                "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+                "type": "string"
+              },
+              "team": {
+                "description": "The Convex team's slug.",
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The Convex project's slug, the name the card shows.",
+                "type": "string",
+                "default": ""
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              },
+              "repos": {
+                "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "url",
+              "team",
+              "project",
+              "key_hint",
+              "repos"
+            ]
+          },
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
+            ]
+          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -42532,6 +43949,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/BoxAsk"
+            }
+          },
+          "convex": {
+            "description": "The connected Convex deployments, each with its key's last characters and the projects\nwhose sessions read it. Only the hub keeps their keys.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ConvexConnection"
             }
           },
           "repo_insight": {
@@ -43389,6 +44813,32 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -43933,6 +45383,60 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "ConvexConnection": {
+            "description": "One connected deployment, as Settings shows it. Never holds the key.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/ConvexKind"
+              },
+              "url": {
+                "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+                "type": "string"
+              },
+              "team": {
+                "description": "The Convex team's slug.",
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The Convex project's slug, the name the card shows.",
+                "type": "string",
+                "default": ""
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              },
+              "repos": {
+                "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "url",
+              "key_hint"
+            ]
+          },
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
             ]
           },
           "RepoInsight": {
@@ -47524,6 +49028,13 @@
                   "$ref": "#/$defs/BoxAsk"
                 }
               },
+              "convex": {
+                "description": "The connected Convex deployments, each with its key's last characters and the projects\nwhose sessions read it. Only the hub keeps their keys.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ConvexConnection"
+                }
+              },
               "repo_insight": {
                 "description": "Absent on the wire while it is off.",
                 "$ref": "#/$defs/RepoInsight"
@@ -48415,6 +49926,33 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "connection"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -48947,6 +50485,63 @@
               "id",
               "connector",
               "subject"
+            ]
+          },
+          "ConvexConnection": {
+            "description": "One connected deployment, as Settings shows it. Never holds the key.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/ConvexKind"
+              },
+              "url": {
+                "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+                "type": "string"
+              },
+              "team": {
+                "description": "The Convex team's slug.",
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The Convex project's slug, the name the card shows.",
+                "type": "string",
+                "default": ""
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              },
+              "repos": {
+                "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "url",
+              "team",
+              "project",
+              "key_hint",
+              "repos"
+            ]
+          },
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
             ]
           },
           "RepoInsight": {
@@ -50595,6 +52190,13 @@
                   "$ref": "#/$defs/BoxAsk"
                 }
               },
+              "convex": {
+                "description": "The connected Convex deployments, each with its key's last characters and the projects\nwhose sessions read it. Only the hub keeps their keys.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ConvexConnection"
+                }
+              },
               "repo_insight": {
                 "description": "Absent on the wire while it is off.",
                 "$ref": "#/$defs/RepoInsight"
@@ -51450,6 +53052,32 @@
                 ]
               },
               {
+                "description": "Lets the run's session read the Convex deployment `connection` names: every table, or only\n`tables`, which also turns off queries and logs. Like `proof`, it counts anywhere in the\nworkflow's own graph, and it adds a note to the session's opening prompt.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "convex-data"
+                  },
+                  "connection": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Walks another connector's graph inside this run, with this run's session.",
                 "type": "object",
                 "properties": {
@@ -51959,6 +53587,60 @@
               "id",
               "connector",
               "subject"
+            ]
+          },
+          "ConvexConnection": {
+            "description": "One connected deployment, as Settings shows it. Never holds the key.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The deployment's name, `quick-lemur-789`. Also the connection's id.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/ConvexKind"
+              },
+              "url": {
+                "description": "The deployment's address, which Convex resolved from the key. It may be a custom domain.",
+                "type": "string"
+              },
+              "team": {
+                "description": "The Convex team's slug.",
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The Convex project's slug, the name the card shows.",
+                "type": "string",
+                "default": ""
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              },
+              "repos": {
+                "description": "The pinned projects whose sessions read it, as repo keys (`github.com/acme/site`). A repo key\nsits in at most one connection.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "url",
+              "key_hint"
+            ]
+          },
+          "ConvexKind": {
+            "description": "A deployment's kind, as its deploy key names it.",
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod",
+              "preview"
             ]
           },
           "RepoInsight": {

@@ -4,6 +4,7 @@ use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
+use pinned_core::convex::client::Http as ConvexHttp;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::Tastes;
@@ -108,6 +109,8 @@ pub struct Hub {
     pub public_url: String,
     pub signup: Signup,
     pub boxes: Boxes,
+    /// Every Convex read and key check goes through it.
+    pub convex_http: Arc<dyn ConvexHttp>,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
     sockets: AtomicU64,
@@ -210,10 +213,10 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 }
 
 impl Hub {
-    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
+    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -464,6 +467,13 @@ impl Hub {
         format!("{name} runs an older pinned that can't mint a Claude token for boxes: update it in Settings › Machines")
     }
 
+    /// A Convex tool's ask from the session in `tab` on `machine`, decided from the tabs the
+    /// account's machines reported and the repo key `machine` names for that tab.
+    pub async fn convex(&self, account: &Arc<Account>, machine: &str, tab: &str, repo: Option<&str>, ask: pinned_core::convex::Ask) -> Result<Value, String> {
+        let find = |on: &str, id: &str| account.tab(on, id);
+        self.connectors(account).await?.convex(&*self.convex_http, machine, tab, repo, &find, ask).await
+    }
+
     /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
@@ -706,6 +716,11 @@ impl Hub {
                 return json(c().await?.save_mcp_server(None, server, &secrets)?);
             }
             HubCall::LoadMcpServers => return Err("only a machine loads the account's MCP servers into the sessions it starts".into()),
+            HubCall::ConnectConvex { key, repos } => (json(c().await?.connect_convex(&*self.convex_http, &key, repos).await?), true),
+            HubCall::SetConvexRepos { id, repos } => (json(c().await?.set_convex_repos(&id, repos)?), true),
+            HubCall::DisconnectConvex { id } => (json(c().await?.disconnect_convex(&id)?), true),
+            HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
+            HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
         };
         if changed {
             self.watch(account).await?;

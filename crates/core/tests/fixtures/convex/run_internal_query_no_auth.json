@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "none",
+    "body": {
+      "path": "invoices:countPending",
+      "format": "convex_encoded_json",
+      "args": [
+        {}
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: 711239888cba9fd6] Server Error\nCould not find public function for 'invoices:countPending'.\n"
+  }
+}

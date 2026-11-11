@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::agent::{Message, ProjectTool, Role, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::convex;
 use crate::delegate::{self, Mode};
 use crate::ipc::UnixStream;
 
@@ -150,6 +151,7 @@ pub fn permissions() -> Vec<String> {
         .map(String::from)
         .into_iter()
         .chain(project)
+        .chain(convex::TOOLS.map(String::from))
         .map(|tool| format!("mcp__{SERVER}__{tool}"))
         .collect()
 }
@@ -186,7 +188,11 @@ pub fn serve_io(reminders: bool, input: impl BufRead, output: impl Write + Send 
             Some("tools/list") => {
                 let child = std::env::var(TASK_ENV).ok().is_some_and(|value| !value.is_empty());
                 let seat = Seat::of(session_var(ROLE_ENV).as_deref(), child);
-                Ok(json!({ "tools": tool_definitions(reminders, child, seat) }))
+                let mut tools = tool_definitions(reminders, child, seat);
+                if let (Some(listed), Some(offer)) = (tools.as_array_mut(), convex_offer(child)) {
+                    listed.extend(convex::tool_definitions(&offer));
+                }
+                Ok(json!({ "tools": tools }))
             }
             Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
@@ -268,6 +274,14 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
     Value::Array(tools)
+}
+
+/// What the hub lets this session read from Convex. A delegated child runs under its parent's tab,
+/// so it gets none, and any failure offers nothing.
+fn convex_offer(child: bool) -> Option<convex::Offer> {
+    let tab = session_var(TAB_ENV).filter(|_| !child)?;
+    let text = send(&Message::Project { tab, tool: ProjectTool::Convex { ask: convex::Ask::Offer } }).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 fn delegation_tools() -> Vec<Value> {
@@ -731,6 +745,10 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
         }),
         "" => Err(format!("unknown tool {}", params["name"])),
+        name if name.starts_with("convex_") => match session_var(TASK_ENV) {
+            Some(_) => Err("A delegated child reads no Convex data: ask the session that started you.".into()),
+            None => convex::ask(name, args).and_then(|ask| in_tab(ProjectTool::Convex { ask }, std::env::var(TAB_ENV).ok())),
+        },
         name => project_request(name, args, std::env::var(TAB_ENV).ok()),
     };
     tool_result(request.and_then(|request| send(&request)))
@@ -842,6 +860,10 @@ fn project_request(name: &str, args: &serde_json::Value, tab: Option<String>) ->
     let mut tool = if args.is_object() { args.clone() } else { serde_json::json!({}) };
     tool["name"] = name.into();
     let tool: ProjectTool = serde_json::from_value(tool).map_err(|e| format!("{name}: {e}"))?;
+    in_tab(tool, tab)
+}
+
+fn in_tab(tool: ProjectTool, tab: Option<String>) -> Result<Message, String> {
     let tab = tab.filter(|t| !t.is_empty()).ok_or_else(|| format!("{TAB_ENV} is not set: run this inside a pinned tab"))?;
     Ok(Message::Project { tab, tool })
 }
@@ -849,6 +871,8 @@ fn project_request(name: &str, args: &serde_json::Value, tab: Option<String>) ->
 fn send(message: &Message) -> Result<String, String> {
     let timeout = match message {
         Message::Delegate { .. } => StdDuration::from_secs(120),
+        // tools/list waits on it, at a session's start.
+        Message::Project { tool: ProjectTool::Convex { ask: convex::Ask::Offer }, .. } => StdDuration::from_secs(5),
         // These may wait on the hub and another machine, which allow a minute.
         Message::Project {
             tool:
@@ -865,6 +889,7 @@ fn send(message: &Message) -> Result<String, String> {
                 | ProjectTool::TasteGet { .. }
                 | ProjectTool::TasteSet { .. }
                 | ProjectTool::TasteReset { .. }
+                | ProjectTool::Convex { .. }
                 | ProjectTool::Act { .. },
             ..
         } => StdDuration::from_secs(70),
@@ -1259,6 +1284,11 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__taste_set",
                 "mcp__pinned__taste_reset",
                 "mcp__pinned__tell_orchestrator",
+                "mcp__pinned__convex_tables",
+                "mcp__pinned__convex_data",
+                "mcp__pinned__convex_query",
+                "mcp__pinned__convex_run",
+                "mcp__pinned__convex_logs",
             ]
         );
 
@@ -1268,7 +1298,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1281,7 +1311,8 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
         let _guard = session_env_lock();
-        let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok());
+        let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok(), std::env::var(TAB_ENV).ok());
+        std::env::remove_var(TAB_ENV);
         match role {
             Some(value) => std::env::set_var(ROLE_ENV, value),
             None => std::env::remove_var(ROLE_ENV),
@@ -1295,9 +1326,90 @@ fn restore_var(name: &str, value: Option<String>) {
         serve_io(true, std::io::Cursor::new(input.into_bytes()), Shared(buf.clone())).unwrap();
         restore_var(ROLE_ENV, previous.0);
         restore_var(TASK_ENV, previous.1);
+        restore_var(TAB_ENV, previous.2);
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         let value: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         value["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect()
+    }
+
+    /// Runs `requests` through `pinned mcp` as tab `tab-1` (a delegated child with `task`), against
+    /// a machine socket that answers each line it hears with the next of `answers`. Gives back the
+    /// JSON-RPC replies and the socket lines.
+    #[cfg(unix)]
+    fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
+        use std::io::{BufRead, Write};
+        let _guard = session_env_lock();
+        let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = {
+            let (heard, done) = (heard.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut answers = answers.into_iter();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let Ok((stream, _)) = listener.accept() else {
+                        std::thread::sleep(StdDuration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut line = String::new();
+                    std::io::BufReader::new(&stream).read_line(&mut line).unwrap();
+                    heard.lock().unwrap().push(line.trim().to_owned());
+                    let answer = answers.next().unwrap_or(Err("no answer left".into()));
+                    writeln!(&stream, "{}", serde_json::to_string(&answer).unwrap()).unwrap();
+                }
+            })
+        };
+        let previous = [SOCK_ENV, TAB_ENV, TASK_ENV, ROLE_ENV].map(|name| (name, std::env::var(name).ok()));
+        std::env::set_var(SOCK_ENV, &sock);
+        std::env::set_var(TAB_ENV, "tab-1");
+        std::env::remove_var(ROLE_ENV);
+        match task {
+            Some(task) => std::env::set_var(TASK_ENV, task),
+            None => std::env::remove_var(TASK_ENV),
+        }
+        let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        serve_io(true, std::io::Cursor::new(input.into_bytes()), Shared(buf.clone())).unwrap();
+        for (name, value) in previous {
+            restore_var(name, value);
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        let replies = String::from_utf8(buf.lock().unwrap().clone()).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let heard = heard.lock().unwrap().clone();
+        (replies, heard)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_offer_adds_the_convex_tools_and_a_convex_call_reaches_the_machine_as_one_line() {
+        let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        let names = |reply: &Value| reply["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let (replies, heard) = over_socket(None, std::slice::from_ref(&list), vec![Ok(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":["invoices"]}"#.into())]);
+        assert_eq!(heard, [r#"{"kind":"project","tab":"tab-1","tool":{"name":"convex","ask":{"op":"offer"}}}"#]);
+        let offered = names(&replies[0]);
+        assert_eq!(offered[offered.len() - 3..], ["act", "convex_tables", "convex_data"], "a table limit offers two tools after the rest");
+        assert!(replies[0]["result"]["tools"].as_array().unwrap().last().unwrap()["description"].as_str().unwrap().contains("quick-lemur-789 (dev)"));
+
+        let (replies, _) = over_socket(None, std::slice::from_ref(&list), vec![Err("Convex is not connected for `github.com/acme/site`.".into())]);
+        assert!(!names(&replies[0]).iter().any(|n| n.starts_with("convex_")), "a refusal offers nothing");
+        let (replies, heard) = over_socket(Some("task-1"), std::slice::from_ref(&list), vec![]);
+        assert!(heard.is_empty() && !names(&replies[0]).iter().any(|n| n.starts_with("convex_")), "a delegated child runs under its parent's tab and asks nothing");
+
+        let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "convex_data", "arguments": { "table": "invoices", "limit": 5 } } });
+        let (replies, heard) = over_socket(None, std::slice::from_ref(&call), vec![Ok(r#"{"table":"invoices","documents":[]}"#.into())]);
+        assert_eq!(heard, [r#"{"kind":"project","tab":"tab-1","tool":{"name":"convex","ask":{"op":"data","table":"invoices","limit":5,"cursor":null,"oldest_first":false}}}"#]);
+        assert_eq!(replies[0]["result"], json!({ "content": [{ "type": "text", "text": r#"{"table":"invoices","documents":[]}"# }], "isError": false }));
+        let (replies, heard) = over_socket(Some("task-1"), std::slice::from_ref(&call), vec![]);
+        assert!(heard.is_empty());
+        assert_eq!(replies[0]["result"]["content"][0]["text"], "A delegated child reads no Convex data: ask the session that started you.");
     }
 
     #[test]

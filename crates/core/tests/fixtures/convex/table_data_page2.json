@@ -1,0 +1,41 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "_system/cli/tableData",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "table": "invoices",
+          "order": "desc",
+          "paginationOpts": {
+            "cursor": "07f2ad14a7055e10ed09dc77a90b1b6dbbc4bf45f5af6f640a230ecf6fa04cb3b7341d545d3a2b9ffd2421328715112890ebb4b45da753fd234436b528f644bf2bea74611019c649d0535df28def65ecc95505c3d7a1d84f654bd8f3e0338e44ccce76a7f433429b34b81668c1f32fff208e4c",
+            "numItems": 2
+          }
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "continueCursor": "075b740376f020185da241e74f75c06d8606d87cc13c9d0cabdd0ab6b3275bb782e697b1c0e2e89aabc77015e54eecf46e5e13d3664548543d46c23582c3baeeb9cdd92ebf2a",
+      "isDone": true,
+      "page": [
+        {
+          "_creationTime": 1794370889263.0464,
+          "_id": "j57fx6yewmkg0w2442qc6pjj8x8j1yy7",
+          "customer": "j97bzvs5tt8tv5xgqw8f758ve18j0r8s",
+          "number": 1041.0,
+          "paidAt": 1794000000000.0,
+          "status": "paid"
+        }
+      ],
+      "pageStatus": null,
+      "splitCursor": null
+    }
+  }
+}

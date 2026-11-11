@@ -187,6 +187,15 @@ test("picker offers switch after classify", () => {
   assert.equal(PICKER_TYPES[PICKER_TYPES.indexOf("classify") + 1], "switch");
 });
 
+test("a new Read Convex data step has no connection yet, reads every table and continues on out", () => {
+  resetIds(0);
+  const graph = { nodes: [{ id: "trigger-1", name: "T", position: [0, 0], type: "trigger", watch: { kind: "called" } }], edges: [] };
+  const step = newNode("convex-data", graph, "trigger-1");
+  assert.deepEqual(step, { id: "convex-data-1", name: "convex-data", position: [0, 0], type: "convex-data", connection: "", tables: null });
+  assert.deepEqual(ports(step), [{ id: OUT, label: "" }]);
+  assert.ok(PICKER_TYPES.includes("convex-data"), "the add-step menu offers it");
+});
+
 test("a typed case equals becomes its port id", () => {
   assert.equal(nextCaseId([], "no"), "no");
   assert.equal(nextCaseId([{ id: "no", equals: "no" }], "no"), "no-1");

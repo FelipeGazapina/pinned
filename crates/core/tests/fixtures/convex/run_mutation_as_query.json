@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "invoices:seed",
+      "format": "convex_encoded_json",
+      "args": [
+        {}
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: a66838775a49b4a2] Server Error\nTrying to execute invoices.js:seed as Query, but it is defined as Mutation.\n"
+  }
+}

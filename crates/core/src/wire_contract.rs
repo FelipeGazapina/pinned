@@ -93,6 +93,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("VercelAccount".into(), schemas::<vercel::Account>());
     outbound.insert("VercelModel".into(), schemas::<vercel::Model>());
     outbound.insert("UpstashAccount".into(), schemas::<upstash::Account>());
+    outbound.insert("ConvexConnection".into(), schemas::<crate::convex::Connection>());
     outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());
     outbound.insert("AgentRequest".into(), schemas::<AgentRequest>());
     outbound.insert("AgentRedirect".into(), schemas::<AgentRedirect>());

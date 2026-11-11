@@ -3,6 +3,7 @@ use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Role, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
+use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
@@ -31,6 +32,8 @@ fn postgres() -> String {
     std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into())
 }
 const WAIT: Duration = Duration::from_secs(10);
+/// The deploy key the hub's Convex fixtures answer to.
+const CONVEX_KEY: &str = "dev:quick-lemur-789|eyJ2MiI6Imh1YiJ9hubsecret";
 
 struct TestHub {
     runtime: tokio::runtime::Runtime,
@@ -95,6 +98,7 @@ impl TestHub {
             signup: self.signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
+            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
         };
         let start = Instant::now();
@@ -5539,6 +5543,75 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
 }
 
+#[test]
+fn an_agent_cannot_add_or_widen_a_workflows_convex_step() {
+    let hub = TestHub::start("convex_widen");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "widen-mac");
+    origin(&ana.dir.join("site"), "git@github.com:acme/site.git");
+    ana.client.hub(json!({ "cmd": "connect_convex", "key": CONVEX_KEY, "repos": ["github.com/acme/site"] })).unwrap();
+    let folder = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |name: &str, id: Option<&str>, step: Option<Value>| {
+        let mut nodes = vec![
+            json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": "agent" } }),
+            json!({ "id": "s", "name": "Talk", "position": [2, 0], "type": "talk", "prompt": "Check the invoices." }),
+        ];
+        let mut edges = vec![json!({ "from": "t", "port": "out", "to": "s" })];
+        if let Some(mut step) = step {
+            step["id"] = json!("c");
+            step["name"] = json!("Read Convex data");
+            step["position"] = json!([1, 0]);
+            step["type"] = json!("convex-data");
+            nodes.push(step);
+            edges = vec![json!({ "from": "t", "port": "out", "to": "c" }), json!({ "from": "c", "port": "out", "to": "s" })];
+        }
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Check the invoices.",
+            "graph": { "nodes": nodes, "edges": edges },
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let invoices = || Some(json!({ "connection": "quick-lemur-789", "tables": ["invoices"] }));
+    let as_call = |mut args: Value| {
+        args["cmd"] = json!("save_connector");
+        args
+    };
+    let limited = ana.client.hub(as_call(workflow("Invoices", None, invoices()))).unwrap()["id"].as_str().unwrap().to_owned();
+    let plain = ana.client.hub(as_call(workflow("Plain", None, None))).unwrap()["id"].as_str().unwrap().to_owned();
+    let refused = Err("save_connector would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app.".to_owned());
+    let agent = |args: Value| act(&ana.dir, &ana.tab, "save_connector", args);
+
+    assert_eq!(agent(workflow("Invoices", Some(&limited), Some(json!({ "connection": "quick-lemur-789" })))), refused, "dropping the table list turns the query tools on");
+    assert_eq!(agent(workflow("Invoices", Some(&limited), Some(json!({ "connection": "quick-lemur-789", "tables": ["invoices", "customers"] })))), refused, "one more table");
+    assert_eq!(agent(workflow("Plain", Some(&plain), invoices())), refused, "a step where the workflow had none");
+    assert_eq!(agent(workflow("Fresh", None, invoices())), refused, "a new workflow that reads Convex");
+    let step_of = |client: &mut Client, id: &str| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let saved = settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap();
+        let step = saved["graph"]["nodes"].as_array().into_iter().flatten().find(|n| n["type"] == "convex-data").cloned();
+        (saved["name"].as_str().unwrap().to_owned(), step.map(|s| s["tables"].clone()))
+    };
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices".to_owned(), Some(json!(["invoices"]))), "a refused save changes nothing");
+    assert_eq!(step_of(&mut ana.client, &plain), ("Plain".to_owned(), None));
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"].as_array().unwrap().len(), 2, "no workflow was added");
+
+    let renamed = agent(workflow("Invoices v2", Some(&limited), invoices())).unwrap();
+    assert_eq!(renamed["outcome"], "done", "an agent's save that leaves the step alone runs: {renamed}");
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices v2".to_owned(), Some(json!(["invoices"]))));
+    let removed = agent(workflow("Invoices v2", Some(&limited), None)).unwrap();
+    assert_eq!(removed["outcome"], "done", "an agent may take the step away: {removed}");
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices v2".to_owned(), None));
+
+    let widened = ana.client.hub(as_call(workflow("Plain", Some(&plain), Some(json!({ "connection": "quick-lemur-789" }))))).unwrap();
+    assert_eq!(widened["id"], plain.as_str(), "the owner's own save sets the step");
+    assert_eq!(step_of(&mut ana.client, &plain), ("Plain".to_owned(), Some(Value::Null)));
+}
+
 /// What a session's `act` tool answers: the hub's `ActAnswer`, or the refusal.
 fn act(dir: &Path, tab: &str, action: &str, args: Value) -> Result<Value, String> {
     session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args }))
@@ -5586,6 +5659,82 @@ fn names(list: &Value) -> Vec<String> {
     let mut names: Vec<String> = list.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_owned()).collect();
     names.sort();
     names
+}
+
+#[test]
+fn a_session_reads_convex_through_the_hub_and_the_key_never_leaves_it() {
+    let hub = TestHub::start("convex");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "convex-mac");
+    origin(&ana.dir.join("site"), "git@github.com:acme/site.git");
+    let (site, secret) = ("github.com/acme/site", CONVEX_KEY.split_once('|').unwrap().1);
+    let convex = |tab: &str, ask: Value| session_tool(&ana.dir, tab, json!({ "name": "convex", "ask": ask }));
+    assert_eq!(convex(&ana.tab, json!({ "op": "offer" })), Err("Convex is not connected for `github.com/acme/site`. The user connects it under Settings, Connectors, Convex.".into()));
+
+    let connected = ana.client.hub(json!({ "cmd": "connect_convex", "key": CONVEX_KEY, "repos": [site] })).unwrap();
+    assert_eq!(connected, json!({ "id": "quick-lemur-789", "kind": "dev", "url": "https://quick-lemur-789.convex.cloud", "team": "acme", "project": "shop", "key_hint": "…cret", "repos": [site] }));
+    let pushed = ana.client.wait("the settings with the connection", |f| f["type"] == "settings" && f["settings"]["convex"][0]["id"] == "quick-lemur-789");
+    assert!(!pushed.to_string().contains(secret), "{pushed}");
+    assert_eq!(ana.client.hub(json!({ "cmd": "convex_tables", "id": "quick-lemur-789" })), Ok(json!(["customers", "invoices"])));
+
+    assert_eq!(convex(&ana.tab, json!({ "op": "offer" })), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev" })));
+    let tables = convex(&ana.tab, json!({ "op": "tables" })).unwrap();
+    assert_eq!(tables, json!({ "deployment": "quick-lemur-789", "kind": "dev", "tables": ["customers", "invoices"] }));
+    let page = convex(&ana.tab, json!({ "op": "data", "table": "invoices", "limit": 2 })).unwrap();
+    assert_eq!((page["documents"].as_array().unwrap().len(), &page["documents"][0]["number"]), (2, &json!(1043)));
+    assert!(!page.to_string().contains(secret));
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "convex", "tab": ana.tab, "repo": site, "ask": { "op": "tables" } })), Err("only a session on a machine reads Convex".into()));
+    let (_, spare_token) = account::register_machine(&url, &token, "convex-spare", "linux").unwrap();
+    assert_eq!(
+        machine_result(&url, &spare_token, json!({ "cmd": "convex", "tab": ana.tab, "repo": site, "ask": { "op": "tables" } })),
+        Err(pinned_core::convex::UNKNOWN_TAB.into()),
+        "a machine reads only for a tab it reported"
+    );
+
+    let column = |sql: &str| {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one(sql, &[]).await.unwrap().get::<_, String>(0)
+        })
+    };
+    wait_for("the key in the secrets column", || column("select secrets::text from accounts where email = 'ana@acme.dev'").contains("convex-key-quick-lemur-789"));
+    let secrets = column("select secrets::text from accounts where email = 'ana@acme.dev'");
+    assert!(secrets.contains("sealed:") && !secrets.contains(secret), "{secrets}");
+    let store = column("select store::text from accounts where email = 'ana@acme.dev'");
+    assert!(store.contains("quick-lemur-789") && !store.contains(secret), "{store}");
+
+    let folder = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let saved = ana
+        .client
+        .hub(json!({ "cmd": "save_connector", "connector": {
+            "name": "Invoices", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Check the invoices.",
+            "graph": {
+                "nodes": [
+                    { "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": "agent" } },
+                    { "id": "c", "name": "Read Convex data", "position": [1, 0], "type": "convex-data", "connection": "quick-lemur-789", "tables": ["invoices"] },
+                    { "id": "s", "name": "Talk", "position": [2, 0], "type": "talk", "prompt": "Check the invoices." },
+                ],
+                "edges": [{ "from": "t", "port": "out", "to": "c" }, { "from": "c", "port": "out", "to": "s" }],
+            },
+        } }))
+        .unwrap();
+    let started = ana.client.hub(json!({ "cmd": "run_workflow", "id": saved["id"] })).unwrap();
+    let run = started["tab"].as_str().unwrap().to_owned();
+    ana.client.wait("the workflow's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == run.as_str()));
+    assert_eq!(convex(&run, json!({ "op": "offer" })), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev", "tables": ["invoices"] })));
+    assert_eq!(convex(&run, json!({ "op": "tables" })), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev", "tables": ["invoices"] })));
+    assert_eq!(convex(&run, json!({ "op": "query", "code": "return 1;" })), Err("This run's Read Convex data step limits it to the tables invoices, so convex_query is off.".into()));
+    assert_eq!(convex(&run, json!({ "op": "data", "table": "customers" })), Err("This run's Read Convex data step limits it to the tables invoices, so convex_data cannot read customers.".into()));
+
+    assert_eq!(ana.client.hub(json!({ "cmd": "disconnect_convex", "id": "quick-lemur-789" })), Ok(Value::Null));
+    assert_eq!(ana.client.hub(json!({ "cmd": "disconnect_convex", "id": "quick-lemur-789" })), Ok(Value::Null), "a second disconnect succeeds");
+    wait_for("the key gone from the secrets column", || !column("select secrets::text from accounts where email = 'ana@acme.dev'").contains("convex-key-quick-lemur-789"));
+    assert_eq!(convex(&ana.tab, json!({ "op": "tables" })), Err("Convex is not connected for `github.com/acme/site`. The user connects it under Settings, Connectors, Convex.".into()));
 }
 
 #[test]
@@ -7319,6 +7468,9 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("save_mcp_server", json!({ "server": server })),
         ("remove_mcp_server", json!({ "id": "s1" })),
         ("import_mcp_server", json!({ "machine": machine, "account": "claude", "name": "linear" })),
+        ("connect_convex", json!({ "repos": ["github.com/acme/site"] })),
+        ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
+        ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
     ]
     .into_iter()
     .collect();
