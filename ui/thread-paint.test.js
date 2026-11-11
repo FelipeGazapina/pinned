@@ -92,6 +92,7 @@ const gui = read("./gui.js");
 const main = read("./main.js");
 const timeline = read("./gui-timeline.js");
 const agents = read("./gui-agents.js");
+const model = read("./redesign-model.js");
 const composer = read("./gui-composer.js");
 vm.runInContext(read("./vendor/marked.js"), sandbox);
 vm.runInContext(
@@ -133,6 +134,12 @@ function renderDialog() {}
 function showScrollEnd() {}
 function renderMinimap() {}
 function workersKey() { return ""; }
+function threadTitle(tab) { return tab.view.title ?? "New thread"; }
+function threadState() { return "idle"; }
+function pendingAsk() { return null; }
+function unixOf(at) { return Date.parse(at) / 1000; }
+function lastPrompt() { return null; }
+function clockMs() { return clock.now; }
 function renderComposer(tab) {
   renderBanners(tab);
   renderTasks(tab);
@@ -152,6 +159,9 @@ ${between(timeline, "const PLAN_TOOL", "let uploadImages = null;")}
 ${between(timeline, "function userHtml", "const DIALOG_KEYS")}
 ${between(timeline, "const CITATIONS_BLOCK", "const citeButton")}
 ${agents.slice(agents.indexOf("const agentsOf"))}
+${between(model, "const STEP_KINDS", "function needsYouItem")}
+${between(model, "const GLYPH_LOOKS", "\n")}
+${between(model, "const glyphHtml", "\n")}
 ${between(gui, "function hookPhase", "async function fetchWorkspace")}
 ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
 ${between(composer, "function branchBanner", "composerBanners.addEventListener")}
@@ -300,7 +310,7 @@ function painted() {
     tasks: tasksTab.hidden ? "" : tasksTab.innerHTML,
     context: contextMeter.hidden ? null : contextMeter.getAttribute("aria-label"),
     branch: composerBanners.innerHTML,
-    agents: [...blocks(html, '<div class="agents">'), ...blocks(html, '<div class="agents-working">')].join(""),
+    agents: blocks(html, '<section class="workers"').join(""),
   };
 }
 
@@ -368,12 +378,48 @@ test("an agent with no steps yet shows what it was asked from the spawn brief", 
   s.append({ item: { kind: "tool", at: "t2", id: "toolu_9", name: "Agent", summary: "Fix the login bug", detail: "Trace the session flow in src/auth.ts and prove it with npm test." } });
   s.agents = [{ ...runningAgent, id: "a9", tool: "toolu_9", name: "Fix the login bug", steps: [] }];
   await poll(tab, net);
-  const card = threadView.innerHTML.match(/<div class="agent-card"[\s\S]*?<\/div><\/div>/)?.[0] ?? "";
-  assert.match(card, /Delegated Fix the login bug/);
-  assert.doesNotMatch(card, /Starting/);
-  tab.thread.open.add("agent:a9");
+  const row = () => blocks(threadView.innerHTML, '<div class="worker-row" data-worker="box:tab-1:a9"')[0] ?? "";
+  assert.match(textOf(row()), /Fix the login bug\s*Delegated Fix the login bug/);
+  assert.doesNotMatch(row(), /Starting|Trace the session flow/);
+  tab.thread.open.add("worker:box:tab-1:a9");
+  sandbox.renderThread();
+  assert.match(row(),/<div class="narration md"><p>Trace the session flow in src\/auth.ts and prove it with npm test.<\/p><\/div>/);
+});
+
+test("a Captain's worker threads fill one Workers block after its lead paragraph", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "tool", at: "t2", id: "toolu_d", name: "mcp__pinned__delegate_task", summary: "Run the CI" } });
+  s.append({ item: { kind: "text", at: "t3", text: "I split this into workers." } });
+  const worker = (id, title, status, extra = {}) => ({ ...tabFor(id, status), view: { id, status, cwd: "/repo", message: "", title, role: "worker", spawned_by: "tab-1", opened: Number(id.slice(-1)), ...extra } });
+  sandbox.threadState = (w) => ({ working: "working", "needs-input": "needs", done: "done" })[w.view.status];
+  sandbox.pendingAsk = (w) => (w.view.status === "needs-input" ? { kind: "approval", command: "git push origin readme-tidy", text: null, choices: [], typed: true } : null);
+  sandbox.tabs = [tab, worker("tab-2", "Run the CI on main", "working"), worker("tab-3", "Tidy the README", "needs-input"), worker("tab-4", "Changelog for v0.17.21", "done", { stats: { active_ms: 118000 } })];
+  try {
+    await poll(tab, net);
+    const html = threadView.innerHTML;
+    const block = painted().agents;
+    assert.ok(html.indexOf("I split this into workers.") < html.indexOf('<section class="workers"'), "the block follows the lead paragraph");
+    assert.match(textOf(blocks(block, '<div class="workers-head"')[0]), /^Workers\s*1 of 3 done\s*1 working\s*1 needs you$/);
+    const rows = blocks(block, '<div class="worker-row"').map((r) => r.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+    assert.deepEqual(rows, ["Run the CI on main", "Tidy the README Asks to run git push origin readme-tidy Review", "Changelog for v0.17.21 1m 58s"]);
+    assert.match(block, /<button type="button" class="worker-review" data-worker-open="box:tab-3">Review<\/button>/);
+    tab.thread.open.add("worker:box:tab-2");
+    sandbox.renderThread();
+    assert.match(painted().agents, /data-worker-open="box:tab-2">Open thread<\/button><button type="button" class="outline" data-toggle="say:box:tab-2">Send it a message<\/button><button type="button" class="outline danger" data-worker-cancel="box:tab-2">Cancel<\/button>/);
+  } finally {
+    sandbox.threadState = () => "idle";
+    sandbox.pendingAsk = () => null;
+  }
+});
+
+test("a prompt of worker notices draws a rule per notice that opens to its words", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "user", at: "2026-11-11T21:47:00Z", text: '[pinned] Worker tab-4 "Changelog" finished. Its last message:\n\nWrote CHANGELOG.md.\n[pinned] Delegated task task-1 "Lint" (Claude Code · haiku) finished: failed: exit 1. Call task_status with taskId "task-1".' } });
   await poll(tab, net);
-  assert.match(threadView.innerHTML, /Trace the session flow/);
+  const rules = blocks(threadView.innerHTML, '<details class="reported"');
+  assert.deepEqual(rules.map((r) => textOf(/<summary>[\s\S]*?<\/summary>/.exec(r)[0]).replace(/ · .*/, "")), ["Changelog reported back", "Lint failed"]);
+  assert.match(rules[0], /Wrote CHANGELOG\.md\./);
+  assert.deepEqual(blocks(threadView.innerHTML, '<div class="bubble"').map(textOf), ["start"]);
 });
 
 test("a working turn shows a plain live row with its full latest step", async () => {

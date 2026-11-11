@@ -33,7 +33,7 @@ button.xs.copied { color: var(--g-success); }
 
 .turn .user .bubble .body.clamped, .report-row .body.clamped { max-height: 176px; overflow: hidden;
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); }
-.turn .bubble .md { color: var(--g-fg); }
+.turn .bubble .md { color: var(--g-fg); line-height: 1.45; }
 .turn .bubble .show-full, .report-row .show-full { display: inline-flex; align-items: center; height: 24px; margin: 6px 0 0 -4px; padding: 0 8px; border-radius: 8px; font-size: 12px; font-weight: 500; color: var(--g-muted); }
 .turn .bubble .show-full:hover, .report-row .show-full:hover { background: var(--g-accent); color: var(--g-fg); }
 @media (pointer: coarse) { .turn .bubble .show-full, .report-row .show-full { min-height: 40px; } }
@@ -45,9 +45,16 @@ button.xs.copied { color: var(--g-success); }
   transition: opacity 0.2s; }
 .turn .user:hover .meta, .turn .user .meta:focus-within, .answer:hover .meta, .answer .meta:focus-within { opacity: 1; }
 #thread :is(.user, .answer) .meta .when { opacity: 1; margin: 0; padding: 0; }
-.answer { padding-bottom: 16px; }
+.answer { position: relative; padding-bottom: 14px; }
 .answer .assistant { padding-bottom: 0; }
 .answer .meta { margin-top: 6px; padding-left: 0; }
+/* With a mouse, a message's row shows over the gap under it on hover and takes no room of its own. */
+@media (pointer: fine) {
+  .turn .user .meta, .answer .meta { position: absolute; z-index: 2; top: calc(100% - 16px); height: 24px; margin: 0; padding: 0 4px; border-radius: 8px; background: var(--g-bg); pointer-events: none; }
+  .turn .user .meta { right: 0; }
+  .answer .meta { left: -4px; }
+  .turn .user:hover .meta, .turn .user .meta:focus-within, .answer:hover .meta, .answer .meta:focus-within { pointer-events: auto; }
+}
 @media (pointer: coarse) { .turn .user .meta, .answer .meta { opacity: 1; } }
 .turn .user .sent-by { margin: 0 4px 0 0; font-size: 11px; color: rgb(var(--g-muted-rgb) / 0.7); }
 .turn .user .steer { display: flex; align-items: center; gap: 4px; margin-right: 4px; font-size: 12px; line-height: 1; color: var(--g-muted); }
@@ -209,6 +216,23 @@ svg.pierre { color-scheme: var(--g-scheme); }
 .changes li .path .head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .changes li .path .tail { flex: none; white-space: pre; }
 .changes li .add { margin-left: auto; }
+
+/* A few changed files: a card that lists each by its path, its counts beside it. */
+.changes.flat { margin: 0 0 14px; border: 1px solid var(--g-input); border-radius: 12px; background: transparent; overflow: hidden; line-height: 1.45; }
+.changes.flat .head { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-bottom: 1px solid var(--g-border); }
+.changes.flat .count { font-size: 12.5px; font-weight: 600; }
+.changes.flat .head :is(.add, .del) { font: 12px var(--g-mono); }
+.changes.flat .spacer { flex: 1; }
+.changes.flat .open-diff { margin: 0; height: 24px; padding: 0 9px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 6px; background: transparent; color: var(--g-fg); font-size: 12px; font-weight: 400; }
+.changes.flat .open-diff:hover { background: var(--g-hover); }
+.changes.flat ul { padding: 0; }
+.changes.flat li { gap: 10px; height: 30px; padding: 0 12px; border-radius: 0; font: 12.5px var(--g-sans); }
+.changes.flat li .path { color: var(--g-fg); }
+.changes.flat li :is(.add, .del) { font: 12px var(--g-mono); }
+.changes.flat :is(.add, .del) { font-variant-numeric: tabular-nums; }
+.changes.flat .add { color: var(--g-add); }
+.changes.flat .del { color: color-mix(in srgb, var(--g-del) 80%, white); }
+.changes.flat li .add { margin-left: 0; }
 
 #thread .earlier { display: flex; align-items: center; gap: 12px; width: 100%; margin: 0 0 16px; color: var(--g-muted); font-size: 12px; }
 #thread .resume-banner { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--g-border); border-radius: 12px; background: var(--g-raised); }

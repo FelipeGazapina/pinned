@@ -970,8 +970,7 @@ function clearComposer(tab, revoke = true) {
 // which a second Esc ends, unless a prompt went out in between.
 const KILL_AGENTS = "\x18\x0b";
 let prompts = 0;
-async function stop() {
-  const tab = active;
+async function stop(tab = active) {
   if (!tab) return;
   const sent = prompts;
   for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
