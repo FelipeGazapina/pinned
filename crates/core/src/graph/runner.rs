@@ -1624,6 +1624,28 @@ mod tests {
         assert_eq!(render("unclosed {{trigger.title"), "unclosed {{trigger.title");
     }
 
+    #[test]
+    fn trigger_mention_is_the_message_that_mentioned_pinned_not_the_thread() {
+        let lib = library(vec![("c1", chain(vec![("t", "Trigger", trigger()), ("s", "Stop", NodeKind::Stop)]))]);
+        let posts = json!([
+            { "ts": "1792400050.000200", "author": "bruno", "text": "the export is slow" },
+            { "ts": "1792400060.000000", "author": "ana", "text": "same here" },
+            { "ts": "1792400100.000100", "author": "ana", "text": "@pinned file a ticket for this\nit blocks billing" },
+        ]);
+        let input = |request: serde_json::Value| {
+            json!({ "kind": "slack", "channel": "C0123ABCD", "channelName": "support", "thread": "1792400050.000200", "posts": posts, "request": request })
+        };
+
+        // A mention inside a thread that was already there: the mention's own post.
+        let run = start(&lib, "c1", slack(), input(json!("1792400100.000100")), AT);
+        assert_eq!(crate::connectors::render_template("{{trigger.mention}}", &run), "@pinned file a ticket for this\nit blocks billing");
+        assert_eq!(crate::connectors::render_template("{{trigger.text}}", &run), "ana: @pinned file a ticket for this\nit blocks billing");
+
+        // A top-level trigger: that message.
+        let run = start(&lib, "c1", slack(), input(serde_json::Value::Null), AT);
+        assert_eq!(crate::connectors::render_template("{{trigger.mention}}", &run), "the export is slow");
+    }
+
     fn error_branch_lib() -> Library {
         let mut lib_graph = chain(vec![
             ("t", "Trigger", trigger()),

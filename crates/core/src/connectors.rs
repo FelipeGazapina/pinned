@@ -2222,6 +2222,20 @@ fn trigger_text(input: &TriggerInput) -> String {
     }
 }
 
+/// The text of the message that started a Slack run: the mention inside a thread that was
+/// already there, else the top-level message. Empty for an issue trigger.
+fn trigger_mention(input: &TriggerInput) -> String {
+    let TriggerInput::Slack { posts, thread, request, .. } = input else { return String::new() };
+    let ts = request.as_deref().unwrap_or(thread);
+    posts.iter().find(|post| post.ts == ts).or_else(|| posts.first()).map(|post| post.text.clone()).unwrap_or_default()
+}
+
+/// A file-issue title for when the step's own renders empty: the mention's first non-empty
+/// line, at most 120 characters, never the whole thread.
+fn fallback_title(mention: &str) -> String {
+    mention.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("").chars().take(120).collect::<String>().trim_end().to_owned()
+}
+
 fn post_lines(posts: &[TriggerPost]) -> String {
     posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n")
 }
@@ -2253,7 +2267,7 @@ fn join_text(left: &str, right: &str) -> String {
     }
 }
 
-/// Fills `{{path}}` spans from the run's data: the trigger's text, title and url, every
+/// Fills `{{path}}` spans from the run's data: the trigger's text, mention, title and url, every
 /// classify answer by question name, and the filed issue once a file-issue step ran.
 /// Unknown spans stay literal.
 pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
@@ -2263,6 +2277,7 @@ pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
     let mut trigger = serde_json::Map::new();
     if let Ok(input) = trigger_of(run) {
         trigger.insert("text".into(), trigger_text(&input).into());
+        trigger.insert("mention".into(), trigger_mention(&input).into());
         match input {
             TriggerInput::Issue { identifier, title, url, .. } => {
                 trigger.insert("identifier".into(), identifier.into());
@@ -2534,7 +2549,7 @@ Node types, fields (? means optional) and ports:
 {workflows}
 - stop: ends a branch. No ports.
 
-Text fields may fill values from the run with {{{{trigger.text}}}}, {{{{trigger.title}}}}, {{{{trigger.url}}}}, {{{{answers.question}}}}, {{{{issue.identifier}}}} and {{{{issue.url}}}}. Prefer them over invented names: a reply posts {{{{trigger.text}}}} back, an issue title starts from it.
+Text fields may fill values from the run with {{{{trigger.text}}}}, {{{{trigger.mention}}}}, {{{{trigger.title}}}}, {{{{trigger.url}}}}, {{{{answers.question}}}}, {{{{issue.identifier}}}} and {{{{issue.url}}}}. Prefer them over invented names: a reply posts {{{{trigger.text}}}} back, an issue title starts from {{{{trigger.mention}}}}, the message that mentioned pinned, since {{{{trigger.text}}}} is the whole thread.
 
 Every node may carry a "group" name; steps of one concern share it. Answer with one JSON object only: {{"nodes":[{{"name":""?,"type":""?, ...fields}}],"edges":[{{"from":""?,"port":"out"?,"to":""?}}]}}. Node names are unique. Ports must exist on their node."#,
         workflows = workflows,
@@ -3606,11 +3621,19 @@ impl Connectors {
         if team.trim().is_empty() {
             return Err("a file-issue step needs a Linear team".into());
         }
+        // An empty title or description falls back to the message that mentioned pinned.
+        let mention = trigger_of(run).map(|input| trigger_mention(&input)).unwrap_or_default();
+        let mut title = render_template(title, run);
+        if title.trim().is_empty() {
+            title = fallback_title(&mention);
+        }
         if title.trim().is_empty() {
             return Err("a file-issue step needs a title".into());
         }
-        let title = render_template(title, run);
-        let description = render_template(description, run);
+        let mut description = render_template(description, run);
+        if description.trim().is_empty() {
+            description = mention;
+        }
         let _filing = self.filing.lock().await;
         let filed = self.file_issue(connector, channel, thread, team.trim(), label.trim(), &title, &description, assignee.trim()).await?;
         run.context["issue"] = serde_json::json!({ "id": filed.id, "identifier": filed.identifier, "url": filed.url });
@@ -7142,6 +7165,83 @@ mod tests {
         root["latest_reply"] = thread.last().unwrap()["ts"].clone();
         root["reply_count"] = json!(thread.len() - 1);
         root
+    }
+
+    /// Case B with the ticket router's file-issue set to `title` and `description`: a mention
+    /// `mention` in a month-old thread nothing follows. Answers the issueCreate inputs Linear got.
+    fn file_on_a_mention_in_an_old_thread(title: &str, description: &str, mention: &str) -> Vec<Value> {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(r#"{"kind":"ticket-request"}"#.into());
+        install_rustls();
+        let now = Utc::now();
+        let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
+        let old = ago(30 * 86_400);
+        let asked = [
+            slack_message(&old, &old, "U2", "the financial flow on staging is slow"),
+            slack_message(&ago(29 * 86_400), &old, "U1", "same here"),
+            slack_message(&ago(120), &old, "U1", mention),
+        ];
+        let channel = std::sync::Arc::new(Mutex::new(json!({ "history": [thread_root(&asked)], "threads": { old.clone(): asked } })));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), channel);
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = ticket_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        for node in &mut router.graph.as_mut().unwrap().nodes {
+            if let NodeKind::FileIssue { title: t, description: d, .. } = &mut node.kind {
+                (*t, *d) = (title.into(), description.into());
+            }
+        }
+        let (connectors, dir) = stored("old-thread-mention-title", vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        block_on(connectors.drive(&|work: Work| placed(work))).unwrap();
+        crate::vercel::take_test_inputs();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+        let seen = seen.lock().unwrap();
+        let created = seen.iter().filter(|request| request.contains("issueCreate")).map(|request| {
+            let body: Value = serde_json::from_str(request.split_once(' ').unwrap().1).unwrap();
+            body["variables"]["input"].clone()
+        });
+        created.collect()
+    }
+
+    #[test]
+    fn a_trigger_mention_title_is_the_mention_not_the_thread() {
+        let filed = file_on_a_mention_in_an_old_thread("{{trigger.mention}}", "Asked for in Slack.", "<@UBOT> please create a ticket for this");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "@pinned please create a ticket for this");
+    }
+
+    #[test]
+    fn an_empty_issue_title_falls_back_to_the_mentions_first_line() {
+        let filed = file_on_a_mention_in_an_old_thread("", "", "<@UBOT> please create a ticket for this");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "@pinned please create a ticket for this");
+        assert_eq!(
+            filed[0]["description"],
+            "@pinned please create a ticket for this\n\nSlack thread: https://slack.example/archives/C0123ABCD/p1792400050000200"
+        );
+
+        let filed = file_on_a_mention_in_an_old_thread("  ", "", "<@UBOT> checkout drops the coupon  \nsteps: add one, pay\nexpected: 10% off");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "@pinned checkout drops the coupon");
+    }
+
+    #[test]
+    fn fallback_title_is_the_first_non_empty_line_capped() {
+        assert_eq!(fallback_title("\n  first line  \nsecond"), "first line");
+        assert_eq!(fallback_title(&"x".repeat(300)).chars().count(), 120);
+        assert_eq!(fallback_title("  \n "), "");
     }
 
     #[test]
