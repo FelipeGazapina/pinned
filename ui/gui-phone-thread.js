@@ -506,12 +506,16 @@ askCard.addEventListener("click", (e) => {
   askDismissed = "";
   syncPhoneAsk();
 });
-matchMedia("(max-width: 768px)").addEventListener("change", () => {
+/** Past phone width the sheets, which are phone screens, close rather than stay up as modals over
+ * the desktop. */
+function phoneWidthChanged() {
+  if (!onPhone()) openedSheet?.close();
   if (!guiOn()) return;
   renderHeadSub();
   renderWorkersPill();
   if (active) renderComposer(active);
-});
+}
+matchMedia("(max-width: 768px)").addEventListener("change", phoneWidthChanged);
 
 // -- The thread actions sheet ----------------------------------------------------------------
 

@@ -206,3 +206,24 @@ test("Message all skips the workers waiting on you, says how many, and keeps the
   assert.equal(told.at(-1), "Nothing sent. Skipped 2 workers waiting on you.");
   assert.equal(input.value, "Rebase on main");
 });
+
+test("a sheet closes when the window grows past phone width, and stays while it is a phone", () => {
+  let width = 390;
+  const closed = [];
+  const context = {
+    narrow: (px) => width <= px,
+    guiOn: () => true,
+    renderHeadSub: () => {},
+    renderWorkersPill: () => {},
+    renderComposer: () => {},
+    active: null,
+    openedSheet: { close: () => closed.push(width) },
+  };
+  vm.createContext(context);
+  vm.runInContext(`const onPhone = () => narrow(768);\n${src.slice(src.indexOf("function phoneWidthChanged"), src.indexOf('matchMedia("(max-width: 768px)")'))}`, context);
+  vm.runInContext("phoneWidthChanged()", context);
+  assert.deepEqual(closed, []);
+  width = 1024;
+  vm.runInContext("phoneWidthChanged()", context);
+  assert.deepEqual(closed, [1024]);
+});
