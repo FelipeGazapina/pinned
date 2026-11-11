@@ -132,6 +132,7 @@ function markClippedTables() {}
 function renderDialog() {}
 function showScrollEnd() {}
 function renderMinimap() {}
+function workersKey() { return ""; }
 function renderComposer(tab) {
   renderBanners(tab);
   renderTasks(tab);

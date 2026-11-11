@@ -77,6 +77,7 @@ test("the project filter label keeps the full name as its title", () => {
     drawSidebarToggle() {},
     tickDurations() {},
     scheduleWake() {},
+    modelChanged() {},
     shelfRows: () => [{ matches: () => false }],
     searchRows: () => [],
   };

@@ -68,6 +68,7 @@
   --g-primary-hover: #3061d9;
   --g-on-primary: #ffffff;
   --g-success: #00bc7d;
+  --g-glyph-idle: #5a5a5a;
   --g-error: rgb(var(--g-error-rgb));
   --g-warning: rgb(var(--g-warning-rgb));
   --g-warning-fg: #ffb900;
@@ -146,6 +147,7 @@ html[data-appearance="light"] {
   --g-teal: #0d9488;
   --g-sidebar: #fafafa;
   --g-message: #f4f4f5;
+  --g-glyph-idle: #a1a1aa;
   --g-accent: #f4f4f5;
   --g-hover: #f4f4f5;
   --g-row-hover: #f4f4f5;

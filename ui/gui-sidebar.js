@@ -620,6 +620,7 @@ function renderSidebar() {
   drawSidebarToggle();
   tickDurations();
   scheduleWake();
+  modelChanged();
 }
 
 /** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
