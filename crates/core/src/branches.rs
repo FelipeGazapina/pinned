@@ -336,6 +336,9 @@ mod tests {
         run_step(&repo, &GitStep::Init, Path::new("/bin/false"), &crate::machine::Headless { env: &[], strip: &[] }, None).unwrap();
         git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        // The step commits with the repository's own identity, which a clean HOME does not have.
+        git(&repo, &["config", "user.email", "a@b"]);
+        git(&repo, &["config", "user.name", "a"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
         std::fs::write(repo.join("a.txt"), "a").unwrap();
         std::fs::write(repo.join("b.txt"), "b").unwrap();
