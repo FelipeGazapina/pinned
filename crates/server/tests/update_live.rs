@@ -370,7 +370,8 @@ impl Live {
     }
 
     fn save_session(&self) {
-        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": false, "account": "claude" }]);
+        // Saved mid-turn: an idle session comes back with no process, and these tests count the claudes each restart starts.
+        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": true, "account": "claude" }]);
         std::fs::write(self.dir.join("sessions.json"), serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
     }
 
@@ -378,7 +379,7 @@ impl Live {
         let bin = self.dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\necho $$ >> \"$HOME/claude.pids\"\ntrap '' HUP\nexec sleep 300\n").unwrap();
+        std::fs::write(&claude, "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true}'; exit 0; fi\nif [ \"$1\" = \"--version\" ]; then echo 1.0.0; exit 0; fi\necho $$ >> \"$HOME/claude.pids\"\ntrap '' HUP\nexec sleep 300\n").unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         bin.display().to_string()
     }

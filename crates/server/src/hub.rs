@@ -116,6 +116,8 @@ pub struct Hub {
     /// The unlocks apps hold in memory, by the sha256 of the token. A hub restart forgets them, and
     /// the app asks for the password again.
     unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
+    /// Turns true when the hub is about to stop, so every socket sends its close frame.
+    going_away: tokio::sync::watch::Sender<bool>,
 }
 
 struct Unlock {
@@ -142,6 +144,8 @@ pub struct Account {
     /// Held while task records are billed and saved, so two sends from one box never bill the
     /// same box time twice.
     task_records: tokio::sync::Mutex<()>,
+    /// When the global orchestrator's last repo reads came, for their per-minute and per-hour limit.
+    pub repo_reads: Mutex<crate::relay::ReadRate>,
 }
 
 #[derive(Default)]
@@ -167,6 +171,9 @@ struct Online {
     /// It runs in one of the account's boxes, so no other run goes to it.
     dedicated: bool,
     version: String,
+    /// What the machine last reported about its load and accounts. It goes with the connection, so
+    /// an offline machine shows none.
+    state: Option<pinned_core::load::MachineState>,
 }
 
 impl Online {
@@ -206,7 +213,17 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
+    }
+
+    /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
+    pub fn going_away(&self) {
+        self.going_away.send_replace(true);
+    }
+
+    /// Turns true once `going_away` ran.
+    pub fn watch_going_away(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.going_away.subscribe()
     }
 
     /// Waits until no one else reaches the Capitão of the project at `path` on `machine`, the hub
@@ -214,10 +231,20 @@ impl Hub {
     /// would both see it stopped and start it twice. Locks nobody holds are dropped as others are
     /// taken, so the map stays small.
     pub async fn hold_captain(&self, account: &Account, machine: &str, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("{}:{machine}:{path}", account.id)).await
+    }
+
+    /// Held while the worker for task `task` of thread `tab` on `machine` starts elsewhere, so a
+    /// repeat of that start waits for the first and finds its worker instead of making another.
+    pub async fn hold_start(&self, account: &Account, machine: &str, tab: &str, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("start:{}:{machine}:{tab}:{task}", account.id)).await
+    }
+
+    async fn hold(&self, key: String) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.agent_locks.lock().unwrap();
             locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-            locks.entry(format!("{}:{machine}:{path}", account.id)).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
         lock.lock_owned().await
     }
@@ -259,7 +286,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -441,7 +468,7 @@ impl Hub {
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
-            HubCall::Machines => return json(self.machines(account).await?),
+            HubCall::Machines | HubCall::MachineStates => return json(self.machines(account).await?),
             HubCall::RenameMachine { id, name } => {
                 let name = name.trim();
                 if name.is_empty() {
@@ -582,10 +609,11 @@ impl Hub {
             HubCall::CancelBoxClaudeToken { machine, account: name } => {
                 return self.call_machine(account, &machine, Call::CancelSetupToken { account: name }, MACHINE_CALL_WAIT).await.map_err(|e| self.too_old_to_mint(account, &machine, e));
             }
-            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } => {
+            HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
+            HubCall::SetRepoInsight { settings } => (json(c().await?.set_repo_insight(settings)?), true),
             HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
@@ -615,7 +643,7 @@ impl Hub {
                 crate::oauth::revoke_grant(self, account, &id).await?;
                 return Ok(Value::Null);
             }
-            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
+            call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
             HubCall::GetTastes => return json(self.db.tastes(account.id).await?.unwrap_or_default()),
             HubCall::SetTaste { scope, patch } => return self.change_tastes(account, |tastes| tastes.set(&scope, patch)).await,
             HubCall::ResetTasteField { scope, field } => {
@@ -635,8 +663,10 @@ impl Hub {
                 let days = pinned_core::delegate::stats_days(Some(u64::from(days)))?;
                 let now = pinned_core::connectors::unix_millis();
                 let since = now.saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
-                let records = self.db.task_records(account.id, since).await?;
-                return json(pinned_core::delegate::aggregate(&records, now, days));
+                let (records, unreadable) = self.db.task_records(account.id, since).await?;
+                let mut stats = pinned_core::delegate::aggregate(&records, now, days);
+                stats.unreadable = unreadable;
+                return json(stats);
             }
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {
@@ -645,6 +675,7 @@ impl Hub {
                 return json(self.write_marks(account, changes).await?);
             }
             HubCall::ArchiveSession { machine, tab } => return json(self.archive_session(account, &machine, &tab).await?),
+            HubCall::AutoArchive { .. } => return Err("only a machine archives its own finished threads".into()),
             HubCall::UnarchiveSession { session } => return json(self.unarchive_session(account, &session, true).await?),
             HubCall::DeleteSession { machine, tab } => {
                 self.delete_session(account, &machine, &tab).await?;
@@ -766,6 +797,17 @@ impl Hub {
         Ok(row)
     }
 
+    /// Archives the thread of `tab` for `machine`, which found it finished (`auto_archive::keeps`).
+    /// The hub knows what the machine can't: a pinned thread, an orchestrator and a working one stay.
+    pub(crate) async fn auto_archive(&self, account: &Account, machine: &str, tab: &str) -> Result<SessionMarks, String> {
+        let (view, session) = Self::open_tab(account, machine, tab)?;
+        let marks = self.db.session_marks_of(account.id, &session).await?;
+        if let Some(keeps) = pinned_core::auto_archive::hub_keeps(&view, &marks) {
+            return Err(format!("{tab} stays open: {keeps}"));
+        }
+        self.archive_session(account, machine, tab).await
+    }
+
     /// Reopens an archived conversation in a new tab with its name and pin back. The user's Unarchive
     /// resumes it at once; with `start` false, as for an agent, the tab stays unstarted: starting it
     /// is `start_claude`'s, which holds it to the agent's limits.
@@ -855,7 +897,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -885,6 +927,19 @@ impl Account {
         let live = self.live.lock().unwrap();
         let updates = self.updates.lock().unwrap();
         apply_overlay(&live, &updates, machines);
+    }
+
+    /// What the online `machine` last reported about its load and accounts.
+    pub fn state_of(&self, machine: &str) -> Option<pinned_core::load::MachineState> {
+        self.live.lock().unwrap().machines.get(machine)?.state.clone()
+    }
+
+    /// Keeps `state`, which the online `machine` just answered, as its latest report.
+    pub fn note_state(&self, machine: &str, state: pinned_core::load::MachineState) {
+        let reported_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        if let Some(online) = self.live.lock().unwrap().machines.get_mut(machine) {
+            online.state = Some(pinned_core::load::MachineState { reported_at, ..state });
+        }
     }
 
     pub fn dedicated(&self, machine: &str) -> bool {
@@ -1057,6 +1112,11 @@ impl Account {
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
+            MachineEvent::State { state } => {
+                let reported_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+                m.state = Some(pinned_core::load::MachineState { reported_at, ..state.clone() });
+                return;
+            }
             _ => {}
         }
         let thread_tab = match &event {
@@ -1223,6 +1283,7 @@ fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machin
     for machine in machines {
         machine.online = live.machines.contains_key(&machine.id);
         machine.update = updates.get(&machine.id).cloned();
+        machine.state = live.machines.get(&machine.id).and_then(|online| online.state.clone());
         if let Some(version) = live.machines.get(&machine.id).map(|online| online.version.clone()).filter(|version| !version.is_empty()) {
             machine.version = version;
         }
@@ -1376,7 +1437,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
@@ -1397,7 +1458,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();

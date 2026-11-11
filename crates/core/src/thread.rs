@@ -208,6 +208,15 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     Ok(Page { items, next, reset: replaced, context, branch, todos })
 }
 
+/// The latest tool call among `items` that has no result yet, as its name and one-line summary:
+/// what a session blocked on a permission prompt or a question waits on.
+pub fn pending_tool(items: &[Item]) -> Option<(&str, &str)> {
+    items.iter().rev().find_map(|item| match item {
+        Item::Tool { id, name, summary, .. } if !items.iter().any(|later| matches!(later, Item::Result { tool, .. } if tool == id)) => Some((name.as_str(), summary.as_str())),
+        _ => None,
+    })
+}
+
 /// Where the last page of `file` starts, so a read from there holds its latest items however long
 /// it grew. A read from 0 stops after `READ_LIMIT` bytes.
 pub fn last_page(file: &Path) -> u64 {
@@ -691,7 +700,42 @@ pub(crate) fn clip(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads the transcript `PINNED_BENCH_TRANSCRIPT` names to its end, a page at a time as the
+    /// app view does, and prints what the process holds before and after, as `footprint` reads it.
+    #[test]
+    #[ignore]
+    fn reading_a_long_transcript_leaves_little_behind() {
+        let file = std::path::PathBuf::from(std::env::var_os("PINNED_BENCH_TRANSCRIPT").expect("PINNED_BENCH_TRANSCRIPT names a transcript"));
+        let held = || {
+            let out = crate::process::command("footprint").args(["-f", "bytes", "--noCategories", &std::process::id().to_string()]).output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let bytes: u64 = text.split("Footprint:").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+            bytes / (1 << 20)
+        };
+        let before = held();
+        let (mut from, mut items, mut pages) = (0, 0, 0);
+        loop {
+            let page = read(&file, from).unwrap();
+            items += page.items.len();
+            pages += 1;
+            if page.next == from {
+                break;
+            }
+            from = page.next;
+        }
+        eprintln!("{pages} pages, {items} items; footprint {before} MB before, {} MB after", held());
+    }
     use std::io::Write;
+
+    #[test]
+    fn the_pending_tool_is_the_last_call_with_no_result() {
+        let call = |id: &str, name: &str, summary: &str| Item::Tool { id: id.into(), at: "t".into(), name: name.into(), summary: summary.into(), detail: String::new(), args: vec![] };
+        let result = |tool: &str| Item::Result { tool: tool.into(), at: "t".into(), error: false, text: String::new(), links: vec![] };
+        assert_eq!(pending_tool(&[call("a", "Bash", "ls"), result("a"), call("b", "Bash", "git push origin main")]), Some(("Bash", "git push origin main")));
+        assert_eq!(pending_tool(&[call("a", "Bash", "ls"), result("a")]), None, "a call that ran is not pending");
+        assert_eq!(pending_tool(&[]), None);
+    }
 
     fn page(lines: &[&str]) -> Page {
         let mut file = tempfile::NamedTempFile::new().unwrap();

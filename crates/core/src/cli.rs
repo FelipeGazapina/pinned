@@ -13,6 +13,10 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             hooks::forward(first);
             return Some(0);
         }
+        hooks::GUARD_SUBCOMMAND => {
+            hooks::guard();
+            return Some(0);
+        }
         hooks::STATUSLINE_SUBCOMMAND => {
             hooks::statusline();
             return Some(0);

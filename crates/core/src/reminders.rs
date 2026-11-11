@@ -290,9 +290,9 @@ fn delegation_tools() -> Vec<Value> {
                     "title": { "type": "string", "description": "Short label for the card. The first line of task is used when this is omitted." },
                     "target": {
                         "type": "object",
-                        "description": "Which account and model run the child, and where. Omit providerInstanceId to use this session's account. Omit machine and box to run it on this machine.",
+                        "description": "Which account and model run the child, and where. Omit providerInstanceId to use this session's account. Leave machine and box out and pinned places heavy workers by the account's placement policy, and runs the rest on this machine; name a machine to override it. The answer's placement says where it runs, who chose it and why.",
                         "properties": {
-                            "machine": { "type": "string", "description": "Another machine of this pinned account, by the id or name projects() lists. The worker runs there, in that machine's checkout of this repo (cloned when it has none), as a thread nested under this one; task_status, task_cancel and the end notice work from here. An offline or unknown machine is an error, never this machine." },
+                            "machine": { "type": "string", "description": "Another machine of this pinned account, by the id or name projects() lists. The worker runs there, in that machine's checkout of this repo (cloned when it has none), as a thread nested under this one; task_status, task_cancel and the end notice work from here. An offline or unknown machine is an error, never this machine. \"here\" keeps the worker on this machine on purpose, and \"auto\" places it by the policy even when it is not heavy." },
                             "box": {
                                 "description": "Run the worker in a new Upstash Box that the hub opens with this account's Upstash connection, cloning this repo (or repo). providerInstanceId picks which Claude token, stored on the Upstash card in Connectors, the box signs in with; the stored default when omitted. The box is deleted when the task ends or is cancelled. The Workers box permission in Connectors decides whether a box may open.",
                                 "oneOf": [
@@ -335,6 +335,7 @@ fn delegation_tools() -> Vec<Value> {
                         },
                     },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
+                    "heavy": { "type": "boolean", "description": "Whether the account's placement policy picks the machine for this worker when target names none. Left out, a worker with isolation worktree is heavy and a shared one is not." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
@@ -418,7 +419,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 16] {
+fn project_tools() -> [(Audience, serde_json::Value); 20] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -433,6 +434,14 @@ fn project_tools() -> [(Audience, serde_json::Value); 16] {
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
             "inputSchema": no_args,
+        })),
+        (Audience::Spawners, serde_json::json!({
+            "name": "work_cost",
+            "description": "What this piece of work cost so far: this session's own cost plus every worker it delegated, theirs in turn, and their Upstash Boxes, whether they ran here, on another machine or in a box. Answers total_usd (own_usd + agents_usd + box_usd), unknown (how many parts have no known cost, such as a Cursor worker: they add nothing to the total, so total_usd is then a floor, never a guess), workers, wall_ms, tokens, and tasks: each worker's id, title, model, machine, state, cost_usd (absent when unknown), box_usd, wall_ms and tokens. With taskId, that task and the workers under it instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string", "description": "A worker you started, to read its own subtree. Omit for this session's whole tree." } },
+            },
         })),
         (Audience::Everyone, serde_json::json!({
             "name": "memory_search",
@@ -553,6 +562,51 @@ fn project_tools() -> [(Audience, serde_json::Value); 16] {
                     "items": { "type": "integer", "description": "How many of its last messages and tool calls to read; 20 when left out, at most 50." },
                 },
                 "required": ["id"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_overview",
+            "description": "Read-only look at a project's repository: the machine, branch and HEAD it read, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the start of the README, the latest commits and the project's memories. Use it before you hand a Capitão more than a one-liner. Off until Felipe turns it on in Settings; every call is in Agent activity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to read, an id or a name. Optional: the checkout its Capitão runs in, else this machine's, else the first online one." },
+                },
+                "required": ["project"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_read",
+            "description": "Read lines of one file in a project's repository, read-only: at most 400 lines or 24 KB a call, with next_line to read on. Files that may hold secrets, and anything git ignores, can't be read; lines that hold a token come back as [redacted].",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "path": { "type": "string", "description": "The file's path inside the repository, such as crates/core/src/wire.rs." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to read, an id or a name. Optional." },
+                    "rev": { "type": "string", "description": "A commit or ref to read the file at, such as HEAD~3. Optional: the working tree." },
+                    "from_line": { "type": "integer", "description": "The first line, 1 when left out." },
+                    "lines": { "type": "integer", "description": "How many lines, at most 400." },
+                },
+                "required": ["project", "path"],
+            },
+        })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "repo_search",
+            "description": "Search a project's repository, read-only. With query: the lines that hold it (40 by default, at most 100, with the total), in the files glob matches when given. With glob alone: the paths that match it, at most 200. Secrets and ignored files are never searched.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "The project's key from projects." },
+                    "query": { "type": "string", "description": "Text to find; a regular expression with regex." },
+                    "glob": { "type": "string", "description": "Only these files, such as **/*.rs or ui/*.js." },
+                    "machine": { "type": "string", "description": "The machine whose checkout to search, an id or a name. Optional." },
+                    "regex": { "type": "boolean", "description": "Read query as an extended regular expression." },
+                    "case": { "type": "boolean", "description": "Match case." },
+                    "max": { "type": "integer", "description": "Hits to return, 40 when left out, at most 100." },
+                },
+                "required": ["project"],
             },
         })),
         (Audience::TasteChat, serde_json::json!({
@@ -804,6 +858,9 @@ fn send(message: &Message) -> Result<String, String> {
                 | ProjectTool::Waiting
                 | ProjectTool::Sessions { .. }
                 | ProjectTool::ReadSession { .. }
+                | ProjectTool::RepoOverview { .. }
+                | ProjectTool::RepoRead { .. }
+                | ProjectTool::RepoSearch { .. }
                 | ProjectTool::TellOrchestrator { .. }
                 | ProjectTool::TasteGet { .. }
                 | ProjectTool::TasteSet { .. }
@@ -923,6 +980,7 @@ mod tests {
             vec![
                 "budgetMs".to_owned(),
                 "clientRequestId".into(),
+                "heavy".into(),
                 "interactionMode".into(),
                 "isolation".into(),
                 "limitMs".into(),
@@ -1174,14 +1232,15 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
-        assert_eq!(names(false), [&reminders[..], &delegation, &["agents"], &memory].concat());
+        assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, [&delegation[..], &["agents"], &memory].concat());
+        assert_eq!(on_a_node, [&delegation[..], &["agents", "work_cost"], &memory].concat());
         assert_eq!(
             permissions()[9..],
             [
                 "mcp__pinned__agents",
+                "mcp__pinned__work_cost",
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
                 "mcp__pinned__memory_forget",
@@ -1193,6 +1252,9 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__waiting",
                 "mcp__pinned__sessions",
                 "mcp__pinned__read_session",
+                "mcp__pinned__repo_overview",
+                "mcp__pinned__repo_read",
+                "mcp__pinned__repo_search",
                 "mcp__pinned__taste_get",
                 "mcp__pinned__taste_set",
                 "mcp__pinned__taste_reset",
@@ -1202,9 +1264,11 @@ fn restore_var(name: &str, value: Option<String>) {
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
+        assert_eq!(ask("work_cost", serde_json::json!({}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost"}}"#.into()));
+        assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1260,11 +1324,11 @@ fn restore_var(name: &str, value: Option<String>) {
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
-        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents"], &memory].concat();
+        let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
@@ -1279,6 +1343,14 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("waiting", serde_json::Value::Null), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"waiting"}}"#.into()));
         assert_eq!(ask("sessions", serde_json::json!({ "project": "client-apps" })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"sessions","project":"client-apps"}}"#.into()));
         assert_eq!(ask("read_session", serde_json::json!({ "id": "tab-1a-3", "items": 5 })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"read_session","id":"tab-1a-3","items":5}}"#.into()));
+        assert_eq!(
+            ask("repo_read", serde_json::json!({ "project": "github.com/o/r", "path": "src/a.rs", "from_line": 401 })),
+            Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_read","project":"github.com/o/r","path":"src/a.rs","from_line":401}}"#.into())
+        );
+        assert_eq!(
+            ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
+            Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
+        );
     }
 
     #[test]

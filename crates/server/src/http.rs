@@ -24,6 +24,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
 
+/// The WebSocket close code for an endpoint that is going down.
+pub const GOING_AWAY: u16 = 1001;
 const MIN_PASSWORD: usize = 8;
 /// Sign-in attempts allowed within `ATTEMPT_WINDOW` from one address, the only limit a stranger can't
 /// spend on someone else's behalf.
@@ -408,6 +410,16 @@ fn close_behind() -> Message {
     Message::Close(Some(CloseFrame { code: 1013, reason: "fell behind".into() }))
 }
 
+/// Resolves once the hub is told to stop. It doesn't hand out the watch's guard, which can't be held across an await.
+async fn hub_going_away(away: &mut tokio::sync::watch::Receiver<bool>) {
+    let _ = away.wait_for(|away| *away).await;
+}
+
+/// 1001, going away: the hub is stopping, and the peer reconnects at once to whichever hub follows.
+fn close_going_away() -> Message {
+    Message::Close(Some(CloseFrame { code: GOING_AWAY, reason: "the hub is restarting".into() }))
+}
+
 async fn first_text(socket: &mut WebSocket) -> Option<String> {
     match tokio::time::timeout(AUTH_WAIT, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => Some(text.to_string()),
@@ -481,6 +493,7 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
+    let mut going_away = hub.watch_going_away();
     loop {
         tokio::select! {
             text = outbox.recv() => match text {
@@ -490,6 +503,10 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
                     break;
                 }
             },
+            _ = hub_going_away(&mut going_away) => {
+                let _ = sink.send(close_going_away()).await;
+                break;
+            }
             frame = stream.next() => match frame {
                 Some(Ok(Message::Text(text))) => client_frame(&server, &account, id, &text),
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -595,7 +612,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
-    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None };
+    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
@@ -608,12 +625,17 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
 
     let (mut sink, mut stream) = socket.split();
     let mut ping = tokio::time::interval(PING);
+    let mut going_away = hub.watch_going_away();
     loop {
         tokio::select! {
             text = outbox.recv() => match text {
                 Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
                 None => break,
             },
+            _ = hub_going_away(&mut going_away) => {
+                let _ = sink.send(close_going_away()).await;
+                break;
+            }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
                 Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
@@ -710,14 +732,14 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
 async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
-    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. }) {
+    if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s delegate call failed: {e}");
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. }) {
+    if matches!(call, HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) {
         let result = crate::relay::serve(&hub, &account, crate::relay::Source::Machine(&machine), call).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s global orchestrator call failed: {e}");
@@ -731,6 +753,11 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine} could not load the account's MCP servers: {e}");
         }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    // A machine archives only its own tabs, found finished by its own check.
+    if let HubCall::AutoArchive { tab } = call {
+        let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
     if let HubCall::RecordTasks { records } = call {
@@ -762,6 +789,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::ImportTastes { .. }
                 | HubCall::GetTastes
                 | HubCall::DelegationStats { .. }
+                | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
                 | HubCall::SyncList { .. }
                 | HubCall::SyncPush { .. }

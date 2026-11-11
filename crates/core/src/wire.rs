@@ -147,6 +147,10 @@ pub struct TabView {
     /// news and the global orchestrator's requests.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: u32,
+    /// What the thread and the workers it delegated cost so far, on the thread that delegated
+    /// them. Workers are not counted again under it: its card is the one place the total shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::delegate::WorkTotal>,
     /// The tab was opened from the Way of working page to adjust the account's tastes by talking,
     /// and its session has the taste tools. Its `role` is empty, so an older app shows a plain thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -155,6 +159,10 @@ pub struct TabView {
     /// the next turn starts or fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// While the session waits on an approval or a question mid-turn: the tool call or the question
+    /// it waits on, read from its transcript, such as the command a permission prompt shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -187,6 +195,9 @@ pub enum Call {
     AutoResume { tab: TabId, on: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
+    /// Null. The tab is on the client's screen: a session that sleeps starts at this size, and
+    /// one that runs stays awake. The client sends it again while the tab stays there.
+    Wake { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
@@ -347,10 +358,23 @@ pub enum Call {
     /// `null`. From the hub: the task this machine's tab `tab` sent to `from` with `delegate_task`
     /// ended there. `from` is the hub's stamp of the machine that reports it.
     RemoteEnded { from: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// `null`. From the hub: the worker of the task this machine's tab `tab` sent to `from` waits
+    /// on the user for `ask`, or, with none, waits on nothing now.
+    RemoteAsked {
+        from: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<crate::delegate::RemoteAsk>,
+    },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
     /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
     SetGlobalOrchestratorSettings { settings: global::Settings },
+    /// `auto_archive::Settings` of this machine: when it archives a finished session.
+    AutoArchiveSettings,
+    /// The `auto_archive::Settings` saved, answered as saved.
+    SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
     /// `reading::read` of the tab's session: its state and the last `items` items of its
     /// conversation, 20 when not given, read from the end of its transcript however long it is.
     ReadSession {
@@ -358,6 +382,9 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<usize>,
     },
+    /// `repo_look::look` of the checkout at `path`, a project folder of this machine: read-only,
+    /// with secrets left out. The global orchestrator's repo tools, sent by the hub.
+    RepoLook { path: String, look: crate::repo_look::RepoLook },
     /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
     /// latest ones for an empty query.
     MemorySearch {
@@ -681,6 +708,9 @@ pub enum Call {
     UpdateSelf,
     /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
     SyncStopped,
+    /// `load::MachineState`: the machine's load and accounts now, which the hub asks for before it
+    /// refuses a delegation on what the machine reported earlier.
+    State,
     /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
     /// machine. A readable one is left alone.
     ResetSync,
@@ -741,6 +771,7 @@ impl Call {
         matches!(
             self,
             Call::Run { .. }
+                | Call::State
                 | Call::RunNow { .. }
                 | Call::PullRequest { .. }
                 | Call::PrStatus { .. }
@@ -751,6 +782,7 @@ impl Call {
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
                 | Call::ReadSession { .. }
+                | Call::RepoLook { .. }
                 | Call::Workspace { .. }
                 | Call::ProjectHistory { .. }
                 | Call::Diff { .. }
@@ -938,6 +970,9 @@ pub enum MachineEvent {
     SkillsChanged { scopes: Vec<crate::skills::Scope> },
     /// A taste chat's session changed the account's tastes. An open Way of working page reads them again.
     TastesChanged,
+    /// The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`
+    /// and passes it to no client.
+    State { state: crate::load::MachineState },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -976,6 +1011,8 @@ pub enum HubCall {
     DisconnectUpstash,
     /// `connectors::BoxAccess`.
     SetBoxAccess { access: BoxAccess },
+    /// `connectors::RepoInsight`: whether the global orchestrator may read the account's repos.
+    SetRepoInsight { settings: crate::connectors::RepoInsight },
     /// Allows or refuses the pending box question `id`.
     AnswerBox { id: String, allow: bool },
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
@@ -1020,6 +1057,20 @@ pub enum HubCall {
     ExtendBox { machine: MachineId, extra_usd: f64 },
     /// `Vec<MachineView>`.
     Machines,
+    /// From a machine: `Vec<MachineView>`, each online machine with the summary it last reported, for
+    /// `orchestrator_capabilities`.
+    MachineStates,
+    /// From a machine: `placement::Placed`, the machine of the account that runs a heavy worker it
+    /// would start, by the account's placement policy. `repo` is the project's origin, `need` the
+    /// account and model the worker runs on, and `exclude` the machines that refused it already.
+    Place {
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default)]
+        need: crate::placement::Need,
+        #[serde(default)]
+        exclude: Vec<MachineId>,
+    },
     RenameMachine { id: MachineId, name: String },
     RemoveMachine { id: MachineId },
     /// `PairCode`.
@@ -1087,6 +1138,18 @@ pub enum HubCall {
     ResetTasteField { scope: TasteScope, field: TasteField },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
+    /// From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of
+    /// `project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a
+    /// Capitão runs in, the asking machine's own, or the first online one; with `machine`,
+    /// `machine_name` and `project` set. Refused while the account's `RepoInsight` is off, and past
+    /// 30 calls a minute or 300 an hour. Each call writes an audit row.
+    RepoLook {
+        tab: TabId,
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        look: crate::repo_look::RepoLook,
+    },
     /// From a machine: `Call::ReadSession` of the tab `tab` on `machine`, an id or a name, else on
     /// the online machine that has that tab, with `id`, `machine` and `machine_name` set.
     ReadSession {
@@ -1125,6 +1188,15 @@ pub enum HubCall {
     /// From a machine: `null` once machine `to` took the end of the task its tab `tab` delegated
     /// here as `task`.
     RemoteEnded { to: MachineId, tab: TabId, task: String, end: crate::delegate::RemoteEnd },
+    /// From a machine: `true` once machine `to` took what the worker of the task its tab `tab`
+    /// delegated here as `task` waits on the user for. No `ask` says it waits on nothing now.
+    RemoteAsked {
+        to: MachineId,
+        tab: TabId,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<crate::delegate::RemoteAsk>,
+    },
     /// `connectors::Settings::box_claude_tokens`. Keeps `token`, a `claude setup-token` token, for
     /// boxes that run as the pinned account `name`, which `delegate_task`'s `providerInstanceId` picks.
     SetBoxClaudeToken { name: String, token: String },
@@ -1152,6 +1224,10 @@ pub enum HubCall {
     /// closed, and Settings › Archive lists it to bring back with its name and pin. Refused while
     /// its turn runs.
     ArchiveSession { machine: MachineId, tab: TabId },
+    /// `marks::SessionMarks` of the conversation in `tab`, once it is archived as `ArchiveSession`
+    /// does it. Only the machine that runs the tab sends it, from its auto-archive check, and the
+    /// hub keeps a pinned thread, an orchestrator and a working one open.
+    AutoArchive { tab: TabId },
     /// `Target`: the new tab, on the archived conversation's machine, that resumes it with its name
     /// and pin back.
     UnarchiveSession { session: String },
@@ -1289,6 +1365,10 @@ pub struct MachineView {
     /// The phase the machine last reported. Absent until it reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateStatus>,
+    /// How busy the machine is and which accounts it has, as it last told the hub. Absent while it
+    /// is offline, and until a machine that reports it has connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::load::MachineState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1520,7 +1600,9 @@ mod tests {
             taste_chat: false,
             orchestrator_turn: false,
             queued: 0,
+            work: None,
             question: None,
+            ask_detail: None,
         }
     }
 
@@ -1831,7 +1913,7 @@ mod tests {
         round_trip(HubCall::RemoveBoxClaudeToken { name: "bloom".into() }, json!({ "cmd": "remove_box_claude_token", "name": "bloom" }));
         round_trip(HubCall::MintBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "bloom" }));
         round_trip(HubCall::CancelBoxClaudeToken { machine: "m1".into(), account: "bloom".into() }, json!({ "cmd": "cancel_box_claude_token", "machine": "m1", "account": "bloom" }));
-        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None };
+        let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Done.".into()), error: None, usage: None };
         round_trip(
             HubCall::RemoteEnded { to: "m1".into(), tab: "tab-1".into(), task: "task-1".into(), end: end.clone() },
             json!({ "cmd": "remote_ended", "to": "m1", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
@@ -1893,7 +1975,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None, state: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -1908,7 +1990,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -1953,7 +2035,7 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
         round_trip(
@@ -2016,7 +2098,7 @@ mod tests {
         assert_eq!(old.version, "");
         assert_eq!(old.update, None);
         round_trip(
-            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }) },
+            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }), state: None },
             json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
     }

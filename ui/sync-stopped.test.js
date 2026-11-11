@@ -125,6 +125,7 @@ test("opening the Machines page asks every online machine again", () => {
     ]),
     settingsSection: (section) => sections.push(section),
     showMachinesPage: () => drawn.push("machines page"),
+    pollMachineLoad: () => {},
     refreshSyncStopped: (machine) => asked.push(machine),
   });
   assert.equal(sections.length, 1);
@@ -142,7 +143,11 @@ function entry(syncStopped) {
     machinesUi: { renaming: null, removing: null },
     machines: new Map([["box", { view: { id: "box", name: "box" }, syncStopped }]]),
     rowUpdate: () => "",
+    updateStanding: () => ({ standing: "unknown", text: "", button: { label: "Update", disabled: false, title: "", primary: false } }),
+    updateButtonHtml: () => "",
+    machineWork: () => ({ running: 0, waiting: 0 }),
     lastSeen: () => "",
+    machineStateHtml: () => "",
   }).machineEntryHtml("box", { id: "box", name: "box", os: "linux", online: true });
 }
 

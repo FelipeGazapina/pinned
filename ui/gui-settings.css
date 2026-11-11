@@ -307,7 +307,11 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .side-setting select { width: 232px; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
-  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
+  /* The name and the machine stack under their label, chips from the left, one line each when they fit. */
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) > :is(.go-name, .chips) { flex: 1 1 100%; align-items: flex-start; }
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) .chips { justify-content: flex-start; }
+  #settings-page #global-orchestrator-settings .go-name input { width: 100%; }
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }

@@ -35,6 +35,8 @@ function load({ fail } = {}) {
     active: null,
     console: { error: (...args) => app.logged.push(args) },
     globalHostMachine: () => "mac",
+    machines: new Map([["mac", { view: { online: true } }]]),
+    machineName: () => "mac",
     isGlobalOrchestratorTab: (tab) => tab?.view?.orchestrator_global === true,
     narrow: () => false,
     toggleSidebar() {},

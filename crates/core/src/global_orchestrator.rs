@@ -251,6 +251,14 @@ impl Ledger {
         answered
     }
 
+    /// Makes the message look sent `secs` earlier, to test what age changes.
+    #[cfg(test)]
+    pub fn backdate(&mut self, request_id: &str, secs: u64) {
+        if let Some(sent) = self.sent.iter_mut().find(|s| s.request_id == request_id) {
+            sent.at = sent.at.saturating_sub(secs);
+        }
+    }
+
     fn count_turns(&self) {
         *self.turns.lock().unwrap() = self.sent.iter().filter(|s| s.progress == Progress::InFlight).map(|s| s.project.clone()).collect();
     }
@@ -335,6 +343,9 @@ pub struct OverviewMachine {
     /// Why its projects may be missing or old, such as `precisa atualizar o pinned`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// Its load, accounts and Workers at once, as it last reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::load::MachineState>,
 }
 
 /// One project, with every machine that has a checkout of it.
@@ -365,6 +376,9 @@ pub struct OverviewCheckout {
     /// Worker tabs of the project running on that machine.
     #[serde(default)]
     pub workers: u32,
+    /// How busy that machine is, as it last reported. Absent while it is offline or too old to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<crate::load::Load>,
 }
 
 /// Whether a message to the project's Capitão would be typed now.
@@ -403,6 +417,16 @@ pub struct Waiting {
     pub machine_name: String,
     pub tab: TabId,
     pub kind: WaitingKind,
+    /// Whether a `needs_input` tab waits on an approval or on a question. Absent from a hub that
+    /// predates it, and from any other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<AskKind>,
+    /// The tool an `approval` is for, such as `Bash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What the tool call or the question is, such as the command a permission prompt shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// The project folder the tab works in, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -426,13 +450,45 @@ pub enum WaitingKind {
     Confirm,
 }
 
+/// What a session that cannot go on without the user asks of them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    /// A tool waits on a permission prompt.
+    Approval,
+    /// The session asked a question (`AskUserQuestion`).
+    Question,
+}
+
+impl AskKind {
+    /// How a row or a notice names it.
+    pub fn word(self) -> &'static str {
+        match self {
+            AskKind::Approval => "approval",
+            AskKind::Question => "question",
+        }
+    }
+}
+
+/// What the notice `message` of a session blocked on the user asks: an approval, with the tool it
+/// is for, when Claude Code said it needs permission to use one, else a question. The sidebar's
+/// `askOf` in `ui/global-chat.js` follows the same cases, which `waiting_cases.json` lists.
+pub fn ask_of(message: Option<&str>) -> (AskKind, Option<String>) {
+    let message = message.unwrap_or_default();
+    if !message.to_ascii_lowercase().contains("permission") {
+        return (AskKind::Question, None);
+    }
+    let tool = message.split_once(" to use ").map(|(_, tool)| tool.trim().trim_end_matches('.').to_owned()).filter(|tool| !tool.is_empty());
+    (AskKind::Approval, tool)
+}
+
 /// Why `tab` waits on the user, or None when it does not. The sidebar's `waitingKindOf` in
 /// `ui/global-chat.js` follows the same cases, which `waiting_cases.json` lists for both tests.
 ///
-/// A question or an approval mid-turn waits while the session runs. A finished turn waits when its
-/// last reply asked the user something, whether or not Claude Code's idle notice came after it.
-/// The idle notice alone asks nothing. The global orchestrator's own tab never waits: the user
-/// talks to it directly.
+/// Only a session that cannot go on without the user waits: a question (`AskUserQuestion`) or an
+/// approval pending mid-turn, or a failure. A finished turn that ended asking something is an
+/// `offer_of`, which waits on nobody. The global orchestrator's own tab never waits: the user talks
+/// to it directly.
 pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     if tab.orchestrator_global {
         return None;
@@ -440,27 +496,42 @@ pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     match tab.status {
         Some(AgentStatus::Failed) => Some(WaitingKind::Failed),
         Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => Some(WaitingKind::NeedsInput),
-        Some(AgentStatus::Working) => None,
-        _ => tab.question.as_ref().map(|_| WaitingKind::NeedsInput),
+        _ => None,
     }
 }
 
-/// The question a reply puts to the user: its last sentence outside code that ends in a question
-/// mark, cut at `QUESTION_CHARS`. None when it asks nothing.
+/// How long a finished turn's question stays an offer.
+pub const OFFER_SECS: u64 = 24 * 60 * 60;
+
+/// What the finished turn of `tab` offered or asked in its last paragraph, while that still stands
+/// at `now` (Unix seconds): the tab's session runs, its turn is over, and it is not a worker (whose
+/// result already went up to the thread that started it, the delivery its task ends on). An offer
+/// drops after `OFFER_SECS`. `ui/global-chat.js`'s `offerOf` follows the same cases.
+pub fn offer_of(tab: &TabView, now: u64) -> Option<&str> {
+    let finished = tab.running && !matches!(tab.status, Some(AgentStatus::Working | AgentStatus::Failed)) && !(tab.status == Some(AgentStatus::NeedsInput) && tab.interrupted);
+    let fresh = tab.updated.is_none_or(|at| now.saturating_sub(at) < OFFER_SECS);
+    (!tab.orchestrator_global && finished && fresh && tab.role != Some(Role::Worker)).then_some(tab.question.as_deref()).flatten()
+}
+
+/// The question a reply puts to the user: its last paragraph's last sentence, when that paragraph
+/// ends in a question mark outside code, cut at `QUESTION_CHARS`. None when the reply ends on
+/// anything else, so a question quoted or answered earlier in the reply asks nothing.
 pub fn question_in(reply: &str) -> Option<String> {
-    let chars: Vec<char> = reply.chars().collect();
-    let ends_sentence = |i: usize| chars.get(i + 1).is_none_or(|next| next.is_whitespace() || matches!(next, '*' | '_' | ')' | '"' | '\u{201d}' | '\u{bb}'));
+    let chars: Vec<char> = reply.trim_end().chars().collect();
+    let paragraph = (1..chars.len()).rev().find(|&i| chars[i] == '\n' && chars[i - 1] == '\n').map_or(0, |i| i + 1);
+    let closes = |c: &char| c.is_whitespace() || matches!(c, '*' | '_' | ')' | '"' | '\u{201d}' | '\u{bb}');
+    let ends_sentence = |i: usize| chars.get(i + 1).is_none_or(closes);
     let mut in_code = false;
     let mut end = None;
-    for (i, c) in chars.iter().enumerate() {
+    for (i, c) in chars.iter().enumerate().skip(paragraph) {
         match c {
             '`' => in_code = !in_code,
             '?' | '\u{ff1f}' if !in_code && ends_sentence(i) => end = Some(i),
             _ => {}
         }
     }
-    let end = end?;
-    let start = (0..end).rev().find(|&i| chars[i] == '\n' || (matches!(chars[i], '.' | '!' | '?' | '\u{ff1f}') && chars[i + 1].is_whitespace())).map_or(0, |i| i + 1);
+    let end = end.filter(|&end| chars[end + 1..].iter().all(closes))?;
+    let start = (paragraph..end).rev().find(|&i| chars[i] == '\n' || (matches!(chars[i], '.' | '!' | '?' | '\u{ff1f}') && chars[i + 1].is_whitespace())).map_or(paragraph, |i| i + 1);
     let sentence: String = chars[start..=end].iter().collect();
     let sentence = sentence.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '-' | '#' | '>')).split_whitespace().collect::<Vec<_>>().join(" ");
     Some(crate::thread::clip(&sentence, QUESTION_CHARS))
@@ -489,6 +560,11 @@ pub fn captain_tab<'a>(tabs: &'a [TabView], path: &str) -> Option<&'a TabView> {
 /// on the user there. An offline machine's checkouts are listed with no Capitão, and nothing of it
 /// waits, since its tabs are not live.
 pub fn overview(machines: &[MachineSnapshot]) -> Overview {
+    overview_at(machines, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()))
+}
+
+/// `overview` as it stands at `now`, in Unix seconds: the time an offer's 24 hours run against.
+pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
     let mut projects: Vec<OverviewProject> = vec![];
     let mut waiting = vec![];
     let mut sessions = vec![];
@@ -506,6 +582,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
                 captain: CaptainState::of(captain),
                 captain_tab: captain.map(|t| t.id.clone()),
                 workers: workers as u32,
+                load: None,
             };
             let key = project.repo.clone().unwrap_or_else(|| format!("{}:{}", machine.id, project.path));
             match projects.iter_mut().find(|p| p.key == key) {
@@ -515,18 +592,22 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
         }
         // What waits on the user is the sessions in those two states, so the two lists never differ.
         for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
-            let session = session(machine, tab);
+            let session = session(machine, tab, now);
             let kind = match session.state {
                 SessionState::WaitingOnInput => Some(WaitingKind::NeedsInput),
                 SessionState::Error => Some(WaitingKind::Failed),
                 _ => None,
             };
             if let Some(kind) = kind {
+                let (ask, tool) = if kind == WaitingKind::NeedsInput { let (ask, tool) = ask_of(tab.message.as_deref()); (Some(ask), tool) } else { (None, None) };
                 waiting.push(Waiting {
                     machine: session.machine.clone(),
                     machine_name: session.machine_name.clone(),
                     tab: session.id.clone(),
                     kind,
+                    ask,
+                    tool,
+                    detail: tab.ask_detail.clone().filter(|_| kind == WaitingKind::NeedsInput),
                     project: machine.projects.iter().any(|p| Path::new(&p.path) == Path::new(&session.project.path)).then(|| session.project.path.clone()),
                     title: session.title.clone(),
                     message: session.message.clone(),
@@ -539,7 +620,7 @@ pub fn overview(machines: &[MachineSnapshot]) -> Overview {
     sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
     let machines = machines
         .iter()
-        .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned) })
+        .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned), state: None })
         .collect();
     Overview { projects, waiting, machines, sessions: Some(sessions) }
 }
@@ -566,7 +647,8 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<PrLink>,
     pub state: SessionState,
-    /// What it asks the user, or the error that stopped it.
+    /// What it asks the user, or the error that stopped it. An idle session's is the offer its
+    /// finished turn ended on, which waits on nobody.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Unix seconds of its last message, else of its last status.
@@ -602,8 +684,8 @@ pub enum SessionState {
     Running,
     /// Its session runs and no turn is in progress: done, Claude Code's idle notice, or no status yet.
     Idle,
-    /// It waits on the user (`waiting_kind` is `needs_input`): a question or an approval mid-turn,
-    /// or a finished turn whose last reply asked the user something.
+    /// It waits on the user (`waiting_kind` is `needs_input`): a question or an approval pending
+    /// mid-turn. A finished turn that ended asking something is `Idle`, its question in `message`.
     WaitingOnInput,
     /// It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).
     Error,
@@ -635,7 +717,7 @@ impl Session {
 
 /// One tab as a session. `overview` lists one per tab of each online machine, the global
 /// orchestrator's own tab left out.
-fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
+fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
     let folder = history::project_of(Path::new(&tab.cwd));
     let listed = machine.projects.iter().find(|p| Path::new(&p.path) == folder);
     let path = folder.display().to_string();
@@ -662,7 +744,10 @@ fn session(machine: &MachineSnapshot, tab: &TabView) -> Session {
         title: tab.title.clone().or_else(|| tab.prompt_title.clone()),
         branch: tab.branch.clone(),
         pr: tab.pr.clone(),
-        message: tab.question.clone().or_else(|| tab.message.clone()).filter(|_| matches!(state, SessionState::WaitingOnInput | SessionState::Error)),
+        message: match state {
+            SessionState::WaitingOnInput | SessionState::Error => tab.message.clone(),
+            _ => offer_of(tab, now).map(str::to_owned),
+        },
         state,
         last_activity: tab.last_message_at.or(tab.updated),
     }
@@ -687,7 +772,7 @@ pub fn prompt(name: &str, machine: &str) -> String {
     format!(
         "Você é o {name}, o orquestrador global do Felipe no pinned: o chat acima de todos os projetos dele, em todas as máquinas. Você roda na máquina {machine}, numa pasta que não é projeto.
 
-Você nunca faz trabalho de projeto: não lê nem edita arquivos de projeto, não roda comandos neles e não inicia workers. Todo pedido de projeto vai para o Capitão daquele projeto com send_to_captain. O Capitão é a sessão que lidera o projeto; ele faz o trabalho e te reporta.
+Você nunca faz trabalho de projeto: não edita arquivos, não roda comandos e não inicia workers. Você pode **ler** os repositórios só com repo_overview, repo_read e repo_search, que são somente leitura. Todo trabalho de projeto vai para o Capitão daquele projeto com send_to_captain; ele faz o trabalho e te reporta. Seus próprios Read, Write, Edit, Grep e Glob alcançam só a sua pasta, o seu scratchpad, a sua pasta de memória e os uploads do Felipe (e leem o scratchpad dos Capitães); você não tem Bash.
 
 Para cada pedido:
 1. Chame projects() primeiro e escolha o projeto pelo texto do Felipe. Use a key que projects() lista como project.
@@ -700,6 +785,8 @@ Para cada pedido:
 Capitão reports arrive as messages that start with \"[pinned] Capitão <project> (<machine>)\". Sum each one up for Felipe in a few lines: what was done, what is left and what needs Felipe. read_captain(project) reads a Capitão's last replies, and waiting() lists what waits on Felipe on every machine.
 
 To answer what is running in a project or on a machine, such as \"what is running in client-apps?\", call sessions(project) or sessions(machine=...). It lists every session on every machine and account: loose threads Felipe opened, workers and Capitães. projects() counts only a Capitão's workers, so never answer that question from projects() alone. Answer with each session's title, state, branch, PR, machine and account, and call read_session(id) to read the last messages of any session whose title and state don't say enough.
+
+Before you hand a request to a Capitão, look at the repo when the request is more than a one-liner: repo_overview(project) for its shape and its CLAUDE.md/AGENTS.md rules, then at most a few repo_search or repo_read calls to find where the work lands. Use what you find to (1) split the request into one message per independent piece, in order; (2) write the message with file paths and symbols to start from, the repo's rules that apply, and a suggested model tier (small and contained, or crosses modules). When a Capitão reports something you can check, such as a file or a change it says it made, check it with repo_search or repo_read before you tell Felipe it is done, and say so when it doesn't match. If a question needs more than about five reads, ask the Capitão to explore and report instead of reading on. Never quote a line marked [redacted]. When a repo tool answers that reading repositories is off, tell Felipe in one sentence where to turn it on and go on without it.
 
 Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou projects() lista uma máquina com problem, diga ao Felipe numa frase simples qual máquina precisa atualizar o pinned ou não respondeu, sem o texto do erro.
 
@@ -877,7 +964,7 @@ mod tests {
     #[test]
     fn waiting_holds_questions_mid_turn_and_failures_but_not_the_idle_notice_or_the_orchestrators_own_tab() {
         let site = [project("/w/site", Some("github.com/o/site"))];
-        let question = TabView { interrupted: true, title: Some("Fix the form".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794234244), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let question = TabView { interrupted: true, ask_detail: Some("git push origin main".into()), title: Some("Fix the form".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794234244), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
         let idle_notice = TabView { interrupted: false, message: Some("Claude is waiting for your input".into()), ..view("tab-c-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::NeedsInput)) };
         let failed = TabView { message: Some("API Error: 500".into()), updated: Some(1794234300), ..view("tab-c-3", "/tmp/scratch", None, false, Some(AgentStatus::Failed)) };
         let own = TabView { orchestrator_global: true, interrupted: true, ..view("tab-c-4", "/home/f/.pinned/orquestrador", None, true, Some(AgentStatus::NeedsInput)) };
@@ -888,12 +975,44 @@ mod tests {
             serde_json::json!({
                 "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": [{ "machine": "m-1", "machine_name": "MacBook", "online": true, "version": "0.17.19", "path": "/w/site", "captain": "livre", "captain_tab": "tab-c-1", "workers": 1 }] }],
                 "waiting": [
-                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-2", "kind": "needs_input", "project": "/w/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244 },
+                    { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-2", "kind": "needs_input", "ask": "approval", "tool": "Bash", "detail": "git push origin main", "project": "/w/site", "title": "Fix the form", "message": "Claude needs your permission to use Bash", "since": 1794234244 },
                     { "machine": "m-1", "machine_name": "MacBook", "tab": "tab-c-3", "kind": "failed", "message": "API Error: 500", "since": 1794234300 },
                 ],
                 "machines": [{ "id": "m-1", "name": "MacBook", "online": true, "version": "0.17.19" }],
             })
         );
+    }
+
+    #[test]
+    fn waiting_lists_a_workers_approval_and_question_from_every_machine_with_the_machine_the_project_and_what_is_asked() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let on_mini = [project("/Users/f/site", Some("github.com/o/site"))];
+        let approval = TabView { interrupted: true, ask_detail: Some("git push origin main".into()), title: Some("Push the fix".into()), message: Some("Claude needs your permission to use Bash".into()), updated: Some(1794239000), ..view("tab-m-3", "/Users/f/site/.claude/worktrees/pinned-3", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let question = TabView { interrupted: true, ask_detail: Some("Which one should open the PR?".into()), title: Some("Pick the PR opener".into()), message: Some("Claude needs your input".into()), updated: Some(1794239500), ..view("tab-b-9", "/w/site/.claude/worktrees/pinned-9", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) };
+        let working = TabView { interrupted: true, ..view("tab-m-4", "/Users/f/site/.claude/worktrees/pinned-4", Some(Role::Worker), true, Some(AgentStatus::Working)) };
+        let (book_tabs, mini_tabs) = ([question], [approval, working]);
+        let machines = [
+            MachineSnapshot { id: "m-book", name: "MacBook", online: true, version: "0.17.24", projects: &site, tabs: &book_tabs, problem: None },
+            MachineSnapshot { id: "m-mini", name: "Mac mini", online: true, version: "0.17.24", projects: &on_mini, tabs: &mini_tabs, problem: None },
+        ];
+        let waiting: Vec<_> = overview_at(&machines, 1794240000).waiting.iter().map(|w| serde_json::to_value(w).unwrap()).collect();
+        assert_eq!(
+            waiting,
+            vec![
+                serde_json::json!({ "machine": "m-book", "machine_name": "MacBook", "tab": "tab-b-9", "kind": "needs_input", "ask": "question", "detail": "Which one should open the PR?", "project": "/w/site", "title": "Pick the PR opener", "message": "Claude needs your input", "since": 1794239500 }),
+                serde_json::json!({ "machine": "m-mini", "machine_name": "Mac mini", "tab": "tab-m-3", "kind": "needs_input", "ask": "approval", "tool": "Bash", "detail": "git push origin main", "project": "/Users/f/site", "title": "Push the fix", "message": "Claude needs your permission to use Bash", "since": 1794239000 }),
+            ],
+            "the worker on the Mac mini waits under that machine's name, with the command it asks; the one that works does not"
+        );
+    }
+
+    #[test]
+    fn a_permission_notice_is_an_approval_with_its_tool_and_any_other_a_question() {
+        assert_eq!(ask_of(Some("Claude needs your permission to use Bash")), (AskKind::Approval, Some("Bash".into())));
+        assert_eq!(ask_of(Some("Claude needs your permission to use mcp__pinned__act")), (AskKind::Approval, Some("mcp__pinned__act".into())));
+        assert_eq!(ask_of(Some("Claude needs your permission")), (AskKind::Approval, None));
+        assert_eq!(ask_of(Some("Claude needs your input")), (AskKind::Question, None));
+        assert_eq!(ask_of(None), (AskKind::Question, None));
     }
 
     #[test]
@@ -905,9 +1024,16 @@ mod tests {
         );
         assert_eq!(
             question_in("**A produção ainda não tem a correção.** O hub continua na v0.17.19, então o clique segue quebrado até sair a v0.17.20. Quer que eu faça a release?\n\n**O PR #89 corrige o mesmo bug.** A segunda saída é fechar o #89."),
-            Some("Quer que eu faça a release?".into()),
-            "personal-harness's workflow thread asks mid-reply"
+            None,
+            "a question mid-reply, with more after it, is not what the turn ended on"
         );
+        assert_eq!(
+            question_in("Why did the CI fail? A missing semicolon in app.ts, now fixed. All 214 checks pass and the PR is merged, nothing left for you to do."),
+            None,
+            "a rhetorical opener answered in the same paragraph"
+        );
+        assert_eq!(question_in("Merged the fix.\n\nWant me to cut the release?\n\n"), Some("Want me to cut the release?".into()), "trailing blank lines");
+        assert_eq!(question_in("Done. Want me to open the PR? Say yes and I will."), None, "a question the paragraph goes on from");
         assert_eq!(question_in("Mandei ao Orquestrador o caminho de cliques; ele já recebeu. Não mexi no código."), None, "the Captain's report asks nothing");
         assert_eq!(question_in("Use `a?.b`, see https://x.dev/search?q=1, then:\n```js\nconst ok = done ? 1 : 2; // why?\n```\nDone."), None, "question marks in code and links");
         assert_eq!(question_in("1. **Ship it now?**"), Some("Ship it now?".into()));
@@ -916,15 +1042,41 @@ mod tests {
     #[test]
     fn waiting_counts_exactly_the_cases_the_sidebar_shares() {
         let cases: serde_json::Value = serde_json::from_str(include_str!("waiting_cases.json")).unwrap();
-        let verdict = |case: &serde_json::Value| {
+        let now = cases["now"].as_u64().unwrap();
+        let tab_of = |case: &serde_json::Value| {
             let mut view = cases["base"].clone();
             view.as_object_mut().unwrap().extend(case["view"].as_object().unwrap().clone());
-            let tab: TabView = serde_json::from_value(view).unwrap();
+            serde_json::from_value::<TabView>(view).unwrap()
+        };
+        let verdict = |case: &serde_json::Value| {
+            let tab = tab_of(case);
             let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.21", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
-            (case["case"].clone(), serde_json::to_value(overview(&machines).waiting.first().map(|w| w.kind)).unwrap())
+            let overview = overview_at(&machines, now);
+            let waiting = overview.waiting.first();
+            (case["case"].clone(), serde_json::to_value(waiting.map(|w| w.kind)).unwrap(), serde_json::to_value(waiting.and_then(|w| w.ask)).unwrap(), offer_of(&tab, now).is_some())
         };
         let cases_list = cases["cases"].as_array().unwrap();
-        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone())).collect::<Vec<_>>());
+        assert_eq!(cases_list.iter().map(verdict).collect::<Vec<_>>(), cases_list.iter().map(|c| (c["case"].clone(), c["waits"].clone(), c["ask"].clone(), c["offer"] == true)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_finished_turn_ending_in_a_question_is_not_blocked_but_a_pending_prompt_and_a_stopped_thread_are_told_apart() {
+        let tab = |id: &str, running: bool, status, interrupted: bool, question: Option<&str>| TabView { interrupted, question: question.map(str::to_owned), message: Some("msg".into()), updated: Some(1794239000), ..view(id, "/w/site", None, running, Some(status)) };
+        let book = [
+            tab("tab-1-1", true, AgentStatus::Done, false, Some("Quer que eu abra o PR?")),
+            tab("tab-1-2", true, AgentStatus::NeedsInput, true, None),
+            tab("tab-1-3", false, AgentStatus::Done, false, Some("Quer que eu abra o PR?")),
+        ];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.17.24", projects: &[], tabs: &book, problem: None }];
+        let overview = overview_at(&machines, 1794240000);
+        assert_eq!(overview.waiting.iter().map(|w| w.tab.as_str()).collect::<Vec<_>>(), ["tab-1-2"], "only the pending prompt blocks");
+        let sessions = overview.sessions.unwrap();
+        let by = |id: &str| sessions.iter().find(|s| s.id == id).map(|s| (s.state, s.message.as_deref())).unwrap();
+        assert_eq!(by("tab-1-1"), (SessionState::Idle, Some("Quer que eu abra o PR?")), "the offer rides on the idle session");
+        assert_eq!(by("tab-1-2"), (SessionState::WaitingOnInput, Some("msg")));
+        assert_eq!(by("tab-1-3"), (SessionState::Settled, None), "a stopped thread lists nothing");
+        let later = overview_at(&machines, 1794240000 + OFFER_SECS);
+        assert_eq!(later.sessions.unwrap().iter().find(|s| s.id == "tab-1-1").unwrap().message, None, "24 hours drop the offer");
     }
 
     #[test]
@@ -955,7 +1107,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
             serde_json::json!([
-                { "id": "tab-b-9", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "branch": "felipega/fix-and-ops", "state": "waiting_on_input", "message": "Should I open the PR now?", "last_activity": 1794241000 },
+                { "id": "tab-b-9", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "branch": "felipega/fix-and-ops", "state": "idle", "message": "Should I open the PR now?", "last_activity": 1794241000 },
                 { "id": "tab-b-2", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "title": "Someone mentioned you in the Slack thread", "branch": "felipega/fix-and-ops", "state": "idle", "last_activity": 1794240000 },
                 { "id": "tab-b-3", "machine": "m-book", "machine_name": "MacBook", "account": "bloom", "project": apps_on_book, "role": "thread", "state": "waiting_on_input", "message": "Claude needs your permission to use Bash", "last_activity": 1794239000 },
                 { "id": "tab-b-7", "machine": "m-book", "machine_name": "MacBook", "account": "claude", "project": apps_on_book, "role": "worker", "captain": "tab-b-5", "branch": "pinned/sub", "pr": { "number": 92, "url": "https://github.com/o/client-apps/pull/92" }, "state": "idle", "last_activity": 1794235000 },
@@ -976,12 +1128,11 @@ mod tests {
             waiting,
             [
                 ("tab-b-3", WaitingKind::NeedsInput, Some("Claude needs your permission to use Bash")),
-                ("tab-b-9", WaitingKind::NeedsInput, Some("Should I open the PR now?")),
                 ("tab-d-1", WaitingKind::Failed, Some("API Error: 500")),
             ],
-            "what waits is the sessions waiting on input or stopped on an error, a loose thread that asked included"
+            "what waits is the sessions waiting on input or stopped on an error; a loose thread that asked is an offer, not a wait"
         );
-        assert_eq!(overview.waiting[2].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
+        assert_eq!(overview.waiting[1].title.as_deref(), Some("Someone mentioned you in the Slack thread"), "a restored tab's first prompt names it");
     }
 
     #[test]
