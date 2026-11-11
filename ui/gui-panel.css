@@ -24,11 +24,9 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 #chat-head .split .pick { border-radius: 0 8px 8px 0; border-left: 0; padding: 0 4px; }
 #chat-head .split .pick .i { width: 16px; height: 16px; }
 #chat-head .split .outline:hover { background: var(--g-input); }
-#chat-head .split .label, #git-action .main .label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-#scripts-control .main:not(.solo) { width: 24px; justify-content: center; padding: 0; }
 #chat-head #head-more { display: none; }
 @media (max-width: 768px) {
-  #chat-head :is(#scripts-control, #open-in, #git-action, .controls) { display: none; }
+  #chat-head :is(#scripts-control, #open-in, #git-action, #open-diff, .controls) { display: none; }
   #chat-head #head-more { display: grid; }
 }
 
@@ -419,3 +417,72 @@ body.panel-animating #panel { transition: transform var(--panel-animation, 0ms) 
 .file-chip:hover { background: rgb(var(--g-ink-rgb) / 0.1); }
 .file-chip .ficon { display: inline-grid; place-items: center; }
 .file-chip .ficon .i { width: 12px; height: 12px; }
+
+/* Above phone width the panel names its tabs, labels Add and its diff switches, and docks the review
+   draft as a card under its line. */
+@media (min-width: 769px) {
+  #panel-tabs { height: 49px; box-sizing: border-box; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--g-border); }
+  #panel-tabs .strip { gap: 2px; }
+  #panel-tabs [data-panel].ptab { position: relative; height: 28px; max-width: 160px; padding: 0 11px; border-radius: 7px; font-size: 12.5px; color: var(--g-side-muted); }
+  #panel-tabs [data-panel].ptab.active { background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-fg); font-weight: 600; }
+  #panel-tabs .ptab .lead { position: absolute; right: 3px; top: 6px; }
+  #panel-tabs .ptab .lead .kind { display: none !important; }
+  #panel-tabs .ptab .lead .x { display: block !important; opacity: 0; }
+  #panel-tabs .ptab .lead .pending { right: -2px; top: -2px; bottom: auto; }
+  #panel-tabs .ptab:is(:hover, :focus-within) .lead { background: var(--g-raised); }
+  #panel-tabs .ptab:is(:hover, :focus-within) .lead .x { opacity: 1; }
+  @media (hover: none) { #panel-tabs .ptab.active .lead .x { opacity: 1; } }
+  #panel-tabs #panel-add { display: flex; align-items: center; gap: 5px; flex: none; width: auto; height: 28px; padding: 0 9px; margin-left: 2px; border: 1px dashed rgb(var(--g-ink-rgb) / 0.16); border-radius: 7px;
+    background: transparent; color: var(--g-side-muted); font-size: 12.5px; }
+  #panel-tabs #panel-add:hover { color: var(--g-fg); background: var(--g-hover); }
+  #panel-tabs #panel-add .i { width: 12px; height: 12px; }
+  #panel-tabs #panel-expand { border-radius: 6px; color: var(--g-side-muted); }
+  #panel-tabs #panel-expand .i { width: 14px; height: 14px; }
+
+  #panel .diff-bar { height: 40px; gap: 8px; padding: 0 12px; margin-bottom: 0; box-shadow: none; border-bottom: 1px solid var(--g-border); font-size: 12.5px; }
+  .diff-bar .scope-pick { gap: 5px; height: 26px; padding: 0 9px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 7px; background: transparent; font-size: 12.5px; }
+  .diff-bar .scope-pick .i { width: 11px; height: 11px; opacity: 1; color: var(--g-side-muted); }
+  .diff-bar :is(.add, .del) { font: 12px var(--g-mono); }
+  .diff-bar .add { color: var(--g-add); }
+  .diff-bar .del { margin-right: 0; color: color-mix(in srgb, var(--g-del) 80%, white); }
+  #panel .diff-bar .icon { width: 26px; height: 26px; border-radius: 6px; }
+  .diff-bar .seg { padding: 2px; border-radius: 7px; background: rgb(var(--g-ink-rgb) / 0.05); }
+  #panel .diff-bar .icon.text { display: flex; width: auto; height: 26px; padding: 0 8px; border-radius: 6px; color: var(--g-side-muted); font-size: 12px; }
+  #panel .diff-bar .icon.text .i { display: none; }
+  #panel .diff-bar .seg .icon.text { height: 22px; border-radius: 5px; }
+  #panel .diff-bar .icon.text:hover { color: var(--g-fg); }
+  #panel .diff-bar .icon.text.on { background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-fg); }
+
+  #panel .file > header { height: 34px; gap: 8px; padding: 0 12px; border-top: 0; border-bottom: 1px solid var(--g-border); background: var(--g-bg); font-size: 12.5px; }
+  #panel .file > header .path { color: var(--g-fg); }
+  #panel .file > header :is(.add, .del) { font-size: 12px; }
+  #panel .file > header .del { order: 1; color: color-mix(in srgb, var(--g-del) 80%, white); }
+  #panel .file > header .viewed { order: 2; }
+  #panel .diff .dl { grid-template-columns: minmax(40px, max-content) 1fr; }
+  #panel .diff .dl.split { grid-template-columns: minmax(40px, max-content) 1fr minmax(40px, max-content) 1fr; }
+  #panel .diff .dl .no { padding: 0 8px 0 4px; color: var(--g-muted); }
+  #panel .diff .dl .code { padding-left: 0; color: rgb(var(--g-fg-rgb) / 0.8); }
+  #panel .diff .dl .code::before { content: " "; display: inline-block; width: 16px; }
+  #panel .diff .dl.add .code::before, #panel .diff .dl .code.add::before { content: "+"; color: var(--g-add); }
+  #panel .diff .dl.del .code::before, #panel .diff .dl .code.del::before { content: "-"; color: color-mix(in srgb, var(--g-del) 80%, white); }
+  #panel .diff .dl.add, #panel .diff .dl.add .no, #panel .diff .dl .code.add, #panel .diff .dl .no.add { background: var(--g-add-no); }
+  #panel .diff .dl.del, #panel .diff .dl.del .no, #panel .diff .dl .code.del, #panel .diff .dl .no.del { background: var(--g-del-no); }
+  #panel .diff .dl :is(.no.add, .no.del), #panel .diff .dl:is(.add, .del) .no { color: var(--g-muted); }
+  #panel .diff .dl .no::before { display: none; }
+
+  #panel .dcomment.draft { width: auto; max-width: calc(var(--panel-width) - 72px); margin: 8px 12px 8px 56px; padding: 9px 11px; gap: 6px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 10px;
+    background: var(--g-message); font-size: 12.5px; }
+  #panel .dcomment.draft .about { margin: 0; color: var(--g-side-muted); font-size: 12px; }
+  #panel .dcomment.draft textarea { min-height: 44px; padding: 0; border: 0; background: transparent; box-shadow: none; font-size: 12.5px; }
+  #panel .dcomment.draft .row { justify-content: flex-end; }
+  #panel .dcomment.draft .row button { height: 24px; padding: 0 9px; border-radius: 6px; }
+  #panel .dcomment.draft .row .primary { font-weight: 600; }
+}
+@media (pointer: coarse) and (max-width: 980px) {
+  #panel .diff-bar { height: 48px; }
+}
+@media (max-width: 768px) {
+  #panel-tabs #panel-add .label, .diff-bar .icon.text .label, .dcomment.draft .about { display: none; }
+  .diff-bar :is(.scope-pick, .refs) { order: -2; }
+  .diff-bar .spacer { order: -1; }
+}

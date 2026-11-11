@@ -2522,7 +2522,8 @@ async function sweep(profileName) {
   await step("app view: panel tabs open from + and the launcher, close, and stay with their thread", async () => {
     await tapOrClick("#toggle-panel");
     await waitFor("the panel", () => page.locator("#panel").isVisible());
-    check((await page.locator("#panel-tabs #toggle-panel").count()) === 1, "with the panel open, the layout controls stayed in the chat header");
+    const overlay = await page.evaluate(() => matchMedia("(max-width: 980px)").matches);
+    check((await page.locator(`${overlay ? "#panel-tabs" : "#chat-head"} #toggle-panel`).count()) === 1, overlay ? "with the panel over the chat, the layout controls stayed in the chat header" : "with the panel beside the chat, the layout controls left the chat header");
     for (let n = await page.locator("#panel-tabs .ptab").count(); n > 0; n--) await press(gui("#panel-tabs .ptab .lead"));
     await waitFor("the last tab's × to close the panel", async () => !(await page.locator("#panel").isVisible()));
     check((await page.locator("#chat-head #toggle-panel").count()) === 1, "with the panel closed, the layout controls didn't return to the chat header");
@@ -3200,7 +3201,7 @@ async function sweep(profileName) {
       await waitFor("long.txt in the diff", () => page.locator('#panel-body .file[data-path="long.txt"]').isVisible(), 10000);
       const bar = await page.locator("#panel-body .diff-bar").evaluate((el) => [getComputedStyle(el).height, getComputedStyle(el).borderBottomColor]);
       const sheet = await page.evaluate(() => matchMedia("(max-width: 980px)").matches);
-      check(sheet ? bar[0] === (touch ? "48px" : "40px") && bar[1] !== "rgba(0, 0, 0, 0)" : bar[0] === "28px" && bar[1] === "rgba(0, 0, 0, 0)", `the diff's header row is ${bar.join(", ")}`);
+      check(bar[0] === (sheet && touch ? "48px" : "40px") && bar[1] !== "rgba(0, 0, 0, 0)", `the diff's header row is ${bar.join(", ")}`);
       if ((await page.locator('#panel-body .file[data-path="long.txt"]').getAttribute("data-collapsed")) === "") await press(gui('#panel-body .file[data-path="long.txt"] > header .change'));
       check((await page.locator('#panel-body .file[data-path="long.txt"][data-fresh] .hunks').evaluate((el) => getComputedStyle(el).animationName)) === "file-in", "an opened file doesn't fade in");
       check((await page.locator("#panel-body .rows-later").count()) > 0, "a 600-line file drew every row up front");
@@ -3466,7 +3467,9 @@ async function sweep(profileName) {
     const range = await page.getAttribute("#panel-body .dcomment.draft textarea", "aria-label");
     check(range === (touch ? "Comment on lines L11" : "Comment on lines L11 to L13"), `the draft covers ${range}`);
     const box = await page.locator("#panel-body .dcomment.draft").evaluate((el) => [getComputedStyle(el).backgroundColor, getComputedStyle(el).borderInlineStartWidth]);
-    check(box[0] === "rgba(0, 0, 0, 0)" && box[1] === "0px", `the draft sits in a box: ${box.join(", ")}`);
+    const phone = await page.evaluate(() => matchMedia("(max-width: 768px)").matches);
+    check(phone ? box[0] === "rgba(0, 0, 0, 0)" && box[1] === "0px" : box[0] !== "rgba(0, 0, 0, 0)" && box[1] === "1px", `the draft's box: ${box.join(", ")}`);
+    if (!phone) check(/^Review comment on lines? 11( to 13)?\. It goes out with your next message\.$/.test(await text("#panel-body .dcomment.draft .about")), `the draft says ${await text("#panel-body .dcomment.draft .about")}`);
     check((await text("#panel-body .dcomment.draft .hint")) === "⌘/Ctrl Enter to send", `hint: ${await text("#panel-body .dcomment.draft .hint")}`);
     check((await page.locator("#panel-body .dcomment.draft [data-comment-cancel].ghost").count()) === 1, "Cancel isn't a ghost button");
     check(await page.locator("#panel-body [data-comment-save]").isDisabled(), "Comment is enabled with nothing written");
@@ -4993,11 +4996,11 @@ async function sweep(profileName) {
     await page.fill("#composer-menu .search", "try-this");
     await press(page.locator('#composer-menu [data-create="try-this"]'));
     await waitFor("try-this in the footer", async () => (await text("#composer-footer .branch")) === "try-this");
-    await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push & create PR");
+    await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push and create PR");
     if (touch) {
       await tapOrClick("#head-more");
       const options = await page.locator("#panel-menu button .label").allTextContents();
-      check(options.join("|").includes("Push & create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
+      check(options.join("|").includes("Push and create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
       await page.screenshot({ path: path.join(shots, "options-menu.png") });
       await tapOrClick("#head-more");
       await tapOrClick("#toggle-details");
@@ -5566,7 +5569,7 @@ async function sweep(profileName) {
       fs.writeFileSync(path.join(beta, "keep.txt"), "kept");
       fs.writeFileSync(path.join(beta, "leave.txt"), "left out");
       await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
-      await waitFor("the Git action", async () => (await text("#git-action .main")) === "Commit, push & PR");
+      await waitFor("the Git action", async () => (await text("#git-action .main")) === "Commit, push and PR");
       // The label reads the same before the files were written, so the status that lists them is waited for.
       await waitFor("the written files in the Git status", () => page.evaluate(() => !!threadOf(active).git?.changed.includes("leave.txt")));
       // A phone commits from its Options menu and runs the Git action from the thread details card, as T3 Code's.
@@ -5584,7 +5587,7 @@ async function sweep(profileName) {
       await waitFor("the commit", () => git("log", "-1", "--format=%s") === "Keep the kept file", 10000);
       check(git("status", "--porcelain").includes("leave.txt"), "the unchecked file went into the commit");
       await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
-      await waitFor("Commit, push & PR again", async () => (await text("#git-action .main")) === "Commit, push & PR");
+      await waitFor("Commit, push and PR again", async () => (await text("#git-action .main")) === "Commit, push and PR");
       if (touch) {
         if (!(await page.locator("#details-card").isVisible())) await tapOrClick("#toggle-details");
         await tapOrClick('#details-card [data-act="git"]');
@@ -6792,15 +6795,16 @@ async function sweep(profileName) {
     await openRow(alpha);
   });
 
-  await step("app view: the header as T3's: the project on a phone, the chevron on the title only, icon-only split buttons, disabled Git actions explained, a folding parent crumb", async () => {
+  await step("app view: the header: the project on a phone, the chevron on the title only, named split buttons above phone width, disabled Git actions explained, a folding parent crumb", async () => {
     const alpha = await keyFor("alpha");
     await openRow(alpha);
     check(await page.locator("#chat-head .crumb .project").isVisible(), "the header hides the project");
     check(!(await page.locator("#chat-head .crumb .sub-back").count()), "the header has a back button");
+    const unfolded = await page.evaluate(() => !matchMedia("(max-width: 768px)").matches && document.getElementById("chat-head").dataset.fold === "0");
     for (const label of ["#open-in .main .label", "#git-action .main .label", "#scripts-control .main .label"]) {
-      if (!(await page.locator(label).count())) continue;
+      if (!unfolded || !(await page.locator(label).count()) || (await page.locator(label).evaluate((el) => !!el.closest("[hidden]")))) continue;
       const box = await rect(label);
-      check(box.width <= 1, `${label} shows (${box.width}px)`);
+      check(box.width > 1, `${label} is ${box.width}px wide`);
     }
     if (!touch) {
       await page.hover("#chat-head .crumb .project");
@@ -6832,7 +6836,8 @@ async function sweep(profileName) {
     await press(lastTurn(".work > summary"));
     await press(gui("#thread .turn:last-of-type [data-subagent]"));
     await waitFor("the subagent's thread", () => page.locator("#chat-head .crumb .parent").isVisible(), 10000);
-    check((await tone("#chat-head .crumb .parent")) === "rgb(129, 129, 129)", `the parent crumb is ${await tone("#chat-head .crumb .parent")}`);
+    const parentTone = (await page.evaluate(() => matchMedia("(max-width: 768px)").matches)) ? "rgb(129, 129, 129)" : "rgb(163, 163, 163)";
+    check((await tone("#chat-head .crumb .parent")) === parentTone, `the parent crumb is ${await tone("#chat-head .crumb .parent")}`);
     check((await text("#chat-head .crumb h2.title")) === "Look for the bug", `the title reads ${await text("#chat-head .crumb h2.title")}`);
     await page.evaluate(() => (document.querySelector("#chat-head .crumb").style.maxWidth = "150px"));
     await waitFor("the parent folded", () => page.locator("#chat-head .crumb .parent.folded").count());

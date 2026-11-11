@@ -178,7 +178,7 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "prs") return "Pull requests";
   if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
   if (s.kind === "memory") return isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory";
-  if (s.kind === "pr") return `#${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
+  if (s.kind === "pr") return `PR #${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
   return s.title || hostOf(s.url) || "Browser";
 };
 const hostOf = (url) => {
@@ -195,7 +195,7 @@ onGuiKey("d", () => (panelOf(active).open && shownSurface(active)?.kind === "dif
 onGuiKey("j", () => (panelOf(active).open && shownSurface(active)?.kind === "browser" ? closePanel() : openSurface("browser")), { shift: true });
 onGuiKey("k", () => {
   const s = shownSurface(active);
-  const pr = s?.kind === "pr" ? { number: surfaceTitle(active, s).slice(1) } : active && shownPr(active);
+  const pr = s?.kind === "pr" ? { number: s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?" } : active && shownPr(active);
   if (pr) copyText(`#${pr.number}`, "PR number copied");
 }, { shift: true });
 onGuiKey("o", () => openInEditor());
@@ -400,9 +400,11 @@ function renderPanel() {
   expandButton.innerHTML = icon(p.max ? "minimize-2" : "maximize-2");
   expandButton.title = p.max ? "Restore panel size" : "Maximize panel";
   expandButton.classList.toggle("on", p.max);
-  // Open, the panel's tab row holds the layout controls, at the window's top right.
-  const home = p.open ? panelTabs : chatHead;
+  // Beside the chat the layout controls stay in its header. Where the panel covers the chat, its tab
+  // row holds them, at the window's top right.
+  const home = p.open && narrow(980) ? panelTabs : chatHead;
   if (layoutControls.parentElement !== home) home.append(layoutControls);
+  setPressed(document.getElementById("toggle-panel"), !!p.open);
   setPanelWidth(p.width || Number(load("gui-panel-width")) || 540);
   renderOpenIn(tab);
   renderPip(tab);
@@ -2348,8 +2350,8 @@ function renderOpenIn(tab) {
   openIn.hidden = !editor;
   if (!editor) return;
   const main = openIn.querySelector(".main");
-  main.setAttribute("aria-label", "Open");
-  main.querySelector(".label").textContent = "Open";
+  main.setAttribute("aria-label", `Open in ${editor.name}`);
+  main.querySelector(".label").textContent = `Open in ${editor.name}`;
   main.dataset.editor = editor.id;
 }
 function openInEditor() {

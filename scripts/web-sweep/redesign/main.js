@@ -1,6 +1,7 @@
 // Main.dc.html: the Captain "Release v0.17.21" open beside the sidebar, its three workers in the
 // timeline and the README worker's approval above the composer. The live side opens the Captain's
-// thread; today's app shows its workers as tool calls and the approval only on the worker.
+// thread; today's app shows its workers as tool calls and the approval only on the worker. The
+// pinned project gets a "dev" script, so the header's scripts control reads Run dev.
 module.exports = {
   board: "Main",
   viewport: { width: 1440, height: 900 },
@@ -10,6 +11,9 @@ module.exports = {
     { name: "timeline", x: 264, y: 49, width: 1176, height: 673 },
     { name: "composer", x: 264, y: 722, width: 1176, height: 178 },
   ],
+  async seed(page, ctx) {
+    await page.evaluate((key) => saveScripts(tabByKey(key), [{ id: "dev", name: "dev", icon: "play", command: "npm run dev" }]), ctx.threads.release);
+  },
   async open(page, ctx) {
     await page.evaluate((key) => activate(tabByKey(key)), ctx.threads.release);
   },

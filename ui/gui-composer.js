@@ -2508,18 +2508,18 @@ function quickAction(git, workspace, hasPr) {
   const behind = git.behind > 0;
   if (git.dirty) {
     if (!git.upstream && !git.remote) return { label: "Commit", action: "commit" };
-    if (hasPr || isDefault) return { label: "Commit & push", action: "commit_push" };
-    return { label: "Commit, push & PR", action: "commit_push_pr" };
+    if (hasPr || isDefault) return { label: "Commit and push", action: "commit_push" };
+    return { label: "Commit, push and PR", action: "commit_push_pr" };
   }
   if (!git.upstream) {
     if (!git.remote) return { label: "Publish repository", action: "publish" };
     if (!ahead && !(git.ahead_of_default > 0)) return hasPr ? { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." } : { label: "Push", disabled: true, hint: "No local commits to push." };
     if (hasPr || isDefault) return { label: "Push", action: isDefault ? "commit_push" : "push" };
-    return { label: "Push & create PR", action: "create_pr" };
+    return { label: "Push and create PR", action: "create_pr" };
   }
   if (ahead && behind) return { label: "Sync ref", disabled: true, hint: "Branch has diverged from upstream. Rebase/merge first." };
   if (behind) return { label: "Pull", action: "pull" };
-  if (ahead) return hasPr || isDefault ? { label: "Push", action: isDefault ? "commit_push" : "push" } : { label: "Push & create PR", action: "create_pr" };
+  if (ahead) return hasPr || isDefault ? { label: "Push", action: isDefault ? "commit_push" : "push" } : { label: "Push and create PR", action: "create_pr" };
   if (hasPr) return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
   if ((git.ahead_of_default ?? 0) > 0 && !isDefault) return { label: "Create PR", action: "create_pr" };
   return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
@@ -2540,8 +2540,10 @@ let gitRun = null;
 const gitAction = document.getElementById("git-action");
 function renderGitAction(tab) {
   const t = tab && threadOf(tab);
-  gitAction.hidden = !t?.workspace;
-  if (gitAction.hidden) return;
+  renderOpenDiff(tab);
+  // A worker's header shows Open diff in its place; Thread details keeps the Git action.
+  gitAction.hidden = !t?.workspace || tab.view.role === "worker";
+  if (!t?.workspace) return;
   const key = JSON.stringify([tab.key, tab.view.cwd, t.workspace.branch, statusOf(tab)]);
   if (t.gitFor !== key && t.workspace.repo) {
     t.gitFor = key;
@@ -2827,12 +2829,13 @@ const importable = ({ scripts, file }) => file.filter((f) => !scripts.some((s) =
 
 const scriptsControl = document.getElementById("scripts-control");
 function renderScripts(tab) {
-  const known = tab && guiOn() && tab.view.running && threadOf(tab).workspace && projectScripts(tab);
+  // A worker's header keeps Open in and Open diff; its scripts stay in Thread details.
+  const known = tab && guiOn() && tab.view.running && tab.view.role !== "worker" && threadOf(tab).workspace && projectScripts(tab);
   scriptsControl.hidden = !known || known.loading;
   if (scriptsControl.hidden) return;
   const primary = primaryScript(known.scripts);
   const html = primary
-    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" data-tip="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions">${icon("chevron-down")}</button>`
+    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" data-tip="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">Run ${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions">${icon("chevron-down")}</button>`
     : known.scripts.length || importable(known).length
       ? `<button type="button" class="main outline solo" data-scripts-menu aria-label="Project actions">${icon("wrench")}<span class="label">Actions</span>${icon("chevron-down")}</button>`
       : `<button type="button" class="main outline solo" data-add-script aria-label="Add action" data-tip="Add action">${icon("plus")}<span class="label">Add action</span></button>`;
@@ -3087,7 +3090,9 @@ function renderDrawer() {
   const group = open ? (shown ? shown.group : threadOf(tab).claudeGroup) : null;
   const visible = group?.members ?? [shown];
   for (const s of scriptShells) s.el.hidden = !visible.includes(s);
-  if (tab) layoutSplit([tab.el, ...own.map((s) => s.el)], group && group.members.map((s) => s?.el ?? tab.el), group?.vertical, own.length ? 38 : 6);
+  // Above phone width the drawer always has its tab row; a phone shows it only beside a shell.
+  const phone = narrow(768);
+  if (tab) layoutSplit([tab.el, ...own.map((s) => s.el)], group && group.members.map((s) => s?.el ?? tab.el), group?.vertical, !phone ? 44 : own.length ? 38 : 6);
   if (tab && tab.el.hidden !== !visible.includes(null) && guiOn()) {
     tab.el.hidden = !visible.includes(null);
     if (!tab.el.hidden) refit(tab);
@@ -3097,8 +3102,12 @@ function renderDrawer() {
     s.fit.fit();
     if (s.id) callOn(tab.machine, { cmd: "resize_pty", tab: s.id, cols: s.term.cols, rows: s.term.rows }).catch(() => {});
   }
-  drawerTabs.hidden = !own.length;
-  drawerTabs.innerHTML = own.length ? `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}` : "";
+  setPressed(document.getElementById("toggle-terminal"), !!open);
+  drawerTabs.hidden = !own.length && phone;
+  const html = drawerTabs.hidden ? "" : `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span class="dot"></span><span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}
+    <button type="button" class="act new" data-drawer-act="new" aria-label="New terminal" title="New terminal">${icon("plus")}</button><span class="spacer"></span>
+    <button type="button" class="act" data-drawer-act="split" title="Split the terminal">Split</button><button type="button" class="act hide" data-drawer-act="hide" aria-label="Hide terminal" title="Hide terminal (⌘J)">${icon("x")}</button>`;
+  setHtml(drawerTabs, html);
 }
 /** T3 Code's split terminals: a group's terminals share the drawer side by side, or stacked when `vertical`. */
 function layoutSplit(all, members, vertical, top) {
@@ -3121,6 +3130,14 @@ drawerTabs.addEventListener("click", (e) => {
   const own = scriptShells.filter((s) => s.tab === tab);
   const close = e.target.closest("[data-close-shell]");
   if (close) return closeShell(own[close.dataset.closeShell]);
+  const act = e.target.closest("[data-drawer-act]")?.dataset.drawerAct;
+  if (act === "hide") return toggleDrawer(false);
+  if (act === "new") return runScript(tab, nextTerminal(tab)).then((shell) => shell?.term.focus());
+  if (act === "split") {
+    // A split goes beside the terminal the drawer shows, as ⌘D does beside the focused one.
+    (threadOf(tab).drawerShell?.term ?? tab.term).focus();
+    return splitDrawerTerminal(false);
+  }
   const pick = e.target.closest("[data-shell]");
   if (pick) showDrawerView(tab, pick.dataset.shell === "" ? null : own[pick.dataset.shell]);
 });

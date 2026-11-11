@@ -2357,9 +2357,12 @@ function crumbHtml(tab, sub = null) {
   const sep = `<span class="sep" aria-hidden="true">/</span>`;
   const parent = threadTitle(tab);
   const title = sub ? sub.title : parent;
+  // A worker's crumb names the thread that started it, and opens it.
+  const spawner = !sub && tab.view.role === "worker" ? tabByKey(spawnerKey(tab)) : null;
+  const spawnerCrumb = spawner ? `<button type="button" class="parent" data-parent-thread="${esc(spawner.key)}" aria-label="Open parent thread: ${esc(threadTitle(spawner))}" data-tip="${esc(threadTitle(spawner))}"><span class="text">${esc(threadTitle(spawner))}</span></button>${sep}` : "";
   return `<button type="button" class="project" data-new-here aria-label="New thread in ${esc(name)}" data-tip="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button>${sep}${sub
     ? `<button type="button" class="parent" data-subagent-back aria-label="Open parent thread: ${esc(parent)}" data-tip="${esc(parent)}"><span class="text">${esc(parent)}</span></button>${sep}<h2 class="title sub" data-tip="${esc(title)}"><span class="text">${esc(title)}</span></h2>`
-    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}${statsHtml(tab)}`;
+    : `${spawnerCrumb}<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>${roleChipHtml(tab)}`}${headStatsHtml(tab)}`;
 }
 /** A parent crumb that would push the title out folds to "...", as T3 Code's does. */
 function fitParentCrumb() {
