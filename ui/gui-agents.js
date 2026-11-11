@@ -110,7 +110,10 @@ function workerLine(tab, row) {
     const spawn = spawnOf(threadOf(tab), row.agent);
     if (spawn?.kind === "tool" && (spawn.detail || spawn.summary)) return { text: `Delegated ${spawn.summary || row.agent.name || "task"}`, tone: "" };
   }
-  return { text: row.step ?? "", tone: "" };
+  const items = row.tab && row.state === "working" ? threadOf(row.tab).items : [];
+  const last = items.findLast((i) => i.kind === "tool" || i.kind === "text" || i.kind === "thinking");
+  const running = last?.kind === "tool" && last.name === "Bash" && !items.some((i) => i.kind === "result" && i.tool === last.id);
+  return { text: running && row.step ? `Running ${row.step}` : row.step ?? "", tone: "" };
 }
 
 const WORKER_STEPS = 5;

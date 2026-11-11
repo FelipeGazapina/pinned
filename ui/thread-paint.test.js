@@ -393,7 +393,13 @@ test("a Captain's worker threads fill one Workers block after its lead paragraph
   const worker = (id, title, status, extra = {}) => ({ ...tabFor(id, status), view: { id, status, cwd: "/repo", message: "", title, role: "worker", spawned_by: "tab-1", opened: Number(id.slice(-1)), ...extra } });
   sandbox.threadState = (w) => ({ working: "working", "needs-input": "needs", done: "done" })[w.view.status];
   sandbox.pendingAsk = (w) => (w.view.status === "needs-input" ? { kind: "approval", command: "git push origin readme-tidy", text: null, choices: [], typed: true } : null);
-  sandbox.tabs = [tab, worker("tab-2", "Run the CI on main", "working"), worker("tab-3", "Tidy the README", "needs-input"), worker("tab-4", "Changelog for v0.17.21", "done", { stats: { active_ms: 118000 } })];
+  const ci = worker("tab-2", "Run the CI on main", "working");
+  ci.thread.items = [
+    { kind: "tool", at: "t1", id: "toolu_f", name: "Bash", summary: "cargo fmt --check", detail: "cargo fmt --check" },
+    { kind: "result", at: "t1", tool: "toolu_f", text: "" },
+    { kind: "tool", at: "t2", id: "toolu_t", name: "Bash", summary: "cargo test -p pinned-server", detail: "cargo test -p pinned-server" },
+  ];
+  sandbox.tabs = [tab, ci, worker("tab-3", "Tidy the README", "needs-input"), worker("tab-4", "Changelog for v0.17.21", "done", { stats: { active_ms: 118000 } })];
   try {
     await poll(tab, net);
     const html = threadView.innerHTML;
@@ -401,7 +407,7 @@ test("a Captain's worker threads fill one Workers block after its lead paragraph
     assert.ok(html.indexOf("I split this into workers.") < html.indexOf('<section class="workers"'), "the block follows the lead paragraph");
     assert.match(textOf(blocks(block, '<div class="workers-head"')[0]), /^Workers\s*1 of 3 done\s*1 working\s*1 needs you$/);
     const rows = blocks(block, '<div class="worker-row"').map((r) => r.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
-    assert.deepEqual(rows, ["Run the CI on main", "Tidy the README Asks to run git push origin readme-tidy Review", "Changelog for v0.17.21 1m 58s"]);
+    assert.deepEqual(rows, ["Run the CI on main Running cargo test -p pinned-server", "Tidy the README Asks to run git push origin readme-tidy Review", "Changelog for v0.17.21 1m 58s"]);
     assert.match(block, /<button type="button" class="worker-review" data-worker-open="box:tab-3">Review<\/button>/);
     tab.thread.open.add("worker:box:tab-2");
     sandbox.renderThread();
