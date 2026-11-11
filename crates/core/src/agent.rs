@@ -152,6 +152,18 @@ pub const ISSUE_ENV: &str = "PINNED_ISSUE";
 pub const SLACK_CHANNEL_ENV: &str = "PINNED_SLACK_CHANNEL";
 pub const SLACK_THREAD_ENV: &str = "PINNED_SLACK_THREAD";
 
+/// The connector interactive box sessions run under. The hub sees their tabs through it, and the
+/// app treats their first prompt as the user's own rather than automation's.
+pub const INTERACTIVE_CONNECTOR: &str = "session";
+/// The connector a `delegate_task` worker's box runs under.
+pub const DELEGATE_CONNECTOR: &str = "delegate";
+/// The connector a Captain's box, opened by the global orchestrator, runs under.
+pub const CAPTAIN_CONNECTOR: &str = "captain";
+/// Starts the connector id a session an external agent drives through the hub's MCP endpoint
+/// carries, `mcp:<session>`, which finds its tab again on any machine and across the machine's
+/// restarts, since a tab's environment is saved with it.
+pub const EXTERNAL_CONNECTOR_PREFIX: &str = "mcp:";
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentStatus {

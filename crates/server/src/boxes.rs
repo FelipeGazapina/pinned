@@ -8,7 +8,7 @@ use crate::hub::{Account, Hub, RUN_WAIT};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
-use pinned_core::agent::{session_env, Subject};
+use pinned_core::agent::{session_env, Subject, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, INTERACTIVE_CONNECTOR};
 use pinned_core::connectors::{unix_millis, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
 use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteEnd, Request, RunTarget, TaskOutcome, TaskRecord, TaskUsage};
 use pinned_core::surface::ActorRole;
@@ -27,13 +27,6 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const DIR: &str = "/workspace/home/.pinned";
-/// The connector interactive box sessions run under. The hub sees their tabs through it, and the
-/// app treats their first prompt as the user's own rather than automation's.
-pub const INTERACTIVE_CONNECTOR: &str = "session";
-/// The connector a `delegate_task` worker's box runs under.
-pub const DELEGATE_CONNECTOR: &str = "delegate";
-/// The connector a Captain's box, opened by the global orchestrator, runs under.
-pub const CAPTAIN_CONNECTOR: &str = "captain";
 const BOOTSTRAP: &str = include_str!("box-bootstrap.sh");
 const START: &str = include_str!("box-start.sh");
 /// The bootstrap output a failure quotes, from its end.

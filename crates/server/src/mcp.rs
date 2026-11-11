@@ -15,7 +15,7 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pinned_core::agent::CONNECTOR_ENV;
+use pinned_core::agent::{CONNECTOR_ENV, EXTERNAL_CONNECTOR_PREFIX};
 use pinned_core::global_orchestrator::captain_tab;
 use pinned_core::reading::{self, next_for, state_of, DEFAULT_ITEMS};
 use pinned_core::wire::{AgentProject, Call, RunSpec, TabView};
@@ -27,9 +27,6 @@ use uuid::Uuid;
 
 /// Newest first. A client asking for another gets the newest, which it may refuse.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
-/// The connector id an agent's session carries, `mcp:<session>`, which finds its tab again on any
-/// machine and across the machine's restarts, since a tab's environment is saved with it.
-const SESSION_PREFIX: &str = "mcp:";
 const START_WAIT: Duration = Duration::from_secs(120);
 const CALL_WAIT: Duration = Duration::from_secs(30);
 /// How many sessions one agent may start in an hour, so a looping agent can't fill a machine.
@@ -422,7 +419,7 @@ async fn forget(ctx: &Ctx<'_>, key: &str) {
 }
 
 fn session_connector(id: Uuid) -> String {
-    format!("{SESSION_PREFIX}{id}")
+    format!("{EXTERNAL_CONNECTOR_PREFIX}{id}")
 }
 
 fn session_tab(tabs: &[TabView], id: Uuid) -> Option<&TabView> {
