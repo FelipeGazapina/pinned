@@ -413,9 +413,26 @@ function closeAskSheet() {
   shown?.sheet.close();
 }
 
+/** The sheets belong to the open thread's screen, the Orchestrator's included. An ask's sheet also
+ * waits while the palette is up, which it would cover. */
+const onThreadScreen = () => typeof phoneScreen === "function" && ["thread", "orchestrator"].includes(phoneScreen());
+const askSheetMayShow = () => onThreadScreen() && !(typeof paletteOpen === "function" && paletteOpen());
+
+/** Off a thread's screen its sheets close; back on it, its ask's sheet opens again. */
+function syncPhoneSheets() {
+  syncPhoneAsk();
+  if (!onThreadScreen()) openedSheet?.close();
+}
+let sheetsScreen;
+new MutationObserver(() => {
+  if (document.body.dataset.phoneScreen === sheetsScreen) return;
+  sheetsScreen = document.body.dataset.phoneScreen;
+  syncPhoneSheets();
+}).observe(document.body, { attributeFilter: ["data-phone-screen"] });
+
 function syncPhoneAsk() {
   const tab = active;
-  const key = guiOn() && onPhone() && tab && !terminalOnly(tab) ? askKeyOf(tab) : "";
+  const key = guiOn() && onPhone() && askSheetMayShow() && tab && !terminalOnly(tab) ? askKeyOf(tab) : "";
   if (!key) {
     askCard.hidden = true;
     if (askSheet) closeAskSheet();
