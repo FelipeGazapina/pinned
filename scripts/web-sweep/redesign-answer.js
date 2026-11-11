@@ -3,7 +3,10 @@
 // the worker was never opened in the page: its menu is read off a hidden terminal that was never
 // fitted. Approve, Decline, and Decline with a reason each reach the worker's session, the worker
 // goes on, and the Captain's draft, composer and card stay as they were. The README worker is put
-// back to waiting on its push at the end, so the redesign world stays as the boards show it.
+// back to waiting on its push at the end, so the redesign world stays as the boards show it. Then
+// the Captain's "Worker waiting." banner (ui/gui-worker-banner.js) is pressed with the mouse: its
+// Approve and Decline answer the worker while the prompt keeps the focus and the draft, and its
+// Open opens the worker on its own approval card.
 //
 //   export SWEEP_DIR=... SWEEP_HUB_PORT=... SWEEP_PG_PORT=... SWEEP_GO_PORT=...
 //   export CARGO=true CARGO_TARGET_DIR=<a checkout's target>
@@ -89,6 +92,23 @@ async function answer(page, keys, choice, before) {
   return { workersBefore, t0 };
 }
 
+/** Presses the Captain's "Worker waiting." banner's `button` with the mouse while the prompt holds
+ * the focus and the draft, and checks both stay. */
+async function pressBanner(page, keys, button, before) {
+  await page.evaluate(() => prompt.focus());
+  const banner = await waitFor("the Worker waiting banner", () => page.evaluate(() => !workerBanner.hidden && workerBanner.innerText.replace(/\s+/g, " ").trim()), 15000);
+  check(banner.startsWith(`Worker waiting. ${world.WORLD.threads.readme.title} needs your approval to run ${PUSH}`), `the banner reads "${banner}"`);
+  check(/Decline/.test(banner) && /Approve/.test(banner) && /Open/.test(banner), "the banner offers Decline, Approve and Open");
+  const workersBefore = await page.evaluate((k) => workersKey(tabByKey(k)), keys.captain);
+  const t0 = Date.now();
+  await page.click(`#worker-banner ${button}`);
+  const after = await page.evaluate(({ captain }) => ({ focused: document.activeElement === prompt, prompt: prompt.value, draft: drafts[threadKey(tabByKey(captain))] ?? "", active: active?.key }), keys);
+  if (button === "[data-worker-open]") return after;
+  check(after.focused, `the prompt kept the focus after ${button}`);
+  check(after.prompt === before.prompt && after.draft === before.draft && after.active === before.active, `the Captain's draft and thread stayed after ${button}`);
+  return { workersBefore, t0 };
+}
+
 async function proveAnswered(page, keys, { workersBefore, t0 }, seen, what) {
   const screen = await waitFor(`${what} on the worker's screen`, async () => {
     const lines = await page.evaluate((k) => screenLines(tabByKey(k)), keys.worker);
@@ -156,6 +176,17 @@ async function proveAnswered(page, keys, { workersBefore, t0 }, seen, what) {
     const reason = "Push to a fork instead";
     await proveAnswered(page, keys, await answer(page, keys, { text: reason }, before), `declined: ${reason}`, "Decline with a reason");
     await rearm(page, keys);
+
+    await proveAnswered(page, keys, await pressBanner(page, keys, '[data-worker-answer="approve"]', before), "chose 1", "the banner's Approve");
+    await waitFor("the banner to go once the worker went on", () => page.evaluate(() => workerBanner.hidden), 10000);
+    check(true, "the banner went away with nothing left to answer");
+    await rearm(page, keys);
+    await proveAnswered(page, keys, await pressBanner(page, keys, '[data-worker-answer="decline"]', before), "chose 3", "the banner's Decline");
+    await rearm(page, keys);
+    const opened = await pressBanner(page, keys, "[data-worker-open]", before);
+    check(opened.active === keys.worker, `the banner's Open opened the worker (${opened.active})`);
+    check(await page.evaluate(() => approval.dataset.kind === "approval" && !approval.hidden && approval.querySelector("pre")?.textContent === "git push origin readme-tidy"), "the worker's own card shows its push");
+    await page.evaluate((k) => activate(tabByKey(k)), keys.captain);
     const title = await page.evaluate((k) => threadTitle(tabByKey(k)), keys.worker);
     check(title === world.WORLD.threads.readme.title, `the README worker waits on its push again under its title "${title}", as the boards show it`);
     check(!errors.length, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);
