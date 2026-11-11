@@ -194,7 +194,12 @@ document.getElementById("chat-head").after(workersPill);
 function renderWorkersPill() {
   const tab = active;
   const rows = tab && guiOn() && onPhone() && !terminalOnly(tab) ? workersOf(tab) : [];
-  workersPill.hidden = !rows.length;
+  if (workersPill.hidden !== !rows.length) {
+    // The pill takes its height from the thread, which keeps to its end if it was there.
+    const atEnd = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight <= 40;
+    workersPill.hidden = !rows.length;
+    if (atEnd) threadView.scrollTop = threadView.scrollHeight;
+  }
   if (!rows.length) return;
   const s = workersSummary(rows);
   const glyph = s.working ? "working" : s.needs ? "needs" : "done";

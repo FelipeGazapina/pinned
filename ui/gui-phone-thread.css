@@ -33,6 +33,10 @@
 
   /* The Workers block in the chat: a row each that opens its worker, its counts in the pill. */
   #thread { padding: 10px 16px 200px; }
+  #thread .turn .bubble { max-width: min(300px, 80%); padding: 10px 14px; border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.065); }
+  #thread .turn :is(.bubble .md, .assistant, .narration) { font-size: 16px; line-height: 1.4; }
+  #thread .turn .assistant { color: rgb(var(--g-fg-rgb) / 0.92); }
+  #thread .work > summary { font-size: 14px; }
   .workers { border-color: rgb(var(--g-ink-rgb) / 0.09); border-radius: 14px; background: rgb(var(--g-ink-rgb) / 0.02); font-size: 16px; line-height: 1.4; }
   .workers-head { display: none; }
   .worker-row + .worker-row { border-top-color: rgb(var(--g-ink-rgb) / 0.06); }
