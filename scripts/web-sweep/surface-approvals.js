@@ -166,7 +166,8 @@ async function approveBoth(view, agent, shot, name) {
   await unlock(view, shot);
   await waitFor(`${shot}: the account the approval added`, () => view.evaluate((n) => document.getElementById("account-list")?.innerText.includes(n), name));
   check(await view.evaluate(() => !document.getElementById("agent-asking")), `${shot}: the form forgets the request once it ran`);
-  await view.evaluate(() => settingsOpen() && toggleSettings());
+  // Settings' Back is the way out: to the app on a desktop, to More and its tab bar on a phone.
+  if (await view.evaluate(() => settingsOpen())) await view.click("#settings-back");
   await openWaiting(view);
   await waitFor(`${shot}: pair_code still waits`, async () => (await asksShown(view)).join(" | ") === "Pair a machine");
   await view.click(`#page-view .ny-card[data-confirmation="${pair.id}"] [data-agent=approve]`);

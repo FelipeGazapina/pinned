@@ -328,7 +328,7 @@ const errors = [];
       await B.tap(row(t1.key));
       await waitFor("the phone's sidebar to close on the tapped thread", () => B.evaluate(() => document.body.dataset.sidebar === "closed"));
     }
-    await B.tap("#chat-sidebar-toggle");
+    await B.tap("#chat-back");
     await waitFor("the phone's sidebar", () => B.evaluate(() => document.body.dataset.sidebar === "open" && !document.body.classList.contains("sidebar-animating")));
     check(await cardTitle(B, t1.key) === "Fix login" && await B.evaluate((s) => !!document.querySelector(`${s} .pin`), row(t2.key)), "the phone lost the rename or the pin");
     await B.screenshot(path.join(SCREENS, "session-marks-phone.png"));

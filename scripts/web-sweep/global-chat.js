@@ -323,8 +323,8 @@ const sendText = (page, text) => page.evaluate((t) => {
       return view.status === "needs-input" && !view.interrupted;
     }, keys.pinned));
     s = await page.evaluate(state);
-    console.log("idle notice:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
-    check(s.waitingHead === null && s.waitingRows.length === 0, `the idle notice waits on Felipe: ${JSON.stringify(s.waitingRows)}`);
+    console.log("idle notice:", JSON.stringify({ needsYou: s.needsYou }));
+    check(s.needsYou === "0", `the idle notice waits on Felipe: Needs you counts ${s.needsYou}`);
 
     await page.evaluate((k) => activate(tabByKey(k)), keys.site);
     await sendText(page, "/question");
@@ -339,26 +339,28 @@ const sendText = (page, text) => page.evaluate((t) => {
     check(!s.threadRows.includes(globalKey), "the global tab joined the thread list");
     check(await page.evaluate((k) => tabByKey(k).view.status === "needs-input" && !tabByKey(k).view.interrupted, keys.pinned), "the pinned Captain left its idle notice");
 
-    // A turn that ends asking the user still waits once Claude Code's idle notice follows it, as
-    // monorepo-photoshot's "PR #254" did, and so does a failure.
+    // A turn that ends asking the user blocks nobody: once Claude Code's idle notice follows it the
+    // question stays on the thread and lists as a quiet card, outside the count. A failure waits.
     await page.evaluate((k) => activate(tabByKey(k)), keys.pinned);
     await sendText(page, "asks");
-    await waitFor("the asked question", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"));
+    await waitFor("the asked question", () => page.evaluate((k) => tabByKey(k).view.question === "Should I cut the release now?", keys.pinned));
     await waitFor("the idle notice after the question", () => page.evaluate((k) => tabByKey(k).view.status === "needs-input", keys.pinned));
     const asked = await page.evaluate((k) => tabByKey(k).view, keys.pinned);
     console.log("asked:", JSON.stringify({ status: asked.status, interrupted: asked.interrupted ?? false, message: asked.message, question: asked.question }));
     check(!asked.interrupted && asked.question === "Should I cut the release now?", "the pinned Captain's question did not survive its idle notice");
-    check(await page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"), "the idle notice took the question off the list");
+    check(await page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "1"), "a finished turn that asked joined the count");
     await page.evaluate((k) => activate(tabByKey(k)), keys.api);
     await sendText(page, "spent");
-    await waitFor("the failure", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "3"));
+    await waitFor("the failure", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"));
     await page.click('#side-nav [data-nav="needs-you"]');
-    await waitFor("three cards", () => page.evaluate(() => document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])').length === 3));
+    await waitFor("two cards", () => page.evaluate(() => document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])').length === 2));
     s = await page.evaluate(state);
     console.log("waiting:", JSON.stringify({ needsYou: s.needsYou, rows: s.waitingRows }));
-    check(s.needsYou === "3", `the Needs you row counts ${s.needsYou}`);
+    check(s.needsYou === "2", `the Needs you row counts ${s.needsYou}`);
     const kinds = await page.evaluate(() => [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((r) => `${r.dataset.kind} ${r.querySelector(".ny-where").textContent.split(" · ")[0]}`).sort());
-    check(JSON.stringify(kinds) === JSON.stringify(["failed api", "question pinned", "question site"]), `rows: ${JSON.stringify(kinds)}`);
+    check(JSON.stringify(kinds) === JSON.stringify(["failed api", "question site"]), `rows: ${JSON.stringify(kinds)}`);
+    const offer = await page.evaluate((k) => document.querySelector(`#page-view .ny-card[data-kind="offer"][data-key="thread:${k}"] .ny-sub`)?.textContent ?? null, keys.pinned);
+    check(offer === "Asked · Should I cut the release now?", `the pinned Captain's quiet card: ${offer}`);
     await page.screenshot(path.join(SCREENS, "global-chat-waiting.png"));
 
     // Needs you answers a question on its card; a failure's card opens its thread.
@@ -416,7 +418,8 @@ const sendText = (page, text) => page.evaluate((t) => {
     check(await page.evaluate((k) => !tabByKey(k).view.question, keys.pinned), "the pinned Captain kept its question after the next turn");
 
     // The sidebar tree: the Needs you row with its count above the list, then each project with its
-    // Captain, the Captain's workers under it, and the project's plain threads.
+    // Captain, the Captain's workers under it, and the project's plain threads. A project's head
+    // counts every thread of it that works, so alpha reads 2 running: its Captain and one worker.
     await page.size(1440, 900);
     const alpha = fs.realpathSync(path.join(WORK, "alpha"));
     const beta = fs.realpathSync(path.join(WORK, "beta"));
@@ -438,7 +441,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     const asks = await page.evaluate(() => [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((c) => c.dataset.key.replace(/^thread:/, "")));
     check(asks.length === 2 && asks.includes(tree.waiting), `waiting cards: ${JSON.stringify(asks)}`);
     check(tokens[0].startsWith("project "), `the list does not start with a project: ${JSON.stringify(tokens.slice(0, 2))}`);
-    const alphaAt = tokens.indexOf("project alpha 1 queued 1 running sweep-node");
+    const alphaAt = tokens.indexOf("project alpha 1 queued 2 running sweep-node");
     check(alphaAt >= 0, `alpha's head: ${JSON.stringify(tokens.filter((t) => t.startsWith("project ")))}`);
     check(JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5)) === JSON.stringify([tree.captain, `  ${tree.w1}`, `  ${tree.w2}`, tree.plain]),
       `alpha's Captain, its two workers under it, then the plain thread: ${JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5))}`);
@@ -474,7 +477,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("alpha's head on the phone", () => small.evaluate(() => [...document.querySelectorAll(".project-head")].some((h) => /queued/.test(h.innerText))));
     const phoneTokens = await small.evaluate(sidebarTokens);
     const badge = await small.evaluate(() => document.querySelector('#phone-tabs [data-phone-tab="needs-you"] .badge:not([hidden])')?.textContent ?? "0");
-    check(phoneTokens.includes("project alpha 1 queued 1 running sweep-node") && badge === "2", `phone sidebar: ${JSON.stringify(phoneTokens)}, Needs you ${badge}`);
+    check(phoneTokens.includes("project alpha 1 queued 2 running sweep-node") && badge === "2", `phone sidebar: ${JSON.stringify(phoneTokens)}, Needs you ${badge}`);
     await small.screenshot(path.join(SCREENS, "sidebar-tree-phone.png"));
     await small.evaluate(() => document.querySelector(".project-head").scrollIntoView());
     await small.screenshot(path.join(SCREENS, "sidebar-tree-phone-projects.png"));
