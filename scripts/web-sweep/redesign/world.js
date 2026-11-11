@@ -191,12 +191,14 @@ async function ensureMachines(page, ctx) {
 // Runs in the page: the key of the open thread titled `title`, if any.
 const keyTitled = (title) => tabs.find((t) => threadTitle(t) === title)?.key ?? null;
 
-/** Opens a thread in `cwd`, sends `prompt`, retitles it `title`, and waits for `until` statuses. */
+/** Opens a thread in `cwd`, or without a project when `cwd` is null, sends `prompt`, retitles it
+ * `title`, and waits for `until` statuses. */
 async function thread(page, ctx, { machine, cwd, title, prompt, until, orchestrator = false }) {
   const found = await page.evaluate(keyTitled, title);
   if (found) return found;
   const key = await page.evaluate(async ({ machine, cwd, orchestrator }) => {
-    const tab = await revealTab(machine, await callOn(machine, orchestrator ? { cmd: "open_orchestrator", path: cwd } : { cmd: "open_tab", path: cwd, bypass: false }));
+    const call = orchestrator ? { cmd: "open_orchestrator", path: cwd } : cwd ? { cmd: "open_tab", path: cwd, bypass: false } : { cmd: "open_scratch", bypass: false };
+    const tab = await revealTab(machine, await callOn(machine, call));
     startTab(tab);
     return tab.key;
   }, { machine, cwd, orchestrator });
@@ -219,15 +221,16 @@ async function seedOnce(page, ctx) {
     fs.writeFileSync(path.join(home(m), "fake-turns.json"), JSON.stringify([...CAPTAIN_TURNS, ...LOOSE_TURNS], null, 1));
   }
   const pinned = repo(home(T.release.machine), "pinned", WORLD.captain.branch);
-  const updater = worktree(pinned, "fix/updater-retry", path.join(home(T.updater.machine), "work", "pinned-updater"));
+  // A `claude --worktree` checkout reports to the repository that holds it, so the updater's
+  // thread joins the pinned project as on the board.
+  const exclude = path.join(pinned, ".git", "info", "exclude");
+  if (!fs.readFileSync(exclude, "utf8").includes(".claude/")) fs.appendFileSync(exclude, ".claude/\n");
+  const updater = worktree(pinned, "fix/updater-retry", path.join(pinned, ".claude", "worktrees", "updater-retry"));
   const site = repo(home(T.hero.machine), "site", "fix/hero-spacing", { "src/components/Hero.css": HERO_CSS_BEFORE }, { "src/components/Hero.css": HERO_CSS_AFTER });
   const api = repo(home(T.rate.machine), "api", "feat/rate-limit");
-  const loose = path.join(home(T.two.machine), "notes");
-  fs.mkdirSync(loose, { recursive: true });
 
-  // Projects sort by their newest message, so the board's last project is seeded first.
   const keys = {};
-  keys.two = await thread(page, ctx, { machine: ids[T.two.machine], cwd: fs.realpathSync(loose), title: T.two.title, prompt: "Should the Captain run two workers at a time?", until: ["done"] });
+  keys.two = await thread(page, ctx, { machine: ids[T.two.machine], cwd: null, title: T.two.title, prompt: "Should the Captain run two workers at a time?", until: ["done"] });
   keys.rate = await thread(page, ctx, { machine: ids[T.rate.machine], cwd: api, title: T.rate.title, prompt: T.rate.title, until: ["working"] });
   keys.hero = await thread(page, ctx, { machine: ids[T.hero.machine], cwd: site, title: T.hero.title, prompt: HERO_PROMPT, until: ["done"] });
   keys.updater = await thread(page, ctx, { machine: ids[T.updater.machine], cwd: updater, title: T.updater.title, prompt: T.updater.title, until: ["done"] });
@@ -254,6 +257,29 @@ async function seedOnce(page, ctx) {
     }, ids[HOST]);
     await ctx.waitFor("the orchestrator's thread", () => page.evaluate(() => tabs.some(isGlobalOrchestratorTab)), 30000);
   }
+  // The sidebar lists threads newest first by when the page first saw them, which follows the order
+  // the machines answer in. A drag fixes it, so the rows are put in the board's order as a drag would.
+  await page.evaluate((order) => {
+    const marked = order.map((key) => threadKey(tabByKey(key)));
+    changeMarks(marked[0], () => (sideMarks.order = marked));
+  }, ["release", "updater", "hero", "rate", "two"].map((id) => keys[id]));
+  // The board's shelves: earlier conversations opened again without starting, as a connector's run
+  // opens one, then snoozed or settled as the row's menu does it, without the undo notice. A
+  // resumed thread carries its session, which is what the hub keeps marks by.
+  await page.evaluate(async ({ machine, cwd, snoozed, settled }) => {
+    const titles = [...Array.from({ length: snoozed }, (_, i) => `Snoozed thread ${i + 1}`), ...Array.from({ length: settled }, (_, i) => `Settled thread ${i + 1}`)];
+    for (const [i, title] of titles.entries()) {
+      const session = `shelf-${i + 1}`;
+      if (tabs.some((t) => t.view.session === session)) continue;
+      const tab = await revealTab(machine, await callOn(machine, { cmd: "open_run", run: { folder: cwd, args: ["--resume", session], env: [] } }));
+      const key = threadKey(tab);
+      changeMarks(key, () => {
+        sideMarks.titles[key] = title;
+        if (i < snoozed) sideMarks.snoozed[key] = { until: nowS() + 3 * 86400, at: nowS() };
+        else sideMarks.settled[key] = nowS();
+      });
+    }
+  }, { machine: ids[HOST], cwd: pinned, snoozed: 2, settled: 14 });
   return { machines: ids, threads: keys };
 }
 
