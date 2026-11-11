@@ -469,6 +469,9 @@ ${TRY}
 }
 
 (async () => {
+  // A display that sleeps takes the app's window off screen, and WebKit then gives its surfaces
+  // back, so the run would read less than someone at the Mac sees.
+  spawn("caffeinate", ["-d", "-w", String(process.pid)], { stdio: "ignore" }).on("error", () => {});
   const results = [];
   let failed = false;
   for (let run = 1; run <= RUNS; run++) {
