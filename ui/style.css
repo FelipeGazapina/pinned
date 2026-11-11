@@ -213,7 +213,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #mcp-endpoint { font: 12px ui-monospace, Menlo, monospace; }
 .badge.box { margin-left: 6px; }
 .convex-list .chips { margin: 6px 0 0; align-items: center; }
-#settings .convex-list select { width: auto; }
+#settings .convex-list select { width: auto; min-width: 0; max-width: 100%; }
+#settings #convex-project { flex: 1 1 auto; min-width: 0; }
 .chip:is(.convex-repo, .convex-table) { display: inline-flex; align-items: center; gap: 4px; color: var(--fg); }
 .chip:is(.convex-repo, .convex-table) button { padding: 0 2px; color: var(--muted); }
 .badge.convex-kind { margin-left: 0; border-color: currentColor; }
