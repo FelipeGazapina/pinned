@@ -1,0 +1,201 @@
+/* A thread at 768px and below, as Phone-Thread, Phone-Workers, Phone-Approval and Phone-Actions draw
+   it (gui-phone-thread.js). Above that width none of these pieces show. */
+#chat :is(#chat-back, #head-sub, #workers-pill, #ask-card, #composer-chip) { display: none; }
+
+@media (max-width: 768px) {
+  /* The header: back, the title over its second line, and ⋯, each target 44px. */
+  #chat-head { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; grid-template-rows: auto auto; align-content: center; gap: 0 4px;
+    height: 52px; padding: 0 6px; }
+  #chat-head > :not(#chat-back, .crumb, #head-sub, #head-more, #header-menu) { display: none !important; }
+  #chat-head #chat-back, #chat-head #head-more { display: grid; place-items: center; grid-row: 1 / 3; width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+    border-radius: 22px; color: var(--g-fg); }
+  #chat-head #chat-back { grid-column: 1; }
+  #chat-head #head-more { grid-column: 3; }
+  #chat-head #chat-back svg, #chat-head #head-more svg { width: 22px; height: 22px; }
+  #chat-head .crumb { grid-column: 2; grid-row: 1; gap: 0; min-width: 0; font-size: 17px; font-weight: 600; line-height: 1.4; }
+  #chat-head .crumb > :not(.title, input.rename) { display: none; }
+  #chat-head .crumb .title, #chat-head .crumb button.title { flex: 1 1 auto; min-width: 0; min-height: 0; font-weight: 600; }
+  #chat-head .crumb .title > .text { padding: 0; }
+  #chat-head .crumb .title .chev { display: none; }
+  #chat-head #head-sub { display: block; grid-column: 2; grid-row: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 13px; line-height: 1.4; color: rgb(var(--g-fg-rgb) / 0.55); }
+  #chat-head #head-sub:empty { display: none; }
+
+  /* The Workers pill under the header. */
+  #chat #workers-pill:not([hidden]) { display: flex; flex: none; align-items: center; gap: 10px; height: 46px; margin: 0 12px 4px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1);
+    border-radius: 12px; background: var(--g-raised); color: var(--g-fg); font-size: 14px; line-height: 1.4; text-align: left; }
+  #workers-pill .status-glyph { --glyph-ring: 2px; }
+  #workers-pill .count { font-weight: 600; }
+  #workers-pill .working { color: var(--g-blue); }
+  #workers-pill .needs { color: var(--g-warning-fg); }
+  #workers-pill .spacer { flex: 1; }
+  #workers-pill .chev { flex: none; color: var(--g-side-muted); }
+
+  /* The Workers block in the chat: a row each that opens its worker, its counts in the pill. */
+  #thread { padding: 10px 16px 200px; }
+  #thread .turn .bubble { max-width: min(328px, calc(100% - 30px)); padding: 10px 14px; border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.065); }
+  /* A theme names its own Message surface. */
+  html[data-theme-id]:not([data-theme-id=""]) #thread .turn .bubble { background: var(--g-message); }
+  #thread .turn :is(.bubble .md, .assistant, .narration) { font-size: 16px; line-height: 1.4; }
+  #thread .turn .assistant { color: rgb(var(--g-fg-rgb) / 0.92); }
+  #thread .work > summary { font-size: 14px; }
+  .workers { border-color: rgb(var(--g-ink-rgb) / 0.09); border-radius: 14px; background: rgb(var(--g-ink-rgb) / 0.02); font-size: 16px; line-height: 1.4; }
+  .workers-head { display: none; }
+  .worker-row + .worker-row { border-top-color: rgb(var(--g-ink-rgb) / 0.06); }
+  .worker-head { gap: 12px; min-height: 56px; padding: 8px 12px; }
+  .worker-head .status-glyph { --glyph-ring: 2px; }
+  .worker-text { gap: 1px; }
+  .worker-title, .worker-row:is([data-state="done"], [data-state="stopped"], [data-state="failed"]) .worker-title { font-size: 15px; font-weight: 600; color: var(--g-fg); }
+  .worker-step { font-size: 13px; color: rgb(var(--g-fg-rgb) / 0.55); }
+  .worker-time { font-size: 13px; color: var(--g-side-muted); }
+  .worker-row[data-state="done"] .worker-time { font-size: 0; }
+  .worker-row[data-state="done"] .worker-time::before { content: "Done"; font-size: 13px; }
+  .worker-row[data-state="done"] .status-glyph[data-glyph="done"]::after { display: none; }
+  .worker-head .chev { width: 16px; height: 16px; color: rgb(var(--g-fg-rgb) / 0.55); }
+  .worker-head > .worker-review, .worker-model { display: none; }
+
+  /* Over the composer: a worker waiting on the user, or this thread's own ask once its sheet closed. */
+  #composer :is(#worker-banner, #ask-card):not([hidden]) { display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: auto; max-width: none; min-height: 48px;
+    margin: 0 10px; padding: 0 6px 0 12px; border: 1px solid rgb(var(--g-warning-rgb) / 0.3); border-bottom: 0; border-radius: 14px 14px 0 0;
+    background: rgb(var(--g-warning-rgb) / 0.08); font-size: 14px; line-height: 1.4; }
+  #composer #ask-card:not([data-kind="approval"]) { border-color: rgb(var(--g-info-rgb) / 0.3); background: rgb(var(--g-info-rgb) / 0.08); }
+  #composer :is(#worker-banner, #ask-card) .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--g-warning); }
+  #composer #ask-card:not([data-kind="approval"]) .dot { background: var(--g-info); }
+  #composer :is(#worker-banner, #ask-card) .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #composer :is(#worker-banner, #ask-card) .primary { flex: none; display: flex; align-items: center; height: 36px; min-height: 36px; padding: 0 14px; border-radius: 10px;
+    background: var(--g-primary); color: var(--g-on-primary); font-size: 14px; font-weight: 600; box-shadow: none; }
+  #composer #approval { display: none; }
+
+  /* The composer: always the full box, one chip for the model and its modes, then attach, mic and send. */
+  #composer { padding: 8px 12px max(0px, calc(8px - env(safe-area-inset-bottom))); }
+  #composer > * { max-width: none; }
+  #composer .box { display: flex; flex-direction: column; gap: 6px; padding: 12px 8px 8px 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 22px;
+    background: var(--g-composer); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  /* 16px keeps iOS from zooming the page when the prompt takes focus. A larger Prompt size still applies. */
+  #prompt { min-height: 22px; padding: 0; font-size: max(16px, var(--prompt-size, 16px)); line-height: 1.4; }
+  #prompt-mirror { padding: 0; font-size: max(16px, var(--prompt-size, 16px)); line-height: 1.4; }
+  #composer .tools { gap: 2px; padding: 0; }
+  #composer .tools > .controls, #composer .tools > #context-meter, #composer .tools > #composer-dictate-lang { display: none; }
+  #composer #composer-chip { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; height: 36px; min-height: 36px; margin-left: -6px; padding: 0 12px;
+    border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.07); color: var(--g-fg); font-size: 14px; font-weight: 400; }
+  #composer #composer-chip .name { display: inline; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #composer #composer-chip .chev { flex: none; width: 13px; height: 13px; color: var(--g-side-muted); opacity: 1; }
+  #composer .tools > :is(#composer-attach, #composer-dictate) { width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: 22px; color: var(--g-side-muted); }
+  #composer .tools > :is(#composer-attach, #composer-dictate) .i { width: 22px; height: 22px; stroke-width: 1.75; }
+  #composer .tools .round { width: 44px; height: 44px; min-width: 44px; min-height: 44px; margin-left: 0; border-radius: 22px; }
+  #composer .tools .send .i { width: 22px; height: 22px; stroke-width: 2; }
+  #composer[data-empty="true"] .send { opacity: 1; }
+  #chat:not([data-hero="true"]) #composer-footer { display: none; }
+
+  :is(.workers-sheet .ws-answers, .workers-sheet .ws-foot, .workers-sheet .ws-say, .ask-sheet .ask-answers) button, .actions-sheet .act-primary { display: flex; align-items: center; justify-content: center; text-align: center; }
+  /* The approval sheet leaves the thread behind it undimmed; a tap there still closes it. */
+  .sheet-root:has(.ask-sheet) .sheet-scrim { background: transparent; }
+  /* The header names a worker's parent and its back button opens it. */
+  #thread .worker-of { display: none; }
+  /* A worker's brief, as Phone-Approval draws it. */
+  #thread .brief { gap: 4px; padding: 10px 14px; border-radius: 16px; }
+  #thread .brief-head { font-size: 13px; }
+  #thread .brief-from { color: var(--g-side-muted); }
+  #thread .brief-text { font-size: 16px; }
+
+  /* The Workers sheet. */
+  .workers-sheet { font-size: 16px; line-height: 1.4; }
+  .workers-sheet .ws-head { display: flex; align-items: center; gap: 10px; padding: 10px 8px 6px 20px; }
+  .workers-sheet h2 { margin: 0; font-size: 20px; font-weight: 700; line-height: 1.4; }
+  .workers-sheet .ws-count { flex: 1; font-size: 14px; color: var(--g-side-muted); }
+  .workers-sheet .ws-close { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 22px; color: var(--g-side-muted); }
+  .workers-sheet .ws-list { display: flex; flex-direction: column; gap: 8px; padding: 0 12px; }
+  .workers-sheet .ws-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid rgb(var(--g-warning-rgb) / 0.32); border-radius: 16px;
+    background: color-mix(in srgb, var(--g-warning) 6%, var(--g-canvas)); }
+  .workers-sheet .ws-card-head, .workers-sheet .ws-row { display: flex; align-items: center; gap: 12px; }
+  .workers-sheet .status-glyph { --glyph-ring: 2px; }
+  .workers-sheet .ws-text { flex: 1; min-width: 0; display: flex; flex-direction: column; text-align: left; }
+  .workers-sheet .ws-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .workers-sheet .ws-says { font-size: 13px; color: var(--g-warning-fg); }
+  .workers-sheet :is(.ws-model, .ws-time) { flex: none; font-size: 13px; color: var(--g-side-muted); font-variant-numeric: tabular-nums; }
+  .workers-sheet .ws-card pre { margin: 0; padding: 9px 11px; border-radius: 10px; background: var(--g-canvas); color: rgb(var(--g-fg-rgb) / 0.93); font: 13px/1.4 var(--g-mono);
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .workers-sheet .ask-text { margin: 0; font-size: 14px; color: rgb(var(--g-fg-rgb) / 0.79); white-space: pre-wrap; }
+  .workers-sheet .ws-answers, .workers-sheet .ws-foot { display: flex; gap: 8px; }
+  .workers-sheet :is(.ws-answers, .ws-foot, .ws-say) button { flex: 1; height: 44px; border-radius: 12px; font-size: 16px; font-weight: 600; }
+  .workers-sheet .ws-answers .outline { border: 1px solid rgb(var(--g-ink-rgb) / 0.16); background: transparent; color: var(--g-fg); }
+  .workers-sheet .primary { border: 0; background: var(--g-primary); color: var(--g-on-primary); box-shadow: none; }
+  .workers-sheet button:disabled { opacity: 0.6; }
+  .workers-sheet .ws-row { min-height: 64px; padding: 10px 14px; border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 16px; background: transparent; color: inherit; font: inherit; }
+  .workers-sheet .ws-row[data-state="done"] .ws-title { font-weight: 400; color: var(--g-text); }
+  .workers-sheet .ws-step { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-side-muted); }
+  .workers-sheet .ws-row .chev { flex: none; color: rgb(var(--g-fg-rgb) / 0.55); }
+  .workers-sheet .ws-row[data-depth] { margin-left: calc(var(--depth) * 20px); }
+  .workers-sheet .ws-foot { padding: 14px 12px 0; }
+  .workers-sheet .ws-foot button { border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: transparent; color: var(--g-fg); font-size: 15px; font-weight: 400; }
+  .workers-sheet .ws-foot .danger { border-color: rgb(var(--g-error-rgb) / 0.4); color: color-mix(in srgb, var(--g-error) 60%, white); }
+  .workers-sheet .ws-foot [hidden] { display: none; }
+  .workers-sheet .ws-say:not([hidden]) { display: flex; gap: 8px; padding: 10px 12px 0; }
+  .workers-sheet .ws-say input { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 12px; background: var(--g-canvas);
+    color: var(--g-fg); font: 16px var(--g-sans); outline: none; }
+  .workers-sheet .ws-say button { flex: none; padding: 0 16px; }
+
+  /* The sheet for the open thread's own ask. */
+  .ask-sheet { --sheet-pad-x: 16px; --sheet-gap: 12px; font-size: 16px; line-height: 1.4; }
+  .ask-sheet .ask-body { display: contents; }
+  .ask-sheet .ask-head { display: flex; align-items: center; gap: 10px; }
+  .ask-sheet .ask-head .lead { flex: none; width: 20px; height: 20px; color: var(--g-warning-fg); }
+  .ask-sheet:not([data-tone="approval"]) .ask-head .lead { color: var(--g-info); }
+  .ask-sheet h2 { flex: 1; min-width: 0; margin: 0; font-size: 18px; font-weight: 700; line-height: 1.4; }
+  .ask-sheet .ask-count { flex: none; font-size: 13px; color: var(--g-side-muted); font-variant-numeric: tabular-nums; }
+  .ask-sheet button.ask-count { min-height: 32px; padding: 0 6px; border-radius: 8px; }
+  .ask-sheet pre { margin: 0; max-height: 30vh; overflow: auto; padding: 12px 14px; border-radius: 12px; background: var(--g-canvas); color: rgb(var(--g-fg-rgb) / 0.93);
+    font: 14px/1.4 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ask-sheet :is(.ask-about, .ask-question) { margin: 0; font-size: 14px; color: rgb(var(--g-fg-rgb) / 0.79); white-space: pre-wrap; }
+  .ask-sheet .ask-question { font-size: 16px; color: var(--g-fg); }
+  .ask-sheet .ask-answers { display: flex; gap: 10px; }
+  .ask-sheet .ask-answers button { flex: 1; height: 52px; border-radius: 14px; font-size: 17px; font-weight: 600; }
+  .ask-sheet .ask-answers .outline { border: 1px solid rgb(var(--g-ink-rgb) / 0.18); background: transparent; color: var(--g-fg); }
+  .ask-sheet .ask-answers .primary { border: 0; background: var(--g-primary); color: var(--g-on-primary); box-shadow: none; }
+  .ask-sheet .ask-options { display: flex; flex-direction: column; gap: 8px; }
+  .ask-sheet .ask-option { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 14px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 14px;
+    background: transparent; color: var(--g-fg); font: inherit; text-align: left; }
+  .ask-sheet .ask-option[data-chosen] { border-color: rgb(var(--g-primary-rgb) / 0.6); }
+  .ask-sheet .ask-option.picked { background: rgb(var(--g-primary-rgb) / 0.14); }
+  .ask-sheet .ask-option .text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .ask-sheet .ask-option .label { font-weight: 600; }
+  .ask-sheet .ask-option .about { font-size: 13px; color: var(--g-side-muted); }
+  .ask-sheet .ask-option .tick { flex: none; width: 18px; height: 18px; color: var(--g-primary); }
+  .ask-sheet .ask-rows { display: flex; flex-direction: column; }
+  .ask-sheet .ask-row { display: flex; align-items: center; min-height: 48px; padding: 0 4px; border: 0; border-top: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 0;
+    background: transparent; color: var(--g-fg); font: inherit; font-size: 15px; text-align: left; }
+  .ask-sheet .ask-row.quiet { color: var(--g-side-muted); }
+  .ask-sheet .ask-row .label { flex: 1; min-width: 0; }
+  .ask-sheet .ask-row .end { flex: none; color: rgb(var(--g-fg-rgb) / 0.55); }
+
+  /* The thread's actions: its next steps, the tools that open beside it, then what the row menu does. */
+  .actions-sheet { --sheet-pad-x: 12px; --sheet-gap: 14px; font-size: 16px; line-height: 1.4; }
+  .actions-sheet :is(.act-main, .act-sub) { display: contents; }
+  .actions-sheet :is(.act-main, .act-sub)[hidden] { display: none; }
+  .actions-sheet .act-primaries { display: flex; gap: 8px; }
+  .actions-sheet .act-primary { flex: 1 1 auto; min-width: 0; height: 48px; padding: 0 8px; border-radius: 14px; font-weight: 600; white-space: nowrap; }
+  .actions-sheet .act-primary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .actions-sheet .act-primary.primary { border: 0; background: var(--g-primary); color: var(--g-on-primary); box-shadow: none; }
+  .actions-sheet .act-primary.outline { border: 1px solid rgb(var(--g-ink-rgb) / 0.16); background: transparent; color: var(--g-fg); }
+  .actions-sheet .act-primary:disabled { opacity: 0.5; }
+  .actions-sheet .act-tools { display: flex; flex-direction: column; gap: 6px; }
+  .actions-sheet .act-heading { padding: 0 4px; font-size: 13px; font-weight: 600; color: var(--g-side-muted); }
+  .actions-sheet .act-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .actions-sheet .act-tile { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; height: 60px; padding: 0 4px;
+    border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 14px; background: rgb(var(--g-ink-rgb) / 0.025); color: var(--g-fg); font-size: 14px; }
+  .actions-sheet .act-tile[aria-pressed="true"] { border-color: rgb(var(--g-primary-rgb) / 0.6); }
+  .actions-sheet .act-tile:disabled { opacity: 0.45; }
+  .actions-sheet .act-tile > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions-sheet .act-tile .label { font-weight: 600; }
+  .actions-sheet .act-tile .hint { font-size: 12px; color: var(--g-side-muted); }
+  .actions-sheet .act-list { display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 14px; }
+  .actions-sheet .act-row { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 14px; border: 0; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.06); border-radius: 0;
+    background: rgb(var(--g-ink-rgb) / 0.025); color: var(--g-fg); font: inherit; font-size: 15px; text-align: left; }
+  .actions-sheet .act-row:last-child { border-bottom: 0; }
+  .actions-sheet .act-row.danger { color: color-mix(in srgb, var(--g-error) 60%, white); }
+  .actions-sheet .act-row:disabled { opacity: 0.5; }
+  .actions-sheet .act-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions-sheet .act-row .hint { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-side-muted); }
+  .actions-sheet .act-row .end { flex: none; width: 16px; height: 16px; color: rgb(var(--g-fg-rgb) / 0.55); }
+  .actions-sheet .act-back { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 4px; color: var(--g-fg); font-size: 17px; font-weight: 600; }
+}

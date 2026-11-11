@@ -1,0 +1,333 @@
+/* Settings in the app view: a page over the whole window, in the sidebar's and thread's look. The
+   workspace only turns invisible underneath, so its terminals keep their size and the thread its scroll. */
+body[data-mode="gui"][data-page="settings"] #workspace { visibility: hidden; }
+body[data-mode="gui"] #settings { position: absolute; inset: 0; color-scheme: var(--g-scheme); font-size: 13px; color: var(--g-text);
+  --fg: var(--g-fg); --muted: var(--g-muted); --border: var(--g-input); --working: var(--g-primary); --done: var(--g-success); }
+
+body[data-mode="gui"] #settings-nav { width: var(--sidebar-width); gap: 0; padding: 0 8px 8px; font-size: 14px; color: var(--g-side-fg);
+  background-color: var(--g-side); background-image: var(--grain); background-size: 256px 256px; border-right: 1px solid var(--g-input); }
+body[data-mode="gui"] #settings-nav .head { height: var(--topbar); flex: none; display: flex; align-items: center; gap: 12px; margin: 0 -8px 4px; padding: 0 12px;
+  cursor: grab; user-select: none; background: linear-gradient(180deg, rgb(var(--g-primary-rgb) / 0.16), transparent 80%); }
+body[data-mode="gui"] #settings-nav .head b { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+body[data-mode="gui"] #settings-nav .icon { padding: 0; width: 28px; height: 28px; border-radius: 8px; background: none; color: var(--g-side-muted); }
+body[data-mode="gui"] #settings-nav .icon:hover { background: var(--g-row-hover); color: var(--g-side-fg); }
+body[data-mode="gui"] #settings-nav .links { display: flex; flex-direction: column; gap: 1px; }
+body[data-mode="gui"] #settings-nav .links[hidden] { display: none; }
+body[data-mode="gui"] #settings-nav .links button { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 8px;
+  color: var(--g-side-muted); font-weight: 500; }
+body[data-mode="gui"] #settings-nav .links button:hover { background: var(--g-row-hover); color: var(--g-side-fg); }
+body[data-mode="gui"] #settings-nav .links button.active { background: var(--g-row-active); color: var(--g-fg); }
+body[data-mode="gui"] #settings-nav .i { display: block; color: rgb(var(--g-side-muted-rgb) / 0.7); }
+body[data-mode="gui"] #settings-nav .active .i, body[data-mode="gui"] #settings-nav .icon .i { color: inherit; }
+
+/* One centered column, like the thread's lane. */
+body[data-mode="gui"] #settings-page { --top: 40px; padding: var(--top) 40px 96px; }
+body[data-mode="gui"] #settings-page > * { max-width: 720px; margin-inline: auto; }
+body[data-mode="gui"] #settings-page h2 { margin-bottom: 6px; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; color: var(--g-fg); }
+body[data-mode="gui"] #settings-page h2 ~ h2 { margin-top: 32px; font-size: 15px; letter-spacing: -0.01em; }
+body[data-mode="gui"] #settings-page p { line-height: 1.55; }
+body[data-mode="gui"] #settings :is(.hint, .meta) { color: var(--g-muted); }
+body[data-mode="gui"] #settings code { padding: 1px 4px; border-radius: 4px; background: var(--g-hover); font: 12px var(--g-mono); color: var(--g-fg); }
+body[data-mode="gui"] #settings b { color: var(--g-fg); font-weight: 600; }
+body[data-mode="gui"] #settings .error { color: var(--g-error); }
+
+body[data-mode="gui"] #settings :is(input:not([type="checkbox"]), select, textarea) { min-height: 32px; padding: 6px 10px; border: 1px solid var(--g-input);
+  border-radius: 8px; background-color: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font-size: 13px; transition: border-color 0.12s, box-shadow 0.12s; }
+body[data-mode="gui"] #settings :is(input, select, textarea)::placeholder { color: rgb(var(--g-muted-rgb) / 0.7); }
+body[data-mode="gui"] #settings :is(input, select, textarea):hover { border-color: rgb(var(--g-ink-rgb) / 0.14); }
+body[data-mode="gui"] #settings :is(input, select, textarea):focus { border-color: rgb(var(--g-primary-rgb) / 0.8); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.2); }
+body[data-mode="gui"] #settings select { appearance: none; -webkit-appearance: none; padding-right: 32px; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23818181' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 14px; }
+body[data-mode="gui"] #settings select option { background: var(--g-raised); color: var(--g-fg); }
+body[data-mode="gui"] #settings textarea { font: 12px/1.55 var(--g-mono); }
+body[data-mode="gui"] #settings input[type="checkbox"] { accent-color: var(--g-primary); }
+
+body[data-mode="gui"] #settings :is(button.primary, button.secondary) { height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; padding: 0 14px; border-radius: 8px; font-weight: 500; }
+body[data-mode="gui"] #settings button.primary { background: var(--g-primary); color: var(--g-on-primary); box-shadow: inset 0 1px rgb(255 255 255 / 0.16); }
+body[data-mode="gui"] #settings button.primary:hover:not(:disabled) { background: var(--g-primary-hover); }
+body[data-mode="gui"] #settings button.primary:disabled { background: var(--g-input); color: var(--g-muted); box-shadow: none; }
+body[data-mode="gui"] #settings button.secondary { border: 1px solid var(--g-input); background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); }
+body[data-mode="gui"] #settings button.secondary:hover { background: var(--g-input); }
+body[data-mode="gui"] #settings button.danger:hover { background: var(--g-error); border-color: var(--g-error); color: var(--g-on-primary); }
+body[data-mode="gui"] #settings :is(.confirm, .sync-stopped) { border-color: rgb(var(--g-error-rgb) / 0.5); border-radius: 12px; background: rgb(var(--g-error-rgb) / 0.06); }
+body[data-mode="gui"] #settings .confirm button.danger { background: var(--g-error); border-color: var(--g-error); }
+
+/* Cards, list rows and the workflow canvas share one surface. */
+body[data-mode="gui"] #settings :is(.card, .flow-card, .template, .machine-row) { border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings .card { margin-block: 16px; padding: 16px; }
+body[data-mode="gui"] #settings :is(.flow-card, .template) { padding: 14px 16px; }
+body[data-mode="gui"] #settings :is(.flow-card, .template):hover { border-color: rgb(var(--g-ink-rgb) / 0.14); background: rgb(var(--g-ink-rgb) / 0.035); }
+body[data-mode="gui"] #settings .run-now-outcome { color: var(--g-muted); }
+body[data-mode="gui"] #settings .run-now-outcome.started { color: var(--g-success); }
+body[data-mode="gui"] #settings .run-now-outcome.refused { color: var(--g-error); }
+body[data-mode="gui"] #settings .new-card { padding: 14px; border-color: rgb(var(--g-ink-rgb) / 0.1); border-radius: 12px; color: var(--g-muted); }
+body[data-mode="gui"] #settings .new-card:hover { border-color: rgb(var(--g-primary-rgb) / 0.7); color: var(--g-fg); }
+body[data-mode="gui"] #settings .card-head { gap: 12px; margin-bottom: 12px; }
+body[data-mode="gui"] #settings .card-head b { font-size: 14px; }
+body[data-mode="gui"] #settings .logo { width: 32px; height: 32px; border-radius: 8px; }
+body[data-mode="gui"] #settings .badge { padding: 2px 10px; border-color: var(--g-input); font-weight: 500; }
+body[data-mode="gui"] #settings .badge[data-on="true"] { border-color: color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 10%, transparent); color: var(--g-success); }
+body[data-mode="gui"] #settings .steps { padding-left: 20px; line-height: 1.6; }
+body[data-mode="gui"] #settings .steps li { margin-bottom: 12px; }
+body[data-mode="gui"] #settings .row { gap: 8px; margin-top: 8px; }
+body[data-mode="gui"] #settings .machine-row { padding: 12px 14px; }
+body[data-mode="gui"] #settings .chip { height: 28px; padding: 0 12px; border-color: var(--g-input); border-radius: 999px; }
+body[data-mode="gui"] #settings .chip.active { border-color: rgb(var(--g-primary-rgb) / 0.7); background: rgb(var(--g-primary-rgb) / 0.12); }
+body[data-mode="gui"] #settings-page .project { padding: 8px 10px; border-radius: 8px; }
+body[data-mode="gui"] #settings-page .project:hover { background: var(--g-row-hover); }
+
+/* General's appearance choices read as one settings list: what it is on the left, its value on the right. */
+body[data-mode="gui"] #settings-page .look { display: grid; grid-template-columns: minmax(0, 1fr) 200px; column-gap: 24px; align-items: center;
+  margin-block: 0; padding: 14px 16px; border: 1px solid var(--g-border); border-top: 0; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings-page .looks-title + .look { border-top: 1px solid var(--g-border); border-radius: 12px 12px 0 0; }
+body[data-mode="gui"] #settings-page .look:last-child { border-radius: 0 0 12px 12px; }
+body[data-mode="gui"] #settings-page .look label { color: var(--g-fg); }
+body[data-mode="gui"] #settings-page .look .meta { grid-column: 1; margin: 2px 0 0; }
+body[data-mode="gui"] #settings-page .look select { grid-column: 2; grid-row: 1 / 3; }
+
+body[data-mode="gui"] #settings .editor-bar { top: calc(-1 * var(--top)); margin-top: calc(-1 * var(--top)); margin-bottom: 16px; padding: 16px 0 12px;
+  background: var(--g-canvas); border-color: var(--g-border); }
+body[data-mode="gui"] #settings .editor-bar input.title { font-size: 15px; }
+body[data-mode="gui"] #settings-page[data-view="edit"] { padding: 0; }
+body[data-mode="gui"] #settings-page[data-view="edit"] > * { max-width: none; margin-inline: 0; }
+body[data-mode="gui"] #settings-page[data-view="edit"] .editor-bar { margin: 0; padding: 10px 16px; }
+body[data-mode="gui"] #settings .editor { --line: rgb(var(--g-ink-rgb) / 0.24); --dot: rgb(var(--g-ink-rgb) / 0.11); --tile: var(--g-overlay); --ground: var(--g-canvas); }
+body[data-mode="gui"] #settings .flow .node { border-color: var(--g-input); border-radius: 16px; box-shadow: 0 1px 3px rgb(var(--g-shadow-rgb) / 0.08); }
+body[data-mode="gui"] #settings .flow .node.trigger { border-radius: 42px 16px 16px 42px; }
+body[data-mode="gui"] #settings .flow .node:hover { border-color: rgb(var(--g-ink-rgb) / 0.24); }
+body[data-mode="gui"] #settings .flow .open .node { border-color: rgb(var(--g-primary-rgb) / 0.9); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.22); }
+body[data-mode="gui"] #settings .category { border-color: var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings .flow .branch[data-branch="stop"] .node { background: rgb(var(--g-ink-rgb) / 0.04); box-shadow: none; }
+body[data-mode="gui"] #settings .flow .node.ghost { border-color: rgb(var(--g-ink-rgb) / 0.18); background: transparent; box-shadow: none; }
+body[data-mode="gui"] #settings .flow .node .warn { background: var(--g-error); }
+body[data-mode="gui"] #settings .flow .text b { font-size: 13px; }
+body[data-mode="gui"] #settings .flow .edge-label { border-color: var(--g-input); }
+body[data-mode="gui"] #settings :is(.canvas-zoom, .flow .add-menu) { border-color: var(--g-border); background: var(--g-raised); box-shadow: 0 4px 16px rgb(var(--g-shadow-rgb) / 0.1); }
+body[data-mode="gui"] #settings :is(.canvas-zoom button, .flow .add-menu button):hover:not(:disabled) { background: var(--g-row-hover); }
+body[data-mode="gui"] #settings .node-panel { border-color: var(--g-border); background: var(--g-raised); box-shadow: -8px 0 24px rgb(var(--g-shadow-rgb) / 0.06); }
+body[data-mode="gui"] #settings .node-panel-head { padding: 12px 12px 12px 16px; border-color: var(--g-border); }
+body[data-mode="gui"] #settings .node-panel-head b { font-size: 14px; }
+body[data-mode="gui"] #settings .details { gap: 14px; padding: 16px; }
+body[data-mode="gui"] #settings .details label { gap: 6px; color: var(--g-muted); }
+body[data-mode="gui"] #settings .details label.toggle { color: var(--g-fg); }
+
+/* SettingsSidebarNav.tsx's Search settings, between the head and the sections; results replace the sections. */
+body:not([data-mode="gui"]) #settings-nav :is(.settings-search, .settings-none, .settings-results) { display: none; }
+body[data-mode="gui"] #settings-nav .settings-search { display: flex; align-items: center; gap: 8px; height: 32px; flex: none; margin-bottom: 8px; padding: 6px 10px; border-radius: 8px; color: var(--g-side-muted); font-size: 14px; font-weight: 500; cursor: text; }
+body[data-mode="gui"] #settings-nav .settings-search:hover { background: var(--g-row-hover); color: var(--g-side-fg); }
+#settings-nav .settings-search > .i { width: 16px; height: 16px; color: rgb(var(--g-side-muted-rgb) / 0.8); }
+#settings-nav .settings-search input { flex: 1; min-width: 0; height: auto; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--g-side-fg); font: inherit; outline: none; -webkit-appearance: none; appearance: none; }
+#settings-nav .settings-search input::placeholder { color: var(--g-side-muted); }
+#settings-nav .settings-search input::-webkit-search-cancel-button, #settings-nav .settings-search input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
+#settings-nav .settings-search kbd { display: inline-flex; align-items: center; justify-content: center; height: 20px; min-width: 20px; padding: 0 4px; border-radius: 4px; background: var(--g-accent); color: var(--g-muted); font: 500 12px var(--g-sans); pointer-events: none; }
+#settings-nav .settings-search :is(kbd, .clear)[hidden] { display: none; }
+#settings-nav .settings-search .clear { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border-radius: 6px; color: var(--g-muted); }
+#settings-nav .settings-search .clear:hover { background: var(--g-hover); color: var(--g-fg); }
+#settings-nav .settings-search .clear .i { display: block; width: 12px; height: 12px; }
+body[data-mode="gui"] #settings-nav .settings-none:not([hidden]) { display: block; margin: 0; padding: 24px 8px; text-align: center; font-size: 12px; color: var(--g-side-muted); }
+body[data-mode="gui"] #settings-nav .settings-results:not([hidden]) { display: flex; flex-direction: column; gap: 4px; }
+#settings-nav .settings-results button { display: flex; align-items: flex-start; gap: 8px; min-height: 40px; padding: 8px; border-radius: 10px; text-align: left; color: var(--g-side-fg); font-size: 12px; }
+#settings-nav .settings-results button.on { background: var(--g-row-selected); }
+#settings-nav .settings-results button .i { width: 14px; height: 20px; flex: none; color: rgb(var(--g-side-muted-rgb) / 0.6); }
+#settings-nav .settings-results .text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+#settings-nav .settings-results .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; }
+#settings-nav .settings-results .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: rgb(var(--g-side-muted-rgb) / 0.75); }
+
+
+/* Agent activity: the actions waiting on Felipe as cards, then the audit trail as one list. */
+body[data-mode="gui"] #settings-page .agent-heading { margin: 24px 0 8px; font-size: 14px; font-weight: 600; color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirms { display: flex; flex-direction: column; gap: 8px; }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-audit) { border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-confirm { padding: 12px 14px; }
+body[data-mode="gui"] #settings .agent-once { margin-top: 16px; padding: 12px 14px; border-radius: 12px; color: var(--g-fg); }
+body[data-mode="gui"] #settings :is(.agent-confirm .who, .agent-once .hint) { color: var(--g-muted); }
+body[data-mode="gui"] #settings :is(.agent-confirm, .agent-once) button.outline { height: 32px; padding: 0 14px; }
+body[data-mode="gui"] #settings .agent-audit-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 14px; border-top: 1px solid var(--g-border); }
+body[data-mode="gui"] #settings .agent-audit-row:first-child { border-top: 0; }
+body[data-mode="gui"] #settings .agent-audit-row .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+body[data-mode="gui"] #settings .agent-audit-row .head b { font-weight: 500; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .head time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+body[data-mode="gui"] #settings .agent-audit-row > .meta { font-size: 12px; overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-audit-row .args { align-self: flex-start; max-width: 100%; padding: 4px 6px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+body[data-mode="gui"] #settings .agent-audit-row .detail { margin: 0; font-size: 12px; line-height: 1.45; color: var(--g-muted); overflow-wrap: anywhere; }
+body[data-mode="gui"] #settings .agent-outcome { margin-left: 0; padding: 1px 8px; font-size: 11px; }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="success"] { border-color: color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 10%, transparent); color: var(--g-success); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="primary"] { border-color: rgb(var(--g-primary-rgb) / 0.35); background: rgb(var(--g-primary-rgb) / 0.1); color: var(--g-primary); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="warning"] { border-color: rgb(var(--g-warning-rgb) / 0.35); background: rgb(var(--g-warning-rgb) / 0.1); color: var(--g-warning-fg); }
+body[data-mode="gui"] #settings .agent-outcome[data-tone="error"] { border-color: rgb(var(--g-error-rgb) / 0.4); background: rgb(var(--g-error-rgb) / 0.1); color: var(--g-error); }
+/* The line in a credential form that Approve on an agent's request opened: who asked, and that entering the key approves it. */
+body[data-mode="gui"] #settings .agent-asking { display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.06); color: var(--g-fg); }
+body[data-mode="gui"] #settings .agent-asking button { margin-left: auto; flex: none; }
+
+/* SettingsSection, SettingsGroup and SettingsRow. */
+.settings-sections { display: flex; flex-direction: column; gap: 32px; }
+.settings-section .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-height: 28px; margin-bottom: 10px; padding: 0 16px; }
+.settings-section .section-head h3 { display: flex; align-items: center; min-height: 28px; margin: 0; font-size: 14px; font-weight: 400; color: rgb(var(--g-fg-rgb) / 0.7); }
+.settings-section .section-head .advanced { display: flex; align-items: center; gap: 8px; min-height: 28px; font-size: 12px; font-weight: 500; color: var(--g-muted); cursor: pointer; }
+.settings-section:not(.plain) > .settings-group { border: 1px solid color-mix(in srgb, var(--g-border) 60%, transparent); border-radius: 14px; background: rgb(var(--g-raised-rgb) / 0.4); box-shadow: 0 1px 2px rgb(var(--g-shadow-rgb) / 0.05); }
+.settings-group > .settings-row + .settings-row { border-top: 1px solid color-mix(in srgb, var(--g-border) 50%, transparent); }
+.settings-row { container: settings-row / inline-size; padding: 12px 16px; outline: none; }
+.settings-row .row-line { display: flex; flex-direction: column; gap: 12px; }
+@container settings-row (min-width: 32rem) {
+  .settings-row .row-line { display: grid; grid-template-columns: minmax(0, 1fr) minmax(10rem, auto); align-items: center; gap: 32px; }
+  .settings-row .row-control { width: auto; justify-content: flex-end; }
+}
+.settings-row .row-text { min-width: 0; }
+.settings-row .row-title { display: flex; align-items: center; gap: 6px; min-height: 20px; }
+.settings-row h4 { margin: 0; font-size: 14px; font-weight: 500; color: var(--g-fg); }
+#settings-page .settings-row .row-text p { max-width: 576px; margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: rgb(var(--g-muted-rgb) / 0.8); }
+.settings-row .row-control { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.row-reset { display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; border-radius: 6px; color: var(--g-muted); }
+.row-reset:hover { background: var(--g-hover); color: var(--g-fg); }
+.row-reset[hidden] { display: none; }
+.row-reset .i { width: 12px; height: 12px; }
+.settings-pulse { animation: settings-pulse 650ms ease-in-out 2; border-radius: 12px; }
+.settings-section.settings-pulse { animation: none; }
+.settings-section.settings-pulse > .section-head, .settings-section.plain.settings-pulse > .settings-group { animation: settings-pulse 650ms ease-in-out 2; border-radius: 12px; }
+.settings-pulse:focus { outline: none; }
+@keyframes settings-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 0 transparent; }
+  50% { box-shadow: inset 0 0 0 2px rgb(var(--g-primary-rgb) / 0.7); }
+}
+
+/* The Interface and Motion controls: an output and a slider, 208px wide from sm up. */
+.slider-control { display: flex; align-items: center; gap: 12px; width: 100%; }
+@media (min-width: 640px) { .slider-control { width: 208px; } }
+.slider-control output { min-width: 48px; padding: 4px 8px; border-radius: 6px; text-align: center; background: var(--g-accent); color: var(--g-fg); font: 500 12px var(--g-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.motion-control .slider-control output { min-width: 64px; }
+#settings input.settings-slider { flex: 1; min-width: 0; width: auto; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.motion-control { display: grid; grid-template-columns: 5rem minmax(0, 1fr); align-items: center; gap: 12px; width: 100%; }
+@media (min-width: 640px) { .motion-control { grid-template-columns: 7rem 13rem; gap: 16px; width: auto; } .motion-control .slider-control { width: auto; } }
+.motion-preview { display: flex; height: 40px; width: 100%; padding: 4px; overflow: hidden; border: 1px solid var(--g-border); border-radius: 10px; background: var(--g-canvas); box-shadow: 0 1px 2px rgb(var(--g-shadow-rgb) / 0.05); }
+.motion-preview > span, .motion-preview .foot { transition: width var(--preview-duration) ease-out, height var(--preview-duration) ease-out, border-width var(--preview-duration) ease-out; }
+.motion-preview .side { width: 16px; height: 100%; flex: none; border-radius: 6px; background: var(--g-sidebar); }
+.motion-preview .panel { width: 20px; height: 100%; flex: none; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.03); }
+.motion-preview .main { display: flex; flex-direction: column; flex: 1; min-width: 0; padding: 0 4px; }
+.motion-preview .lines { display: flex; flex-direction: column; gap: 4px; flex: 1; min-height: 0; padding-top: 4px; }
+.motion-preview i { display: block; height: 2px; border-radius: 99px; background: rgb(var(--g-muted-rgb) / 0.25); }
+.motion-preview .lines i:nth-child(2) { width: 80%; background: rgb(var(--g-muted-rgb) / 0.2); }
+.motion-preview .lines i:nth-child(3) { width: 60%; background: rgb(var(--g-muted-rgb) / 0.15); }
+.motion-preview .foot { display: flex; align-items: center; height: 8px; flex: none; padding: 0 8px; overflow: hidden; border-top: 1px solid rgb(var(--g-ink-rgb) / 0.07); background: rgb(var(--g-fg-rgb) / 0.05); }
+.motion-preview .foot i { width: 66%; height: 1px; }
+.motion-preview.closed :is(.side, .panel) { width: 0; }
+.motion-preview.closed .foot { height: 0; border-top-width: 0; }
+@media (prefers-reduced-motion: reduce) { .motion-preview > span, .motion-preview .foot { transition: none; } }
+
+/* The sidebar's collapse at the Panel animations duration. */
+body.sidebar-animating #workspace { transition: grid-template-columns var(--panel-animation, 0ms) ease-out; }
+body.sidebar-animating[data-sidebar="closed"] #sidebar { visibility: visible; }
+@media (max-width: 768px) {
+  body.sidebar-animating #sidebar { transition: transform var(--panel-animation, 0ms) ease-out; }
+  body[data-mode="gui"].sidebar-animating[data-sidebar="closed"] #sidebar { transform: translateX(-100%); }
+}
+
+/* T3's Select: a trigger like its outline input, and a glass popup of options. */
+#settings .g-select, .g-select { position: relative; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 28px; width: auto; padding: 0 9px; border: 1px solid var(--g-input); border-radius: 10px;
+  background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font-size: 14px; text-align: left; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px rgb(var(--g-shadow-rgb) / 0.05); }
+html[data-appearance="light"] .g-select { background: var(--g-raised); }
+.g-select .value { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.g-select > .i { width: 12px; height: 12px; margin-right: -4px; opacity: 0.5; flex: none; }
+.g-select:focus-visible { outline: none; border-color: var(--g-primary); box-shadow: inset 0 0 0 3px rgb(var(--g-primary-rgb) / 0.24); }
+#settings .g-select.wide { width: 100%; }
+@media (min-width: 640px) { #settings .g-select.wide { width: 160px; } }
+#settings .g-select.size { width: 88px; flex: none; }
+#g-select-popup { position: fixed; z-index: 130; display: flex; flex-direction: column; padding: 4px; overflow-y: auto; border-radius: 10px; color: var(--g-fg); font-size: 14px;
+  box-shadow: 0 18px 44px -18px rgb(var(--g-shadow-rgb) / 0.8); }
+#g-select-popup [role="option"] { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+#g-select-popup [role="option"].on { background: rgb(var(--g-fg-rgb) / 0.08); }
+#g-select-popup [role="option"].hi { background: var(--g-accent); }
+.diff-dots { display: inline-flex; gap: 4px; flex: none; }
+.diff-dots.flip { flex-direction: row-reverse; }
+.diff-dots i { width: 8px; height: 8px; border-radius: 50%; }
+.diff-dots .del { background: var(--g-del); }
+.diff-dots .add { background: var(--g-add); }
+
+/* FontFamilyPicker.tsx: a 288px glass popup with Search fonts… over the families, each in its own face. */
+#settings .g-select.font-pick { width: 100%; min-width: 0; flex: 1; }
+@media (min-width: 640px) { #settings .g-select.font-pick { width: 176px; flex: none; } }
+#font-picker { position: fixed; z-index: 130; display: flex; flex-direction: column; width: 288px; max-width: calc(100vw - 16px); overflow: hidden; border-radius: 10px; color: var(--g-fg); font-size: 14px;
+  background: color-mix(in srgb, var(--g-popover) 18%, color-mix(in srgb, var(--g-popover) var(--g-glass-opacity), transparent)); border: 1px solid color-mix(in srgb, var(--g-fg) 10%, transparent);
+  backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); -webkit-backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); box-shadow: 0 18px 44px -18px rgb(var(--g-shadow-rgb) / 0.8); }
+#font-picker > input { height: 36px; margin: 0; padding: 0 12px; border: 0; border-bottom: 1px solid var(--g-border); border-radius: 0; background: transparent; color: var(--g-fg); font: inherit; outline: none; }
+#font-picker > input::placeholder { color: var(--g-muted); }
+#font-picker .list { max-height: 288px; overflow-y: auto; padding: 4px; }
+#font-picker [role="option"] { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 30px; padding: 0 8px; border-radius: 6px; cursor: pointer; }
+#font-picker [role="option"].hi { background: var(--g-accent); }
+#font-picker .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#font-picker .default { margin-left: auto; font-size: 10px; color: rgb(var(--g-muted-rgb) / 0.6); }
+#font-picker [role="option"] .i { width: 14px; height: 14px; flex: none; color: var(--g-muted); }
+#font-picker .none { margin: 0; padding: 16px 8px; text-align: center; font-size: 13px; color: var(--g-muted); }
+
+/* The typography rows: a 176px family field and an 88px size from sm up. */
+.font-control { display: flex; align-items: center; gap: 8px; width: 100%; }
+#settings .font-control input { flex: 1; min-width: 0; width: auto; height: 28px; padding: 0 9px; border: 1px solid var(--g-input); border-radius: 10px; background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font-size: 14px; }
+#settings .font-control input::placeholder { color: var(--g-muted); }
+#settings .font-control input:focus { border-color: var(--g-primary); box-shadow: inset 0 0 0 3px rgb(var(--g-primary-rgb) / 0.24); }
+#settings .font-control input[aria-invalid="true"] { border-color: rgb(var(--g-error-rgb) / 0.36); }
+@media (min-width: 640px) { .font-control { width: auto; } #settings .font-control input { width: 176px; flex: none; } }
+
+}
+@media (pointer: coarse) {
+  body[data-mode="gui"] #settings-nav :is(.links button, .settings-search) { min-height: 40px; }
+  .g-select, #g-select-popup [role="option"], .row-reset, #settings .font-control input { min-height: 40px; }
+  .row-reset { min-width: 40px; }
+  .settings-row .switch input { inset: -12px -8px; }
+}
+
+/* T3's Switch: a 16px thumb on the primary color when on, on the input color when off. */
+body[data-mode="gui"] #settings .switch { width: 30px; height: 18px; }
+body[data-mode="gui"] #settings .switch span { border-radius: 9px; background: var(--g-input); transition: background-color 0.2s; }
+body[data-mode="gui"] #settings .switch span::after { top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 7px; background: var(--g-muted); transition: translate 0.15s, background-color 0.15s; }
+html[data-appearance="light"] body[data-mode="gui"] #settings .switch span::after { background: var(--g-canvas); box-shadow: 0 1px 2px rgb(var(--g-shadow-rgb) / 0.05); }
+body[data-mode="gui"] #settings .switch input:checked + span { background: var(--g-primary); }
+body[data-mode="gui"] #settings .switch input:checked + span::after { transform: none; translate: 12px 0; background: var(--g-canvas); }
+body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: none; box-shadow: inset 0 0 0 2px var(--g-primary), 0 0 0 1px var(--g-canvas); }
+
+@media (max-width: 600px) {
+  body[data-mode="gui"] #settings-nav { width: auto; flex-direction: column; overflow: visible; padding: 0 8px 8px;
+    border-right: 0; border-bottom: 1px solid var(--g-border); }
+  body[data-mode="gui"] #settings-nav .links { flex-direction: row; overflow-x: auto; scrollbar-width: none; }
+  body[data-mode="gui"] #settings-nav .links button { flex: none; }
+  body[data-mode="gui"] #settings-page { --top: 20px; padding: var(--top) 16px 64px; }
+  body[data-mode="gui"] #settings .editor-bar { margin-inline: auto; padding: 12px 0; }
+  body[data-mode="gui"] #settings-page .look { grid-template-columns: minmax(0, 1fr); row-gap: 8px; }
+  body[data-mode="gui"] #settings-page .look select { grid-column: 1; grid-row: auto; }
+}
+
+/* The Global orchestrator section of the General page: name chips over a text field, machine
+   chips for the host, one save for the whole account. */
+#settings-page #global-orchestrator-settings .go-name { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+#settings-page #global-orchestrator-settings .go-name input { width: 176px; }
+#settings-page #global-orchestrator-settings .side-setting .chips { justify-content: flex-end; margin: 0; }
+#settings-page #global-orchestrator-settings .chip { white-space: nowrap; }
+@media (min-width: 640px) { #settings-page #global-orchestrator-settings .go-name .chips { flex-wrap: nowrap; } }
+#settings-page #global-orchestrator-settings .side-setting select { width: 232px; }
+#settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
+@media (max-width: 639px) {
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
+  /* The name and the machine stack under their label, chips from the left, one line each when they fit. */
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) > :is(.go-name, .chips) { flex: 1 1 100%; align-items: flex-start; }
+  #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) .chips { justify-content: flex-start; }
+  #settings-page #global-orchestrator-settings .go-name input { width: 100%; }
+  #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
+}
+#settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
+
+/* MCP servers: one card per server, its command or URL in mono, its secrets as set badges; the form lays its fields out two to a row. */
+#settings .mcp-server .card-head { display: flex; align-items: center; justify-content: space-between; }
+#settings .mcp-server .mcp-name { min-width: 0; }
+#settings .mcp-reach { display: block; overflow-wrap: anywhere; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04); font: 12px/1.5 var(--g-mono); }
+#settings .mcp-secrets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#settings .mcp-secrets .badge { margin-left: 0; }
+#settings .mcp-server .confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid; }
+#settings .mcp-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#settings .mcp-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--g-muted); font-size: 13px; }
+#settings .mcp-field :is(input, select, textarea) { width: 100%; }
+#settings .mcp-field input[readonly], #settings .mcp-field textarea[readonly], #settings .mcp-field select:disabled { opacity: 0.75; }
+#settings .mcp-fields :is(.wide, .hint.wide) { grid-column: 1 / -1; }
+#settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }

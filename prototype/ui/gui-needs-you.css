@@ -1,0 +1,71 @@
+/* The Needs you page (gui-needs-you.js): the Phone-Inbox board's cards, in one column of the board's
+   card width on every screen. */
+body[data-page="needs-you"] #page-view .page-head .range { display: block; }
+.ny-wrap { --ny-line: rgb(var(--g-ink-rgb) / 0.09); --ny-edge: rgb(var(--g-ink-rgb) / 0.16); --ny-link: color-mix(in srgb, var(--g-link) 77%, var(--g-ink));
+  max-width: 390px; margin: 0 auto; padding: 24px 12px 48px; color: var(--g-fg); font-size: 16px; line-height: 1.4; }
+.ny-title { display: none; align-items: baseline; gap: 10px; padding: 4px 4px 12px; }
+.ny-title h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.4; }
+.ny-title .ny-count { font-size: 15px; color: var(--g-side-muted); }
+.ny-list { display: flex; flex-direction: column; gap: 10px; }
+.ny-empty { margin: 0; padding: 40px 0; text-align: center; color: var(--g-side-muted); font-size: 15px; }
+
+.ny-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px 14px; border: 1px solid var(--ny-line); border-radius: 16px; background: var(--g-raised); }
+.ny-card[data-kind="limit"] { gap: 8px; }
+.ny-card[data-kind="review"], .ny-card[data-kind="offer"] { flex-direction: row; align-items: center; min-height: 56px; padding: 8px 14px; box-sizing: border-box; }
+.ny-card[data-kind="offer"] { opacity: 0.7; }
+.ny-card[data-kind="shown"] { padding: 0; border: 0; background: none; }
+.ny-card[data-kind="shown"] .agent-once { margin: 0; padding: 12px 14px; border-radius: 16px; gap: 8px; }
+.ny-card[data-kind="shown"] .agent-once button { height: 44px; padding: 0 14px; border-radius: 12px; }
+.ny-head { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; color: var(--g-side-muted); }
+.ny-kind { flex: none; color: var(--g-warning-fg); font-weight: 600; }
+.ny-card:is([data-kind="limit"], [data-kind="failed"]) .ny-kind { color: color-mix(in srgb, var(--g-error) 62%, var(--g-ink)); }
+.ny-card[data-kind="limit"] .status-glyph { border-radius: 2px; }
+.ny-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ny-when { flex: none; font-variant-numeric: tabular-nums; }
+.ny-name { font-weight: 600; overflow-wrap: anywhere; }
+.ny-texts { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ny-texts .ny-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ny-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-side-muted); }
+.ny-line { margin: 0; font-size: 15px; color: var(--g-side-muted); overflow-wrap: anywhere; }
+.ny-card[data-kind="failed"] .ny-line { color: var(--g-fg); }
+.ny-card pre { margin: 0; max-height: 9.8em; overflow: auto; padding: 9px 11px; border-radius: 10px; background: var(--g-canvas); color: var(--g-code-fg);
+  font: 13px/1.4 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ny-note { margin: 0; font-size: 13px; color: var(--g-side-muted); }
+
+.ny-fields { display: contents; min-width: 0; margin: 0; padding: 0; border: 0; }
+.ny-actions { display: flex; gap: 8px; }
+.ny-card button:disabled { opacity: 0.55; cursor: default; }
+.ny-actions button { height: 44px; border-radius: 12px; }
+.ny-secondary { flex: 1; min-width: 0; padding: 0 12px; border: 1px solid var(--ny-edge); background: transparent; color: var(--g-fg); font-weight: 600; }
+.ny-secondary.ny-plain { font-size: 15px; font-weight: 400; }
+.ny-primary { flex: 1; min-width: 0; padding: 0 12px; border: 0; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
+@media (hover: hover) {
+  .ny-primary:hover:not(:disabled) { background: var(--g-primary-hover); }
+  .ny-secondary:hover:not(:disabled), .ny-option:hover:not(:disabled) { background: var(--g-hover); }
+  .ny-quiet:hover:not(:disabled) { color: var(--g-fg); }
+  .ny-link:hover { text-decoration: underline; }
+}
+.ny-quiet { flex: none; padding: 0 14px; border: 0; background: transparent; color: var(--g-side-muted); font-size: 15px; }
+.ny-link { flex: none; display: flex; align-items: center; height: 44px; padding: 0 12px; border: 0; background: transparent; color: var(--ny-link); }
+.ny-card[data-kind="review"] .ny-link, .ny-card[data-kind="offer"] .ny-link { padding: 0; min-width: 44px; justify-content: flex-end; }
+
+.ny-options { display: flex; flex-direction: column; gap: 6px; }
+.ny-option { display: flex; flex-direction: column; justify-content: center; min-height: 48px; padding: 6px 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 12px;
+  background: transparent; color: var(--g-fg); text-align: left; }
+.ny-label { font-size: 15px; }
+.ny-about { font-size: 13px; color: var(--g-side-muted); }
+.ny-typed { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.ny-typed input { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border: 0; border-radius: 12px; outline: 0; background: transparent; color: var(--g-fg); font: inherit; font-size: 15px; }
+.ny-typed input::placeholder { color: var(--ny-link); opacity: 1; }
+.ny-typed input:focus { background: rgb(var(--g-ink-rgb) / 0.04); }
+.ny-typed input:focus::placeholder { color: var(--g-side-muted); }
+.ny-send { flex: none; height: 44px; padding: 0 14px; border: 0; border-radius: 12px; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
+.ny-typed:has(input:placeholder-shown) .ny-send { display: none; }
+.ny-card :focus-visible { outline: 2px solid var(--ny-link); outline-offset: 2px; }
+
+@media (max-width: 767px) {
+  body[data-page="needs-you"] #page-view .page-head :is(h1, .range) { display: none; }
+  body[data-page="needs-you"] #page-view .page-head { min-height: 54px; height: 54px; padding-top: 0; padding-bottom: 0; border-bottom: 0; }
+  .ny-wrap { padding-top: 0; }
+  .ny-title { display: flex; }
+}

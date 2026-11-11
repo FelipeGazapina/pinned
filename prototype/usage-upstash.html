@@ -1,0 +1,149 @@
+<!doctype html>
+<!-- Static prototype: the Usage page's "Upstash Box" section.
+     ?state=a|b|c|d  a normal, b not connected, c Upstash not answering, d connected with no boxes
+     ?view=limits|spend (default limits)  ?theme=dark|light  ?open=1 opens "Other boxes"
+     The stylesheets in ui/ are a copy of the app's own (same order as ui/index.html). -->
+<html data-appearance="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage prototype</title>
+<script>
+  const q = new URLSearchParams(location.search);
+  document.documentElement.dataset.appearance = q.get("theme") === "light" ? "light" : "dark";
+</script>
+<link rel="stylesheet" href="ui/style.css">
+<link rel="stylesheet" href="ui/gui.css">
+<link rel="stylesheet" href="ui/gui-theme.css">
+<link rel="stylesheet" href="ui/gui-sidebar.css">
+<link rel="stylesheet" href="ui/gui-timeline.css">
+<link rel="stylesheet" href="ui/gui-agents.css">
+<link rel="stylesheet" href="ui/gui-glyph.css">
+<link rel="stylesheet" href="ui/gui-sheet.css">
+<link rel="stylesheet" href="ui/gui-composer.css">
+<link rel="stylesheet" href="ui/gui-panel.css">
+<link rel="stylesheet" href="ui/gui-header.css">
+<link rel="stylesheet" href="ui/gui-orchestrator.css">
+<link rel="stylesheet" href="ui/gui-pr.css">
+<link rel="stylesheet" href="ui/gui-diff.css">
+<link rel="stylesheet" href="ui/gui-browser.css">
+<link rel="stylesheet" href="ui/gui-surfaces.css">
+<link rel="stylesheet" href="ui/gui-device.css">
+<link rel="stylesheet" href="ui/gui-shell.css">
+<link rel="stylesheet" href="ui/gui-usage.css">
+<link rel="stylesheet" href="ui/gui-skills.css">
+<link rel="stylesheet" href="ui/gui-taste.css">
+<link rel="stylesheet" href="ui/gui-delegation.css">
+<link rel="stylesheet" href="ui/gui-settings.css">
+<link rel="stylesheet" href="ui/gui-keybindings.css">
+<link rel="stylesheet" href="ui/gui-pulls.css">
+<link rel="stylesheet" href="ui/gui-needs-you.css">
+<link rel="stylesheet" href="ui/gui-phone.css">
+<link rel="stylesheet" href="ui/gui-phone-thread.css">
+<link rel="stylesheet" href="usage-upstash.css">
+</head>
+<body data-view="expanded" data-tabs="top" data-mode="gui" data-page="usage" data-sidebar="closed">
+<main id="expanded">
+  <div id="workspace">
+    <aside id="sidebar"></aside>
+    <section id="chat"></section>
+    <aside id="panel"></aside>
+    <div id="page-view"></div>
+  </div>
+</main>
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const svg = (path) => `<svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+const icon = (name) => ({
+  "chevron-down": svg('<path d="m6 9 6 6 6-6"/>'),
+  "refresh-cw": svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
+  "triangle-alert": svg('<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>'),
+  "panel-left": svg('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>'),
+}[name] ?? "");
+
+// Fixed clock so "up for" is the same on every load.
+const NOW = 1781000000;
+const MIN = 60;
+const mock = {
+  connected: true, error: null,
+  boxes: [
+    { id: "b1", name: "pinned-worker-3f2a", size: "medium", status: "running", created: NOW - 72 * MIN, last_activity: NOW - 20, cpu_hours: 1.18, compute_usd: 0.07, pinned: { project: "pinned", role: "worker", machine: "build-mac" } },
+    { id: "b2", name: "demo-app-captain-91c0", size: "small", status: "idle", created: NOW - 5 * 3600 - 8 * MIN, last_activity: NOW - 41 * MIN, cpu_hours: 0.64, compute_usd: 0.04, pinned: { project: "demo-app", role: "captain", machine: "build-mac" } },
+    { id: "b3", name: "scratch-browser", size: "large", status: "creating", created: NOW - 2 * MIN, last_activity: null, cpu_hours: null, compute_usd: null, pinned: null },
+    { id: "b4", name: "demo-app-worker-77de", size: "small", status: "paused", created: NOW - 2 * 86400 - 3 * 3600, last_activity: NOW - 26 * 3600, cpu_hours: 0.92, compute_usd: 0.05, pinned: { project: "demo-app", role: "worker", machine: "build-mac" } },
+    { id: "b5", name: "pinned-worker-0b14", size: "medium", status: "deleted", created: NOW - 9 * 86400, last_activity: NOW - 6 * 86400, cpu_hours: null, compute_usd: null, pinned: { project: "pinned", role: "worker", machine: "build-mac" } },
+  ],
+  upstash: { cpu_hours: 2.74, compute_usd: 0.16, boxes: 5 },
+  pinned: { box_hours: 9.6, tasks: 14, since: NOW - 10 * 86400 },
+};
+const state = { a: mock,
+  b: { connected: false, error: null, boxes: [], upstash: null, pinned: mock.pinned },
+  c: { connected: true, error: "request timed out after 10 s", boxes: [], upstash: null, pinned: mock.pinned },
+  d: { connected: true, error: null, boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: mock.pinned },
+}[q.get("state") || "a"];
+
+// --- the section (what the real renderer would produce from box_usage) ---
+const num = (v, f) => (v === null || v === undefined ? "—" : f(v));
+const hours = (v) => v.toFixed(2);
+const usd = (v) => `$${v.toFixed(2)}`;
+const SIZE = { small: "Small", medium: "Medium", large: "Large" };
+function upFor(sec) {
+  const m = Math.max(0, Math.floor(sec / 60));
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), r = m % 60;
+  return d ? `${d} d ${h} h` : h ? `${h} h ${r} min` : `${r} min`;
+}
+const belongs = (b) => (b.pinned ? `${esc(b.pinned.project)} · ${esc(b.pinned.role)}` : "Not opened by pinned");
+const tableHtml = (rows, cols, label) => `<div class="table-region" tabindex="0" role="region" aria-label="${label}"><table class="by-time"><thead><tr>${cols.map(([name, cls]) => `<th class="${cls}">${name}</th>`).join("")}</tr></thead>
+  <tbody>${rows.join("")}</tbody></table></div>`;
+function runningRow(b) {
+  return `<tr><td class="strong">${esc(b.name)}<span class="sub muted">${belongs(b)}</span></td><td class="opt">${b.size ? SIZE[b.size] : "—"}</td><td class="opt">${belongs(b)}</td><td>${b.status === "creating" ? "Starting…" : upFor(NOW - b.created)}</td>
+    <td class="num">${num(b.cpu_hours, hours)}</td><td class="num">${num(b.compute_usd, usd)}</td></tr>`;
+}
+function otherRow(b) {
+  return `<tr><td class="strong">${esc(b.name)}<span class="sub muted">${belongs(b)}</span></td><td class="opt">${b.size ? SIZE[b.size] : "—"}</td><td class="opt">${belongs(b)}</td><td>${b.status[0].toUpperCase()}${b.status.slice(1)}</td>
+    <td class="num">${num(b.cpu_hours, hours)}</td><td class="num">${num(b.compute_usd, usd)}</td></tr>`;
+}
+function boxUsageHtml(u) {
+  const live = u.boxes.filter((b) => ["creating", "idle", "running"].includes(b.status));
+  const others = u.boxes.filter((b) => !live.includes(b));
+  const upstashCard = u.upstash ? `<div class="limit-card box-figure"><div class="limit-text"><span class="label">From Upstash</span>
+      <div class="box-nums"><span class="figure"><b>${hours(u.upstash.cpu_hours)}</b><span class="muted">CPU hours</span></span><span class="figure"><b>${usd(u.upstash.compute_usd)}</b><span class="muted">compute cost</span></span></div></div>
+      <p class="muted note">Upstash's numbers for the ${u.upstash.boxes} box${u.upstash.boxes === 1 ? "" : "es"} it still lists. Deleted boxes may be missing.</p></div>` : "";
+  const pinnedCard = `<div class="limit-card box-figure"><div class="limit-text"><span class="label">pinned's count</span>
+      <div class="box-nums"><span class="figure"><b>${u.pinned.box_hours.toFixed(1)}</b><span class="muted">box hours</span></span><span class="figure"><b>${u.pinned.tasks}</b><span class="muted">task${u.pinned.tasks === 1 ? "" : "s"}</span></span></div></div>
+      <p class="muted note">Box time pinned recorded for its delegated tasks; not a bill.</p></div>`;
+  const cols = [["Box", ""], ["Size", "opt"], ["Belongs to", "opt"], ["Up for", ""], ["CPU hours", "num"], ["Cost", "num"]];
+  const notice = u.error ? `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>Upstash did not answer: ${esc(u.error)}</p></div></div>` : "";
+  const running = !u.connected ? "" : u.error ? "" : `<div class="breakdown"><h3>Running now</h3>${
+    live.length ? tableHtml(live.map(runningRow), cols, "Running boxes") : `<p class="muted note">No boxes right now.</p>`}</div>
+    ${others.length ? `<details class="box-others"${q.get("open") ? " open" : ""}><summary>Other boxes (${others.length})</summary>${tableHtml(others.map(otherRow), cols.map(([n, c]) => (n === "Up for" ? ["Status", c] : [n, c])), "Other boxes")}</details>` : ""}`;
+  return `<section class="box-usage"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>
+    ${!u.connected ? `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>` : `${notice}<div class="box-figures">${upstashCard}${pinnedCard}</div>`}
+    ${running}</section>`;
+}
+
+// --- the page as it is today (head + limits or spend block, shaped like renderUsagePage output) ---
+const seg = (name, opts, cur, label) => `<span class="seg" role="radiogroup" aria-label="${label}" data-seg="${name}">${opts.map(([v, t]) => `<button type="button" role="radio" aria-checked="${v === cur}" data-value="${v}">${t}</button>`).join("")}</span>`;
+const pick = (opts, cur, label) => `<button type="button" class="pick" aria-label="${label}">${opts.find(([v]) => v === cur)[1]}${icon("chevron-down")}</button>`;
+const view = q.get("view") === "spend" ? "spend" : "limits";
+const metrics = [["spend", "Spend"], ["tokens", "Tokens"], ["limits", "Limits"]];
+const periods = [["1", "1 day"], ["7", "7 days"], ["30", "30 days"]];
+const metric = view === "spend" ? "spend" : "limits";
+const refresh = `<button type="button" class="icon refresh" aria-label="Refresh usage">${icon("refresh-cw")}</button>`;
+const limitCard = (label, left, rows, resets) => `<div class="limit-card"><div class="limit-text"><span class="label">${label}</span><span class="figure"><b>${left}%</b><span class="muted">left</span></span></div>
+  <div class="pool"><div class="accounts">${rows.map(([who, pct, chip]) => `<div class="account-row" style="--provider:#d97757"><span class="line1"><span class="who"><span class="provider-name">${who}</span></span><b>${pct}%</b><span class="chip">${chip}</span></span>
+    <span class="bar"><span class="clip"><span class="cut"><span class="fill" style="width:${pct}%;background:#d97757"></span></span></span></span></div>`).join("")}</div></div></div>`;
+const limitsBody = `<div class="limits-view"><section class="limits"><h2>Claude</h2>
+  ${limitCard("Session (5 h)", 64, [["Claude", 64, "↻ 2 h 10 min"]])}
+  ${limitCard("Weekly", 41, [["Claude", 41, "↻ 3 d 4 h"]])}</section></div>`;
+const spendBody = `<section class="overview"><div class="lead"><div class="headline"><span class="total">$12.48</span><p class="muted">Estimated API-equivalent spend, last 7 days</p></div></div></section>
+  <section><h2>Totals</h2><dl class="tiles">${[["Processed tokens", "18.2M"], ["Cached input", "15.9M"], ["Uncached input", "1.3M"], ["Output", "1.0M"], ["Cache savings", "$41.20"]].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl></section>`;
+document.getElementById("page-view").innerHTML = `<header class="page-head"><button type="button" class="icon side-toggle" title="Toggle sidebar">${icon("panel-left")}</button><h1>Usage</h1><span class="crumb-sep">›</span>
+  <button type="button" class="crumb-menu env-filter"><span class="text">All environments</span>${icon("chevron-down")}</button><span class="crumb-sep">›</span>
+  <span class="provider"><span class="text">Claude Code</span></span>${view === "spend" ? `<span class="range">Nov 5 to Nov 11</span>` : ""}<span class="spacer"></span>
+  <span class="controls wide">${seg("metric", metrics, metric, "Usage metric")}${seg("days", periods, "7", "Usage period")}${refresh}</span>
+  <span class="controls narrow">${pick(metrics, metric, "Usage metric")}${pick(periods, "7", "Usage period")}${refresh}</span></header>
+  <div class="page-body"><div class="page-wrap usage" data-metric="${metric}">${view === "spend" ? spendBody : limitsBody}${boxUsageHtml(state)}</div></div>`;
+</script>
+</body>
+</html>

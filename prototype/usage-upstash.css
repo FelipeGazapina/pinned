@@ -1,0 +1,18 @@
+/* Additions for the "Upstash Box" section of the Usage page. Everything else reuses gui-usage.css. */
+.usage .box-usage { display: flex; flex-direction: column; gap: 12px; }
+.usage .box-usage .box-title { display: flex; align-items: baseline; gap: 8px; }
+.usage .box-usage .sub-title { font-size: 12px; }
+.usage .box-usage h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.usage .box-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.usage .limit-card.box-figure { grid-template-columns: minmax(0, 1fr); align-items: start; }
+.usage .box-figure .box-nums { display: flex; flex-wrap: wrap; gap: 8px 32px; }
+.usage .box-figure .note { font-size: 12px; }
+.usage .box-usage table { table-layout: fixed; }
+.usage .box-usage th:first-child { width: 32%; }
+.usage .box-usage td .sub { display: none; font-size: 12px; }
+.usage .box-others > summary { width: fit-content; padding: 4px 0; color: var(--g-muted); font-size: 12px; cursor: pointer; }
+@media (max-width: 639px) {
+  .usage .box-usage .opt { display: none; }
+  .usage .box-usage th:first-child { width: 44%; }
+  .usage .box-usage td .sub { display: block; }
+}
