@@ -61,6 +61,7 @@ impl Hub {
             signup: pinned_core::account::Signup::Open,
             box_api: Arc::new(Upstash),
             box_policy: Policy::default(),
+            convex_http: Arc::new(pinned_core::convex::client::Reqwest),
             learning_db: None,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();

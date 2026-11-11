@@ -22,7 +22,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Kind::Dev => "dev",
             Kind::Prod => "prod",
@@ -100,6 +100,17 @@ impl DeployKey {
 
     fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Keeps the key in `storage` under `key_name`.
+    pub fn keep(&self, storage: &dyn crate::connectors::Storage) -> Result<(), String> {
+        storage.write_key(&key_name(&self.deployment), &self.text)
+    }
+
+    /// The key `keep` kept for `deployment`.
+    pub fn kept(storage: &dyn crate::connectors::Storage, deployment: &str) -> Result<DeployKey, String> {
+        let gone = || format!("pinned lost the deploy key of `{deployment}`. Paste it again on the Convex card in Settings, Connectors.");
+        DeployKey::parse(&storage.key(&key_name(deployment)).ok_or_else(gone)?).map_err(|_| gone())
     }
 
     /// `text` with this key, and the secret after its `|`, replaced by `[hidden]`. Every error text

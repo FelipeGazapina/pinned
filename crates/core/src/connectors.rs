@@ -7,7 +7,7 @@ use crate::graph::project::project;
 use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
 use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, SessionSetup, Watch};
 use crate::wire::{MachineId, RunSpec, TabView};
-use crate::{github, linear, slack, upstash, vercel};
+use crate::{convex, github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -749,6 +749,9 @@ struct Store {
     /// The account's own MCP servers, with the names of their secrets; the values are keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mcp_servers: Vec<crate::mcp::Entry>,
+    /// The connected Convex deployments. Their keys are keys, under `convex::key_name`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    convex: Vec<convex::Connection>,
     connectors: Vec<Connector>,
 }
 
@@ -1011,6 +1014,10 @@ pub struct Settings {
     pub boxes: BoxAccess,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub box_asks: Vec<BoxAsk>,
+    /// The connected Convex deployments, each with its key's last characters and the projects
+    /// whose sessions read it. Only the hub keeps their keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convex: Vec<convex::Connection>,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
@@ -3326,8 +3333,9 @@ impl Connectors {
         let spec = match run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe) {
             Ok(mut spec) => {
                 let waiting = inbox_text(&inbox);
-                if let Some(last) = spec.args.last_mut().filter(|_| !waiting.is_empty()) {
-                    *last = join_text(last, &waiting);
+                let note = self.convex_note(owner).unwrap_or_default();
+                if let Some(last) = spec.args.last_mut() {
+                    *last = join_text(&join_text(last, &note), &waiting);
                 }
                 spec
             }
@@ -3535,6 +3543,7 @@ impl Connectors {
             checked: self.checked.lock().unwrap().clone(),
             boxes: store.boxes.clone(),
             box_asks: store.box_asks.clone(),
+            convex: store.convex.clone(),
         }
     }
 
@@ -3924,6 +3933,7 @@ impl Connectors {
                 graph.validate(&called)?;
             }
             reject_call_cycle(connector.id.as_str(), &graph, &store)?;
+            check_convex_step(&graph, &store.convex)?;
             refresh_legacy(&mut connector, &graph);
             connector.graph = (graph != migrate(&connector)).then_some(graph);
         } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
@@ -4033,6 +4043,7 @@ impl Connectors {
         }
         self.channels.lock().unwrap().clear();
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
+        imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
         self.save(&current)?;
         self.wake.notify_one();
@@ -4155,7 +4166,143 @@ impl Connectors {
         let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup);
         owner.proof |= proof || self.graph_has_proof(&owner.id);
         let title: String = format!("{} · Run now", workflow.name).chars().take(TAB_NAME_CHARS).collect();
-        Ok(manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe))
+        let mut run = manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe);
+        if let (Some(note), Some(last)) = (self.convex_note(&owner.id), run.args.last_mut()) {
+            *last = join_text(last, &note);
+        }
+        Ok(run)
+    }
+}
+
+/// The workflow's Convex step, anywhere in its own stored graph.
+fn convex_step(connector: &Connector) -> Option<convex::access::Step> {
+    connector.graph.as_ref()?.nodes.iter().find_map(|node| match &node.kind {
+        NodeKind::ConvexData { connection, tables } => Some(convex::access::Step { connection: connection.clone(), tables: tables.clone() }),
+        _ => None,
+    })
+}
+
+/// Refuses a Convex step that names no connected deployment.
+fn check_convex_step(graph: &Graph, connected: &[convex::Connection]) -> Result<(), String> {
+    for node in &graph.nodes {
+        let NodeKind::ConvexData { connection, .. } = &node.kind else { continue };
+        if connection.is_empty() {
+            return Err(format!("\"{}\" names no Convex deployment: pick one", node.name));
+        }
+        if !connected.iter().any(|c| &c.id == connection) {
+            return Err(format!("\"{}\" reads Convex deployment {connection}, which is not connected: connect it under Connectors", node.name));
+        }
+    }
+    Ok(())
+}
+
+/// What a session whose workflow has the Convex step learns about it.
+fn convex_note(connection: &convex::Connection, tables: Option<&[String]>) -> String {
+    let on = format!("Convex deployment {} ({})", connection.id, connection.kind.name());
+    let mut note = match tables {
+        None => format!("You may read {on}, which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs."),
+        Some(tables) => format!("You may read the tables {} of {on} with the tools convex_tables and convex_data. Queries and logs are off for this run.", tables.join(", ")),
+    };
+    if connection.kind == convex::Kind::Prod {
+        note += " This is production data.";
+    }
+    note + " Anyone in the thread sees your reply. Quote only what the answer needs."
+}
+
+/// Repo keys as the UI sends them, each once.
+fn repo_keys(repos: Vec<String>) -> Result<Vec<String>, String> {
+    let mut keys: Vec<String> = vec![];
+    for repo in repos {
+        if repo.trim().is_empty() || repo.trim() != repo || !repo.contains('/') || repo.chars().any(char::is_whitespace) {
+            return Err("a project is its repository, as github.com/owner/repo".into());
+        }
+        if !keys.contains(&repo) {
+            keys.push(repo);
+        }
+    }
+    Ok(keys)
+}
+
+/// Gives `repos` to the connection `id` alone.
+fn take_repos(connections: &mut [convex::Connection], id: &str, repos: &[String]) {
+    for other in connections.iter_mut().filter(|c| c.id != id) {
+        other.repos.retain(|repo| !repos.contains(repo));
+    }
+}
+
+impl Connectors {
+    /// Parses and resolves the key, keeps it under `convex::key_name`, and upserts the connection
+    /// by deployment: its repos join the ones it had, and each moves off any other connection.
+    pub async fn connect_convex(&self, http: &dyn convex::client::Http, key: &str, repos: Vec<String>) -> Result<convex::Connection, String> {
+        let key = convex::DeployKey::parse(key)?;
+        let repos = repo_keys(repos)?;
+        let mut connection = convex::client::resolve(http, &key).await?;
+        key.keep(&*self.storage)?;
+        let mut store = self.store.lock().unwrap();
+        let earlier = store.convex.iter().position(|c| c.id == connection.id);
+        connection.repos = earlier.map(|at| store.convex[at].repos.clone()).unwrap_or_default();
+        for repo in repos {
+            if !connection.repos.contains(&repo) {
+                connection.repos.push(repo);
+            }
+        }
+        match earlier {
+            Some(at) => store.convex[at] = connection.clone(),
+            None => store.convex.push(connection.clone()),
+        }
+        take_repos(&mut store.convex, &connection.id, &connection.repos);
+        self.save(&store)?;
+        Ok(connection)
+    }
+
+    /// Sets the whole repo list of the connection `id`, moving each repo off any other connection.
+    pub fn set_convex_repos(&self, id: &str, repos: Vec<String>) -> Result<convex::Connection, String> {
+        let repos = repo_keys(repos)?;
+        let mut store = self.store.lock().unwrap();
+        let connection = store.convex.iter_mut().find(|c| c.id == id).ok_or_else(|| format!("No Convex deployment {id} is connected."))?;
+        connection.repos = repos.clone();
+        let connection = connection.clone();
+        take_repos(&mut store.convex, id, &repos);
+        self.save(&store)?;
+        Ok(connection)
+    }
+
+    /// Forgets the key, then the connection. A second call succeeds.
+    pub fn disconnect_convex(&self, id: &str) -> Result<(), String> {
+        self.storage.remove_key(&convex::key_name(id));
+        let mut store = self.store.lock().unwrap();
+        store.convex.retain(|c| c.id != id);
+        self.save(&store)
+    }
+
+    /// Table names of the connection `id`, for the workflow step's panel. The owner asks, so no rule applies.
+    pub async fn convex_tables(&self, http: &dyn convex::client::Http, id: &str) -> Result<Vec<String>, String> {
+        let connection = self.store.lock().unwrap().convex.iter().find(|c| c.id == id).cloned().ok_or_else(|| format!("No Convex deployment {id} is connected."))?;
+        let key = convex::DeployKey::kept(&*self.storage, id)?;
+        convex::client::table_names(http, &key, &connection).await
+    }
+
+    /// A session's ask. `Ask::Offer` answers the offer as JSON; a read answers `Value::String`.
+    pub async fn convex(&self, http: &dyn convex::client::Http, machine: &str, tab: &str, repo: Option<&str>, find: &dyn Fn(&str, &str) -> Option<TabView>, ask: convex::Ask) -> Result<Value, String> {
+        let (connections, steps) = {
+            let store = self.store.lock().unwrap();
+            let steps: HashMap<String, Option<convex::access::Step>> = store.connectors.iter().map(|c| (c.id.clone(), convex_step(c))).collect();
+            (store.convex.clone(), steps)
+        };
+        let grant = convex::access::decide(machine, tab, repo, find, &connections, &|id| steps.get(id).cloned(), &ask)?;
+        if ask == convex::Ask::Offer {
+            return Ok(json!(grant.offer()));
+        }
+        let key = convex::DeployKey::kept(&*self.storage, &grant.connection.id)?;
+        convex::client::read(http, &key, &grant, ask).await.map(Value::String)
+    }
+
+    /// The opening prompt's paragraph for a run whose owner graph has the Convex step.
+    fn convex_note(&self, owner: &str) -> Option<String> {
+        let store = self.store.lock().unwrap();
+        let step = convex_step(store.connectors.iter().find(|c| c.id == owner)?)?;
+        let connection = store.convex.iter().find(|c| c.id == step.connection)?;
+        Some(convex_note(connection, step.tables.as_deref()))
     }
 }
 
@@ -6613,6 +6760,223 @@ mod tests {
         assert!(failed.is_err(), "the post did not reach Slack");
         assert!(connectors.store.lock().unwrap().connectors[0].paged.is_empty(), "the thread stays unpaged so the next attempt posts");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    mod convex_connections {
+        use super::*;
+        use crate::convex::client::Replay;
+        use crate::convex::{Ask, Connection, Kind};
+
+        const KEY: &str = "dev:quick-lemur-789|eyJ2MiI6ImNvbm4ifQconnsecret";
+        const NEW_KEY: &str = "dev:quick-lemur-789|eyJ2MiI6Im5ldyJ9freshsecretZ9";
+        const OTHER: &str = "prod:happy-otter-123|eyJ2MiI6Im90aGVyIn0othersecret";
+        const SITE: &str = "github.com/acme/site";
+        const SHOP: &str = "github.com/acme/shop";
+
+        fn replay(key: &str) -> Replay {
+            Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/convex"), key).unwrap()
+        }
+
+        fn hub() -> (Connectors, MemStorage) {
+            let storage = MemStorage::default();
+            (Connectors::new(storage.clone(), "/bin/pinned".into()), storage)
+        }
+
+        fn connect(connectors: &Connectors, key: &str, repos: &[&str]) -> Result<Connection, String> {
+            block_on(connectors.connect_convex(&replay(key), key, repos.iter().map(|r| r.to_string()).collect()))
+        }
+
+        fn repos(connectors: &Connectors) -> Vec<(String, Vec<String>)> {
+            connectors.get_settings().convex.into_iter().map(|c| (c.id, c.repos)).collect()
+        }
+
+        #[test]
+        fn the_key_stays_in_storage_and_only_its_hint_reaches_settings() {
+            let (connectors, storage) = hub();
+            let connection = block_on(connectors.connect_convex(&replay(KEY), &format!(" {KEY}\n"), vec![SITE.into()])).unwrap();
+            assert_eq!(
+                connection,
+                Connection { id: "quick-lemur-789".into(), kind: Kind::Dev, url: "https://quick-lemur-789.convex.cloud".into(), team: "acme".into(), project: "shop".into(), key_hint: "…cret".into(), repos: vec![SITE.into()] }
+            );
+            assert_eq!(*storage.keys.lock().unwrap(), BTreeMap::from([("convex-key-quick-lemur-789".to_owned(), KEY.to_owned())]));
+            let settings = serde_json::to_string(&connectors.get_settings()).unwrap();
+            assert!(settings.contains("\"key_hint\":\"…cret\"") && !settings.contains("connsecret"), "{settings}");
+            let stored = String::from_utf8(storage.store.lock().unwrap().clone().unwrap()).unwrap();
+            assert!(stored.contains("quick-lemur-789") && !stored.contains("connsecret"), "{stored}");
+            assert_eq!(connect(&connectors, "project:acme:site|token", &[]).unwrap_err(), "That is a project key, which names no deployment. Create a deploy key in the deployment's settings instead: https://dashboard.convex.dev/deployment/settings");
+            let wrong = "dev:quick-lemur-789|eyJ2MiI6Indyb25nIn0wrongsecret";
+            let refused = block_on(connectors.connect_convex(&replay(KEY), wrong, vec![])).unwrap_err();
+            assert!(!refused.contains("wrongsecret"), "{refused}");
+            assert_eq!(*storage.keys.lock().unwrap(), BTreeMap::from([("convex-key-quick-lemur-789".to_owned(), KEY.to_owned())]), "a key Convex refused is not kept");
+        }
+
+        #[test]
+        fn connecting_a_deployment_again_keeps_its_repos_and_swaps_its_key() {
+            let (connectors, storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            let again = connect(&connectors, NEW_KEY, &[]).unwrap();
+            assert_eq!((again.repos, again.key_hint), (vec![SITE.to_owned()], "…etZ9".to_owned()));
+            assert_eq!(storage.keys.lock().unwrap().get("convex-key-quick-lemur-789").map(String::as_str), Some(NEW_KEY));
+            assert_eq!(connectors.get_settings().convex.len(), 1);
+        }
+
+        #[test]
+        fn a_repo_sits_in_one_connection_and_moves_between_them() {
+            let (connectors, _) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            let other = connect(&connectors, OTHER, &[SITE, SHOP, SITE]).unwrap();
+            assert_eq!((other.id.as_str(), other.kind), ("happy-otter-123", Kind::Prod));
+            assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![]), ("happy-otter-123".to_owned(), vec![SITE.to_owned(), SHOP.to_owned()])]);
+            let back = connectors.set_convex_repos("quick-lemur-789", vec![SITE.into()]).unwrap();
+            assert_eq!(back.repos, [SITE]);
+            assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()]), ("happy-otter-123".to_owned(), vec![SHOP.to_owned()])]);
+            assert_eq!(connectors.set_convex_repos("gone-deployment-1", vec![]).unwrap_err(), "No Convex deployment gone-deployment-1 is connected.");
+            assert_eq!(connectors.set_convex_repos("quick-lemur-789", vec![" github.com/acme/site".into()]).unwrap_err(), "a project is its repository, as github.com/owner/repo");
+        }
+
+        #[test]
+        fn disconnecting_forgets_the_key_and_a_second_disconnect_succeeds() {
+            let (connectors, storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            assert_eq!(connectors.disconnect_convex("quick-lemur-789"), Ok(()));
+            assert!(storage.keys.lock().unwrap().is_empty());
+            assert!(connectors.get_settings().convex.is_empty());
+            assert_eq!(connectors.disconnect_convex("quick-lemur-789"), Ok(()));
+            assert_eq!(block_on(connectors.convex_tables(&replay(KEY), "quick-lemur-789")).unwrap_err(), "No Convex deployment quick-lemur-789 is connected.");
+        }
+
+        #[test]
+        fn an_import_keeps_the_connections_and_their_keys() {
+            let (connectors, storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            let imported = connectors.import(json!({ "linear": null, "connectors": [] }), Keys::default()).unwrap();
+            assert!(imported);
+            assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()])]);
+            assert_eq!(storage.keys.lock().unwrap().get("convex-key-quick-lemur-789").map(String::as_str), Some(KEY));
+        }
+
+        #[test]
+        fn the_owner_lists_table_names_and_a_session_reads_through_its_grant() {
+            let (connectors, storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            assert_eq!(block_on(connectors.convex_tables(&replay(KEY), "quick-lemur-789")), Ok(vec!["customers".into(), "invoices".into()]));
+            let thread: TabView = serde_json::from_value(json!({ "id": "tab-1", "cwd": "/Users/f/site", "bypass": false, "running": true, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap();
+            let saved = connectors.save_connector(linear_connector()).unwrap();
+            let workflow = TabView { id: "tab-2".into(), connector: Some(saved.id), ..thread.clone() };
+            let tabs = [thread, workflow];
+            let find = |machine: &str, tab: &str| tabs.iter().find(|t| machine == "m1" && t.id == tab).cloned();
+            let ask = |tab: &str, ask: Ask| block_on(connectors.convex(&replay(KEY), "m1", tab, Some(SITE), &find, ask));
+            assert_eq!(ask("tab-1", Ask::Offer), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev" })));
+            assert_eq!(ask("tab-1", Ask::Tables { table: None }), Ok(json!(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":["customers","invoices"]}"#)));
+            assert_eq!(ask("tab-9", Ask::Offer), Err(convex::UNKNOWN_TAB.into()));
+            assert_eq!(ask("tab-2", Ask::Tables { table: None }), Err("This workflow has no Read Convex data step.".into()));
+            storage.keys.lock().unwrap().clear();
+            assert_eq!(ask("tab-1", Ask::Tables { table: None }), Err("pinned lost the deploy key of `quick-lemur-789`. Paste it again on the Convex card in Settings, Connectors.".into()));
+        }
+
+        fn with_convex(name: &str, workflows: Vec<Connector>) -> (Connectors, PathBuf) {
+            let dir = temp_dir(name);
+            let storage = FileStorage::new(dir.clone());
+            let connected = |id: &str, kind| Connection { id: id.into(), kind, url: format!("https://{id}.convex.cloud"), team: "acme".into(), project: "site".into(), key_hint: "…a1b2".into(), repos: vec![] };
+            let store = Store { connectors: workflows, convex: vec![connected("quick-lemur-789", Kind::Dev), connected("happy-otter-123", Kind::Prod)], ..Store::default() };
+            storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+            (Connectors::new(storage, "/bin/pinned".into()), dir)
+        }
+
+        fn reads(connection: &str, tables: Option<&[&str]>) -> Node {
+            node("convex", "Read Convex data", NodeKind::ConvexData { connection: connection.into(), tables: tables.map(|t| t.iter().map(|s| s.to_string()).collect()) })
+        }
+
+        /// A Run now's opening prompt for workflow c1 whose graph is a session step, plus `extra` nodes
+        /// that no edge reaches.
+        fn run_now_prompt(name: &str, extra: Vec<Node>, more: Vec<Connector>) -> String {
+            let mut c = linear_connector();
+            let mut graph = talks(&["Summarize the week."]);
+            graph.nodes.extend(extra);
+            c.graph = Some(graph);
+            let mut workflows = vec![c];
+            workflows.extend(more);
+            let (connectors, dir) = with_convex(name, workflows);
+            let prompt = connectors.run_now("c1", "you").unwrap().args.pop().unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+            prompt
+        }
+
+        #[test]
+        fn the_opening_prompt_names_what_the_step_lets_the_session_read() {
+            let everything = run_now_prompt("convex-note-all", vec![reads("quick-lemur-789", None)], vec![]);
+            assert!(
+                everything.ends_with("Summarize the week.\n\nYou may read Convex deployment quick-lemur-789 (dev), which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs. Anyone in the thread sees your reply. Quote only what the answer needs."),
+                "a step no edge reaches still counts: {everything}"
+            );
+            let limited = run_now_prompt("convex-note-tables", vec![reads("happy-otter-123", Some(&["invoices", "customers"]))], vec![]);
+            assert!(
+                limited.ends_with("\n\nYou may read the tables invoices, customers of Convex deployment happy-otter-123 (prod) with the tools convex_tables and convex_data. Queries and logs are off for this run. This is production data. Anyone in the thread sees your reply. Quote only what the answer needs."),
+                "{limited}"
+            );
+            let none = run_now_prompt("convex-note-none", vec![], vec![]);
+            assert!(none.ends_with("Summarize the week.") && !none.contains("Convex"), "{none}");
+        }
+
+        #[test]
+        fn a_step_only_in_a_called_graph_grants_nothing() {
+            let mut called = linear_connector();
+            called.id = "c2".into();
+            called.trigger = Trigger::Called;
+            called.graph = Some(Graph {
+                nodes: vec![node("t", "Trigger", NodeKind::Trigger { watch: Watch::Called }), reads("quick-lemur-789", None)],
+                edges: vec![edge("t", "out", "convex")],
+            });
+            let calls = node("call", "Call", NodeKind::Call { workflow: "c2".into() });
+            let prompt = run_now_prompt("convex-note-called", vec![calls], vec![called]);
+            assert!(!prompt.contains("Convex"), "{prompt}");
+        }
+
+        #[test]
+        fn a_graph_run_opens_its_session_with_the_note() {
+            let mut c = linear_connector();
+            let mut graph = talks(&["one"]);
+            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
+            c.graph = Some(graph);
+            let (connectors, dir) = with_convex("convex-note-open", vec![c]);
+            connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-11-11T12:00:00Z").unwrap();
+            let opened = std::sync::Mutex::new(Vec::<String>::new());
+            let open = |work: Work| {
+                if let Work::Run(run) = &work {
+                    opened.lock().unwrap().push(run.args.last().cloned().unwrap_or_default());
+                }
+                async { Ok::<Option<Placement>, String>(Some(Placement { machine: "m1".into(), tab: "tab-1".into() })) }
+            };
+            block_on(connectors.drive(&open)).unwrap();
+            let prompts = opened.lock().unwrap().clone();
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].contains("\n\nYou may read the tables invoices of Convex deployment quick-lemur-789 (dev) with the tools convex_tables and convex_data."), "{}", prompts[0]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_saved_step_must_name_a_connected_deployment() {
+            let (connectors, dir) = with_convex("convex-save", vec![]);
+            let saving = |connection: &str| {
+                let mut c = linear_connector();
+                c.id = String::new();
+                let mut graph = talks(&["go"]);
+                graph.nodes.push(reads(connection, None));
+                c.graph = Some(graph);
+                connectors.save_connector(c).map(|saved| saved.graph.is_some())
+            };
+            assert_eq!(saving("gone-deployment-1"), Err("\"Read Convex data\" reads Convex deployment gone-deployment-1, which is not connected: connect it under Connectors".into()));
+            assert_eq!(saving(""), Err("\"Read Convex data\" names no Convex deployment: pick one".into()));
+            assert_eq!(saving("quick-lemur-789"), Ok(true));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_workflow_generator_never_offers_the_step() {
+            assert!(!generate_instructions("").to_lowercase().contains("convex"));
+            let drafted = generated("convex-generated", json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-mention", "channel": "support" } }, { "name": "Reply", "type": "convex-data", "connection": "quick-lemur-789" }]));
+            assert_eq!(drafted.unwrap_err(), "step \"Reply\" is a \"convex-data\" step, which new maps do not use");
+        }
     }
 
     include!("legacy_outcome.rs");

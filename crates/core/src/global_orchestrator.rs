@@ -816,7 +816,7 @@ mod tests {
     }
 
     fn project(path: &str, repo: Option<&str>) -> ProjectView {
-        ProjectView { path: path.into(), name: path.rsplit('/').next().unwrap().into(), repo: repo.map(Into::into), account: "default".into() }
+        ProjectView { path: path.into(), name: path.rsplit('/').next().unwrap().into(), repo: repo.map(Into::into), account: "default".into(), convex: None }
     }
 
     #[test]

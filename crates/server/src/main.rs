@@ -102,6 +102,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
         box_policy: pinned_server::boxes::Policy::default(),
+        convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;

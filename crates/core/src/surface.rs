@@ -245,7 +245,7 @@ pub const ACTIONS: &[Action] = &[
     n("act_for", Excluded, "the hub's way to run an agent's act on its machine"),
     n("notice", Excluded, "the hub's way to tell a session what the user decided"),
     // The account, on the hub.
-    h("get_settings", Read, "The account's integrations (who is connected to Linear, Slack, GitHub, Vercel and Upstash, never a key), its workflows, their last check, and box access.").wired(),
+    h("get_settings", Read, "The account's integrations (who is connected to Linear, Slack, GitHub, Vercel, Upstash and Convex, never a key), its workflows, their last check, and box access.").wired(),
     h("connect_linear", Confirm, "Connects Linear. The user enters the key in the app; an agent never sends one.").wired().asks(&["key"]),
     h("disconnect_linear", Confirm, "Disconnects Linear.").wired(),
     h("linear_suggestions", Read, "Linear's labels, columns and teams, for a workflow's form.").wired(),
@@ -326,6 +326,11 @@ pub const ACTIONS: &[Action] = &[
     h("remove_mcp_server", Confirm, "Removes a server and its secrets from the account's MCP list.").wired(),
     h("import_mcp_server", Confirm, "Adds the MCP server name that Claude Code account account on machine configures (as mcp_servers lists it, path for its local and project scope) to the account's list, for every project or for project. The user types each of its env and header values in the app.").wired().asks(&["secrets"]),
     h("load_mcp_servers", Excluded, "a machine's way to load the account's MCP servers, secrets and all, into the sessions it starts"),
+    h("connect_convex", Confirm, "Connects a Convex deployment to repos, the account's projects as repo keys like github.com/owner/repo, whose sessions then read its data. The user pastes the deploy key in the app; an agent never sends one.").wired().asks(&["key"]),
+    h("set_convex_repos", Confirm, "Sets the projects, as repo keys, whose sessions read the connected Convex deployment id. A project moves off any other deployment.").wired(),
+    h("disconnect_convex", Confirm, "Disconnects the Convex deployment id and forgets its key.").wired(),
+    h("convex_tables", Excluded, "the Read Convex data step's table list in the app: a session reads Convex through its convex_ tools"),
+    h("convex", Excluded, "a session's Convex read, which its machine sends: call the convex_ tools"),
 ];
 
 /// A signed-in client's answer to a call only the account's owner makes, until it unlocks.
@@ -898,7 +903,7 @@ pub fn mask_secrets(text: &str) -> String {
     let mut boundary = true;
     while let Some(c) = rest.chars().next() {
         if boundary {
-            if let Some(len) = pem_block(rest).or_else(|| jwt(rest)).or_else(|| {
+            if let Some(len) = pem_block(rest).or_else(|| jwt(rest)).or_else(|| convex_key(rest)).or_else(|| {
                 SECRET_PREFIXES.iter().find_map(|prefix| {
                     let tail = rest.strip_prefix(prefix)?;
                     let run = tail.chars().take_while(|c| token_char(*c)).count();
@@ -917,6 +922,20 @@ pub fn mask_secrets(text: &str) -> String {
         rest = &rest[c.len_utf8()..];
     }
     out
+}
+
+/// A Convex deploy key: `dev:`, `prod:` or `preview:` and a name, or a bare name with a token of
+/// 16 characters or more, then `|` and the token.
+fn convex_key(text: &str) -> Option<usize> {
+    let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-');
+    let token = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=');
+    let prefix = ["dev:", "prod:", "preview:"].into_iter().find(|p| text.starts_with(p)).unwrap_or("");
+    let rest = &text[prefix.len()..];
+    let name = rest.chars().take_while(|c| named(*c) || (*c == ':' && prefix == "preview:")).count();
+    let tail = rest[name..].strip_prefix('|')?;
+    let run = tail.chars().take_while(|c| token(*c)).count();
+    let enough = if prefix.is_empty() { 16 } else { 1 };
+    (name > 0 && run >= enough).then(|| prefix.len() + name + 1 + run)
 }
 
 fn jwt(text: &str) -> Option<usize> {
@@ -967,7 +986,7 @@ mod tests {
         assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
         assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
         assert!(!needs(Side::Hub, "answer_box", true) && !needs(Side::Hub, "extend_box", true), "a box follows its access setting and Box budget, never the password");
-        for cmd in ["set_box_access", "connect_upstash", "disconnect_upstash", "set_box_claude_token", "remove_box_claude_token"] {
+        for cmd in ["set_box_access", "connect_upstash", "disconnect_upstash", "set_box_claude_token", "remove_box_claude_token", "connect_convex", "set_convex_repos", "disconnect_convex"] {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
@@ -1018,6 +1037,7 @@ mod tests {
                 "reset_taste_field", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
+                "connect_convex", "set_convex_repos", "disconnect_convex",
             ]
         );
         for name in ["set_taste", "reset_taste_field", "delete_connector"] {
@@ -1044,6 +1064,7 @@ mod tests {
                 "set_box_claude_token: token",
                 "save_mcp_server: secrets",
                 "import_mcp_server: secrets",
+                "connect_convex: key",
             ]
         );
         for action in ACTIONS.iter().filter(|a| !a.asks.is_empty()) {
@@ -1389,6 +1410,22 @@ mod tests {
         assert_eq!(mask_secrets(pem), "a\n[hidden]\nz");
         assert_eq!(mask_secrets("AKIAIOSFODNN7EXAMPLE and AKIA short"), "[hidden] and AKIA short");
         assert_eq!(mask_secrets("ação sk-ant-api03-abcdefghijklmnop1234!"), "ação [hidden]!");
+    }
+
+    #[test]
+    fn a_convex_deploy_key_is_hidden_and_its_deployment_name_is_not() {
+        let cases = [
+            ("key dev:quick-lemur-789|eyJ2MiI6ImExYjIifQ== failed", "key [hidden] failed"),
+            ("prod:happy-otter-123|t0k3n, preview:calm-fox-456|abc", "[hidden], [hidden]"),
+            ("preview:acme:site|eyJ2MiI6InByZXZpZXcifQ", "[hidden]"),
+            ("CONVEX_DEPLOY_KEY=happy-otter-123|0123456789abcdef0123", "CONVEX_DEPLOY_KEY=[hidden]"),
+            ("CONVEX_DEPLOYMENT=dev:quick-lemur-789", "CONVEX_DEPLOYMENT=dev:quick-lemur-789"),
+            ("ls|grep foo", "ls|grep foo"),
+            ("dev:quick-lemur-789 | tail", "dev:quick-lemur-789 | tail"),
+        ];
+        for (text, shown) in cases {
+            assert_eq!(mask_secrets(text), shown, "{text}");
+        }
     }
 
     #[test]

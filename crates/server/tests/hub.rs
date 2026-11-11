@@ -3,6 +3,7 @@ use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Role, Stage, Subject};
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
+use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
@@ -31,6 +32,8 @@ fn postgres() -> String {
     std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into())
 }
 const WAIT: Duration = Duration::from_secs(10);
+/// The deploy key the hub's Convex fixtures answer to.
+const CONVEX_KEY: &str = "dev:quick-lemur-789|eyJ2MiI6Imh1YiJ9hubsecret";
 
 struct TestHub {
     runtime: tokio::runtime::Runtime,
@@ -95,6 +98,7 @@ impl TestHub {
             signup: self.signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
+            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
         };
         let start = Instant::now();

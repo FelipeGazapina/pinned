@@ -2251,6 +2251,7 @@ impl Machine {
             name: path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
             repo: git_remote(path).and_then(|remote| repo_key(&remote)),
             account: self.account_for(None, path).map_or_else(|_| accounts::default_account(), |a| a.id),
+            convex: crate::convex::detect(path),
         }
     }
 
