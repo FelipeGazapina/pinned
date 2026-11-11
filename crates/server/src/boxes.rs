@@ -15,7 +15,7 @@ use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteE
 use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
 use serde::{Deserialize, Serialize};
-use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
+use pinned_core::upstash::{self, BoxId, BoxUsage, Exec, Keys, Listed, NewBox, PinnedBox, PinnedCount};
 use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
@@ -449,9 +449,32 @@ fn token_kept(connectors: &Connectors, account: &str, project: Option<&str>) -> 
 }
 
 /// A project's name as a refusal reads it: its repository's, else its folder's.
-fn project_name(folder: Option<&str>, repo: Option<&str>) -> String {
+pub(crate) fn project_name(folder: Option<&str>, repo: Option<&str>) -> String {
     let named = repo.and_then(machine::repo_name).or_else(|| folder.and_then(|f| std::path::Path::new(f).file_name()?.to_str()));
     named.unwrap_or("this project").to_owned()
+}
+
+/// The account's Upstash Box usage for the Usage page, and pinned's own count of the box time its
+/// delegated tasks used this UTC month. The key stays here: an error that names it is scrubbed.
+pub async fn usage(hub: &Hub, account: &Arc<Account>) -> Result<BoxUsage, String> {
+    let Some(keys) = hub.connectors(account).await?.box_keys() else {
+        return Ok(BoxUsage::default());
+    };
+    let since = upstash::month_start(unix_millis() / 1000);
+    let (box_ms, tasks) = hub.db.box_ms_since(account.id, since * 1000).await?;
+    let mut usage = BoxUsage { connected: true, pinned: PinnedCount { box_hours: box_ms as f64 / 3_600_000.0, tasks, since }, ..BoxUsage::default() };
+    match upstash::list_all(&keys.api_key).await {
+        Ok(listed) => {
+            let (mut boxes, totals) = upstash::usage_boxes(&listed, since);
+            let opened = hub.db.opened_boxes(account.id).await?;
+            for row in &mut boxes {
+                row.pinned = opened.iter().find(|o| o.upstash == row.id).map(|o| PinnedBox { project: Some(project_name(o.folder.as_deref(), o.repo.as_deref())), role: o.role.clone(), machine: o.machine.clone() });
+            }
+            (usage.boxes, usage.upstash) = (boxes, totals);
+        }
+        Err(e) => usage.error = Some(format!("Upstash did not answer: {}", e.replace(&keys.api_key, "…"))),
+    }
+    Ok(usage)
 }
 
 /// The pinned agent account the sessions of a project run under on the account's machines, as

@@ -118,6 +118,14 @@ create table if not exists dictation_feedback (id uuid primary key, account uuid
   final_text text not null, locale text not null, engine text not null, app_version text not null,
   platform text not null, duration_ms bigint not null);
 ";
+/// A box row of the account, as the Usage page joins it to what Upstash lists.
+pub struct OpenedBox {
+    pub upstash: String,
+    pub folder: Option<String>,
+    pub repo: Option<String>,
+    pub role: Option<String>,
+    pub machine: Option<String>,
+}
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// Compressed bytes of synced project files one account may keep on the hub.
 const SYNC_QUOTA: i64 = 1 << 30;
@@ -1091,6 +1099,41 @@ impl Db {
             eprintln!("pinned-server: {} of account {account}'s stored task records did not read, so delegation_stats leaves them out (first: {id}: {why})", unreadable.len());
         }
         Ok((records, u32::try_from(unreadable.len()).unwrap_or(u32::MAX)))
+    }
+
+    /// The box time the account's delegated tasks that ended at `since` (unix ms) or later were
+    /// billed, in milliseconds, and how many of them had any.
+    pub async fn box_ms_since(&self, account: Uuid, since: u64) -> Result<(u64, u32), String> {
+        let since = i64::try_from(since).unwrap_or(i64::MAX);
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "select coalesce(sum((record->'usage'->>'box_ms')::bigint), 0)::bigint, count(*) filter (where record->'usage'->>'box_ms' is not null)::bigint from delegation_tasks where account = $1 and ended >= $2",
+                &[&account, &since],
+            )
+            .await
+            .map_err(err)?;
+        Ok((u64::try_from(row.get::<_, i64>(0)).unwrap_or(0), u32::try_from(row.get::<_, i64>(1)).unwrap_or(u32::MAX)))
+    }
+
+    /// What the account's box rows with an Upstash id say of who opened the box, by that id: the
+    /// project's folder and repo, and the agent session that opened it, when one did. Never the
+    /// run spec's token.
+    pub async fn opened_boxes(&self, account: Uuid) -> Result<Vec<OpenedBox>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select b.upstash, b.spec->>'folder', b.spec->>'repo', a.role, coalesce(m.name, a.machine::text) \
+                 from boxes b left join agent_boxes a on a.box = b.id and a.account = b.account \
+                 left join machines m on m.id = a.machine and m.account = b.account \
+                 where b.account = $1 and b.upstash is not null",
+                &[&account],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| OpenedBox { upstash: r.get(0), folder: r.get(1), repo: r.get(2), role: r.get(3), machine: r.get(4) }).collect())
     }
 
     /// The box time already billed to the other tasks of `machine`, in milliseconds.

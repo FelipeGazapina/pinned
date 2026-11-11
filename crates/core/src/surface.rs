@@ -315,6 +315,7 @@ pub const ACTIONS: &[Action] = &[
     h("repo_look", Excluded, "the global orchestrator's own repo tools: it calls repo_overview, repo_read and repo_search"),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
     h("delegation_stats", Read, "How the account's delegated tasks went over the last days (1, 7 or 30), per model.").wired(),
+    h("box_usage", Read, "The account's Upstash Box usage: every box the key lists with its CPU hours and compute cost, the totals of this UTC month, and the box hours of pinned's own delegated tasks.").wired(),
     h("delegate", Excluded, "a machine's way to run delegate_task on another machine or a box: call delegate_task"),
     h("remote_task", Excluded, "a machine's way to read its remote worker: call task_status"),
     h("remote_ended", Excluded, "a machine's way to report a remote worker's end"),

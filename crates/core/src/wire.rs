@@ -1252,6 +1252,9 @@ pub enum HubCall {
     /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
     /// (1, 7 or 30), on every machine.
     DelegationStats { days: u32 },
+    /// `upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its
+    /// delegated tasks used this UTC month. The Upstash key stays on the hub.
+    BoxUsage,
     /// `Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.
     SessionMarks,
     /// `Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change
@@ -2045,6 +2048,7 @@ mod tests {
         assert_eq!((delegate["cmd"].as_str(), delegate["access"].as_str()), (Some("delegate"), Some("read_only")));
         assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
+        round_trip(HubCall::BoxUsage, json!({ "cmd": "box_usage" }));
         round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
