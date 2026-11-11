@@ -628,6 +628,7 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
   #composer .box { border-radius: 18px; background: var(--g-composer); border: 1px solid rgb(var(--g-ink-rgb) / 0.09); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
   #composer #prompt, #prompt-mirror { padding: 14px 14px 0 16px; line-height: 1.45; }
   #composer #prompt { min-height: 0; }
+  #composer[data-resting="true"] .box { padding: 7px 0; }
   #composer #prompt::placeholder { color: var(--g-muted); }
   #composer .tools { gap: 6px; padding: 10px 14px 10px 16px; }
   #composer .tools > .controls { gap: 6px; margin-left: 0; }

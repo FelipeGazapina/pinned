@@ -4812,7 +4812,8 @@ async function sweep(profileName) {
     await page.focus("#prompt");
     await waitFor("the full composer", () => page.evaluate(() => composer.dataset.resting === "false"));
     const full = (await rect("#composer .box")).height;
-    check(full > 100, `the focused composer is ${Math.round(full)}px tall`);
+    // Main.dc.html draws the full box 88px tall, a line of prompt over its row of controls.
+    check(full >= 88, `the focused composer is ${Math.round(full)}px tall`);
     check(await page.locator("#composer .tools #model-button").isVisible(), "the model control didn't come back");
     await page.fill("#prompt", "sent while scrolled up");
     await page.evaluate(() => (threadView.scrollTop = 0));
