@@ -26,6 +26,7 @@ const TASTE_FIELD_LABELS = {
   budget_cents: "Budget per worker",
   time_limit_min: "Time limit per worker",
   box_budget_cents: "Box budget",
+  box_size: "Default box size",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -202,6 +203,22 @@ function tasteLadderHtml(t, field, label, noun) {
   return tasteStepperHtml(field, label(value), near(-1), near(1), noun);
 }
 
+/** The default Upstash Box size: the effective size and where it comes from, and the choices. A
+ * hub that predates it sends none, so there is nothing to show. A project row says what it
+ * inherits and carries the Reset; the account's can go back to the built-in small. */
+function tasteBoxSizeHtml() {
+  const { draft, scope } = tasteUi;
+  if (draft.captains.box_size === undefined) return "";
+  const { size, from } = tasteBoxSize(draft, scope);
+  const sizes = TASTE_BOX_SIZES.map((s) => `<button type="button" data-act="set" data-field="box_size" data-value="${s}" aria-pressed="${s === size}">${tasteBoxSizeName(s)}</button>`).join("");
+  const own = scope.kind === "project" ? draft.projects?.[scope.repo]?.box_size != null : draft.captains.box_size != null;
+  const tag = scope.kind === "project" ? tasteTagHtml("box_size") : own ? `<button type="button" class="taste-reset" data-act="reset" data-field="box_size" aria-label="Use the built-in size for the account" title="Use the built-in size for the account">Reset</button>` : "";
+  const inherits = scope.kind === "project" && !own ? `Inherits ${tasteBoxSizeName(size)} from ${from === "account" ? "Captains (all)" : "the built-in default"}. ` : "";
+  return `<div class="taste-field"><div class="taste-label"><span>${TASTE_FIELD_LABELS.box_size}</span>${tag}</div>
+    <div class="taste-seg" role="group" aria-label="Default box size">${sizes}</div>
+    <span class="taste-quiet"><output aria-live="polite">${tasteBoxSizeText(draft, scope)}</output> ${inherits}Boxes opened with no size named start at this size. A size named for one box wins.</span></div>`;
+}
+
 function tasteLimitsHtml(t) {
   const note = (text, rest = "") => `<section class="taste-section"><div class="taste-heading"><h2>Delegation limits</h2><p>${text}</p></div>${rest}</section>`;
   if (tasteUi.scope.kind === "orchestrator") return note("The orchestrator starts no workers itself. Each Captain follows the limits under Captains (all) or its project.");
@@ -219,6 +236,7 @@ function tasteLimitsHtml(t) {
     ${tasteLadderHtml(t, "time_limit_min", tasteMinutes, "time per worker")}
     ${tasteLadderHtml(t, "budget_cents", tasteMoney, "budget per worker")}
     ${tasteLadderHtml(t, "box_budget_cents", tasteMoney, "budget per box")}
+    ${tasteBoxSizeHtml()}
     <p class="taste-quiet">The budget counts what a Claude Code worker's tokens cost at list prices, its subagents' included. Cursor and Codex workers are held to time and tier only.</p>
   </section>`;
 }

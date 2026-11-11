@@ -555,3 +555,89 @@ test("a hub that predates placement says so instead of drawing empty lists", asy
   assert.match(p.html(), /Update pinned on the hub to choose where heavy work runs\./);
   assert.doesNotMatch(p.html(), /data-place-add/);
 });
+
+const sized = (captains = null, projects = {}) => limited({ captains: { ...balanced, ...limits, box_size: captains }, projects });
+const boxSize = (html) => html.match(/<output aria-live="polite">((?:Small|Medium|Large) \([^)]*\))<\/output>/)?.[1];
+
+test("the default box size shows the size and where it comes from", async () => {
+  let tastes = sized();
+  const p = page({ answer: () => tastes });
+  await p.show();
+  let html = p.html();
+  assert.match(html, /<span>Default box size<\/span><\/div>/, "the account's own row has no Reset while unset");
+  assert.equal(boxSize(html), "Small (built-in)");
+  assert.match(html, /data-field="box_size" data-value="small" aria-pressed="true"/);
+
+  tastes = sized("medium");
+  await p.show();
+  html = p.html();
+  assert.equal(boxSize(html), "Medium (account default)");
+  assert.match(html, /data-field="box_size" data-value="medium" aria-pressed="true"/);
+  assert.match(html, /<span>Default box size<\/span><button type="button" class="taste-reset" data-act="reset" data-field="box_size"/);
+});
+
+test("a project shows its own box size, or what it inherits", async () => {
+  const other = "github.com/acme/other";
+  const p = page({ answer: () => sized("medium", { [SITE]: { box_size: "large" }, [other]: { parallel: 2 } }) });
+  await p.show();
+  const tabs = p.html().match(/data-act="scope" data-kind="project"[^>]*>/g);
+  assert.equal(tabs.length, 2);
+  await p.click(new RegExp(`data-act="scope" data-kind="project" data-repo="${SITE}"`));
+  let html = p.html();
+  assert.equal(boxSize(html), "Large (this project)");
+  assert.match(html, /<span>Default box size<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="box_size"/);
+  assert.doesNotMatch(html, /Inherits (?:Small|Medium|Large) from/);
+
+  await p.click(/data-act="reset" data-field="box_size"/);
+  html = p.html();
+  assert.equal(boxSize(html), "Medium (account default)");
+  assert.match(html, /Inherits Medium from Captains \(all\)\./);
+  assert.match(html, /<span>Default box size<\/span><\/div>/, "an inherited size carries no tag");
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "box_size" }]);
+});
+
+test("a project with no account default inherits the built-in small", async () => {
+  const p = page({ answer: () => sized(null, { [SITE]: { parallel: 2 } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  const html = p.html();
+  assert.equal(boxSize(html), "Small (built-in)");
+  assert.match(html, /Inherits Small from the built-in default\./);
+});
+
+test("changing the box size saves it on the scope it was changed on", async () => {
+  let tastes = sized();
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? tastes : (tastes = sized(args.patch?.box_size ?? null, tastes.projects))) });
+  await p.show();
+  await p.click(/data-field="box_size" data-value="medium"/);
+  assert.equal(boxSize(p.html()), "Medium (account default)");
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "captains" }, patch: { box_size: "medium" } }]);
+
+  tastes = sized("medium", { [SITE]: { parallel: 2 } });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  await p.click(/data-field="box_size" data-value="large"/);
+  assert.equal(boxSize(p.html()), "Large (this project)");
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "project", repo: SITE }, patch: { box_size: "large" } }]);
+
+  tastes = sized("medium");
+  await p.show();
+  await p.click(/data-act="scope" data-kind="captains"/);
+  await p.click(/data-act="reset" data-field="box_size"/);
+  assert.equal(boxSize(p.html()), "Small (built-in)");
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "captains" }, field: "box_size" }]);
+});
+
+test("the orchestrator tab and a hub without box sizes show no box size control", async () => {
+  const p = page({ answer: () => sized() });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.doesNotMatch(p.html(), /box_size|Default box size/);
+  const old = page({ answer: () => limited() });
+  await old.show();
+  assert.doesNotMatch(old.html(), /Default box size/);
+});
