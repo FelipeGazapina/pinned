@@ -316,15 +316,22 @@ async function until(test, ms = 1500) {
   return true;
 }
 
+/** Redraws what shows `tab`'s ask once it changed: the composer only when `tab` is the open thread,
+ * since an ask answered from elsewhere must leave the open thread's draft and card alone. */
+function redrawAsk(tab) {
+  if (tab === active) renderComposer(tab);
+  renderSidebar();
+}
+
 function chooseOption(tab, n, label) {
   const menu = terminalMenu(tab);
   if (menu?.options[n - 1]?.label !== label) {
     tab.menu = menu;
-    return renderComposer(tab);
+    redrawAsk(tab);
+    return null;
   }
   tab.menu = null;
-  renderComposer(tab);
-  renderSidebar();
+  redrawAsk(tab);
   return writeTo(tab, arrowsTo(menu, n) + "\r");
 }
 
@@ -339,7 +346,7 @@ async function answerWith(tab, text) {
   const shown = () => terminalMenu(tab)?.options[option.n - 1]?.head.includes(line.slice(0, 20));
   tab.answering = true;
   tab.menu = null;
-  renderComposer(tab);
+  redrawAsk(tab);
   try {
     await writeTo(tab, arrowsTo(menu, option.n));
     await until(() => terminalMenu(tab)?.options.find((o) => o.chosen)?.n === option.n);
@@ -355,7 +362,7 @@ async function answerWith(tab, text) {
       await writeTo(tab, "\r");
       // Keys typed into a menu that stayed up could pick one of its options.
       if (!(await until(() => !terminalMenu(tab), 4000))) {
-        showComposerNote("Claude's menu didn't close. Your message is still here.", true);
+        if (tab === active) showComposerNote("Claude's menu didn't close. Your message is still here.", true);
         return false;
       }
       await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
@@ -455,7 +462,7 @@ function approvalMore(tab, anchor) {
 }
 function cancelMenu(tab) {
   tab.menu = null;
-  renderComposer(tab);
+  redrawAsk(tab);
   return writeTo(tab, "\x1b");
 }
 function renderQuestion(tab, menu, tabs, lines) {
