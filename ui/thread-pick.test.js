@@ -41,6 +41,7 @@ function pageOn(screen) {
     refit() {},
     render() {},
     markSeen() {},
+    visibleInterval() {},
   };
   vm.createContext(context);
   return context;

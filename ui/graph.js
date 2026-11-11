@@ -187,6 +187,8 @@ export function newNode(type, graph, upstreamId) {
       return { ...base, type: "move-column", column: "" };
     case "proof":
       return { ...base, type: "proof" };
+    case "convex-data":
+      return { ...base, type: "convex-data", connection: "", tables: null };
     case "session":
       return { ...base, type: "session", prompt: "", folder: "", repo: "", model: "", effort: "", permission: "", account: "", worktree: false, instructions: "" };
     case "page":
@@ -458,4 +460,4 @@ export function startingGraph(connector) {
   };
 }
 
-export const PICKER_TYPES = ["classify", "switch", "session", "reply", "file-issue", "take-issue", "move-column", "proof", "page", "call", "stop"];
+export const PICKER_TYPES = ["classify", "switch", "session", "reply", "file-issue", "take-issue", "move-column", "proof", "convex-data", "page", "call", "stop"];

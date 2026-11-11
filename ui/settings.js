@@ -262,6 +262,7 @@ function integrationsHtml() {
     ${githubCardHtml()}
     ${vercelCardHtml()}
     ${upstashCardHtml()}
+    ${convexCardHtml()}
     ${externalAgentsCardHtml()}`;
 }
 
@@ -965,6 +966,7 @@ function graphNodeUi(node) {
   if (type === "take-issue") return { tone: "linear", icon: "✓", app: "Linear", title: "Work an issue", about: "Works the thread on an existing Linear issue." };
   if (type === "move-column") return { tone: "linear", icon: "⇥", app: "Linear", title: "Move issue", about: "Moves the run's Linear issue to the named column." };
   if (type === "proof") return { tone: "proof", icon: "▶", app: "Playwright", title: "Proof video", about: "Requires a proof video on the pull request." };
+  if (type === "convex-data") return CONVEX_STEP;
   if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked", about: "Moves the issue to the picked column when the session opens." };
   if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow", about: "Runs another workflow's map with this run's session." };
   if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop", about: "Ends this branch on purpose." };
@@ -1007,6 +1009,7 @@ function graphNodeSummary(node, c) {
   if (type === "take-issue") return (node.issue ?? "").trim() ? `Work ${(node.issue ?? "").trim()}` : "The thread's filed issue";
   if (type === "move-column") return (node.column ?? "").trim() ? `Move to ${(node.column ?? "").trim()}` : "Name a column";
   if (type === "proof") return "Require proof video";
+  if (type === "convex-data") return convexStepSummary(node);
   if (type === "stage-picked") return c.columns.picked.trim() ? `Move to ${c.columns.picked.trim()}` : "Move to the picked column";
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
@@ -1065,6 +1068,7 @@ function graphNodeIssues(node, c) {
   if (type === "take-issue") return [!slackRun(c) && "A take-issue step needs a Slack trigger."].filter(Boolean);
   if (type === "move-column") return [!(node.column ?? "").trim() && "Name the column."].filter(Boolean);
   if (type === "proof") return [];
+  if (type === "convex-data") return convexStepIssues(node);
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
     return [!node.workflow && "Choose a workflow.", node.workflow && !target && "That workflow was deleted."].filter(Boolean);
@@ -1415,6 +1419,8 @@ function graphNodePanel(c) {
       <p class="hint">Moves the run's Linear issue to the named column.</p>`;
   } else if (type === "proof") {
     body = `<p class="hint">Requires a proof video on the pull request, like the connector's proof flag. The session drives the change in a Playwright script, records a video and posts it as a comment on the pull request. The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>`;
+  } else if (type === "convex-data") {
+    body = convexStepPanel(node);
   } else if (type === "call") {
     const i = graphNodeIndex(node.id);
     const targets = settings.connectors.filter((k) => k.id !== c.id);
@@ -1447,6 +1453,7 @@ function applyGraphPick(type) {
     const c = view.draft;
     Object.assign(fresh, { folder: c.folder ?? "", repo: c.repo ?? "", model: c.model ?? "", effort: c.effort ?? "", permission: c.permissionMode ?? "", account: c.account ?? "", worktree: !!c.worktree, instructions: c.instructions ?? "" });
   }
+  if (fresh.type === "convex-data") fresh.connection = convexDefaultConnection(view.draft);
   if (view.graphPick.mode === "splice") {
     const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
     view.draft.graph = api.splice(view.draft.graph, edge, fresh);
@@ -2182,6 +2189,7 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
   if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
   if (e.key === "Enter" && e.target.id === "box-token") actions["add-box-token"]();
+  if (e.key === "Enter" && e.target.id === "convex-key") actions["connect-convex"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
@@ -2279,13 +2287,14 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
   { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
   { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector permission fresh fixed ask"] },
+  { title: "Convex", terms: ["database tables documents deploy key logs query connector"], id: "convex" },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });

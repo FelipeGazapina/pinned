@@ -1,0 +1,32 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "_system/cli/tableData",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "table": "nope",
+          "order": "desc",
+          "paginationOpts": {
+            "cursor": null,
+            "numItems": 2
+          }
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "continueCursor": "077b165f7a35736ba8192ca135d6bd60d25446e294c71997b72f34dc2a6d844b236fd65e60fc99b514e174859697254011988981998ce41b92bf54481299921ee018e7c85dfd",
+      "isDone": true,
+      "page": [],
+      "pageStatus": null,
+      "splitCursor": null
+    }
+  }
+}

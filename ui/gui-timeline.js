@@ -1211,13 +1211,14 @@ function renderThread() {
   t.editable = !sub && (working ? "busy" : true);
   const resume = !sub && resumeOffered(tab);
   const box = !sub && boxSoon(tab);
+  const convex = !sub && convexBannerFor(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsFor(t);
   if (globalLane(tab) && !sub) speakGlobalTexts(tab, turns);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1251,7 +1252,7 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   const saying = document.activeElement?.dataset?.workerSay;
-  threadView.innerHTML =`<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${convex ? convexBannerHtml(convex) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
@@ -1879,6 +1880,13 @@ threadView.addEventListener("click", (e) => {
   }
   if (e.target.closest("[data-dismiss-box]")) {
     boxWarned.add(active.key);
+    return renderThread();
+  }
+  const convexConnect = e.target.closest("[data-convex-connect]");
+  if (convexConnect) return convexOpenCard(convexConnect.dataset.convexConnect);
+  const convexDismiss = e.target.closest("[data-dismiss-convex]");
+  if (convexDismiss) {
+    convexDismissed.add(convexDismiss.dataset.dismissConvex);
     return renderThread();
   }
   const boxAdd = e.target.closest("[data-box-add]");

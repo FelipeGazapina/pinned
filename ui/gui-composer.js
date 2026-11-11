@@ -3096,7 +3096,7 @@ async function runScript(tab, script, cwd = null, group = null) {
   fit.fit();
   try {
     shell.id = await callOn(tab.machine, { cmd: "open_shell", tab: tab.view.id, cols: term.cols, rows: term.rows });
-    await machines.get(tab.machine).transport.attach(shell.id, { write: (bytes) => term.write(bytes), reset: () => term.reset() });
+    await machines.get(tab.machine).transport.attach(shell.id, { write: (bytes) => feed(term, bytes), reset: () => term.reset() });
     term.onData((data) => callOn(tab.machine, { cmd: "write_input", tab: shell.id, data }));
     // A shell drops what is typed before its prompt is up.
     await until(() => term.buffer.active.getLine(term.buffer.active.cursorY + term.buffer.active.baseY)?.translateToString(true).trim(), 5000);

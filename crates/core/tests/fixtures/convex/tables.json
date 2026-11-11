@@ -1,0 +1,35 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "_system/cli/tables",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "paginationOpts": {
+            "cursor": null,
+            "numItems": 100
+          }
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "continueCursor": "end",
+      "isDone": true,
+      "page": [
+        {
+          "name": "invoices"
+        },
+        {
+          "name": "customers"
+        }
+      ]
+    }
+  }
+}

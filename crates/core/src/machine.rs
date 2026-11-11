@@ -27,6 +27,12 @@ const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// How long input for a session waits for a start under way to give it a process.
+const START_WAIT: Duration = Duration::from_secs(5);
+/// A session that may sleep does so this long after it started, after its last turn, and after
+/// a client last showed its tab.
+const REST_AFTER: Duration = Duration::from_secs(2 * 60);
+const REST_LOOK_EVERY: Duration = Duration::from_secs(15);
 /// About when a parent should hear that its worker can't start without the user.
 const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 /// How many times the first-run watch reads a starting session's screen before it stops.
@@ -37,6 +43,9 @@ const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// How long a session's Convex offer waits for the hub to hear of its new tab, and how often it asks.
+const CONVEX_OFFER_WAIT: Duration = Duration::from_secs(3);
+const CONVEX_OFFER_RETRY: Duration = Duration::from_millis(250);
 /// How long a session's start waits for the account's taste before it takes the one `taste.json`
 /// kept. A Capitão can start while a Machine lock is held, so a silent hub must not hold it long.
 #[cfg(not(test))]
@@ -245,6 +254,17 @@ pub struct Headless<'a> {
     pub strip: &'a [&'a str],
 }
 
+/// Appends `bytes` to `kept` and keeps its last `limit` bytes. Room is made before the bytes go
+/// in: a buffer that held the old ones and the new ones for a moment grew to twice what it keeps,
+/// and every tab and shell has one.
+pub(crate) fn keep_last(kept: &mut VecDeque<u8>, bytes: &[u8], limit: usize) {
+    kept.reserve_exact(limit.saturating_sub(kept.len()));
+    let bytes = &bytes[bytes.len().saturating_sub(limit)..];
+    let excess = (kept.len() + bytes.len()).saturating_sub(limit);
+    kept.drain(..excess);
+    kept.extend(bytes);
+}
+
 #[derive(Default)]
 struct Screen {
     kept: VecDeque<u8>,
@@ -286,9 +306,7 @@ impl Screen {
         if let Some(watch) = self.watch.as_mut() {
             watch.feed(bytes, Instant::now());
         }
-        self.kept.extend(bytes);
-        let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
-        self.kept.drain(..excess);
+        keep_last(&mut self.kept, bytes, OUTPUT_KEEP);
         for (_, sink) in &self.viewers {
             sink(bytes);
         }
@@ -382,6 +400,24 @@ struct Tab {
     started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
+    /// The conversation has no process: `launch` resumes it once something needs it. Clients see
+    /// the tab as running.
+    asleep: bool,
+    /// The running session started as a bare resume of its conversation: until something is typed
+    /// into it, it holds nothing that a later resume lacks.
+    bare: bool,
+    /// The session started from sleep and has not taken the terminal yet, so keys typed meanwhile
+    /// wait in `keys`.
+    waking: bool,
+    /// `permission_mode` is the mode the running session is in: a hook reported it, or the start
+    /// asked for it. A bare resume starts in the default mode whatever was recorded before.
+    mode_live: bool,
+    /// The effort the running session was started at, when its start named one. A resume starts
+    /// at the default effort whatever the conversation ran at before.
+    effort: Option<String>,
+    /// The session's last turn left background shells that run on under its process, such as a
+    /// dev server.
+    shells_left: bool,
     /// Environment for every start, such as the issue a connector's session reports on.
     env: Vec<(String, String)>,
     /// Every start runs claude with `--dangerously-skip-permissions`, so nothing asks or is blocked.
@@ -423,6 +459,10 @@ struct Tab {
     ask_detail: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
+    /// Keys typed into a session that was asleep, written once it takes the terminal.
+    keys: Vec<u8>,
+    /// When a client last showed the tab, as the look for sessions to rest found it.
+    seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
@@ -472,6 +512,11 @@ impl Tab {
         }
     }
 
+    /// The tab holds a conversation that takes input: its session runs, or sleeps.
+    fn live(&self) -> bool {
+        self.session.is_some() || self.asleep
+    }
+
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
     fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
@@ -482,7 +527,7 @@ impl Tab {
             account: self.account.id.clone(),
             program: self.program,
             bypass: self.bypass,
-            running: self.session.is_some(),
+            running: self.live(),
             status: self.status,
             title: self.title.clone(),
             message: self.message.clone(),
@@ -519,6 +564,23 @@ impl Tab {
             return self.notice_idle();
         }
         self.status != Some(AgentStatus::Working) && !self.interrupted && self.turn_pending.is_none() && self.draft.empty()
+    }
+
+    /// The session sits at its prompt with nothing typed, held or pending.
+    fn quiet(&self) -> bool {
+        self.program == Program::Agent && self.notice_idle() && !self.starting && self.resume_at.is_none() && self.held.is_empty() && self.keys.is_empty() && self.background_wait.is_none() && !self.shells_left
+    }
+
+    /// The session started, ended its last turn, and was last shown `REST_AFTER` ago or more.
+    fn left_alone(&self, now: SystemTime) -> bool {
+        let old = |at: SystemTime| now.duration_since(at).is_ok_and(|age| age >= REST_AFTER);
+        self.started.is_some_and(old) && self.seen.is_none_or(old) && self.updated.is_none_or(|at| old(SystemTime::UNIX_EPOCH + Duration::from_secs(at)))
+    }
+
+    /// Nothing was typed into the session since it resumed its conversation, so it holds nothing
+    /// that a later resume lacks.
+    fn untouched(&self) -> bool {
+        self.bare && self.status.is_none() && self.session.as_ref().is_some_and(pty::Session::untouched)
     }
 
     fn notice_idle(&self) -> bool {
@@ -616,6 +678,7 @@ pub struct Machine {
     /// After the hub refused records, when to offer them again.
     records_retry: Mutex<Option<Instant>>,
     threads_watched: AtomicBool,
+    rest_looked_for: AtomicBool,
     thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     /// When a Go account's allowance was last asked for, so a burst of statuslines makes one request.
@@ -812,6 +875,7 @@ impl Machine {
             sending_records: AtomicBool::new(false),
             records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
+            rest_looked_for: AtomicBool::new(false),
             thread_watchers: Mutex::default(),
             usage: Mutex::default(),
             usage_refreshed: Mutex::default(),
@@ -960,6 +1024,7 @@ impl Machine {
             Call::OpenScratch { bypass } => json(self.open_scratch(bypass)?),
             Call::AutoResume { tab, on } => json(self.auto_resume(&tab, on)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
+            Call::Wake { tab, cols, rows } => json(self.wake(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::SetModel { tab, model, cols, rows, account } => json(self.set_model(&tab, &model, cols, rows, account.as_deref())?),
             Call::RestartClaude { tab, cols, rows } => json(self.restart_claude(&tab, cols, rows)?),
@@ -1700,7 +1765,7 @@ impl Machine {
         // The hub sends a run again when it lost the answer, as on a dropped link: the session it started answers.
         if let Some(work) = session_of(&run.env) {
             let tabs = self.tabs.lock().unwrap();
-            if let Some((id, _)) = tabs.iter().find(|(_, t)| t.session.is_some() && session_of(&t.env).as_ref() == Some(&work)) {
+            if let Some((id, _)) = tabs.iter().find(|(_, t)| t.live() && session_of(&t.env).as_ref() == Some(&work)) {
                 return Ok(id.clone());
             }
         }
@@ -1732,7 +1797,7 @@ impl Machine {
         // The hub sends a run again when it lost the answer: the session it started answers.
         if let Some(work) = session_of(&run.env) {
             let tabs = self.tabs.lock().unwrap();
-            if let Some((id, _)) = tabs.iter().find(|(_, t)| (t.session.is_some() || t.starting) && session_of(&t.env).as_ref() == Some(&work)) {
+            if let Some((id, _)) = tabs.iter().find(|(_, t)| (t.live() || t.starting) && session_of(&t.env).as_ref() == Some(&work)) {
                 return Ok(id.clone());
             }
         }
@@ -1920,19 +1985,31 @@ impl Machine {
             if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
                 return None;
             }
+            let slept = std::mem::take(&mut t.asleep);
             t.starting = true;
+            t.waking = slept;
+            // What was typed for a session this start replaces is not for the next one. What was
+            // typed for a session that sleeps is why it starts.
+            if !slept {
+                t.held.clear();
+                t.keys.clear();
+            }
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
+            let asked = args.clone();
+            t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
+            t.mode_live = args.iter().any(|a| a == "--permission-mode");
+            t.effort = args.iter().position(|a| a == "--effort").and_then(|at| args.get(at + 1).cloned());
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass))
+            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept))
         })?;
-        let Some((cwd, account, program, args, env, bypass)) = prepared else {
+        let Some((cwd, account, program, args, env, bypass, asked, slept)) = prepared else {
             return self.tab(tab, |t| t.cwd.display().to_string());
         };
         let mut args = args;
@@ -1974,7 +2051,9 @@ impl Machine {
         }
         let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
         if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
-            let _ = self.tab(tab, |t| t.starting = false);
+            // The next start asks for the same again: with its arguments gone it would open a new
+            // conversation in place of this one.
+            let _ = self.tab(tab, |t| (t.starting, t.waking, t.launch, t.asleep) = (false, false, asked, slept));
             return Err(error);
         }
         if first_run {
@@ -2115,7 +2194,7 @@ impl Machine {
     /// only at launch, so the tab restarts on its own conversation.
     pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
         let unchanged = self.tab(tab, |t| {
-            let unchanged = t.bypass == on && t.session.is_some();
+            let unchanged = t.bypass == on && t.live();
             t.bypass = on;
             unchanged.then(|| t.cwd.display().to_string())
         })?;
@@ -2203,6 +2282,39 @@ impl Machine {
         self.relaunch(tab, cols, rows)
     }
 
+    /// Starts the process of a session that sleeps, and waits out a start already under way, so
+    /// what follows finds the session. One that runs is marked as in use, which keeps it from
+    /// going to sleep under what follows.
+    fn awake(&self, tab: &str) -> Result<(), String> {
+        let slept = self.tab(tab, |t| {
+            t.seen = Some(SystemTime::now());
+            t.asleep.then(|| t.screen.clone())
+        });
+        if let Ok(Some(screen)) = slept {
+            // The size a client last gave the terminal, which it does not send again.
+            let (rows, cols) = Some(screen.lock().unwrap().size).filter(|(rows, cols)| *rows > 0 && *cols > 0).unwrap_or((UNWATCHED.1, UNWATCHED.0));
+            self.start_claude(tab, cols, rows)?;
+        }
+        let starts = Instant::now();
+        while self.tab(tab, |t| t.starting && t.session.is_none()).unwrap_or(false) && starts.elapsed() < START_WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    /// What a client sends for the tab on its screen, and again while it stays there: a session
+    /// that sleeps starts at the terminal's size, and one that runs stays awake.
+    pub fn wake(&self, tab: &str, cols: u16, rows: u16) -> Result<(), String> {
+        let slept = self.tab(tab, |t| {
+            t.seen = Some(SystemTime::now());
+            t.asleep
+        })?;
+        if slept {
+            self.start_claude(tab, cols, rows)?;
+        }
+        Ok(())
+    }
+
     /// Starts claude again on the tab's conversation and returns its folder; a tab with no
     /// conversation yet starts a fresh one.
     pub fn restart_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
@@ -2221,10 +2333,7 @@ impl Machine {
 
     /// `spawn`, keeping the session's own MCP config `mcp` until the session ends.
     fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, mcp: Option<mcp::SessionFiles>) -> Result<(), String> {
-        let (old, screen) = self.tab(tab, |t| {
-            t.held.clear();
-            (t.session.take(), t.screen.clone())
-        })?;
+        let (old, screen) = self.tab(tab, |t| (t.session.take(), t.screen.clone()))?;
         let session = {
             let mut screen = screen.lock().unwrap();
             screen.size = (size.rows, size.cols);
@@ -2252,10 +2361,70 @@ impl Machine {
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             t.turn_pending = None;
+            t.shells_left = false;
             t.draft = Draft::default();
         })?;
         self.type_held_once_raw(tab, session);
+        if !self.rest_looked_for.swap(true, Ordering::Relaxed) {
+            self.every(REST_LOOK_EVERY, |machine| machine.rest_sessions(SystemTime::now()));
+        }
         Ok(())
+    }
+
+    /// Puts to sleep the quiet sessions that no client shows and that lose nothing by it: one
+    /// nothing was typed into since it resumed, and a worker's whose task is over. A worker's turn
+    /// that leaves background work is not over, so such a worker holds none.
+    fn rest_sessions(&self, now: SystemTime) {
+        // Off unix a dropped session ends only the program it started, so what that program
+        // started would be left behind at every rest.
+        if cfg!(not(unix)) {
+            return;
+        }
+        let shown: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
+        let quiet: Vec<(TabId, bool, Option<String>)> = {
+            let mut tabs = self.tabs.lock().unwrap();
+            for (_, t) in tabs.iter_mut().filter(|(id, _)| shown.contains(*id)) {
+                t.seen = Some(now);
+            }
+            let worker = |t: &Tab| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker);
+            tabs.iter().filter(|(_, t)| t.quiet() && t.left_alone(now)).map(|(id, t)| (id.clone(), t.untouched(), t.task.clone().filter(|_| worker(t)))).collect()
+        };
+        for (tab, untouched, task) in quiet {
+            let over = task.and_then(|task| self.delegates.get(&task)).is_some_and(|task| task.state.terminal() && task.thread.is_some_and(|thread| thread.runs));
+            if (untouched || over) && !self.delegates.has_news(&tab) && self.delegates.running_under(&tab).is_empty() {
+                self.rest(&tab, over, now);
+            }
+        }
+    }
+
+    /// Ends the session's process and leaves its conversation asleep, unless something was typed
+    /// or a client asked for it since it was found quiet; `used` says a session that took input
+    /// before may still rest. The screen keeps its last frame, which a client that attaches later
+    /// reads the session's mode from.
+    fn rest(&self, tab: &str, used: bool, now: SystemTime) {
+        let taken = self.tab(tab, |t| {
+            if !t.quiet() || !t.left_alone(now) || !(used || t.session.as_ref().is_some_and(pty::Session::untouched)) {
+                return None;
+            }
+            let saved = t.saved()?;
+            let session = t.session.take()?;
+            // The session rested at its prompt, so its next start types nothing: a turn that was
+            // cut off before waits for the user, as it did while the session ran.
+            t.launch = crate::delegate::resume_args(t.account.provider, &saved.session);
+            // A resume starts in the default mode and at the default effort, and this session may have left both.
+            let claude = t.account.provider == Provider::Claude;
+            let mode = t.permission_mode.clone().filter(|mode| claude && t.mode_live && !t.bypass && !t.permission_unknown && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
+            t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
+            t.launch.extend(t.effort.clone().filter(|_| claude).into_iter().flat_map(|effort| ["--effort".to_owned(), effort]));
+            (t.asleep, t.mcp, t.started) = (true, None, None);
+            // The screen moves on before the tab is let go: the exit of the session dropped below
+            // reaches no one, and a start that follows counts from here, so its output is its own.
+            t.screen.lock().unwrap().session += 1;
+            Some(session)
+        });
+        let Ok(Some(session)) = taken else { return };
+        drop(session);
+        self.emit_tabs();
     }
 
     /// Watches the session until it takes the terminal, then types the prompts held for it. The
@@ -2270,6 +2439,10 @@ impl Machine {
             }
             let done = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
+                    t.waking = false;
+                    if !t.keys.is_empty() {
+                        let _ = s.write(&std::mem::take(&mut t.keys));
+                    }
                     let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
@@ -2318,6 +2491,10 @@ impl Machine {
     /// wake claude for a turn of its own, which the last Esc ends.
     pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
         const KILL_AGENTS: &[u8] = b"\x18\x0b";
+        // A session that sleeps runs no turn, and the keys would start it.
+        if !Shells::owns(tab) && self.tab(tab, |t| t.asleep)? {
+            return Ok(());
+        }
         for keys in [KILL_AGENTS, KILL_AGENTS, b"\x1b"] {
             self.write_input(tab, keys)?;
             std::thread::sleep(Duration::from_millis(300));
@@ -2330,6 +2507,7 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
+        self.awake(tab)?;
         let (submitted, mode_unknown) = self.tab(tab, |t| {
             let submitted = note_draft(&mut t.draft, data);
             if submitted {
@@ -2339,8 +2517,19 @@ impl Machine {
             if mode_unknown {
                 t.permission_unknown = true;
             }
-            if let Some(s) = t.session.as_mut() {
-                s.write(data).map_err(|e| e.to_string())?;
+            match t.session.as_mut() {
+                // A session that woke takes the terminal a moment later: typed now, the pty would
+                // echo the keys and turn their Enter into a newline.
+                Some(s) if (t.waking || !t.keys.is_empty()) && !s.raw() => t.keys.extend_from_slice(data),
+                Some(s) => {
+                    if !t.keys.is_empty() {
+                        s.write(&std::mem::take(&mut t.keys)).map_err(|e| e.to_string())?;
+                    }
+                    s.write(data).map_err(|e| e.to_string())?
+                }
+                // A start under way has given it no process yet.
+                None if t.starting => t.keys.extend_from_slice(data),
+                None => {}
             }
             Ok::<_, String>((submitted, mode_unknown))
         })??;
@@ -2429,6 +2618,7 @@ impl Machine {
             name: path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
             repo: git_remote(path).and_then(|remote| repo_key(&remote)),
             account: self.account_for(None, path).map_or_else(|_| accounts::default_account(), |a| a.id),
+            convex: crate::convex::detect(path),
         }
     }
 
@@ -3135,6 +3325,7 @@ impl Machine {
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
+            ProjectTool::Convex { ask } => self.convex(tab, ask),
             ProjectTool::Act { action, args, request_id, machine } => {
                 let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
                 match self.call_hub(HubCall::Act { act }) {
@@ -3142,6 +3333,32 @@ impl Machine {
                     answer => text_json(answer?),
                 }
             }
+        }
+    }
+
+    /// A Convex tool's ask, which the hub answers for the project of the tab's checkout, by its
+    /// repo key. The machine reports a tab just after it starts it, so the offer at a session's
+    /// start waits a moment for the hub to hear of it.
+    fn convex(&self, tab: &str, ask: crate::convex::Ask) -> Result<String, String> {
+        use crate::convex::{Ask, SIGNED_OUT, UNKNOWN_TAB};
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        let repo = git_remote(&history::project_of(&cwd)).and_then(|remote| repo_key(&remote));
+        let offer = ask == Ask::Offer;
+        if offer && repo.is_none() {
+            return Err(crate::convex::NO_ORIGIN.into());
+        }
+        let started = Instant::now();
+        let answer = loop {
+            match self.call_hub(HubCall::Convex { tab: tab.to_owned(), repo: repo.clone(), ask: ask.clone() }) {
+                Err(e) if offer && e == UNKNOWN_TAB && started.elapsed() < CONVEX_OFFER_WAIT => std::thread::sleep(CONVEX_OFFER_RETRY),
+                answer => break answer,
+            }
+        };
+        match answer {
+            Ok(Value::String(text)) => Ok(text),
+            Ok(value) => text_json(value),
+            Err(e) if e == NOT_LINKED => Err(SIGNED_OUT.into()),
+            Err(e) => Err(needs_update(e)),
         }
     }
 
@@ -3176,7 +3393,7 @@ impl Machine {
         }
         // These start a stopped tab as well as restart a running one, outside the limits.
         if let Call::RestartClaude { tab, .. } | Call::SetModel { tab, .. } | Call::SetBypass { tab, .. } | Call::Rewind { tab, .. } | Call::SwitchAccount { tab, .. } | Call::SetWorkspace { tab, .. } = &call {
-            if !self.tab(tab, |t| t.session.is_some())? {
+            if !self.tab(tab, |t| t.live())? {
                 return Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker"));
             }
         }
@@ -3212,7 +3429,7 @@ impl Machine {
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model) = self.tab(&tab, |t| (t.session.is_some() || t.starting, t.model.clone()))?;
+        let (running, model) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone()))?;
         if !running {
             let limits = self.limits_in(caller, &project);
             limits.admit(model.as_deref(), None, &self.claude_models())?;
@@ -3246,7 +3463,7 @@ impl Machine {
         let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
         let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
             let plan = t.permission_mode.as_deref() == Some("plan");
-            (t.session.is_some() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
         })?;
         if running || self.thread_task(tab, false).is_some() {
             return self.start_claude(tab, cols, rows);
@@ -3779,7 +3996,7 @@ impl Machine {
             return None;
         }
         let tabs = self.tabs.lock().unwrap();
-        let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
+        let live = tabs.iter().filter(|(_, t)| t.live() && env.iter().all(|e| t.env.contains(e)));
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
     }
 
@@ -3835,7 +4052,7 @@ impl Machine {
                     self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
                 }
             }
-            let free = self.tab(&tab, |t| t.session.is_some() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
+            let free = self.tab(&tab, |t| t.live() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
             if free {
                 if let Some(text) = self.pr_watches.take_wake(&tab) {
                     let _ = self.type_prompt(&tab, &text);
@@ -3849,8 +4066,12 @@ impl Machine {
     /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
     /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
+        self.awake(tab)?;
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
+                if !t.keys.is_empty() {
+                    s.write(&std::mem::take(&mut t.keys)).map_err(|e| e.to_string())?;
+                }
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(|e| e.to_string())?;
                     t.turn_pending = Some(Instant::now());
@@ -3863,6 +4084,11 @@ impl Machine {
                 t.held.push(text.to_owned());
                 Ok(false)
             }
+            // A start under way has given it no process yet.
+            None if t.starting => {
+                t.held.push(text.to_owned());
+                Ok(false)
+            }
             None => Err(format!("tab {tab} has no running session")),
         })??;
         if wrote {
@@ -3871,7 +4097,13 @@ impl Machine {
         Ok(())
     }
 
-    /// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
+    /// `restore_tabs`, returning only the tabs to start now: the ones with work left.
+    pub fn restore_working(&self) -> Vec<TabId> {
+        self.restore_tabs().into_iter().filter(|id| self.tab(id, |t| !t.asleep).unwrap_or(false)).collect()
+    }
+
+    /// Reopens the sessions still going at the last quit and returns their tab ids. One with no
+    /// work left sleeps until something needs it.
     pub fn restore_tabs(&self) -> Vec<TabId> {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
@@ -3887,7 +4119,7 @@ impl Machine {
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.asleep) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode, !s.interrupted));
                 Some((id, s.spawned_by))
             })
             .collect();
@@ -4079,10 +4311,11 @@ impl Machine {
         })
     }
 
-    /// Clears the shutdown flag and reopens sessions saved by the last `quit`.
+    /// Clears the shutdown flag, reopens the sessions saved by the last `quit`, and returns the
+    /// ones to start now.
     pub fn reopen_sessions(&self) -> Vec<TabId> {
         self.quitting.store(false, Ordering::SeqCst);
-        self.restore_tabs()
+        self.restore_working()
     }
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
@@ -5236,6 +5469,7 @@ impl Machine {
             let ripe = tabs.iter_mut().filter(|(_, t)| t.background_wait.is_some_and(|w| w.shells_only && now.saturating_duration_since(w.since) >= quiet));
             ripe.map(|(id, t)| {
                 t.background_wait = None;
+                t.shells_left = true;
                 t.status = Some(AgentStatus::Done);
                 t.updated = Some(unix_now());
                 id.clone()
@@ -5346,6 +5580,13 @@ impl Machine {
 
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
+            // A sleeping session starts for its news, and a later pass types it.
+            if self.tab(tab, |t| t.asleep).unwrap_or(false) && self.delegates.has_news(tab) {
+                if let Err(error) = self.awake(tab) {
+                    eprintln!("pinned: could not wake {tab} for its news: {error}");
+                }
+                self.arm_delegate_pass();
+            }
             return;
         }
         let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
@@ -5537,15 +5778,19 @@ impl Machine {
     }
 
     fn summary(&self, look: Look) -> crate::load::MachineState {
-        let tabs = self.tabs();
         let listed = self.listed_accounts(look);
         // A task held for a machine elsewhere runs there, so it is not this machine's load.
         let working = self.delegates.running().iter().filter(|id| self.delegates.get(id).is_some_and(|task| task.remote.is_none())).count() as u32;
-        let worker_tabs = tabs.iter().filter(|tab| tab.running && tab.role == Some(Role::Worker)).count() as u32;
+        // A sleeping session holds no process, so it is no load either.
+        let (sessions, worker_tabs) = {
+            let tabs = self.tabs.lock().unwrap();
+            let held: Vec<&Tab> = tabs.values().filter(|t| t.session.is_some()).collect();
+            (held.len() as u32, held.iter().filter(|t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker)).count() as u32)
+        };
         crate::load::MachineState {
             load: crate::load::sample(&home()),
             accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
-            sessions: tabs.iter().filter(|tab| tab.running).count() as u32,
+            sessions,
             workers: working.max(worker_tabs),
             // The account's tastes as last kept on disk: asking the hub for them could stall the report.
             workers_at_once: self.local_tastes().resolve(&TasteScope::Captains).limits().parallel,
@@ -5681,6 +5926,12 @@ impl Machine {
             starting: false,
             started: None,
             launch,
+            asleep: false,
+            bare: false,
+            waking: false,
+            mode_live: false,
+            effort: None,
+            shells_left: false,
             env,
             bypass,
             claude_session,
@@ -5702,6 +5953,8 @@ impl Machine {
             question: None,
             ask_detail: None,
             held: vec![],
+            keys: vec![],
+            seen: None,
             turn_pending: None,
             background_wait: None,
             draft: Draft::default(),
@@ -5876,6 +6129,10 @@ impl Machine {
             }
             t.ask_detail = detail;
             t.status = Some(event.status);
+            // The turn that starts may end the shells an earlier one left, and its end says which still run.
+            if event.status == AgentStatus::Working {
+                t.shells_left = false;
+            }
             if event.title.is_some() {
                 t.title = event.title.clone();
             }
@@ -5884,6 +6141,7 @@ impl Machine {
             if event.permission_mode.is_some() {
                 t.permission_mode = event.permission_mode.clone();
                 t.permission_unknown = false;
+                t.mode_live = true;
             }
             before != (t.interrupted, t.resume_at, t.held_at_limit) || mode_before != (t.permission_unknown, t.permission_mode.clone())
         });
@@ -6772,6 +7030,190 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A claude that records its arguments, its pid and its terminal's size, takes the terminal a
+    /// moment later, as claude does, and keeps what is typed.
+    #[cfg(unix)]
+    fn typed_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\necho $$ > \"$0.pid.$PINNED_TAB\"\nstty size > \"$0.size.$PINNED_TAB\"\nsleep 0.2\nstty raw -echo\nexec cat > \"$0.typed.$PINNED_TAB\"\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// A machine whose saved sessions `sessions` all ended their last turn, and their tabs in that order.
+    #[cfg(unix)]
+    fn restored_idle(name: &str, sessions: &[&str]) -> (Arc<Machine>, PathBuf, PathBuf, Vec<TabId>) {
+        let dir = temp(name);
+        let (app, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let saved: Vec<Value> = sessions.iter().map(|session| json!({ "cwd": app, "session": session, "env": [] })).collect();
+        std::fs::write(config.join("sessions.json"), json!(saved).to_string()).unwrap();
+        let claude = typed_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let tabs = m.restore_tabs();
+        (m, dir, claude, tabs)
+    }
+
+    #[cfg(unix)]
+    fn kept(claude: &Path, what: &str, tab: &str) -> String {
+        std::fs::read_to_string(format!("{}.{what}.{tab}", claude.display())).unwrap_or_default()
+    }
+
+    /// The pid the tab's claude wrote when it started, which the next start writes over.
+    #[cfg(unix)]
+    fn pid_of(claude: &Path, tab: &str) -> i32 {
+        wait_for("claude's pid", || kept(claude, "pid", tab).ends_with('\n'));
+        let pid = kept(claude, "pid", tab).trim().parse().unwrap();
+        std::fs::remove_file(format!("{}.pid.{tab}", claude.display())).unwrap();
+        pid
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 sends nothing and only asks whether the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_session_with_no_work_left_has_no_process_until_a_prompt_starts_it() {
+        let dir = temp("sleep-restore");
+        let (app, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "idle", "env": [] }, { "cwd": app, "session": "busy", "env": [], "interrupted": true }]).to_string()).unwrap();
+        let claude = typed_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let now = m.restore_working();
+        let tab = |session: &str| m.tabs().into_iter().find(|t| t.session.as_deref() == Some(session)).unwrap();
+        let (idle, busy) = (tab("idle").id, tab("busy").id);
+        assert_eq!(now, [busy.clone()], "only the session with work left starts at launch");
+        m.start_claude(&busy, 80, 24).unwrap();
+        assert_eq!(started(&claude, &busy)[4..], ["--resume", "busy", "Continue from where you left off."]);
+        assert_eq!((tab("idle").running, m.tab(&idle, |t| t.session.is_some())), (true, Ok(false)), "clients see the sleeping session as running, and no process holds it");
+        assert_eq!(m.state().sessions, 1, "the machine reports the session that runs as its load, not the one that sleeps");
+        m.stop_turn(&idle).unwrap();
+        assert_eq!(m.tab(&idle, |t| t.session.is_some()), Ok(false), "Stop finds no turn in a session that sleeps and starts none");
+
+        assert_eq!(m.call(Call::Prompt { tab: idle.clone(), text: "Where were we?".into() }), Ok(json!(null)));
+        assert_eq!(started(&claude, &idle)[4..], ["--resume", "idle"], "the prompt is typed, not passed");
+        wait_for("the prompt", || kept(&claude, "typed", &idle).contains("Where were we?"));
+        assert_eq!(kept(&claude, "typed", &idle).matches("Where were we?").count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keys_typed_into_a_sleeping_session_reach_it_once_it_takes_the_terminal() {
+        let (m, dir, claude, tabs) = restored_idle("sleep-keys", &["s1"]);
+        m.resize_pty(&tabs[0], 100, 40).unwrap();
+        m.write_input(&tabs[0], b"/model").unwrap();
+        m.write_input(&tabs[0], b"\r").unwrap();
+        wait_for("the keys", || kept(&claude, "typed", &tabs[0]) == "/model\r");
+        assert_eq!(started(&claude, &tabs[0])[4..], ["--resume", "s1"]);
+        assert_eq!(kept(&claude, "size", &tabs[0]), "40 100\n", "it starts at the size the client gave its terminal");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn news_for_a_sleeping_session_starts_it_and_is_typed_there() {
+        let (m, dir, claude, tabs) = restored_idle("sleep-news", &["s1"]);
+        assert!(m.notice(&tabs[0], None, "[pinned] The build is green.".into(), "n-1"));
+        wait_for("the news", || kept(&claude, "typed", &tabs[0]).contains("[pinned] The build is green."));
+        assert_eq!(started(&claude, &tabs[0])[4..], ["--resume", "s1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_that_was_only_looked_at_sleeps_again_and_one_that_was_used_or_is_shown_keeps_its_process() {
+        let (m, dir, claude, tabs) = restored_idle("sleep-again", &["looked", "used", "shown", "back"]);
+        let [looked, used, shown, back] = [0, 1, 2, 3].map(|i| tabs[i].clone());
+        // What the page sends when a tab comes on screen.
+        for tab in &tabs {
+            m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        }
+        let pids = [&looked, &used, &shown, &back].map(|tab| pid_of(&claude, tab));
+        m.call(Call::Prompt { tab: used.clone(), text: "Run the tests.".into() }).unwrap();
+        wait_for("the prompt", || kept(&claude, "typed", &used).contains("Run the tests."));
+        m.record_event(AgentEvent { session: Some("used".into()), ..hook(&used, AgentStatus::Done) });
+        m.call(Call::WatchThreads { tabs: vec![shown.clone()] }).unwrap();
+
+        m.rest_sessions(SystemTime::now());
+        assert_eq!(pids.map(alive), [true, true, true, true], "none sleeps before its rest is due");
+        let due = tabs.iter().map(|tab| m.tab(tab, |t| t.started.unwrap()).unwrap()).max().unwrap() + REST_AFTER;
+        // The page sends this again for a tab that comes back on screen.
+        m.call(Call::Wake { tab: back.clone(), cols: 80, rows: 24 }).unwrap();
+        m.rest_sessions(due);
+        wait_for("the session that was only looked at to end", || !alive(pids[0]));
+        assert_eq!(pids.map(alive), [false, true, true, true]);
+        assert_eq!(tabs.iter().map(|tab| m.view(tab).unwrap().running).collect::<Vec<_>>(), [true, true, true, true]);
+
+        let _ = started(&claude, &looked);
+        m.call(Call::Wake { tab: looked.clone(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(started(&claude, &looked)[4..], ["--resume", "looked"], "it starts on its conversation again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_held_at_its_usage_limit_stays_held_when_its_session_sleeps_and_is_looked_at_again() {
+        let dir = temp("sleep-held");
+        let (app, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        // The limit reset while pinned was closed, and the user had switched auto-resume off.
+        std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "held", "env": [], "interrupted": true, "resume_at": unix_now() - 60, "held": true }]).to_string()).unwrap();
+        let claude = typed_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let tab = m.restore_working().remove(0);
+        m.start_claude(&tab, 80, 24).unwrap();
+        assert_eq!(started(&claude, &tab)[4..], ["--resume", "held"], "the turn waits for the user");
+        let pid = pid_of(&claude, &tab);
+        m.rest_sessions(m.tab(&tab, |t| t.started.unwrap()).unwrap() + REST_AFTER);
+        wait_for("the session to sleep", || !alive(pid));
+
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(started(&claude, &tab)[4..], ["--resume", "held"], "a look at the thread continues nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keys_typed_while_a_session_wakes_wait_for_it_to_take_the_terminal_and_arrive_in_order() {
+        let (m, dir, claude, tabs) = restored_idle("sleep-wake-keys", &["s1"]);
+        m.call(Call::Wake { tab: tabs[0].clone(), cols: 80, rows: 24 }).unwrap();
+        m.write_input(&tabs[0], b"hel").unwrap();
+        m.write_input(&tabs[0], b"lo\r").unwrap();
+        wait_for("the keys", || kept(&claude, "typed", &tabs[0]).len() >= 6);
+        assert_eq!(kept(&claude, "typed", &tabs[0]), "hello\r", "a terminal not taken yet would hand Enter on as a newline");
+        m.write_input(&tabs[0], b"!").unwrap();
+        wait_for("the next key", || kept(&claude, "typed", &tabs[0]) == "hello\r!");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_that_cannot_start_sleeps_on_with_its_conversation() {
+        let (m, dir, claude, tabs) = restored_idle("sleep-fail", &["s1"]);
+        let (tab, moved) = (tabs[0].clone(), dir.join("claude.away"));
+        std::fs::rename(&claude, &moved).unwrap();
+        assert!(m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).is_err());
+        assert!(m.write_input(&tab, b"lost").is_err(), "keys for a session that cannot start are refused, not kept for a later one");
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.running, view.session.as_deref()), (true, Some("s1")), "it sleeps on");
+
+        std::fs::rename(&moved, &claude).unwrap();
+        m.write_input(&tab, b"here\r").unwrap();
+        assert_eq!(started(&claude, &tab)[4..], ["--resume", "s1"], "the next start resumes the same conversation");
+        wait_for("the keys", || kept(&claude, "typed", &tab).len() >= 5);
+        assert_eq!(kept(&claude, "typed", &tab), "here\r");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6935,6 +7377,20 @@ pub(crate) mod tests {
         screen.attach("late".into(), sink);
         assert_eq!(seen.lock().unwrap().len(), 256 * 1024);
         assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
+        assert_eq!(screen.kept.capacity(), 256 * 1024, "the buffer holds no more room than it keeps");
+    }
+
+    #[test]
+    fn a_write_longer_than_a_screen_keeps_leaves_its_last_256_kib() {
+        let mut screen = Screen::default();
+        let session = screen.restart();
+        screen.push(session, b"earlier output");
+        let output: Vec<u8> = (0..700 * 1024).map(|i| (i % 241) as u8).collect();
+        screen.push(session, &output);
+        let (seen, sink) = viewer();
+        screen.attach("late".into(), sink);
+        assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
+        assert_eq!(screen.kept.capacity(), 256 * 1024);
     }
 
     #[cfg(unix)]
@@ -10849,7 +11305,7 @@ while True:
         let restarted = work_machine(&dir, &claude, &sock);
         assert_eq!(restarted.restore_tabs().len(), 1);
         assert_eq!(waiting(&restarted), [], "nothing blocks after a restart");
-        assert_eq!(offers(&restarted), Vec::<String>::new(), "a stopped thread keeps no offer");
+        assert_eq!(offers(&restarted), asks("Fecho o #89?"), "the offer stands while the session sleeps, as it does once it runs again");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -12513,6 +12969,11 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain's thread child on the `work` account, with its transcript file and its folder.
     #[cfg(unix)]
     fn captain_with_thread_child(name: &str) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        captain_with_thread_child_on(name, json!({ "providerInstanceId": "work" }))
+    }
+
+    #[cfg(unix)]
+    fn captain_with_thread_child_on(name: &str, target: Value) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -12522,13 +12983,41 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
-        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": { "providerInstanceId": "work" } }));
+        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": target }));
         let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
         let transcripts = config.join("accounts/work/projects/app");
         std::fs::create_dir_all(&transcripts).unwrap();
         let transcript = transcripts.join("s-child.jsonl");
         std::fs::write(&transcript, json!({ "type": "custom-title", "customTitle": "Board check", "sessionId": "s-child" }).to_string() + "\n").unwrap();
         (m, dir, captain, task, child, transcript)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_session_ends_once_its_task_is_over_and_resumes_in_its_mode_and_at_its_effort_on_the_next_prompt() {
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child_on("thread-rest", json!({ "providerInstanceId": "work", "options": { "effort": "high" } }));
+        let claude = dir.join("claude");
+        let _ = started(&claude, &child);
+        let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
+        append(&transcript, &[json!({ "type": "assistant", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Matches the boards." }] } })]);
+        m.record_event(AgentEvent { session: Some("s-child".into()), permission_mode: Some("auto".into()), ..hook(&child, AgentStatus::Working) });
+        m.rest_sessions(SystemTime::now() + REST_AFTER);
+        assert!(alive(pid), "a worker in the middle of its task keeps its process");
+
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        assert!(m.delegates.get(&task).unwrap().state.terminal());
+        m.rest_sessions(SystemTime::now());
+        assert!(alive(pid), "its rest is not due yet");
+        assert_eq!(m.state().workers, 1, "a finished worker that still holds a process counts against Workers at once");
+        m.rest_sessions(SystemTime::now() + REST_AFTER);
+        wait_for("the worker's session to end", || !alive(pid));
+        assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open");
+        assert_eq!(m.state().workers, 0, "and makes room for the next once it sleeps");
+
+        assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
+        let args = started(&claude, &child);
+        assert!(args.windows(6).any(|flags| flags == ["--resume", "s-child", "--permission-mode", "auto", "--effort", "high"]), "{args:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -12580,6 +13069,61 @@ Have another model review a risky change before it goes ahead.";
         let review = m.task_review(Some(captain.clone()), None, &task, "accepted", Some("merged".into())).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&review).unwrap()["review"]["verdict"], "accepted");
         assert_eq!(m.task_review(Some(captain), None, &task, "kept", None).unwrap_err(), "verdict must be accepted or redone, not \"kept\"");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_convex_tool_asks_the_hub_with_its_tabs_repo_and_the_offer_waits_for_its_tab() {
+        use crate::convex::{Ask, SIGNED_OUT, UNKNOWN_TAB};
+        let dir = temp("convex");
+        let project = dir.join("site");
+        let loose = dir.join("loose");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&loose).unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
+        std::fs::write(project.join(".env.local"), "CONVEX_DEPLOYMENT=dev:quick-lemur-789 # team: acme, project: site\n").unwrap();
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        m.open_project(project.clone());
+        assert_eq!(m.list_projects().into_iter().map(|p| p.convex).collect::<Vec<_>>(), [Some("dev:quick-lemur-789".to_owned())]);
+        let thread = m.add_tab(project.join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let scratch = m.add_tab(loose, Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tool = |tab: &str, ask: Ask| m.project_tool(tab, ProjectTool::Convex { ask });
+        assert_eq!(tool(&thread, Ask::Tables { table: None }), Err(SIGNED_OUT.into()));
+
+        let asked = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = asked.clone();
+        m.set_hub(Arc::new(move |call| {
+            let HubCall::Convex { tab, repo, ask } = call else { return Err("not a Convex call".into()) };
+            let mut seen = seen.lock().unwrap();
+            seen.push(json!({ "tab": tab, "repo": repo, "ask": ask }));
+            match ask {
+                Ask::Offer if seen.len() < 3 => Err(UNKNOWN_TAB.into()),
+                Ask::Offer => Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev" })),
+                Ask::Logs { .. } => Err(UNKNOWN_TAB.into()),
+                _ => Ok(Value::String(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":[]}"#.into())),
+            }
+        }));
+        assert_eq!(tool(&thread, Ask::Offer), Ok(r#"{"deployment":"quick-lemur-789","kind":"dev"}"#.into()), "the offer asks again until the hub knows the tab");
+        let calls = asked.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2], json!({ "tab": thread, "repo": "github.com/acme/site", "ask": { "op": "offer" } }), "a worktree reads as its repo");
+        assert_eq!(tool(&thread, Ask::Tables { table: None }), Ok(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":[]}"#.into()));
+        assert_eq!(tool(&thread, Ask::Logs { function: None, errors: false, limit: None }), Err(UNKNOWN_TAB.into()), "only the offer is asked again");
+        assert_eq!(asked.lock().unwrap().len(), 5);
+        assert_eq!(tool(&scratch, Ask::Offer), Err("This folder has no git origin, so it cannot be connected to Convex yet.".into()));
+        assert_eq!(asked.lock().unwrap().len(), 5, "a folder with no origin asks the hub nothing");
+
+        let offline = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tried = offline.clone();
+        m.set_hub(Arc::new(move |_| {
+            tried.fetch_add(1, Ordering::SeqCst);
+            Err(crate::link::OFFLINE.into())
+        }));
+        let started = Instant::now();
+        assert_eq!(tool(&thread, Ask::Offer), Err(crate::link::OFFLINE.into()));
+        assert_eq!(offline.load(Ordering::SeqCst), 1, "a hub link that is down is not asked again, so a session's start does not wait on it");
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -12677,6 +13221,10 @@ Have another model review a risky change before it goes ahead.";
         m.end_quiet_waits(Instant::now() + quiet);
         assert_eq!((state()["workState"].as_str(), state()["summary"].as_str()), (Some("result_available"), Some("The dev server runs on :3000.")));
         assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::Done));
+
+        let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
+        m.rest_sessions(SystemTime::now() + REST_AFTER);
+        assert!(alive(pid), "the dev server runs under the session, so it keeps its process though its task is over");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "invoices:byNumber",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "number": "x"
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: 176d15e6668bb421] Server Error\nArgumentValidationError: Value does not match validator.\nPath: .number\nValue: \"x\"\nValidator: v.float64()\n\n"
+  }
+}

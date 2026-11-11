@@ -61,6 +61,7 @@ impl Hub {
             signup: pinned_core::account::Signup::Open,
             box_api: Arc::new(Upstash),
             box_policy: Policy::default(),
+            convex_http: Arc::new(pinned_core::convex::client::Reqwest),
             learning_db: None,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -370,7 +371,8 @@ impl Live {
     }
 
     fn save_session(&self) {
-        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": false, "account": "claude" }]);
+        // Saved mid-turn: an idle session comes back with no process, and these tests count the claudes each restart starts.
+        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": true, "account": "claude" }]);
         std::fs::write(self.dir.join("sessions.json"), serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
     }
 

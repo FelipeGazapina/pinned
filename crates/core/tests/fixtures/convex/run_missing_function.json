@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "invoices:nope",
+      "format": "convex_encoded_json",
+      "args": [
+        {}
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: 722868ff2c8e4d50] Server Error\nCould not find public function for 'invoices:nope'.\n"
+  }
+}

@@ -175,6 +175,10 @@ pub struct ProjectView {
     /// The account its sessions run under, the default one unless the user picked another.
     #[serde(default = "accounts::default_account")]
     pub account: AccountId,
+    /// The Convex deployment the folder's `.env.local` or `.env` names in `CONVEX_DEPLOYMENT`, as
+    /// written: `dev:quick-lemur-789`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convex: Option<String>,
 }
 
 /// Everything a client may ask a machine to do, local or through the hub. The comment on each
@@ -195,6 +199,9 @@ pub enum Call {
     AutoResume { tab: TabId, on: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
+    /// Null. The tab is on the client's screen: a session that sleeps starts at this size, and
+    /// one that runs stays awake. The client sends it again while the tab stays there.
+    Wake { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
@@ -1293,6 +1300,29 @@ pub enum HubCall {
     /// From a machine only: `Vec<mcp::Load>`, the account's enabled servers with their secrets, to
     /// load into the sessions it starts.
     LoadMcpServers,
+    /// `convex::Connection`, once Convex took the deploy key: connects its deployment to `repos`
+    /// (repo keys, as `github.com/owner/repo`) beside the ones it had. A repo moves off any other
+    /// deployment. Only the hub keeps Convex keys, so this has no Tauri command.
+    ConnectConvex {
+        key: String,
+        #[serde(default)]
+        repos: Vec<String>,
+    },
+    /// `convex::Connection`: sets the repos whose sessions read the deployment `id`, moving each
+    /// off any other deployment.
+    SetConvexRepos { id: String, repos: Vec<String> },
+    /// Forgets the deployment `id` and its key. Succeeds when it is already gone.
+    DisconnectConvex { id: String },
+    /// The table names of the deployment `id`, sorted, for the Read Convex data step.
+    ConvexTables { id: String },
+    /// From a machine only: what a Convex tool of the session in `tab` asks, in the project whose
+    /// repo key is `repo`. A read answers its text; `offer` answers what the session may read.
+    Convex {
+        tab: TabId,
+        #[serde(default)]
+        repo: Option<String>,
+        ask: crate::convex::Ask,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1873,6 +1903,51 @@ mod tests {
     }
 
     #[test]
+    fn convex_calls_round_trip_and_older_values_read_without_the_new_fields() {
+        use crate::convex::{Ask, Connection, Kind};
+        let site = "github.com/acme/site";
+        round_trip(
+            HubCall::ConnectConvex { key: "dev:quick-lemur-789|token".into(), repos: vec![site.into()] },
+            json!({ "cmd": "connect_convex", "key": "dev:quick-lemur-789|token", "repos": [site] }),
+        );
+        let bare: HubCall = serde_json::from_value(json!({ "cmd": "connect_convex", "key": "dev:quick-lemur-789|token" })).unwrap();
+        assert!(matches!(bare, HubCall::ConnectConvex { repos, .. } if repos.is_empty()), "repos may be left out");
+        round_trip(HubCall::SetConvexRepos { id: "quick-lemur-789".into(), repos: vec![] }, json!({ "cmd": "set_convex_repos", "id": "quick-lemur-789", "repos": [] }));
+        round_trip(HubCall::DisconnectConvex { id: "quick-lemur-789".into() }, json!({ "cmd": "disconnect_convex", "id": "quick-lemur-789" }));
+        round_trip(HubCall::ConvexTables { id: "quick-lemur-789".into() }, json!({ "cmd": "convex_tables", "id": "quick-lemur-789" }));
+        round_trip(
+            HubCall::Convex { tab: "tab-1-2".into(), repo: Some(site.into()), ask: Ask::Data { table: "invoices".into(), limit: Some(5), cursor: None, oldest_first: true } },
+            json!({ "cmd": "convex", "tab": "tab-1-2", "repo": site, "ask": { "op": "data", "table": "invoices", "limit": 5, "cursor": null, "oldest_first": true } }),
+        );
+        round_trip(HubCall::Convex { tab: "tab-1-2".into(), repo: None, ask: Ask::Offer }, json!({ "cmd": "convex", "tab": "tab-1-2", "repo": null, "ask": { "op": "offer" } }));
+        let sent: HubCall = serde_json::from_value(json!({ "cmd": "convex", "tab": "tab-1-2", "ask": { "op": "tables" } })).unwrap();
+        assert!(matches!(sent, HubCall::Convex { repo: None, ask: Ask::Tables { table: None }, .. }));
+
+        round_trip(
+            ProjectView { path: "/Users/f/site".into(), name: "site".into(), repo: Some(site.into()), account: "default".into(), convex: Some("dev:quick-lemur-789".into()) },
+            json!({ "path": "/Users/f/site", "name": "site", "repo": site, "account": "default", "convex": "dev:quick-lemur-789" }),
+        );
+        let older: ProjectView = serde_json::from_value(json!({ "path": "/Users/f/site", "name": "site", "account": "default" })).unwrap();
+        assert_eq!(older.convex, None);
+        assert_eq!(serde_json::to_value(&older).unwrap(), json!({ "path": "/Users/f/site", "name": "site", "account": "default" }), "a project without one sends nothing new");
+
+        let connection = Connection { id: "quick-lemur-789".into(), kind: Kind::Dev, url: "https://quick-lemur-789.convex.cloud".into(), team: "acme".into(), project: "site".into(), key_hint: "…a1b2".into(), repos: vec![site.into()] };
+        round_trip(
+            connection.clone(),
+            json!({ "id": "quick-lemur-789", "kind": "dev", "url": "https://quick-lemur-789.convex.cloud", "team": "acme", "project": "site", "key_hint": "…a1b2", "repos": [site] }),
+        );
+        let settings: Settings = serde_json::from_value(json!({ "linear": null, "slack": null, "connectors": [], "checked": null })).unwrap();
+        assert!(settings.convex.is_empty(), "an older hub's settings read with no connections");
+        let shown = serde_json::to_value(Settings { convex: vec![connection], ..settings }).unwrap();
+        assert_eq!(shown["convex"][0]["key_hint"], "…a1b2");
+
+        let node = crate::graph::Node { id: crate::graph::NodeId("c".into()), name: "Read Convex data".into(), position: [0, 0], group_name: None, kind: crate::graph::NodeKind::ConvexData { connection: "quick-lemur-789".into(), tables: None } };
+        round_trip(node, json!({ "id": "c", "name": "Read Convex data", "position": [0, 0], "group_name": null, "type": "convex-data", "connection": "quick-lemur-789" }));
+        let limited: crate::graph::Node = serde_json::from_value(json!({ "id": "c", "name": "Read", "position": [0, 0], "type": "convex-data", "tables": ["invoices"] })).unwrap();
+        assert_eq!(limited.kind, crate::graph::NodeKind::ConvexData { connection: String::new(), tables: Some(vec!["invoices".into()]) });
+    }
+
+    #[test]
     fn hub_calls_match_the_tauri_commands() {
         round_trip(HubCall::GetSettings, json!({ "cmd": "get_settings" }));
         round_trip(HubCall::ConnectSlack { token: "xoxb-1".into() }, json!({ "cmd": "connect_slack", "token": "xoxb-1" }));
@@ -1987,7 +2062,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();

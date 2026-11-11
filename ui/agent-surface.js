@@ -33,6 +33,7 @@ const AGENT_FORMS = {
   connect_vercel: { page: "integrations", focus: "vercel-key", entered: ["key"], noun: "key" },
   connect_upstash: { page: "integrations", focus: "upstash-key", entered: ["key", "claude_token"], noun: "key and token" },
   set_box_claude_token: { page: "integrations", focus: "box-token", entered: ["token"], noun: "token" },
+  connect_convex: { page: "integrations", focus: "convex-key", entered: ["key"], noun: "deploy key" },
   add_account: { page: "accounts", entered: ["key"], noun: "key" },
   set_account_key: { page: "accounts", entered: ["key"], noun: "key", same: ["account"] },
   save_mcp_server: { page: "mcp-servers", entered: ["secrets"], noun: "secrets", how: (c) => agentMcpHow(c.args.server) },
@@ -61,7 +62,7 @@ const AGENT_MCP_COPY = {
   remove_mcp_server: (a) => `Remove MCP server ${agentMcpName(a.id)}`,
 };
 const agentMcpName = (id) => (typeof mcpUi !== "undefined" && mcpUi.list.find((entry) => entry.id === id)?.server.name) || id;
-const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash" };
+const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash", convex: "Convex" };
 /** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
 function agentWords(name) {
   if (AGENT_LABELS[name]) return AGENT_LABELS[name];

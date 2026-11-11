@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/run_test_function",
+    "auth": "admin",
+    "body": {
+      "adminKey": "<admin-key>",
+      "args": {},
+      "bundle": {
+        "path": "testQuery.js",
+        "source": "import { query } from \"convex:/_system/repl/wrappers.js\";\nexport default query({ handler: async (ctx) => { await ctx.db.insert(\"customers\", { name: \"X\", plan: \"free\" }); return 1; } });\n"
+      },
+      "format": "convex_encoded_json"
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: 2ae935d2d682160b] Server Error\nUncaught TypeError: ctx.db.insert is not a function\n"
+  }
+}
