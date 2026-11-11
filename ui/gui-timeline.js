@@ -868,8 +868,16 @@ const stat = (added, removed) => `<span class="add">+${compact(Number(added))}</
 /** A turn that changed this many files or fewer lists them flat, each by its path; more fold into folders. */
 const FLAT_FILES = 8;
 
-function changesHtml(change, open) {
+/** The end of the turn the open panel's Diff shows, while gui-panel.js is loaded. */
+const panelTurn = (tab) => (typeof turnInPanel === "function" ? turnInPanel(tab) : null);
+
+/** A turn's changed files. While the panel's Diff shows this turn, the card only counts them. */
+function changesHtml(change, open, shown = false) {
   const n = change.files.length;
+  if (shown) {
+    return `<section class="changes flat shown" aria-label="Changed files"><div class="head"><span class="count">${n} changed file${n === 1 ? "" : "s"}</span>${stat(sum(change.files, "added"), sum(change.files, "removed"))}<span class="spacer"></span>
+      <span class="in-panel">Shown in the panel</span></div></section>`;
+  }
   if (n <= FLAT_FILES) {
     const rows = change.files.map((f) => `<li data-ended="${change.ended}" data-file="${esc(f.path)}" title="${esc(f.path)}">${fileIconHtml(f.path, "file-icon")}<span class="path">${middle(f.path, 40)}</span>${stat(f.added, f.removed)}</li>`);
     return `<section class="changes flat" aria-label="Changed files"><div class="head"><span class="count">${n} changed file${n === 1 ? "" : "s"}</span>${stat(sum(change.files, "added"), sum(change.files, "removed"))}<span class="spacer"></span>
@@ -1086,8 +1094,8 @@ function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
   const replies = quick && latest ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
   return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? saidHtml.join("") : ""}${fold}${live ? workers : ""}
     ${live ? "" : said}${replies}
-    ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
-    ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
+    ${change ? changesHtml(change, t.open, change.ended === panelTurn(tab)) : ""}
+    ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}${turn.dividers.map(dividerHtml).join("")}</section>`;
 }
 
 const TURNS_SHOWN = 40;
@@ -1209,7 +1217,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);

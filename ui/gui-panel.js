@@ -391,9 +391,16 @@ function animatePanel(open) {
   clearTimeout(animationTimer);
   animationTimer = setTimeout(() => document.body.classList.remove("panel-animating"), ms + 50);
 }
+let panelTurnDrawn = null;
 function renderPanel() {
   const tab = active;
   const p = panelOf(tab);
+  // The thread's card of the turn the Diff shows says so, and goes back to its files after.
+  const turnShown = turnInPanel(tab);
+  if (turnShown !== panelTurnDrawn) {
+    panelTurnDrawn = turnShown;
+    if (tab && guiOn() && !terminalOnly(tab)) renderThread();
+  }
   animatePanel(p.open);
   document.body.dataset.panel = p.open ? "open" : "closed";
   document.body.dataset.panelMax = String(p.open && p.max);
@@ -668,6 +675,12 @@ function diffSource(tab) {
   if (d.scope !== "turn") return { git: true, rev: t.gitDiff?.data?.tree ?? null, key: `${tab.key}:${d.scope}:${d.base ?? ""}` };
   const chosen = t.history?.find((h) => h.ended === d.turn) ?? t.history?.at(-1);
   return { git: false, rev: chosen?.tree ?? null, key: String(chosen?.ended ?? ""), chosen };
+}
+
+/** The end of the turn the open panel's Diff shows, or null. */
+function turnInPanel(tab) {
+  if (!tab || !panelOf(tab).open || shownSurface(tab)?.kind !== "diff" || diffState(tab).scope !== "turn") return null;
+  return diffSource(tab).chosen?.ended ?? null;
 }
 
 function scopeButton(tab) {

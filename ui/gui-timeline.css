@@ -228,6 +228,9 @@ svg.pierre { color-scheme: var(--g-scheme); }
 .changes.flat ul { padding: 0; }
 .changes.flat li { gap: 10px; height: 30px; padding: 0 12px; border-radius: 0; font: 12.5px var(--g-sans); }
 .changes.flat li .path { color: var(--g-fg); }
+.changes.flat.shown { border-radius: 10px; }
+.changes.flat.shown .head { border-bottom: 0; }
+.changes.flat .in-panel { font-size: 12px; color: var(--g-side-muted); }
 .changes.flat li :is(.add, .del) { font: 12px var(--g-mono); }
 .changes.flat :is(.add, .del) { font-variant-numeric: tabular-nums; }
 .changes.flat .add { color: var(--g-add); }
