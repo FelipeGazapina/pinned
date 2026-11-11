@@ -28,6 +28,10 @@
 // workersSummary(rows) -> { total, done, working, needs, since }
 //   Counts for the block's header and the phone pill; `since` is the earliest working row's.
 //
+// waitsOnUser(tab) -> boolean
+//   The thread has a waiting kind, a menu on its screen, or an answer on its way, so a message to
+//   it would answer its ask. "Send it a message" and "Message all" skip it.
+//
 // needsYouItems() -> [{ tab, kind, title, project, machine, since, ask, limit }], newest first
 //   Every thread on every machine that waits on the user, on top of `waitingKindOf`: kind
 //   "approval" | "question" | "plan" (with `ask`), "limit" (a usage limit stopped it; `limit` is
@@ -178,6 +182,11 @@ function workersOf(tab) {
   const started = threads.length ? delegatedModels(tab) : new Map();
   return [...threads.map((w) => threadWorker(w, started)), ...agentsOf(tab).filter((a) => !a.parent).map((a) => agentWorker(tab, a))];
 }
+
+/** Whether a thread waits on the user, so a message must not go to it: a prompt ends in Enter,
+ * which picks the highlighted option of a menu the page may not have read yet, and a menu that
+ * takes typed words reads the message as the reason to decline. */
+const waitsOnUser = (tab) => !!(waitingKindOf(tab.view) || tab.answering || tab.menu || terminalMenu(tab));
 
 function workersSummary(rows) {
   const count = (state) => rows.filter((r) => r.state === state).length;

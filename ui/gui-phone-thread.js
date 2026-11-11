@@ -271,13 +271,29 @@ function openWorkersSheet(tab, first = null) {
   });
 }
 
+/** What "Message all" did: how many workers got the message and how many it skipped, each waiting on
+ * the user (a message would answer its ask). */
+function messageAllSaid(sent, skipped, failed) {
+  const workers = (n) => `${n} ${n === 1 ? "worker" : "workers"}`;
+  const waiting = skipped ? `Skipped ${workers(skipped)} waiting on you.` : "";
+  if (!sent && !failed) return `Nothing sent. ${waiting}`;
+  return [sent ? `Sent to ${workers(sent)}.` : "", failed ? `Couldn't reach ${workers(failed)}; your message is still here.` : "", waiting].filter(Boolean).join(" ");
+}
+
+/** Sends the sheet's message to every running worker that is not waiting on the user. The text stays
+ * in its field unless every send went out. */
 async function messageAllWorkers(tab, input) {
   const text = input.value.trim();
-  const targets = workersOf(tab).filter((r) => r.tab?.view.running);
-  if (!text || !targets.length) return;
-  input.value = "";
-  input.closest("form").hidden = true;
-  await Promise.all(targets.map((r) => sayToWorker(r.key, text)));
+  const running = workersOf(tab).filter((r) => r.tab?.view.running);
+  if (!text || !running.length) return;
+  const targets = running.filter((r) => !waitsOnUser(r.tab));
+  const sent = await Promise.all(targets.map((r) => sayToWorker(r.key, text, true)));
+  const ok = sent.filter(Boolean).length;
+  if (ok && ok === targets.length) {
+    input.value = "";
+    input.closest("form").hidden = true;
+  }
+  tell(esc(messageAllSaid(ok, running.length - targets.length, targets.length - ok)), 5000);
 }
 
 function onWorkersSheetClick(e, tab) {

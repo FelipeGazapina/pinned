@@ -53,6 +53,9 @@
 .worker-say { height: 30px; margin-top: 2px; padding: 0 10px; border: 1px solid var(--g-input); border-radius: 7px; background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg);
   font: 13px var(--g-sans); outline: none; }
 .worker-say:focus { border-color: rgb(var(--g-primary-rgb) / 0.6); }
+.worker-say-waiting { display: flex; align-items: center; gap: 10px; margin-top: 2px; font-size: 12px; color: var(--g-warning-fg); }
+.worker-say-waiting span { flex: 1; min-width: 0; }
+.worker-say-waiting button { height: 26px; padding: 0 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 7px; background: transparent; color: var(--g-fg); font-size: 12px; }
 @media (pointer: coarse) { .worker-head { min-height: 48px; } .worker-actions button, .worker-review { min-height: 36px; } }
 @media (max-width: 639px) { .worker-model { display: none; } .worker-body { padding-left: 12px; } }
 

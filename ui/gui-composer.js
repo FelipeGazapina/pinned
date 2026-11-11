@@ -985,7 +985,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text || sendBlocked(tab)) return;
-  prompts++;
+  tab.prompts = (tab.prompts ?? 0) + 1;
   const draft = prompt.value;
   const chips = { ...chipsOf(tab) };
   const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
@@ -1043,18 +1043,18 @@ function clearComposer(tab, revoke = true) {
 
 // Esc ends the turn but leaves background agents and workflows running, so claude's ctrl+x ctrl+k
 // stops them first. Their "stopped by the user" notices then wake claude for a turn of its own,
-// which a second Esc ends, unless a prompt went out in between.
+// which a second Esc ends, unless a prompt went out to that thread in between: `tab.prompts` counts
+// the prompts the page sent it.
 const KILL_AGENTS = "\x18\x0b";
-let prompts = 0;
 async function stop(tab = active) {
   if (!tab) return;
-  const sent = prompts;
+  const sent = tab.prompts ?? 0;
   for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
     await writeTo(tab, keys);
     await new Promise((r) => setTimeout(r, 300));
   }
   await new Promise((r) => setTimeout(r, 1200));
-  if (prompts === sent) writeTo(tab, "\x1b");
+  if ((tab.prompts ?? 0) === sent) writeTo(tab, "\x1b");
 }
 
 const escapePath = (p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&");

@@ -75,7 +75,7 @@ const QUESTION_SET = [
 
 /** The page's real rules for phases, asks and answers, around `world`, with the page's I/O stubbed. */
 function page(world) {
-  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [] };
+  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [], told: [] };
   const timers = new Map();
   let timerIds = 0;
   const context = {
@@ -120,7 +120,12 @@ function page(world) {
     renderComposer: (tab) => calls.composer.push(tab.key),
     renderSidebar: () => calls.sidebar++,
     renderThread: () => calls.thread++,
-    showComposerNote: () => calls.composer.push("note"),
+    showComposerNote: (text) => calls.composer.push(text ? `note: ${text}` : "note"),
+    tabByKey: (key) => world.tabs.find((t) => t.key === key) ?? null,
+    esc: (text) => String(text),
+    tell: (html) => calls.told.push(html),
+    rerender: () => {},
+    fetchThread: () => {},
     visibleInterval: () => {},
     openProjects: () => new Map([["mini", new Set(["/w/pinned"])], ["book", new Set(["/w/site"])]]),
     callOn: async (machine, call) => {
@@ -169,6 +174,10 @@ function page(world) {
       line(composer, "const multiSelect"),
       decl(composer, "function approvalChoices"),
       read("redesign-model.js"),
+      line(composer, "const KILL_AGENTS"),
+      decl(composer, "async function stop("),
+      line(agents, "const workerDrafts"),
+      decl(agents, "async function sayToWorker"),
     ].join("\n"),
     context,
   );
@@ -488,6 +497,55 @@ test("an answered menu that claude never redraws is freed after 15 seconds", asy
   assert.equal(w.readme.answering, false);
   assert.equal(w.readme.menu.box, "git push origin readme-tidy", "the menu shows again");
   assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
+});
+
+test("a message goes only to a worker that does not wait on the user, and a refused one keeps its words", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain, answer: () => null });
+  readMenus(p);
+  Object.assign(p.context, { readme: w.readme, ci: w.ci });
+  p.run("workerDrafts.set(readme.key, 'Push to a fork instead'); workerDrafts.set(ci.key, 'Rerun the flaky test')");
+  assert.equal(p.run("waitsOnUser(readme)"), true);
+  assert.equal(await p.run("sayToWorker(readme.key, 'Push to a fork instead')"), false);
+  assert.deepEqual(p.calls.asked, [], "no prompt went to the worker waiting on its push");
+  assert.deepEqual(p.calls.writes, [], "and no key either");
+  assert.deepEqual(p.calls.composer, ["note: Tidy the README is waiting on you. Open it to answer."]);
+  assert.equal(p.run("workerDrafts.get(readme.key)"), "Push to a fork instead");
+
+  w.readme.view = { ...w.readme.view, status: "working", interrupted: false };
+  assert.equal(p.run("waitsOnUser(readme)"), true, "a menu still on its screen keeps it waiting though the hub says it works");
+  w.readme.term.show(["> "]);
+  readMenus(p);
+  assert.equal(p.run("waitsOnUser(readme)"), false);
+  w.readme.answering = true;
+  assert.equal(p.run("waitsOnUser(readme)"), true, "an answer on its way keeps it waiting");
+  w.readme.answering = false;
+
+  assert.equal(await p.run("sayToWorker(ci.key, '  Rerun the flaky test ')"), true);
+  assert.deepEqual(p.calls.asked.map(([m, c]) => [m, c.cmd, c.tab, c.text]), [["mini", "prompt", w.ci.view.id, "Rerun the flaky test"]]);
+  assert.equal(p.run("workerDrafts.has(ci.key)"), false);
+  assert.deepEqual(p.calls.told, ["Sent to Run the CI on main."]);
+});
+
+test("a message to a worker right after its Cancel keeps the late Esc from ending the new turn", async () => {
+  const run = async (say) => {
+    const w = captainWorld();
+    const p = page({ tabs: Object.values(w), active: w.captain, answer: () => null });
+    p.context.ci = w.ci;
+    const stopping = p.run("stop(ci)");
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setImmediate(r));
+      if (i === 1 && say) await p.run("sayToWorker(ci.key, 'Keep going on the docs only')");
+      for (const [id, timer] of [...p.context.timers]) {
+        p.context.timers.delete(id);
+        timer.fn();
+      }
+    }
+    await stopping;
+    return p.calls.writes.map(([, keys]) => keys);
+  };
+  assert.deepEqual(await run(false), ["\x18\x0b", "\x18\x0b", "\x1b", "\x1b"], "alone, a second Esc ends the turn the stopped agents' notices start");
+  assert.deepEqual(await run(true), ["\x18\x0b", "\x18\x0b", "\x1b"], "a message sent meanwhile is the new turn, which no Esc ends");
 });
 
 test("answerAsk refuses a question set and a thread with no menu, and types nothing", async () => {

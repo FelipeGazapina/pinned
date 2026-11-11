@@ -144,3 +144,43 @@ test("the Workers sheet puts the waiting workers first, the reviewed one leading
   assert.deepEqual(shown(null), [["a", "b"], ["ci", "task", "log"]]);
   assert.deepEqual(shown("b"), [["b", "a"], ["ci", "task", "log"]]);
 });
+
+test("Message all skips the workers waiting on you, says how many, and keeps the text unless every send went out", async () => {
+  const rows = [
+    { key: "ci", tab: { view: { running: true } } },
+    { key: "readme", tab: { view: { running: true }, waiting: true } },
+    { key: "docs", tab: { view: { running: true }, waiting: true } },
+    { key: "old", tab: { view: { running: false } } },
+    { key: "task", tab: null },
+  ];
+  const sent = [];
+  const told = [];
+  let works = true;
+  const context = {
+    workersOf: () => rows,
+    waitsOnUser: (tab) => !!tab.waiting,
+    sayToWorker: async (key, text, quiet) => (sent.push([key, text, quiet]), works),
+    tell: (html) => told.push(html),
+    esc: (text) => text,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${src.slice(src.indexOf("function messageAllSaid"), src.indexOf("function onWorkersSheetClick"))}\nglobalThis.messageAllWorkers = messageAllWorkers;`, context);
+  const form = { hidden: false };
+  const input = { value: " Rebase on main ", closest: () => form };
+  works = false;
+  await context.messageAllWorkers({}, input);
+  assert.deepEqual(sent, [["ci", "Rebase on main", true]], "only the running worker that waits on nothing gets it");
+  assert.deepEqual([input.value, form.hidden], [" Rebase on main ", false], "a failed send keeps the text");
+  works = true;
+  await context.messageAllWorkers({}, input);
+  assert.deepEqual([input.value, form.hidden], ["", true]);
+  assert.deepEqual(told, [
+    "Couldn't reach 1 worker; your message is still here. Skipped 2 workers waiting on you.",
+    "Sent to 1 worker. Skipped 2 workers waiting on you.",
+  ]);
+  rows.splice(0, 1);
+  input.value = "Rebase on main";
+  await context.messageAllWorkers({}, input);
+  assert.equal(told.at(-1), "Nothing sent. Skipped 2 workers waiting on you.");
+  assert.equal(input.value, "Rebase on main");
+});

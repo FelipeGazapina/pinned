@@ -94,6 +94,7 @@ const timeline = read("./gui-timeline.js");
 const agents = read("./gui-agents.js");
 const model = read("./redesign-model.js");
 const composer = read("./gui-composer.js");
+const chat = read("./global-chat.js");
 vm.runInContext(read("./vendor/marked.js"), sandbox);
 vm.runInContext(
   `
@@ -160,6 +161,7 @@ ${between(timeline, "function userHtml", "const DIALOG_KEYS")}
 ${between(timeline, "const CITATIONS_BLOCK", "const citeButton")}
 ${agents.slice(agents.indexOf("const agentsOf"))}
 ${between(model, "const STEP_KINDS", "function needsYouItem")}
+${between(chat, "function waitingKindOf", "/** What a thread blocked")}
 ${between(model, "const GLYPH_LOOKS", "\n")}
 ${between(model, "const glyphHtml", "\n")}
 ${between(gui, "function hookPhase", "async function fetchWorkspace")}
@@ -412,6 +414,12 @@ test("a Captain's worker threads fill one Workers block after its lead paragraph
     tab.thread.open.add("worker:box:tab-2");
     sandbox.renderThread();
     assert.match(painted().agents, /data-worker-open="box:tab-2">Open thread<\/button><button type="button" class="outline" data-toggle="say:box:tab-2">Send it a message<\/button><button type="button" class="outline danger" data-worker-cancel="box:tab-2">Cancel<\/button>/);
+    for (const key of ["worker:box:tab-3", "say:box:tab-3", "say:box:tab-2"]) tab.thread.open.add(key);
+    sandbox.renderThread();
+    const row = (id) => blocks(painted().agents, `<div class="worker-row" data-worker="box:${id}"`)[0];
+    assert.match(row("tab-2"), /<input type="text" class="worker-say" data-worker-say="box:tab-2"/, "a working worker takes a message");
+    assert.doesNotMatch(row("tab-3"), /worker-say"/, "a waiting worker's line takes no message");
+    assert.match(row("tab-3"), /<div class="worker-say-waiting" role="status"><span>Tidy the README is waiting on you\. A message would answer its ask, so answer it in its thread\.<\/span><button type="button" class="outline" data-worker-open="box:tab-3">Open<\/button><\/div>/);
   } finally {
     sandbox.threadState = () => "idle";
     sandbox.pendingAsk = () => null;
