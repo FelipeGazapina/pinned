@@ -2156,6 +2156,16 @@ mod tests {
     }
 
     #[test]
+    fn run_in_the_background_round_trips_and_a_view_without_it_reads_as_none() {
+        round_trip(Call::SetBackground { on: true }, json!({ "cmd": "set_background", "on": true }));
+        round_trip(MachineEvent::Background { on: false }, json!({ "kind": "background", "on": false }));
+        let older: MachineView = serde_json::from_value(json!({ "id": "m1", "name": "vps", "os": "linux", "online": true, "last_seen": 0 })).unwrap();
+        assert_eq!(older.background, None);
+        let reported = MachineView { background: Some(true), ..older };
+        assert_eq!(serde_json::to_value(&reported).unwrap()["background"], json!(true));
+    }
+
+    #[test]
     fn an_update_status_round_trips_and_an_old_machine_view_still_reads() {
         round_trip(Call::UpdateSelf, json!({ "cmd": "update_self" }));
         assert!(Call::UpdateSelf.may_wait());

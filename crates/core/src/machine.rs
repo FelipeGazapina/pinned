@@ -7464,6 +7464,34 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_in_the_background_reaches_the_app_window_and_is_reported() {
+        struct Window(Mutex<Vec<bool>>);
+        impl AppWindow for Window {
+            fn background(&self) -> bool {
+                self.0.lock().unwrap().last().copied().unwrap_or(false)
+            }
+            fn set_background(&self, on: bool) -> Result<(), String> {
+                self.0.lock().unwrap().push(on);
+                Ok(())
+            }
+        }
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        assert_eq!(m.background(), None, "a node has no setting to report");
+        assert_eq!(m.call(Call::SetBackground { on: true }), Err("this machine runs pinned without the app, so it has no window".into()));
+
+        let window = Arc::new(Window(Mutex::new(vec![])));
+        m.set_window(window.clone());
+        assert_eq!(m.background(), Some(false));
+        assert_eq!(m.call(Call::SetBackground { on: true }), Ok(json!(true)));
+        assert_eq!(m.call(Call::SetBackground { on: false }), Ok(json!(false)));
+        assert_eq!(*window.0.lock().unwrap(), [true, false]);
+        let reported: Vec<Value> = events.lock().unwrap().iter().filter(|e| e["kind"] == "background").cloned().collect();
+        assert_eq!(reported, [json!({ "kind": "background", "on": true }), json!({ "kind": "background", "on": false })]);
+    }
+
+    #[test]
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));
         let seen = events.clone();

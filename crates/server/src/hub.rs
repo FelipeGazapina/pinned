@@ -1479,6 +1479,30 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_reports_run_in_the_background_on_its_view_while_it_is_online() {
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (client, mut heard, _) = Outbox::new();
+        account.client_connected(1, vec![], false, None, client, vec![]);
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("m", 1, "studio".into(), false, "0.17.24".into(), out);
+        let view = || MachineView { id: "m".into(), name: "studio".into(), os: "macos".into(), online: false, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None, background: None };
+        let shown = |account: &Account| {
+            let mut views = [view()];
+            account.overlay(&mut views);
+            views[0].background
+        };
+        assert_eq!(shown(&account), None, "nothing until the app reports it");
+        while heard.try_recv().is_ok() {}
+        account.machine_event("m", 1, MachineEvent::Background { on: true });
+        assert_eq!(shown(&account), Some(true));
+        account.machine_event("m", 1, MachineEvent::Background { on: false });
+        assert_eq!(shown(&account), Some(false));
+        assert!(heard.try_recv().is_err(), "clients get it with the machines list, not as an event");
+        assert!(account.went_offline("m", Some(1)));
+        assert_eq!(shown(&account), None, "an offline machine can't be switched");
+    }
+
+    #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
         let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
