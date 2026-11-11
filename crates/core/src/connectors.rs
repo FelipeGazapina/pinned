@@ -3933,7 +3933,8 @@ impl Connectors {
                 graph.validate(&called)?;
             }
             reject_call_cycle(connector.id.as_str(), &graph, &store)?;
-            check_convex_step(&graph, &store.convex)?;
+            let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
+            check_convex_step(&graph, &store.convex, had.as_ref().map(|step| step.connection.as_str()))?;
             refresh_legacy(&mut connector, &graph);
             connector.graph = (graph != migrate(&connector)).then_some(graph);
         } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
@@ -4182,14 +4183,15 @@ fn convex_step(connector: &Connector) -> Option<convex::access::Step> {
     })
 }
 
-/// Refuses a Convex step that names no connected deployment.
-fn check_convex_step(graph: &Graph, connected: &[convex::Connection]) -> Result<(), String> {
+/// Refuses a Convex step that names no connected deployment. The one the stored workflow already
+/// named (`had`) passes, so a workflow can still be switched off or edited after a disconnect.
+fn check_convex_step(graph: &Graph, connected: &[convex::Connection], had: Option<&str>) -> Result<(), String> {
     for node in &graph.nodes {
         let NodeKind::ConvexData { connection, .. } = &node.kind else { continue };
         if connection.is_empty() {
             return Err(format!("\"{}\" names no Convex deployment: pick one", node.name));
         }
-        if !connected.iter().any(|c| &c.id == connection) {
+        if had != Some(connection.as_str()) && !connected.iter().any(|c| &c.id == connection) {
             return Err(format!("\"{}\" reads Convex deployment {connection}, which is not connected: connect it under Connectors", node.name));
         }
     }
@@ -6986,6 +6988,41 @@ mod tests {
             assert_eq!(saving("gone-deployment-1"), Err("\"Read Convex data\" reads Convex deployment gone-deployment-1, which is not connected: connect it under Connectors".into()));
             assert_eq!(saving(""), Err("\"Read Convex data\" names no Convex deployment: pick one".into()));
             assert_eq!(saving("quick-lemur-789"), Ok(true));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_step_the_workflow_already_had_does_not_block_a_save_after_a_disconnect() {
+            let (connectors, dir) = with_convex("convex-dangling", vec![]);
+            let workflow = |id: &str, name: &str, step: bool| {
+                let mut c = linear_connector();
+                c.id = id.into();
+                c.name = name.into();
+                c.trigger = Trigger::LinearLabel { label: name.to_lowercase() };
+                let mut graph = talks(&["go"]);
+                graph.nodes.extend(step.then(|| reads("quick-lemur-789", None)));
+                c.graph = Some(graph);
+                c
+            };
+            let reads_convex = |c: &Connector| convex_step(c).map(|step| step.connection);
+            let invoices = connectors.save_connector(workflow("", "Invoices", true)).unwrap();
+            let other = connectors.save_connector(workflow("", "Other", false)).unwrap();
+            assert_eq!(connectors.disconnect_convex("quick-lemur-789"), Ok(()));
+
+            // The switch on a workflow sends the whole workflow, its graph included.
+            let off = connectors.save_connector(Connector { enabled: false, ..invoices.clone() }).unwrap();
+            assert_eq!((off.enabled, reads_convex(&off)), (false, Some("quick-lemur-789".to_owned())), "switching it off works with the step still there");
+            let renamed = connectors.save_connector(Connector { name: "Invoices v2".into(), ..off }).unwrap();
+            assert_eq!(renamed.name, "Invoices v2");
+
+            let not_connected = Some("\"Read Convex data\" reads Convex deployment quick-lemur-789, which is not connected: connect it under Connectors".to_owned());
+            assert_eq!(connectors.save_connector(workflow(&other.id, "Other", true)).err(), not_connected, "another workflow cannot take the step up");
+            assert_eq!(connectors.save_connector(workflow("", "Fresh", true)).err(), not_connected);
+            let mut moved = workflow(&invoices.id, "Invoices v2", false);
+            moved.graph.as_mut().unwrap().nodes.push(reads("happy-otter-123", None));
+            assert_eq!(connectors.save_connector(moved).map(|c| reads_convex(&c)), Ok(Some("happy-otter-123".to_owned())), "it may move to a deployment that is connected");
+            assert_eq!(connectors.save_connector(workflow(&invoices.id, "Invoices v2", true)).err(), not_connected, "and not back to the one that is gone");
+            assert_eq!(connectors.save_connector(workflow(&invoices.id, "Invoices v2", false)).map(|c| reads_convex(&c)), Ok(None), "deleting the step works");
             let _ = std::fs::remove_dir_all(dir);
         }
 
