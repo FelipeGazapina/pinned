@@ -460,7 +460,7 @@ function slackCardHtml() {
     : `${agentAskingHtml("connect_slack")}<ol class="steps">
          <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
            <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
-           <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
+           <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code>, <code>reactions:write</code> and <code>files:read</code>, then install it to your workspace.</li>
          <li>Invite the bot to the channel it should watch, with <code>/invite @your-bot</code>.</li>
          <li>Paste the Bot User OAuth Token here.
            <div class="row"><input id="slack-token" type="password" placeholder="xoxb-…" autocomplete="off">
