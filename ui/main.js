@@ -589,12 +589,19 @@ async function moveTab(tab, path) {
   focusInput();
 }
 
+/** The size a machine gives a session no viewer has fitted (`UNWATCHED` in machine.rs). A tab's
+ * terminal starts at it, so a worker the page never showed reads claude's screen as claude drew
+ * it: a narrower terminal wraps claude's lines and its redraws land on the wrong rows, which hides
+ * the menu the app reads off that screen. */
+const UNFITTED = { cols: 120, rows: 32 };
+
 function addTab(machine, view) {
   const el = document.createElement("div");
   el.className = "term";
   el.hidden = true;
   terms.append(el);
   const term = new Terminal({
+    ...UNFITTED,
     fontFamily: "ui-monospace, Menlo, monospace",
     fontSize: 12,
     ...(typeof terminalLook === "function" ? terminalLook() : {}),
