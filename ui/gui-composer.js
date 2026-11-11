@@ -160,7 +160,7 @@ function menuKind(menu) {
 const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.findLast((o) => /^No\b/.test(o.head));
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
-/** The collapsed phone row still says what its Send does while claude waits on an approval or a plan. */
+/** The prompt says what its Send does while claude waits on an approval or a plan. */
 function placeholderFor(tab, t) {
   const menu = tab.menu;
   const desk = matchMedia("(min-width: 769px)").matches;
@@ -171,11 +171,11 @@ function placeholderFor(tab, t) {
   }
   if (menu && menuKind(menu) === "plan") return "Add feedback to refine the plan, or leave this blank to implement it";
   if (menu) return freeOption(menu) ? "Type your own answer, or leave this blank to use the selected option" : "Choose an option above";
-  if (composer.dataset.collapsed === "true") return "Ask anything...";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
   if (!tab.view.running) return touchComposer() ? "claude isn't running. Use the send button to start it." : "claude isn't running. Press Enter to start it.";
-  if (!desk) return "Ask anything, @tag files/folders, $use skills, or / for commands";
-  if (tab.view.role === "orchestrator" && !tab.view.orchestrator_global) return "Message the Captain. It keeps working while you type.";
+  const captain = tab.view.role === "orchestrator" && !tab.view.orchestrator_global;
+  if (!desk) return captain ? "Message the Captain" : "Ask anything, @tag files/folders, $use skills, or / for commands";
+  if (captain) return "Message the Captain. It keeps working while you type.";
   return "Ask anything, @ files, $ skills, / commands";
 }
 
@@ -221,6 +221,8 @@ function renderComposer(tab) {
   renderDetails(tab);
   renderDrawer();
   if (tab) drainIdle(tab);
+  if (typeof renderComposerChip === "function") renderComposerChip(tab);
+  if (typeof syncPhoneAsk === "function") syncPhoneAsk();
   const footer = document.getElementById("composer-footer");
   if (!tab) return setHtml(footer, "");
   const pr = prOf(tab);
@@ -231,7 +233,15 @@ function renderComposer(tab) {
     ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${middle(ws.branch, 24)}</span>${icon("chevron-down", "chev")}</button>` : ""}`);
   hostControls();
   renderHero(tab);
-  prompt.placeholder = placeholderFor(tab, t);
+  const placeholder = placeholderFor(tab, t);
+  if (prompt.placeholder === placeholder) return;
+  prompt.placeholder = placeholder;
+  // A phone's one-line prompt grows to the lines its placeholder wraps to.
+  if (narrow(768) && !prompt.value) fitPrompt();
+}
+function fitPrompt() {
+  prompt.style.height = "auto";
+  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
 }
 
 /** A turn a usage limit stopped continues by itself when it lifts, or now under another signed-in account. */
@@ -257,8 +267,7 @@ function switchDraft(tab) {
   if (tab) threadOf(tab).recall = null;
   if (tab?.view.running) fetchList(tab, "commands");
   composerMenu.hidden = true;
-  prompt.style.height = "auto";
-  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
+  fitPrompt();
 }
 
 function watchMenu(tab) {
@@ -785,26 +794,19 @@ tasksTab.addEventListener("click", (e) => {
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
  * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
  * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press.
- * On a phone it collapses whenever the prompt isn't focused, to a row that opens it, as T3's does;
- * a press in the composer holds it open until the press ends. */
+ * A phone keeps the full box, as Phone-Thread draws it. */
 let composerPressed = false;
 function rest() {
   const away = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight > 40;
   const t = active && threadOf(active);
   const typing = document.activeElement === prompt || prompt.value.includes("\n");
-  const phone = narrow(640);
-  const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
-  const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
+  const phone = narrow(768);
   // A lane narrowed by the side panel rests as one row with the model, the mic and Send. A press in
   // the composer, or a menu open from it, holds the row or the full box, so what it points at stays put.
-  const slim = composerPressed || !composerMenu.hidden ? composer.dataset.slim === "true" : !narrow(768) && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
-  const resting = collapsed || (!phone && !slim && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
+  const slim = composerPressed || !composerMenu.hidden ? composer.dataset.slim === "true" : !phone && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
+  const resting = !phone && !slim && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length;
   if (composer.dataset.slim !== String(slim)) composer.dataset.slim = slim;
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;
-  if (composer.dataset.collapsed !== String(collapsed)) {
-    composer.dataset.collapsed = collapsed;
-    if (active) prompt.placeholder = placeholderFor(active, threadOf(active));
-  }
   hostControls();
 }
 let pressTimer;
@@ -833,8 +835,7 @@ threadView.addEventListener("scroll", rest, { passive: true });
 prompt.addEventListener("focus", rest);
 
 function autosize() {
-  prompt.style.height = "auto";
-  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
+  fitPrompt();
   if (active) renderComposer(active);
 }
 prompt.addEventListener("input", () => {
@@ -1105,7 +1106,7 @@ function placeMenu(anchor) {
   else composerMenu.style.left = `${Math.max(0, left)}px`;
 }
 window.addEventListener("mousedown", (e) => {
-  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
+  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #composer-chip, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
   if (!composerMenu.hidden && !e.target.closest(keeps)) composerMenu.hidden = true;
 }, true);
 window.addEventListener("keydown", (e) => {
