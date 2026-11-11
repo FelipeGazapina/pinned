@@ -122,8 +122,8 @@ function workerSteps(row) {
   return items.filter((i) => i.kind === "tool").slice(-WORKER_STEPS).map((s) => ({ ...s, result: results.get(s.id) }));
 }
 
-function workerStepLineHtml(step, row, cwd) {
-  const live = row.state === "working" || row.state === "needs";
+function workerStepLineHtml(step, row, cwd, last) {
+  const live = last && (row.state === "working" || row.state === "needs");
   const [tag, cls] = step.result ? (step.result.error ? ["Failed", "failed"] : ["Done", "done"]) : live ? ["Now", "now"] : ["Stopped", "stopped"];
   return `<div class="worker-line ${cls}"><span class="tag">${tag}</span><span class="what">${esc(toolLabel(step, cwd))}</span></div>`;
 }
@@ -186,7 +186,7 @@ function workerRowHtml(tab, row, t) {
   const brief = spawn?.kind === "tool" && spawn.detail ? `<div class="narration md">${markdown(spawn.detail)}</div>` : "";
   const saying = row.tab && t.open.has(`say:${row.key}`)
     ? `<input type="text" class="worker-say" data-worker-say="${id}" value="${esc(workerDrafts.get(row.key) ?? "")}" placeholder="Message ${esc(row.title)}. Enter sends it, Esc closes." aria-label="Message ${esc(row.title)}">` : "";
-  const body = `<div class="worker-body">${steps.map((s) => workerStepLineHtml(s, row, cwd)).join("")}${brief}${row.agent ? sendErrorHtml(tab, row.agent) : ""}
+  const body = `<div class="worker-body">${steps.map((s, i) => workerStepLineHtml(s, row, cwd, i === steps.length - 1)).join("")}${brief}${row.agent ? sendErrorHtml(tab, row.agent) : ""}
     <div class="worker-actions">${workerActionsHtml(tab, row)}</div>${saying}</div>`;
   return `<div class="worker-row" data-worker="${id}" data-state="${row.state}" data-open${agentId}>${head}${body}</div>`;
 }
@@ -248,6 +248,9 @@ function noticeHtml(notice, at, t, key) {
     <div class="reported-body md">${markdown(notice.text, promptMarked)}</div></details>`;
 }
 
+/** The model a worker runs: as its transcript names it, else as its parent's delegate_task call did. */
+const workerModel = (tab, parent) =>
+  modelOf(tab)?.name ?? threadOf(tab).items.findLast((i) => i.kind === "model")?.name ?? (parent && delegatedModels(parent).get(tab.view.id)) ?? null;
 /** Whether a worker runs in a worktree of its own rather than in its parent's folder. */
 const ownWorktree = (tab, parent) => !!threadOf(tab).workspace?.worktree && tab.view.cwd !== parent?.view.cwd;
 
@@ -261,8 +264,7 @@ function briefHtml(user, t, tab) {
   const clamped = long && !t.open.has(key);
   const parent = parentOf(tab);
   const from = !parent || parent.view.role === "orchestrator" ? "Brief from the Captain" : `Brief from ${threadTitle(parent)}`;
-  const named = modelOf(tab)?.name ?? threadOf(tab).items.findLast((i) => i.kind === "model")?.name ?? null;
-  const meta = [modelLabel(named), ownWorktree(tab, parent) && "own worktree"].filter(Boolean).join(" · ");
+  const meta = [modelLabel(workerModel(tab, parent)), ownWorktree(tab, parent) && "own worktree"].filter(Boolean).join(" · ");
   return `<div class="brief"><div class="brief-head"><span class="brief-from">${esc(from)}</span>${meta ? `<span class="brief-meta">${esc(meta)}</span>` : ""}<span class="spacer"></span>
     ${long ? `<button type="button" class="brief-full" data-toggle="${esc(key)}" aria-expanded="${!clamped}">${clamped ? "Show full brief" : "Show less"}</button>` : ""}</div>
     <div class="brief-text md${clamped ? " clamped" : ""}">${markdown(text, promptMarked)}</div></div>`;
@@ -280,5 +282,5 @@ function workerOfHtml(tab) {
 function workerViewKey(tab) {
   if (tab.view.role !== "worker") return null;
   const parent = parentOf(tab);
-  return [parent?.key ?? null, parent && threadTitle(parent), parent?.view.role ?? null, modelOf(tab)?.name ?? null, ownWorktree(tab, parent)];
+  return [parent?.key ?? null, parent && threadTitle(parent), parent?.view.role ?? null, workerModel(tab, parent), ownWorktree(tab, parent)];
 }
