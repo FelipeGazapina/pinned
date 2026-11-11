@@ -130,7 +130,29 @@ async function sweep(profileName) {
     if (HEAD_MENU[selector] && touch) await hideSidebar();
     if (HEAD_MENU[selector] && !(await page.locator(selector).isVisible())) {
       await tapOrClick("#head-more");
-      return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
+      if (!(await page.evaluate(() => narrow(768)))) return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
+      // A phone's ⋯ opens the thread actions sheet (Phone-Actions.dc.html), whose tools grid holds Terminal
+      // and Details. It has no Show or Hide side panel, so that one goes through the app and is noted.
+      await waitFor("the actions sheet", () => page.locator(".actions-sheet").isVisible());
+      const tile = { "#toggle-terminal": "terminal", "#toggle-details": "details" }[selector];
+      if (tile) return press(page.locator(`.actions-sheet [data-act="${tile}"]`));
+      await page.keyboard.press("Escape");
+      await waitFor("the sheet to close", async () => !(await page.locator(".actions-sheet").count()));
+      seen.push("no Show or Hide side panel on the phone's actions sheet; toggled through togglePanel()");
+      return page.evaluate(() => togglePanel());
+    }
+    // A phone's composer has no footer: its branch and workspace are on the thread details card, its pull
+    // request leads the thread actions sheet.
+    if (touch && selector.startsWith("#composer-footer") && !(await page.locator(selector).isVisible())) {
+      const act = { "#composer-footer .branch": "branch", "#composer-footer button.where": "workspace" }[selector];
+      if (act) {
+        if (!(await page.locator(`#details-card [data-act="${act}"]`).isVisible())) await tapOrClick("#toggle-details");
+        return page.tap(`#details-card [data-act="${act}"]`);
+      }
+      if (selector === "#composer-footer .pr") {
+        await tapOrClick("#head-more");
+        return page.tap('.actions-sheet .act-primaries [data-act="pr"]');
+      }
     }
     // A lane narrowed by the side panel rests the composer as one row, its footer hidden until the prompt has focus.
     if (!touch && selector.startsWith("#composer-footer") && (await page.evaluate(() => composer.dataset.slim === "true"))) await page.focus("#prompt");
@@ -252,6 +274,9 @@ async function sweep(profileName) {
     const thrown = seen.find((s) => s.startsWith("pageerror"));
     if (verdict === "works" && thrown) [verdict, note] = ["broken", thrown];
     await page.screenshot({ path: path.join(shots, `${String(results.length + 1).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`) }).catch(() => {});
+    // A phone's bottom sheet (an ask, the actions, the workers) covers the screen with its scrim, so one a
+    // step left open is dismissed before the next step.
+    if (touch && (await page.locator(".sheet-root").count().catch(() => 0))) await page.keyboard.press("Escape").catch(() => {});
     results.push({ step: name, verdict, note, seen: [...new Set(seen)] });
     console.log(`${profileName.padEnd(7)} ${verdict.padEnd(17)} ${name}${note ? `: ${note}` : ""}`);
     if (process.env.SWEEP_UNTIL && name.includes(process.env.SWEEP_UNTIL)) {
@@ -624,15 +649,25 @@ async function sweep(profileName) {
   };
   // The phone's sheet is still visible while it slides out, so the body's state says whether it is open.
   const sidebarShown = async () => (await page.evaluate(() => document.body.dataset.sidebar === "open")) && (await page.locator("#sidebar").isVisible());
+  // A phone shows one screen at a time: the thread list is its Threads screen, left for the open thread
+  // by that thread's row and come back to by the thread's Back, or the tab bar on a page.
+  const phoneShell = () => page.evaluate(() => !!document.body.dataset.phoneScreen);
   const hideSidebar = async () => {
     if (!(await sidebarShown())) return;
-    await tapOrClick("#sidebar-toggle");
+    if (!(await phoneShell())) await tapOrClick("#sidebar-toggle");
+    else if (await page.locator("#thread-list .thread-row.active").isVisible()) await press(page.locator("#thread-list .thread-row.active"));
+    else await page.evaluate(() => phoneGo("thread"));
     await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
   };
   // A page's header carries its own toggle while the chat's is hidden under it.
   const showSidebar = async () => {
     if (await sidebarShown()) return;
-    await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
+    if (await phoneShell()) {
+      const worker = await page.evaluate(() => active?.view.role === "worker" && !!parentOf(active));
+      if (!worker && (await page.locator("#chat-back").isVisible())) await tapOrClick("#chat-back");
+      else if (await page.locator('#phone-tabs [data-phone-tab="threads"]').isVisible()) await tapOrClick('#phone-tabs [data-phone-tab="threads"]');
+      else await page.evaluate(() => phoneGo("threads"));
+    } else await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
     await waitFor("the sidebar", sidebarShown);
   };
   // Pull requests and Usage are the sidebar's nav rows; a phone has them on its More screen.
@@ -651,13 +686,14 @@ async function sweep(profileName) {
     await page.keyboard.press("Enter");
     await waitTerm(/echo: typed in the terminal/);
     await tapOrClick("#mode-gui");
-    await waitFor("the app view", () => page.locator("#chat").isVisible());
+    // A phone's app view opens on its Threads screen.
+    await waitFor("the app view", async () => (await page.locator("#chat").isVisible()) || (touch && (await sidebarShown())));
     check(!(await page.locator("#tab-bar").isVisible()), "the tab bar still shows in the app view");
     await showSidebar();
     const rows = await page.locator("#thread-list .thread-row").count();
     check(rows === 2, `${rows} threads in the sidebar, expected 2`);
     check(/alpha/.test(await rowProject("#thread-list .thread-row.active")), "the active row is not alpha");
-    if (touch) await page.tap("#workspace", { position: { x: (await rect("#workspace")).width - 4, y: 300 } });
+    if (touch) await hideSidebar();
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
     return `${rows} threads`;
@@ -1843,7 +1879,11 @@ async function sweep(profileName) {
     await page.evaluate(() => (page = "general"));
     await openSettingsFromSidebar();
     try {
-      const cover = await page.evaluate(() => [Object.values(document.getElementById("settings").getBoundingClientRect().toJSON()).slice(0, 4).map(Math.round).join(","), `${innerWidth},${innerHeight}`]);
+      // On a phone, Settings is a More page, over everything but the tab bar.
+      const cover = await page.evaluate(() => {
+        const bar = document.body.hasAttribute("data-phone-tabs") ? Math.round(document.getElementById("phone-tabs").getBoundingClientRect().height) : 0;
+        return [Object.values(document.getElementById("settings").getBoundingClientRect().toJSON()).slice(0, 4).map(Math.round).join(","), `${innerWidth},${innerHeight - bar}`];
+      });
       check(cover[0].startsWith("0,0,") && cover[0].endsWith(cover[1]), `Settings doesn't cover the window: ${cover.join(" in ")}`);
       const sections = await page.locator("#settings-nav .links button").allTextContents();
       check(sections.join(",") === "General,Appearance,Projects,Keybindings,Connectors,Accounts,Workflows,Account,Machines,Archive", `sections: ${sections.join(", ")}`);
@@ -2161,9 +2201,14 @@ async function sweep(profileName) {
     check((await text("#thread .bubble")) === "Find where the parser drops the last line.", `the subagent's prompt reads ${await text("#thread .bubble")}`);
     check((await text("#chat-head .crumb .title:last-of-type")) === "Look for the bug", `the header reads ${await text("#chat-head .crumb")}`);
     check(!(await page.locator("#composer").isVisible()), "the composer shows over a subagent");
-    await press(gui("#chat-head [data-subagent-back]"));
-    await waitFor("the thread again", async () => (await page.locator("#thread .assistant", { hasText: "The agent reported back." }).count()) === 1);
-    check(await page.locator("#composer").isVisible(), "the composer didn't come back");
+    try {
+      await press(gui("#chat-head [data-subagent-back]"));
+      await waitFor("the thread again", async () => (await page.locator("#thread .assistant", { hasText: "The agent reported back." }).count()) === 1);
+      check(await page.locator("#composer").isVisible(), "the composer didn't come back");
+    } finally {
+      // Leaves the subagent whatever happened, so the steps after this one start on the thread.
+      await page.evaluate(() => subagentShown() && closeSubagent());
+    }
   });
 
   await step("app view: Save to workspace writes the plan into the thread's folder", async () => {
@@ -2533,14 +2578,15 @@ async function sweep(profileName) {
   });
 
   await step("app view: the PR link opens the pull request panel", async () => {
-    if (touch) {
-      await tapOrClick("#head-more");
-      check(await page.locator("#panel-menu button", { hasText: "Open PR #42" }).isVisible(), "the Options menu has no Open PR #42 after the session linked it");
-      await tapOrClick("#head-more");
-    }
     check(!(await page.locator("#chat-head #pr-chip, #chat-head .chip").count()), "the header has a PR chip, which T3 keeps in thread details");
     check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
-    await tapOrClick("#composer-footer .pr");
+    if (touch) {
+      // A phone's composer has no footer; its ⋯ opens the thread actions sheet, which leads with the pull request.
+      await tapOrClick("#head-more");
+      await waitFor("the actions sheet", () => page.locator(".actions-sheet").isVisible());
+      check(/^PR #42/.test(await text('.actions-sheet .act-primaries [data-act="pr"]')), "the actions sheet has no PR #42 after the session linked it");
+      await press(page.locator('.actions-sheet .act-primaries [data-act="pr"]'));
+    } else await tapOrClick("#composer-footer .pr");
     const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
     await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
@@ -4530,12 +4576,16 @@ async function sweep(profileName) {
   });
 
   await step("app view: Open in an editor from the header", async () => {
-    await waitFor("the Open button", () => page.locator(touch ? "#head-more" : "#open-in").isVisible());
-    await tapOrClick(touch ? "#head-more" : "#open-in .pick");
-    const editors = await page.locator("#panel-menu button .label").allTextContents();
+    // A phone's header holds no Open; its thread details card does, as T3 Code's.
+    if (touch) await tapOrClick("#toggle-details");
+    await waitFor("the Open button", () => page.locator(touch ? '#details-card [data-act="editors"]' : "#open-in").isVisible());
+    await tapOrClick(touch ? '#details-card [data-act="editors"]' : "#open-in .pick");
+    const menu = touch ? "#header-menu" : "#panel-menu";
+    const editors = await page.locator(`${menu} button .label`).allTextContents();
     check(editors.includes("Zed") && editors.includes("Finder"), `editors: ${editors.join(" | ")}`);
-    await press(gui('#panel-menu button:has-text("Zed")'));
-    // The phone's Options menu opens the editor it names; the desktop's picker only picks one.
+    await press(gui(`${menu} button:has-text("Zed")`));
+    if (touch) await tapOrClick('#details-card [data-act="open-in"]');
+    // The desktop's picker only picks one.
     if (!touch) {
       await sleep(300);
       check(!readLog("open.log"), "picking an editor opened it");
@@ -4544,15 +4594,8 @@ async function sweep(profileName) {
     const opened = new RegExp(`^-a .*/home/Applications/Zed\\.app ${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/work/alpha$`, "m");
     await waitFor("the folder to open in Zed", async () => opened.test(readLog("open.log")));
     if (touch) {
-      // The thread details card holds Open too, as T3 Code's does.
-      await tapOrClick("#toggle-details");
-      await tapOrClick('#details-card [data-act="editors"]');
-      const listed = await page.locator("#header-menu button .label").allTextContents();
-      check(listed.includes("Zed") && listed.includes("Finder"), `the card's editors: ${listed.join(" | ")}`);
-      await press(gui('#header-menu button:has-text("Zed")'));
       await tapOrClick('#details-card [data-act="open-in"]');
       await waitFor("the card to open it again", async () => readLog("open.log").trim().split("\n").length === 2);
-      await tapOrClick("#toggle-details");
     }
     if (!touch) {
       await page.focus("#prompt");
@@ -4570,8 +4613,33 @@ async function sweep(profileName) {
     return editors.join(" | ");
   });
 
+  // A phone answers claude's menus from a bottom sheet (Phone-Approval.dc.html) instead of the banner.
+  const askSheet = ".sheet-panel.ask-sheet";
   await step("app view: the approval banner answers claude's prompt", async () => {
     await sendPrompt("/ask");
+    if (touch) {
+      await waitFor("the approval sheet", () => page.locator(askSheet).isVisible());
+      check((await text(`${askSheet} h2`)) === "Allow this command?", `the sheet says ${await text(`${askSheet} h2`)}`);
+      check((await text(`${askSheet} pre`)) === "rm -rf build", `the sheet shows the command as ${await text(`${askSheet} pre`)}`);
+      check((await text(`${askSheet} .ask-about`)) === "Remove the build folder", `the sheet describes it as ${await text(`${askSheet} .ask-about`)}`);
+      check(!/Do you want to proceed/.test(await page.locator(askSheet).innerText()), "the sheet repeats claude's question");
+      const options = (await page.locator(`${askSheet} :is(.ask-answers button, .ask-row[data-approval], .ask-row[data-option]) `).allTextContents()).map((o) => o.trim());
+      check(options.length === 3 && options.includes("Approve") && options.some((o) => o.endsWith("Yes, and don't ask again for rm commands")), `options: ${options.join(" | ")}`);
+      // Put aside, the sheet leaves a Review card over the composer, which still holds what is typed.
+      await page.keyboard.press("Escape");
+      await waitFor("the Review card", () => page.locator('[data-ask="review"]').isVisible());
+      await page.fill("#prompt", "typed while claude asks");
+      check(!/typed while claude asks/.test(await termText()), "the composer typed into claude's menu");
+      await page.fill("#prompt", "");
+      await press(page.locator('[data-ask="review"]'));
+      await waitFor("the sheet again", () => page.locator(askSheet).isVisible());
+      await press(page.locator(`${askSheet} .ask-row[data-approval="always"]`));
+      await waitTerm(/chose 2/);
+      await waitFor("the sheet to go", async () => !(await page.locator(askSheet).count()), 1500);
+      check(!/ran it/.test(await termText()), "claude finished before the sheet was checked");
+      await waitTerm(/ran it/);
+      return options.join(" | ");
+    }
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
     check((await text("#approval pre")) === "rm -rf build", `the banner shows the command as ${await text("#approval pre")}`);
@@ -4609,13 +4677,15 @@ async function sweep(profileName) {
     await page.fill("#palette input", `${HOME}/work/gamma/`);
     await waitFor("gamma's folders listed", async () => !(await page.locator("#palette .notice").isVisible()) && (await text("#palette .accessory [data-submit]")).startsWith("Add"));
     await press(page.locator("#palette .accessory [data-submit]"));
-    await waitFor("the trust banner", () => page.locator("#approval .options button").first().isVisible());
-    const options = await page.locator("#approval .options button").allTextContents();
+    const ask = touch ? askSheet : "#approval";
+    const choices = touch ? `${askSheet} [data-option]` : "#approval .options button";
+    await waitFor("the trust question", () => page.locator(choices).first().isVisible());
+    const options = (await page.locator(choices).allTextContents()).map((o) => o.trim());
     check(options.join("|") === "No, exit|Yes, I trust this folder", `options: ${options.join(" | ")}`);
-    check(/No, exit/.test(await text("#approval [data-chosen]")), "the banner doesn't mark claude's own default");
-    await press(gui('#approval [data-option="2"]'));
+    check(/No, exit/.test(await text(`${ask} [data-chosen]`)), "the question doesn't mark claude's own default");
+    await press(gui(`${ask} [data-option="2"]`));
     await waitTerm(/fake claude in .*work\/gamma/);
-    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await waitFor("the question to go", async () => !(await page.locator(ask).isVisible()));
     await page.evaluate(() => closeTab(active));
     await waitFor("two threads again", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
@@ -4717,31 +4787,44 @@ async function sweep(profileName) {
 
   await step("composer: typing while claude asks for permission declines with that feedback", async () => {
     await sendPrompt("/ask");
-    await waitFor("the banner", () => page.locator("#approval").isVisible());
+    if (touch) {
+      // The phone's sheet hands the composer the feedback through its Decline and say what to do instead.
+      await waitFor("the approval sheet", () => page.locator(askSheet).isVisible());
+      await press(page.locator(`${askSheet} [data-ask="type"]`));
+      await waitFor("the sheet put aside", async () => !(await page.locator(askSheet).count()));
+    } else await waitFor("the banner", () => page.locator("#approval").isVisible());
     const placeholder = await page.getAttribute("#prompt", "placeholder");
     const declines = (await page.evaluate(() => narrow(768))) ? "Send feedback to decline this request" : "Or type what it should do instead. Sending declines the command.";
     check(placeholder === declines, `placeholder: ${placeholder}`);
     await sendPrompt("use the trash instead");
     await waitTerm(/declined: use the trash instead/);
-    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await waitFor("the ask to go", async () => !(await page.locator(touch ? '[data-ask="review"]' : "#approval").isVisible()));
     check((await page.inputValue("#prompt")) === "", "the composer kept the feedback");
     await waitFor("claude's answer", async () => (await page.locator("#thread .assistant", { hasText: "Understood: use the trash instead" }).count()) > 0);
     return placeholder;
   });
 
   await step("composer: claude's plan is refined by typed feedback, or implemented from a blank send", async () => {
+    // A phone's plan sheet hands the composer the feedback through Refine it with a message.
+    const planShown = async () => {
+      if (!touch) return waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
+      await waitFor("the plan sheet", async () => (await page.locator(askSheet).isVisible()) && (await text(`${askSheet} h2`)) === "Plan ready");
+      await press(page.locator(`${askSheet} [data-ask="type"]`));
+      await waitFor("the sheet put aside", async () => !(await page.locator(askSheet).count()));
+    };
+    const planGone = () => waitFor("the plan to go", async () => !(await page.locator(touch ? '[data-ask="review"]' : "#approval").isVisible()));
     await sendPrompt("/plan-ready");
-    await waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
+    await planShown();
     const placeholder = await page.getAttribute("#prompt", "placeholder");
     check(placeholder === "Add feedback to refine the plan, or leave this blank to implement it", `placeholder: ${placeholder}`);
     await sendPrompt("also say goodbye");
     await waitTerm(/answered: also say goodbye/);
-    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await planGone();
     await sendPrompt("/plan-ready");
-    await waitFor("the plan banner again", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
+    await planShown();
     await sendPrompt("");
     await waitTerm(/answered: Yes, and use auto mode/);
-    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await planGone();
     return placeholder;
   });
 
@@ -4861,14 +4944,15 @@ async function sweep(profileName) {
     await page.evaluate(() => (threadView.scrollTop = 0));
     if (touch) {
       await tapOutsideComposer();
-      // A phone's composer doesn't rest on a scroll: unfocused, it is T3 Code's collapsed row wherever the thread is.
+      // A phone's composer neither rests on a scroll nor collapses: Phone-Thread draws the open box wherever the thread is.
+      const state = () => page.evaluate(() => `${composer.dataset.collapsed === "true" || composer.dataset.slim === "true" || composer.dataset.resting === "true" ? "row" : "box"} ${document.getElementById("composer-attach").checkVisibility()}`);
       await sleep(300);
-      const up = await page.evaluate(() => composer.dataset.collapsed);
+      const up = await state();
       await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
       await sleep(300);
-      const end = await page.evaluate(() => composer.dataset.collapsed);
-      check(up === "true" && end === "true", `a phone's unfocused composer collapsed ${up} scrolled up and ${end} at the end`);
-      return "a phone collapses instead";
+      const end = await state();
+      check(up === "box true" && end === "box true", `a phone's unfocused composer is ${up} scrolled up and ${end} at the end`);
+      return "a phone keeps the open box";
     }
     await waitFor("the resting composer", () => page.evaluate(() => composer.dataset.resting === "true"));
     const resting = (await rect("#composer .box")).height;
@@ -5068,11 +5152,13 @@ async function sweep(profileName) {
     await waitFor("try-this in the footer", async () => (await text("#composer-footer .branch")) === "try-this");
     await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push and create PR");
     if (touch) {
+      // The actions sheet leads with the Git action; Commit, Push and Create PR are the details card's Git menu, below.
       await tapOrClick("#head-more");
-      const options = await page.locator("#panel-menu button .label").allTextContents();
-      check(options.join("|").includes("Push and create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
+      await waitFor("the actions sheet", () => page.locator(".actions-sheet").isVisible());
+      const primary = await text('.actions-sheet .act-primaries [data-act="git"]');
+      check(primary === "Push and create PR", `the actions sheet's Git action reads ${primary}`);
       await page.screenshot({ path: path.join(shots, "options-menu.png") });
-      await tapOrClick("#head-more");
+      await page.keyboard.press("Escape");
       await tapOrClick("#toggle-details");
     }
     await tapOrClick(touch ? '#details-card [data-act="git-menu"]' : "#git-action .more");
@@ -5355,6 +5441,30 @@ async function sweep(profileName) {
     // A narrow composer, as on a phone, shortens the pill as T3 Code's does.
     const folded = await page.evaluate(() => composer.dataset.compact === "true");
     await sendPrompt("/questions");
+    if (touch) {
+      // A phone steps through the questions on its sheet, Previous and Next question under the options.
+      const head = async () => `${await text(`${askSheet} h2`)} ${await text(`${askSheet} .ask-count`)}`;
+      const option = (label) => page.locator(`${askSheet} .ask-option`, { hasText: label });
+      await waitFor("the first question", async () => (await head()) === "Color 1 of 2");
+      check((await text(`${askSheet} [data-q="next"]`)) === "Next question" && !(await page.locator(`${askSheet} [data-q="previous"]`).count()), `steps: ${await text(`${askSheet} .ask-answers`)}`);
+      await press(option("Red"));
+      await waitFor("the second question", async () => (await head()) === "Sizes 2 of 2");
+      check((await text(`${askSheet} .ask-about`)) === "Select one or more options.", "the multi-select question doesn't say so");
+      check((await text(`${askSheet} [data-q="submit"]`)) === "Submit", `the last question's step reads ${await text(`${askSheet} .ask-answers`)}`);
+      await press(option("Small"));
+      await waitFor("Small checked", () => page.locator(`${askSheet} .ask-option.picked`, { hasText: "Small" }).isVisible());
+      await press(option("Large"));
+      await waitFor("Large checked", () => page.locator(`${askSheet} .ask-option.picked`, { hasText: "Large" }).isVisible());
+      await press(page.locator(`${askSheet} [data-q="previous"]`));
+      await waitFor("back on the first question", async () => (await head()) === "Color 1 of 2");
+      check(await page.locator(`${askSheet} .ask-option.picked`, { hasText: "Red" }).isVisible(), "the answered option has no check");
+      await press(page.locator(`${askSheet} [data-q="next"]`));
+      await waitFor("on to the second question", async () => (await head()) === "Sizes 2 of 2");
+      await press(page.locator(`${askSheet} [data-q="submit"]`));
+      await waitTerm(/answered: Which color\? → Red · Which sizes\? → Small, Large/);
+      await waitFor("the sheet to go", async () => !(await page.locator(askSheet).count()));
+      return;
+    }
     await waitFor("the first question", async () => (await text("#approval .q-header")) === "Color" && (await text("#approval .q-count")) === "1/2");
     check((await pill()) === (folded ? "Next" : "Next question") && !(await page.locator('#pill-actions [data-q="previous"]').isVisible()), `pills: ${await text("#pill-actions")}`);
     check(!(await page.locator("#send").isVisible()), "Send shows beside the question's pill");
@@ -5384,16 +5494,24 @@ async function sweep(profileName) {
 
   await step("composer: claude's plan offers Refine, Implement, and Implement in a new thread", async () => {
     await sendPrompt("/plan-ready");
-    await waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
-    check((await text("#pill-actions .pill")) === "Implement", `the plan's pill reads ${await text("#pill-actions .pill")}`);
-    await page.fill("#prompt", "shorter please");
-    await waitFor("Refine", async () => (await text("#pill-actions .pill")) === "Refine");
-    await page.fill("#prompt", "");
-    await waitFor("Implement", async () => (await text("#pill-actions .pill")) === "Implement");
     const rows = await page.locator("#thread-list .thread-row").count();
-    await press(page.locator('#pill-actions [data-plan="more"]'));
     const before = await page.evaluate(() => active?.key);
-    await press(page.locator("#composer-menu button", { hasText: "Implement in a new thread" }));
+    if (touch) {
+      // A phone's plan sheet offers the plan's options, Refine it with a message and Implement in a new thread.
+      await waitFor("the plan sheet", async () => (await page.locator(askSheet).isVisible()) && (await text(`${askSheet} h2`)) === "Plan ready");
+      const offers = (await page.locator(`${askSheet} :is(.ask-option, .ask-row) .label`).allTextContents()).join("|");
+      check(offers.includes("Yes, and use auto mode") && offers.includes("Refine it with a message|Implement in a new thread"), `the plan sheet offers ${offers}`);
+      await press(page.locator(`${askSheet} [data-ask="new-thread"]`));
+    } else {
+      await waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
+      check((await text("#pill-actions .pill")) === "Implement", `the plan's pill reads ${await text("#pill-actions .pill")}`);
+      await page.fill("#prompt", "shorter please");
+      await waitFor("Refine", async () => (await text("#pill-actions .pill")) === "Refine");
+      await page.fill("#prompt", "");
+      await waitFor("Implement", async () => (await text("#pill-actions .pill")) === "Implement");
+      await press(page.locator('#pill-actions [data-plan="more"]'));
+      await press(page.locator("#composer-menu button", { hasText: "Implement in a new thread" }));
+    }
     await waitFor("the new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitTerm(/PLEASE IMPLEMENT THIS PLAN:/, 15000);
     check(/1\. Add a hello comment to a\.py\./.test(await termText()), "the plan didn't go to the new thread");
@@ -5645,8 +5763,9 @@ async function sweep(profileName) {
       await waitFor("the written files in the Git status", () => page.evaluate(() => !!threadOf(active).git?.changed.includes("leave.txt")));
       // A phone commits from its Options menu and runs the Git action from the thread details card, as T3 Code's.
       if (touch) {
-        await tapOrClick("#head-more");
-        await press(page.locator("#panel-menu button", { hasText: /^Commit$/ }));
+        await tapOrClick("#toggle-details");
+        await tapOrClick('#details-card [data-act="git-menu"]');
+        await press(page.locator("#header-menu button", { hasText: /^Commit$/ }));
       } else {
         await tapOrClick("#git-action .more");
         await press(page.locator("#header-menu button", { hasText: "Commit" }));
@@ -5763,6 +5882,32 @@ async function sweep(profileName) {
 
   await step("composer: a permission offers Decline and Approve, with Cancel and Always allow under …", () => inNewThread(async () => {
     await sendPrompt("/ask");
+    if (touch) {
+      // A phone answers from its sheet: Decline and Approve, then Always allow, Decline with words and the terminal.
+      const seen = async (what) => ((await termText()).match(new RegExp(what, "g")) ?? []).length;
+      const answers = async (choice, pick) => {
+        const [chose, ran] = [await seen(`chose ${choice}`), await seen("ran it")];
+        await pick();
+        await waitFor(`claude to take ${choice}`, async () => (await seen(`chose ${choice}`)) === chose + 1);
+        await waitFor("the sheet to go", async () => !(await page.locator(askSheet).count()));
+        await waitFor("claude to finish", async () => (await seen("ran it")) === ran + 1, 8000);
+      };
+      await waitFor("the sheet", () => page.locator(askSheet).isVisible());
+      const actions = (await page.locator(`${askSheet} .ask-answers button`).allTextContents()).map((a) => a.trim());
+      check(actions.join("|") === "Decline|Approve", `actions: ${actions.join(" | ")}`);
+      check((await page.getAttribute(`${askSheet} [data-approval="accept"]`, "class")) === "primary" && (await page.getAttribute(`${askSheet} [data-approval="decline"]`, "class")) === "outline", "Approve isn't the primary");
+      const entries = (await page.locator(`${askSheet} .ask-row .label`).allTextContents()).map((l) => l.trim());
+      check(entries[0] === "Yes, and don't ask again for rm commands", `rows: ${entries.join(" | ")}`);
+      await answers(3, () => press(page.locator(`${askSheet} [data-approval="decline"]`)));
+      await sendPrompt("/ask");
+      await waitFor("the sheet again", () => page.locator(`${askSheet} [data-approval]`).first().isVisible());
+      await answers(1, () => press(page.locator(`${askSheet} [data-approval="accept"]`)));
+      await sendPrompt("/ask");
+      await waitFor("the sheet a third time", () => page.locator(`${askSheet} [data-approval]`).first().isVisible());
+      check(await page.locator(`${askSheet} [data-ask="cancel"]`).count(), `the sheet offers no Cancel beside Decline: ${entries.join(" | ")}`);
+      await answers("esc", () => press(page.locator(`${askSheet} [data-ask="cancel"]`)));
+      return `${actions.join(" | ")}; ${entries.join(" | ")}`;
+    }
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     const actions = await page.locator("#approval .actions button").allTextContents();
     check(actions.map((a) => a.trim()).join("|") === "Decline|Approve|", `actions: ${actions.join(" | ")}`);
@@ -6633,7 +6778,7 @@ async function sweep(profileName) {
     return tabAt(`/${folder}`);
   };
 
-  await step("app view: every load opens the sidebar, the phone's sheet spans the screen, T3's tooltips, and Back returns to the thread", async () => {
+  await step("app view: every load opens the sidebar, the phone's Threads screen spans it, T3's tooltips, and Back returns to the thread", async () => {
     await openRow(await keyFor("alpha"));
     if (!touch) {
       await page.keyboard.press("Meta+b");
@@ -6643,13 +6788,14 @@ async function sweep(profileName) {
     await page.waitForFunction(() => document.body.dataset.hub === "online");
     await waitFor("the app view again", () => page.locator("#chat").isVisible(), 10000);
     await waitFor("the threads again", async () => (await page.evaluate(() => tabs.length)) >= 2, 10000);
-    check((await page.locator("#sidebar").isVisible()) === !touch, `after a reload the sidebar is ${touch ? "open on a phone" : "closed"}`);
+    // A phone opens on its Threads screen, which is the sidebar.
+    check(await page.locator("#sidebar").isVisible(), "after a reload the sidebar is closed");
     await openRow(await keyFor("alpha"));
     await showSidebar();
     if (touch) {
       const width = await page.evaluate(() => innerWidth);
       const sheet = await rect("#sidebar");
-      check(Math.round(sheet.width) === width - 12, `the sheet is ${sheet.width}px on a ${width}px screen`);
+      check(Math.round(sheet.width) === width, `the Threads screen is ${sheet.width}px on a ${width}px screen`);
     } else {
       // Pull requests and Usage are nav rows that name themselves, so they need no tooltip.
       const nav = (await page.locator("#side-nav .nav-row .label").allTextContents()).join("|");
@@ -6664,8 +6810,15 @@ async function sweep(profileName) {
     await waitFor("the Pull requests page", () => page.evaluate(() => document.body.dataset.page === "pull-requests"));
     await page.evaluate(() => openPage("usage"));
     await waitFor("the Usage page", () => page.evaluate(() => document.body.dataset.page === "usage"));
-    await showSidebar();
-    await press(gui("#sidebar footer .back"));
+    if (touch) {
+      // A phone's page goes back to More, and the thread is a row on the Threads screen.
+      await press(gui("#page-view .page-back"));
+      await waitFor("the More screen", () => page.evaluate(() => document.body.dataset.phoneScreen === "more"));
+      await openRow(await keyFor("alpha"));
+    } else {
+      await showSidebar();
+      await press(gui("#sidebar footer .back"));
+    }
     await waitFor("Back to land on the thread", async () => await page.locator("#chat").isVisible(), 5000).catch(async () =>
       check(false, `Back went to ${await page.evaluate(() => document.body.dataset.page)}`));
     check((await crumbProject()) === "alpha", `Back opened ${await crumbProject()}`);
