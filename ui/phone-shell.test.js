@@ -135,3 +135,16 @@ test("above 768px, and in the terminal view, there is no phone screen and no tab
   edge.body.dataset.mode = "terminal";
   assert.deepEqual(edge.shown(), { screen: null, tabs: false });
 });
+
+test("a notification's tap on a phone lands on its thread's screen, not behind the thread list", () => {
+  const s = shell();
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  s.context.tabByKey = (key) => (key === s.thread.key ? s.thread : null);
+  vm.runInContext(main.slice(main.indexOf("function openNotified"), main.indexOf("navigator.serviceWorker?.addEventListener")), s.context);
+  assert.deepEqual(s.shown(), { screen: "threads", tabs: true });
+  vm.runInContext(`openNotified({ type: "activate-tab", tab: "mini:1" })`, s.context);
+  assert.equal(s.context.active, s.thread);
+  assert.deepEqual(s.shown(), { screen: "thread", tabs: false });
+  vm.runInContext(`openNotified({ type: "activate-tab", tab: "gone" })`, s.context);
+  assert.deepEqual(s.shown(), { screen: "thread", tabs: false }, "a thread no longer open changes nothing");
+});
