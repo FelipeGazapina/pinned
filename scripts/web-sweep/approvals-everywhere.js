@@ -78,7 +78,7 @@ const send = (page, key, text) =>
 (async () => {
   const mini = startMini();
   const errors = [];
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined, executablePath: process.env.CHROME_BIN || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   try {
     const alpha = fs.realpathSync(path.join(WORK, "alpha"));
     const context = await browser.newContext({ viewport: SIZES[0][1], colorScheme: "dark" });

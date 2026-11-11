@@ -99,7 +99,7 @@ async function sweep(profileName) {
   const touch = !!profile.hasTouch;
   const shots = path.join(DIR, "shots", profileName);
   fs.mkdirSync(shots, { recursive: true });
-  const browser = await playwright[engine].launch({ headless: true });
+  const browser = await playwright[engine].launch({ headless: true, ...(engine === "chromium" ? { ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) } : {}) });
   const context = await browser.newContext({ ...profile, colorScheme: "dark", permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
   // It runs in every frame too, where a page that failed to load has no storage to read.

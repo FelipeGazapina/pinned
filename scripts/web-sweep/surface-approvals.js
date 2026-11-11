@@ -181,7 +181,7 @@ async function approveBoth(view, agent, shot, name) {
 
 (async () => {
   const work = fs.realpathSync(path.join(WORK, "alpha"));
-  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {}) });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const errors = [];
   const contextOf = async (viewport, phone) => {
     const context = await browser.newContext({ viewport, deviceScaleFactor: phone ? 2 : 1, colorScheme: "dark", isMobile: phone, hasTouch: phone });

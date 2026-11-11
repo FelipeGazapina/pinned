@@ -89,7 +89,7 @@ const captainCard = () => {
 };
 
 (async () => {
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const errors = [];
   const cards = [];
   const alpha = fs.realpathSync(path.join(WORK, "alpha"));

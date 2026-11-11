@@ -105,7 +105,7 @@ async function shoot(browser, size, setUp) {
 
 (async () => {
   fs.mkdirSync(SCREENS, { recursive: true });
-  const browser = await playwright.chromium.launch({ headless: true, executablePath: process.env.CHROME_BIN || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   let failed = false;
   try {
     let captain = null;

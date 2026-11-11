@@ -12,8 +12,9 @@
 // hosts the orchestrator, and two folders of its own (site, pinned) stand in for the Capitães the
 // reports name. The second tab replays the same account under iPhone emulation for read aloud.
 //
-// The browser is the machine's cached Chrome for Testing (the Playwright browsers cache; CHROME_BIN
-// overrides it), driven over the DevTools protocol directly, so the sweep needs no npm install.
+// The browser is the machine's cached Chrome for Testing (the Playwright browsers cache), else the
+// installed Google Chrome; CHROME_BIN overrides both. It is driven over the DevTools protocol
+// directly, so the sweep needs no npm install.
 // The phone tab is that browser's touch emulation, which alone turns (pointer: coarse) true and
 // (any-pointer: fine) false, the two halves of the app's touchComposer test.
 const { spawn } = require("child_process");
@@ -42,11 +43,10 @@ const waitFor = async (what, fn, timeout = 20000) => {
 
 const chromium = process.env.CHROME_BIN || (() => {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(process.env.HOME || "", "Library", "Caches", "ms-playwright");
-  const found = fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()
+  const found = (fs.existsSync(root) ? fs.readdirSync(root) : []).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()
     .map((d) => path.join(root, d, "chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"))
     .find((p) => fs.existsSync(p));
-  if (!found) throw new Error(`no cached Chromium under ${root}; set CHROME_BIN`);
-  return found;
+  return found || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 })();
 
 class Cdp {

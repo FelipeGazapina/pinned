@@ -7,8 +7,8 @@
 //   SWEEP_DIR=... node scripts/web-sweep/child-threads.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
-// Writes child-threads*.png into scripts/web-sweep/screens/. The browser is the machine's cached
-// Chrome for Testing, driven over the DevTools protocol as global-chat.js drives it.
+// Writes child-threads*.png into scripts/web-sweep/screens/. The browser is the one global-chat.js
+// picks, driven over the DevTools protocol as global-chat.js drives it.
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -35,11 +35,10 @@ const waitFor = async (what, fn, timeout = 20000) => {
 
 const chromium = process.env.CHROME_BIN || (() => {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(process.env.HOME || "", "Library", "Caches", "ms-playwright");
-  const found = fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()
+  const found = (fs.existsSync(root) ? fs.readdirSync(root) : []).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()
     .map((d) => path.join(root, d, "chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"))
     .find((p) => fs.existsSync(p));
-  if (!found) throw new Error(`no cached Chromium under ${root}; set CHROME_BIN`);
-  return found;
+  return found || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 })();
 
 class Cdp {

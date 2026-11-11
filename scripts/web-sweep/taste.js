@@ -8,7 +8,7 @@
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
 // Writes taste-*.png into scripts/web-sweep/screens/, desktop at 1440x900 and phone at 390x844.
-// SWEEP_CHANNEL=chrome drives the installed Google Chrome when Playwright's own browser is missing.
+// The browser is the installed Google Chrome: SWEEP_CHANNEL names another channel, CHROME_BIN a binary.
 const fs = require("fs");
 const path = require("path");
 const playwright = require(process.env.PLAYWRIGHT || "playwright");
@@ -56,7 +56,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SCREENS, `${name}
 (async () => {
   fs.mkdirSync(path.dirname(SKILL), { recursive: true });
   fs.writeFileSync(SKILL, "---\nname: brief-for-flash\ndescription: Brief a cheap model with files, contracts and a command that proves it.\n---\n\nName the files.\n");
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   const page = await desktop.newPage();
   const errors = [];
