@@ -100,49 +100,6 @@ const element = () => ({
   },
 });
 
-/** The sidebar's orchestrator row on a page whose machines are `entries`, with the rest stubbed. */
-function sidebarTop(entries) {
-  const machines = new Map(entries);
-  const context = {
-    machines,
-    LOCAL: "local",
-    document: { createElement: element },
-    active: null,
-    ui: { waitingOpen: true, offersOpen: false },
-    globalSettings: { name: "Orchestrator" },
-    agentConfirmations: [],
-    askGlobalSettings() {},
-    agentWaitingRows: () => [],
-    globalWaitingRows: () => [],
-    globalOfferRows: () => [],
-    isGlobalOrchestratorTab: () => false,
-    machineName: (id) => machines.get(id)?.view.name ?? "machine",
-    esc: (text) => String(text),
-    icon: (name) => `<i ${name}>`,
-    globalHostMachine: () => [...machines.entries()].find(([, m]) => m.view.online)?.[0] ?? null,
-  };
-  vm.createContext(context);
-  vm.runInContext(`${fn(sidebarSrc, "globalSidebarTop")}\nthis.top = globalSidebarTop;`, context);
-  return context.top();
-}
-
-test("with every machine offline the Orchestrator row stays, disabled, with the machine's name and why", () => {
-  const [row, ...rest] = sidebarTop([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", false)]]);
-  assert.equal(rest.length, 0);
-  assert.equal(row.dataset.globalOpen, "true");
-  assert.equal(row.attributes["aria-disabled"], "true");
-  assert.ok(row.classList.names.has("disabled"));
-  assert.equal(row.title, "sweep-node is offline, so the orchestrator can't open");
-  assert.match(row.innerHTML, /<span class="host">sweep-node · offline<\/span>/);
-});
-
-test("with a machine online the Orchestrator row is on it and not disabled", () => {
-  const [row] = sidebarTop([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", true)]]);
-  assert.ok(!row.classList.names.has("disabled"));
-  assert.equal(row.attributes["aria-disabled"], undefined);
-  assert.match(row.innerHTML, /sweep-node-2 · all projects/);
-});
-
 test("a machine that dropped is named in the sidebar by a note with its name and last seen", () => {
   const context = { document: { createElement: element }, esc: (text) => String(text) };
   vm.createContext(context);

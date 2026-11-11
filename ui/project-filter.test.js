@@ -53,7 +53,6 @@ test("the project filter label keeps the full name as its title", () => {
     ui: { project: "repo:pinned", search: "" },
     isGlobalOrchestratorTab: () => false,
     askGlobalSettings() {},
-    globalSidebarTop: () => [],
     projectListsPending: () => false,
     PinnedProjects: { sessionOn },
     machineDirectory: () => directory,

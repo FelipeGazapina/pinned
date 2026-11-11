@@ -7,6 +7,9 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const surfaceSrc = read("agent-surface.js");
 const sidebarSrc = read("gui-sidebar.js");
 const settingsSrc = read("settings.js");
+/** The agents' requests as the Needs you page and Agent activity draw them: what an approval handed
+ * the user to see once, then each waiting confirmation. */
+const ASKS_HTML = `function asksHtml() { return agentShownHtml() + agentConfirmations.map(agentConfirmationHtml).join(""); }`;
 
 const line = (src, start) => src.slice(src.indexOf(start), src.indexOf("\n", src.indexOf(start)));
 const fn = (src, name) => {
@@ -79,7 +82,7 @@ function app({ answer = async () => null, signedIn = true, open = false, extra =
     },
   };
   vm.createContext(context);
-  vm.runInContext(`${escFn}\n${surfaceSrc}\n${extra}`, context);
+  vm.runInContext(`${escFn}\n${surfaceSrc}\n${ASKS_HTML}\n${extra}`, context);
   const state = (name) => vm.runInContext(name, context);
   return { context, calls, told, sections, state };
 }
@@ -94,8 +97,7 @@ function click(context, agent, confirmation) {
 test("a waiting confirmation reads as the action, the machine it names, its exact arguments, who asked, and Approve and Deny", () => {
   const { context } = app();
   context.onAgentConfirmations([removeImac]);
-  const [asks] = context.agentWaitingRows();
-  assert.equal(asks.className, "agent-asks");
+  const asks = { innerHTML: context.asksHtml() };
   assert.equal(
     tight(asks.innerHTML),
     `<div class="agent-confirm" data-confirmation="c-1" role="group" aria-label="Approve remove_machine?"><span class="dot"></span><div class="texts">` +
@@ -109,13 +111,13 @@ test("a waiting confirmation reads as the action, the machine it names, its exac
 test("a title that ends in punctuation reads cleanly inside the quotes", () => {
   const { context } = app();
   context.onAgentConfirmations([{ ...removeImac, title: "Pair the new server and add my OpenCode Go account." }]);
-  assert.match(context.agentWaitingRows()[0].innerHTML, /Asked by “Pair the new server and add my OpenCode Go account” · Worker/);
+  assert.match(context.asksHtml(), /Asked by “Pair the new server and add my OpenCode Go account” · Worker/);
 });
 
 test("an untitled session is named by its tab, and an unknown machine id adds no name", () => {
   const { context } = app();
   context.onAgentConfirmations([{ ...removeImac, args: { id: "gone-id" }, title: "", machine_name: "" }]);
-  const html = context.agentWaitingRows()[0].innerHTML;
+  const html = context.asksHtml();
   assert.match(html, /<b class="title" title="Removes a machine from the account\.">Remove machine<\/b>/);
   assert.match(html, /<span class="who">Asked by “tab-2b-7” · Worker on removed machine · 5m ago<\/span>/);
 });
@@ -124,7 +126,7 @@ test("an action on another machine names it, by its name when the app knows the 
   const { context } = app();
   const openTab = { ...removeImac, action: "open_tab", args: { path: "/Users/me/site" } };
   context.onAgentConfirmations([{ ...openTab, target: "imac-id" }, { ...openTab, id: "c-3", target: "Mac mini" }, { ...openTab, id: "c-4" }]);
-  const titles = [...context.agentWaitingRows()[0].innerHTML.matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
+  const titles = [...context.asksHtml().matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
   assert.deepEqual(titles, ["Open tab on iMac", "Open tab on Mac mini", "Open tab"]);
 });
 
@@ -163,13 +165,13 @@ test("Approve asks the hub to decide, holds both buttons while it waits, then te
   context.onAgentConfirmations([removeImac]);
   click(context, "approve", "c-1");
   assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-1", approve: true }]);
-  assert.match(context.agentWaitingRows()[0].innerHTML, /data-agent="approve" disabled>Approve<\/button><button type="button" class="outline" data-agent="deny" disabled>Deny/);
+  assert.match(context.asksHtml(), /data-agent="approve" disabled>Approve<\/button><button type="button" class="outline" data-agent="deny" disabled>Deny/);
   click(context, "approve", "c-1");
   assert.equal(calls.length, 1);
   reply({ decision: "approved", outcome: "done", result: null });
   await flush();
   assert.deepEqual(told, ["Approved remove_machine: done"]);
-  assert.equal(context.agentWaitingRows().length, 0);
+  assert.equal(context.asksHtml(), "");
   assert.equal(state("agentConfirmations.length"), 0);
 });
 
@@ -188,7 +190,7 @@ test("a decision the hub refuses tells why and gives the buttons back", async ()
   click(context, "approve", "c-1");
   await flush();
   assert.deepEqual(told, ["Couldn&#39;t approve remove_machine: no confirmation c-1 waits"]);
-  assert.match(context.agentWaitingRows()[0].innerHTML, /data-agent="approve">Approve<\/button>/);
+  assert.match(context.asksHtml(), /data-agent="approve">Approve<\/button>/);
 });
 
 test("an approved create_invite shows its code to copy until Done", async () => {
@@ -198,14 +200,14 @@ test("an approved create_invite shows its code to copy until Done", async () => 
   click(context, "approve", "c-2");
   await flush();
   assert.deepEqual(told, ["Approved create_invite: done"]);
-  const [asks] = context.agentWaitingRows();
+  const asks = { innerHTML: context.asksHtml() };
   assert.equal(
     tight(asks.innerHTML),
     `<div class="agent-once"><b>Invite code</b><span class="hint">Send it to the person you invite. It works once and doesn&#39;t expire, and shows only until you press Done.</span>` +
       `<div class="row"><code>K7Q2-9XPL</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
   );
   click(context, "dismiss-code");
-  assert.equal(context.agentWaitingRows().length, 0);
+  assert.equal(context.asksHtml(), "");
 });
 
 test("an approved pair_code shows its command once, to copy and run on the new machine, and signing out forgets it", async () => {
@@ -220,18 +222,18 @@ test("an approved pair_code shows its command once, to copy and run on the new m
   assert.deepEqual(told, ["Approved pair_code: done"]);
   assert.deepEqual(logged, []);
   assert.equal(
-    tight(context.agentWaitingRows()[0].innerHTML),
+    tight(context.asksHtml()),
     `<div class="agent-once"><b>Pairing command</b><span class="hint">Run it yourself on the new machine. Its code works once, until 14:30, and shows only until you press Done.</span>` +
       `<div class="row"><code>curl -fsSL https://hub.example/install.sh | sh -s -- PAIR-7Q2K</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
   );
   context.resetAgentSurface();
-  assert.equal(context.agentWaitingRows().length, 0);
+  assert.equal(context.asksHtml(), "");
 });
 
 test("a plain confirm such as update_self approves at once, with no entered, and reads as words with the machine it runs on", async () => {
   const { context, calls, told } = app({ answer: async () => ({ decision: "approved", outcome: "done", result: null }) });
   context.onAgentConfirmations([{ ...removeImac, id: "c-7", action: "update_self", about: "Updates pinned on the machine.", args: {}, target: "imac-id" }]);
-  const html = context.agentWaitingRows()[0].innerHTML;
+  const html = context.asksHtml();
   assert.match(html, /<b class="title" title="Updates pinned on the machine\.">Update pinned on iMac<\/b>\s*<span class="who">/);
   click(context, "approve", "c-7");
   await flush();
@@ -243,7 +245,7 @@ test("each confirm action an agent asks for reads as words in the item", () => {
   const { context } = app();
   const actions = ["remove_account", "sign_in", "disconnect_linear", "disconnect_github", "disconnect_upstash", "set_box_access", "remove_box_claude_token", "answer_box", "revoke_invite", "approve_agent", "revoke_agent", "connect_vercel", "set_box_claude_token", "pair_code"];
   context.onAgentConfirmations(actions.map((action, i) => ({ ...removeImac, id: `c-${i}`, action, args: { id: "x" } })));
-  const titles = [...context.agentWaitingRows()[0].innerHTML.matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
+  const titles = [...context.asksHtml().matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
   assert.deepEqual(titles, [
     "Remove account",
     "Sign in",
@@ -266,58 +268,7 @@ test("signing out forgets the confirmations and the invite code", () => {
   const { context } = app();
   context.onAgentConfirmations([removeImac]);
   context.resetAgentSurface();
-  assert.equal(context.agentWaitingRows().length, 0);
-});
-
-const sidebarTop = (opts) =>
-  app({
-    ...opts,
-    extra: `${fn(sidebarSrc, "globalSidebarTop")}\nconst ui = { waitingOpen: true };\nconst active = null;\nconst globalSettings = { name: "Orchestrator" };`,
-  });
-
-test("Waiting on you shows with its count when only confirmations wait and no machine hosts the orchestrator", () => {
-  const { context } = sidebarTop();
-  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => null, globalWaitingRows: () => [], globalOfferRows: () => [] });
-  context.machines.delete("imac-id");
-  assert.equal(context.globalSidebarTop().length, 0);
-  context.onAgentConfirmations([removeImac, createInvite]);
-  const [head, asks, ...rest] = context.globalSidebarTop();
-  assert.equal(head.className, "waiting-head");
-  assert.equal(head.innerHTML, `<i data-icon="inbox"></i><span>Waiting on you</span><span class="count">2</span><i data-icon="chevron-down"></i>`);
-  assert.equal(asks.className, "agent-asks");
-  assert.equal(rest.length, 0);
-});
-
-test("the orchestrator's row counts confirmations with the waiting threads, and lists confirmations first", () => {
-  const { context } = sidebarTop();
-  const thread = { className: "waiting-row" };
-  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => "local", globalWaitingRows: () => [thread], globalOfferRows: () => [], machineName: () => "MacBook", isGlobalOrchestratorTab: () => false });
-  context.onAgentConfirmations([removeImac, createInvite]);
-  const [row, head, asks, last] = context.globalSidebarTop();
-  assert.match(row.innerHTML, /<span class="count" title="3 waiting on you">3<\/span>$/);
-  assert.match(head.innerHTML, /<span class="count">3<\/span>/);
-  assert.equal(asks.className, "agent-asks");
-  assert.equal(last, thread);
-});
-
-test("offers sit under their own head, collapsed unless opened, and never count as waiting", () => {
-  const { context } = sidebarTop();
-  const offer = { className: "waiting-row offer" };
-  const blocked = { className: "waiting-row" };
-  Object.assign(context, { askGlobalSettings() {}, globalHostMachine: () => "local", globalWaitingRows: () => [blocked], globalOfferRows: () => [offer, offer], machineName: () => "MacBook", isGlobalOrchestratorTab: () => false });
-  const [row, head, last, offersHead, ...rest] = context.globalSidebarTop();
-  assert.match(row.innerHTML, /<span class="count" title="1 waiting on you">1<\/span>$/, "the badge counts the blocked thread only");
-  assert.match(head.innerHTML, /Waiting on you<\/span><span class="count">1<\/span>/);
-  assert.equal(last, blocked);
-  assert.equal(offersHead.className, "waiting-head offers-head");
-  assert.match(offersHead.innerHTML, /<span>Asked in its last reply<\/span><span class="count">2<\/span>/);
-  assert.equal(rest.length, 0, "collapsed by default");
-  vm.runInContext("ui.offersOpen = true", context);
-  assert.equal(context.globalSidebarTop().length, 6, "opened, both offers follow their head");
-  Object.assign(context, { globalWaitingRows: () => [] });
-  const [onlyRow, onlyHead] = context.globalSidebarTop();
-  assert.equal(onlyHead.className, "waiting-head offers-head", "with nothing blocked, Waiting on you is not drawn");
-  assert.doesNotMatch(onlyRow.innerHTML, /class="count"/);
+  assert.equal(context.asksHtml(), "");
 });
 
 const page = (n, from = 1794249424) =>

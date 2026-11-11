@@ -173,16 +173,6 @@ function agentShownHtml() {
   </div>`;
 }
 
-/** Waiting on you's agent items, above its threads: what an approval handed the user to see once,
- * then each waiting confirmation, in one block, or nothing. */
-function agentWaitingRows() {
-  if (!agentShown && !agentConfirmations.length) return [];
-  const asks = document.createElement("div");
-  asks.className = "agent-asks";
-  asks.innerHTML = `${agentShownHtml()}${agentConfirmations.map(agentConfirmationHtml).join("")}`;
-  return [asks];
-}
-
 /** The confirmation whose Approve opened `action`'s form, or null. */
 const agentAsking = (action) => (agentApproving?.action === action ? agentApproving : null);
 
