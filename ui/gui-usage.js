@@ -17,7 +17,7 @@ const GO_COLOR = "#4c8dff";
 const providerColor = (account) => (account.go ? GO_COLOR : CLAUDE_COLOR);
 const providerName = (account) => (account.go ? "OpenCode Go" : "Claude Code");
 /** `envs` holds each machine's transcripts and `limits` its claude's limits check; `selected` is null for every machine, as T3 Code's environment filter. */
-const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0 };
+const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0, box: { data: null, error: "", loading: false, seq: 0 } };
 try {
   const saved = JSON.parse(load("gui-usage-page"));
   if (USAGE_METRICS.some(([m]) => m === saved?.metric)) usageState.metric = saved.metric;
@@ -304,7 +304,7 @@ function renderUsagePage() {
       ${limits ? "" : `<span class="range">${usageRange(s.buckets, days)}</span>`}<span class="spacer"></span>
       <span class="controls wide">${segmented("metric", metricOptions(), metric, "Usage metric")}${segmented("days", periodOptions(), days, "Usage period", limits)}${refresh}</span>
       <span class="controls narrow">${pickButton("metric", metricOptions(), metric, "Usage metric")}${pickButton("days", periodOptions(), days, "Usage period", limits)}${refresh}</span>`)}
-    <div class="page-body"><div class="page-wrap usage" data-metric="${metric}"${usagePartial() ? " data-loading" : ""}>${body}</div></div>`);
+    <div class="page-body"><div class="page-wrap usage" data-metric="${metric}"${usagePartial() ? " data-loading" : ""}>${body}${hub ? boxUsageHtml(usageState.box, Date.now() / 1000) : ""}</div></div>`);
   if (!limits) drawChart(pageView.querySelector(".usage .chart"), s, metric, usagePartial());
 }
 
@@ -576,6 +576,81 @@ function limitsHtml() {
     ${pools.length ? `<section class="limits"><h2>${icon(go ? "opencode" : "claude")}${go ? "Subscriptions" : "Claude"}</h2>${pools.map((pool) => limitCardHtml(pool, now)).join("")}</section>` : ""}
     ${notices.length ? `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div>${[...new Set(notices)].map((n) => `<p>${esc(n)}</p>`).join("")}</div></div>` : ""}</div>`;
 }
+/** The "Upstash Box" section reads the hub on its own, since the hub waits up to 15 s on Upstash and the rest of the page must not. */
+const BOX_LIVE = ["creating", "idle", "running"];
+const boxWord = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
+const boxNum = (v, format) => (typeof v === "number" && Number.isFinite(v) ? format(v) : "—");
+const boxHours = (v) => v.toFixed(2);
+function boxUpFor(created, now) {
+  if (!created) return "—";
+  const minutes = Math.max(0, Math.floor((now - created) / 60));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  return days ? `${days} d ${hours} h` : hours ? `${hours} h ${minutes % 60} min` : `${minutes} min`;
+}
+const boxBelongs = (b) => (b.pinned ? [b.pinned.project, b.pinned.role].filter(Boolean).join(" · ") || "Opened by pinned" : "Not opened by pinned");
+/** A cell that cuts a long text with an ellipsis and keeps it whole in its tooltip. */
+const boxCell = (text, cls = "") => `<td${cls ? ` class="${cls}"` : ""} title="${esc(text)}">${esc(text)}</td>`;
+function boxRowHtml(b, now) {
+  const live = BOX_LIVE.includes(b.status);
+  const name = b.name || b.id;
+  const status = live ? (b.status === "creating" ? "Starting…" : boxUpFor(b.created, now)) : boxWord(b.status || "unknown");
+  return `<tr><td class="strong" title="${esc(name)}">${esc(name)}<span class="sub muted" title="${esc(boxBelongs(b))}">${esc(boxBelongs(b))}</span></td>${boxCell(b.size ? BOX_SIZES[b.size] ?? boxWord(b.size) : "—", "opt")}${boxCell(boxBelongs(b), "opt")}${boxCell(status)}
+    <td class="num">${boxNum(b.cpu_hours, boxHours)}</td><td class="num">${boxNum(b.compute_usd, usd)}</td></tr>`;
+}
+function boxTableHtml(boxes, label, third, now) {
+  const cols = [["Box", "box"], ["Size", "opt size"], ["Belongs to", "opt who"], [third, "up"], ["CPU hours", "num cpu"], ["Cost", "num cost"]];
+  return `<div class="table-region" tabindex="0" role="region" aria-label="${label}"><table class="by-time"><thead><tr>${cols.map(([name, cls]) => `<th class="${cls}">${name}</th>`).join("")}</tr></thead>
+    <tbody>${boxes.map((b) => boxRowHtml(b, now)).join("")}</tbody></table></div>`;
+}
+const boxFigureHtml = (label, figures, note) => `<div class="limit-card box-figure"><div class="limit-text"><span class="label">${label}</span>
+    <div class="box-nums">${figures.map(([value, unit]) => `<span class="figure"><b>${value}</b><span class="muted">${unit}</span></span>`).join("")}</div></div>
+    <p class="muted note">${note}</p></div>`;
+function boxFiguresHtml(u) {
+  const up = u.error ? null : u.upstash;
+  const from = up ? boxFigureHtml("From Upstash", [[boxHours(up.cpu_hours), "CPU hours"], [usd(up.compute_usd), "compute cost"]],
+    `Upstash's numbers for the ${up.boxes} box${up.boxes === 1 ? "" : "es"} it still lists. Deleted boxes may be missing.`) : "";
+  const p = u.pinned ?? { box_hours: 0, tasks: 0 };
+  const own = boxFigureHtml("pinned's count", [[p.box_hours.toFixed(1), "box hours"], [p.tasks.toLocaleString("en-US"), p.tasks === 1 ? "task" : "tasks"]],
+    "Box time pinned recorded for its delegated tasks; not a bill.");
+  return `<div class="box-figures">${from}${own}</div>`;
+}
+function boxListsHtml(boxes, now, open) {
+  const live = boxes.filter((b) => BOX_LIVE.includes(b.status));
+  const others = boxes.filter((b) => !BOX_LIVE.includes(b.status));
+  return `<div class="breakdown"><h3>Running now</h3>${live.length ? boxTableHtml(live, "Running boxes", "Up for", now) : `<p class="muted note">No boxes right now.</p>`}</div>
+    ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
+}
+const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
+function boxBodyHtml(box, now) {
+  const u = box.data;
+  if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
+  if (!u.connected) return `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
+  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
+}
+function boxUsageHtml(box, now) {
+  return `<section class="box-usage" aria-busy="${box.loading}"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>${boxBodyHtml(box, now)}</section>`;
+}
+/** The page redraws whole, so "Other boxes" keeps its open state here. */
+pageView.addEventListener("toggle", (e) => {
+  if (e.target.matches?.(".box-others")) usageState.box.open = e.target.open;
+}, true);
+async function fetchBoxUsage() {
+  if (!hub) return;
+  const box = usageState.box;
+  const seq = ++box.seq;
+  box.loading = true;
+  if (shellPage() === "usage") renderUsagePage();
+  try {
+    const data = await hub.hub({ cmd: "box_usage" });
+    if (seq === box.seq) Object.assign(box, { data, error: "" });
+  } catch (e) {
+    if (seq === box.seq) Object.assign(box, { data: null, error: String(e?.message ?? e) });
+  }
+  if (seq !== box.seq) return;
+  box.loading = false;
+  if (shellPage() === "usage") renderUsagePage();
+}
 document.addEventListener("click", (e) => {
   const email = e.target.closest?.("#usage-pop .redacted");
   if (!email) return;
@@ -696,6 +771,7 @@ async function refreshUsage() {
   if (usageState.refreshing) return;
   usageState.refreshing = true;
   try {
+    fetchBoxUsage();
     await (usageState.metric === "limits" ? checkLimits() : fetchUsage());
   } finally {
     usageState.refreshing = false;
@@ -1121,6 +1197,7 @@ SHELL_PAGES.usage = {
     renderUsagePage();
     if (!usageState.envs.size || onlineMachines().some((m) => !usageState.envs.get(m)?.loading)) fetchUsage();
     if (usageState.metric === "limits") checkLimits();
+    fetchBoxUsage();
   },
 };
 onGuiKey("u", () => openPage("usage"));

@@ -13,6 +13,7 @@ pub const KEY_PREFIX: &str = "box_";
 /// What `claude setup-token` prints.
 pub const CLAUDE_TOKEN_PREFIX: &str = "sk-ant-oat01-";
 const CALL_WAIT: Duration = Duration::from_secs(60);
+const LIST_ALL_WAIT: Duration = Duration::from_secs(15);
 /// The bootstrap downloads pinned-server and maybe gh before it answers.
 const EXEC_WAIT: Duration = Duration::from_secs(4 * 60);
 const CREATE_POLL: Duration = Duration::from_secs(2);
@@ -103,6 +104,149 @@ pub struct Listed {
     pub labels: Vec<String>,
 }
 
+/// One box as `GET /v2/box` lists it, with only what the Usage page reads. Every field but the id
+/// may be missing; the timestamps are seconds or milliseconds, which `unix_secs` tells apart.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct BoxData {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: f64,
+    #[serde(default)]
+    pub last_activity_at: Option<f64>,
+    #[serde(default)]
+    pub total_cpu_ns: Option<f64>,
+    #[serde(default)]
+    pub total_compute_cost_usd: Option<f64>,
+}
+
+/// The answer of `HubCall::BoxUsage`: the account's Upstash Box usage, and pinned's own count of
+/// the box time its delegated tasks used.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct BoxUsage {
+    /// Whether the account saved an Upstash connection. Without one everything else is empty.
+    #[serde(default)]
+    pub connected: bool,
+    /// Why Upstash gave no boxes, in plain text. `boxes` is empty then; `pinned` is still filled.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Every box the key lists, newest first.
+    #[serde(default)]
+    pub boxes: Vec<UsageBox>,
+    /// The listed boxes created this UTC month.
+    #[serde(default)]
+    pub upstash: Totals,
+    #[serde(default)]
+    pub pinned: PinnedCount,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct UsageBox {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    /// Unix seconds.
+    #[serde(default)]
+    pub created: u64,
+    /// Unix seconds.
+    #[serde(default)]
+    pub last_activity: Option<u64>,
+    /// `total_cpu_ns` in hours.
+    #[serde(default)]
+    pub cpu_hours: Option<f64>,
+    /// `total_compute_cost_usd`.
+    #[serde(default)]
+    pub compute_usd: Option<f64>,
+    /// Only when pinned opened this box.
+    #[serde(default)]
+    pub pinned: Option<PinnedBox>,
+}
+
+/// What the hub knows of a box it opened.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct PinnedBox {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+}
+
+/// Upstash's own figures for the boxes created this UTC month.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct Totals {
+    #[serde(default)]
+    pub cpu_hours: f64,
+    #[serde(default)]
+    pub compute_usd: f64,
+    #[serde(default)]
+    pub boxes: u32,
+}
+
+/// pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct PinnedCount {
+    #[serde(default)]
+    pub box_hours: f64,
+    #[serde(default)]
+    pub tasks: u32,
+    /// The month's start, in unix seconds.
+    #[serde(default)]
+    pub since: u64,
+}
+
+/// `at` in unix seconds: a value above 1e12 is milliseconds.
+fn unix_secs(at: f64) -> u64 {
+    if at > 1e12 {
+        (at / 1000.0) as u64
+    } else {
+        at.max(0.0) as u64
+    }
+}
+
+/// The first second of the UTC month `now` (unix seconds) falls in.
+pub fn month_start(now: u64) -> u64 {
+    use chrono::{Datelike, TimeZone, Utc};
+    let at = Utc.timestamp_opt(now as i64, 0).single().unwrap_or_default();
+    Utc.with_ymd_and_hms(at.year(), at.month(), 1, 0, 0, 0).single().map_or(0, |start| start.timestamp().max(0) as u64)
+}
+
+/// `boxes` for the Usage page, newest first, and the totals of those created from `since` on.
+pub fn usage_boxes(boxes: &[BoxData], since: u64) -> (Vec<UsageBox>, Totals) {
+    let mut rows: Vec<UsageBox> = boxes
+        .iter()
+        .map(|b| UsageBox {
+            id: b.id.clone(),
+            name: b.name.clone().unwrap_or_default(),
+            size: b.size.clone(),
+            status: b.status.clone(),
+            created: unix_secs(b.created_at),
+            last_activity: b.last_activity_at.map(unix_secs),
+            cpu_hours: b.total_cpu_ns.map(|ns| ns / 3.6e12),
+            compute_usd: b.total_compute_cost_usd,
+            pinned: None,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id)));
+    let mut totals = Totals::default();
+    for row in rows.iter().filter(|row| row.created >= since) {
+        totals.cpu_hours += row.cpu_hours.unwrap_or(0.0);
+        totals.compute_usd += row.compute_usd.unwrap_or(0.0);
+        totals.boxes += 1;
+    }
+    (rows, totals)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exec {
     pub exit_code: i32,
@@ -177,6 +321,11 @@ fn parse_list(body: &Value) -> Result<Vec<Listed>, String> {
         .collect()
 }
 
+fn parse_all(body: &Value) -> Result<Vec<BoxData>, String> {
+    let boxes = body.as_array().ok_or_else(|| format!("Upstash Box sent a list that isn't one: {body}"))?;
+    boxes.iter().map(|b| serde_json::from_value(b.clone()).map_err(|e| format!("Upstash Box sent a box pinned cannot read: {e}"))).collect()
+}
+
 fn parse_exec(body: &Value) -> Result<Exec, String> {
     let exit_code = body["exit_code"].as_i64().ok_or_else(|| format!("Upstash Box sent an exec result without an exit code: {body}"))?;
     let text = |field: &str| body[field].as_str().unwrap_or_default().to_owned();
@@ -187,6 +336,11 @@ fn parse_exec(body: &Value) -> Result<Exec, String> {
 pub async fn list(key: &str, label: &str) -> Result<Vec<Listed>, String> {
     let path = format!("/v2/box?label={}", urlencode(label));
     parse_list(&call(key, reqwest::Method::GET, &path, None, CALL_WAIT).await?)
+}
+
+/// Every box the key lists, whatever its label, for the Usage page.
+pub async fn list_all(key: &str) -> Result<Vec<BoxData>, String> {
+    parse_all(&call(key, reqwest::Method::GET, "/v2/box", None, LIST_ALL_WAIT).await?)
 }
 
 /// Creates the box and waits until it runs.
@@ -252,6 +406,54 @@ mod tests {
         let listed = parse_list(&fixture("list.json")).unwrap();
         assert_eq!(listed, [Listed { id: BoxId("tough-seal-18518".into()), labels: vec!["hub:000000000000".into(), "p:00000000000000ff".into()] }]);
         assert_eq!(parse_list(&json!([{ "id": "b" }])), Ok(vec![Listed { id: BoxId("b".into()), labels: vec![] }]));
+    }
+
+    const NOVEMBER: u64 = 1_793_491_200;
+
+    fn usage_list() -> Value {
+        json!([
+            { "id": "a", "name": "web", "labels": ["hub:1"], "size": "large", "status": "running", "runtime": "node", "created_at": 1_793_588_400u64, "updated_at": 1_793_600_000u64,
+              "last_activity_at": 1_794_398_400u64, "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 1.5, "total_token_cost_usd": 4.0, "extra": true },
+            { "id": "b", "status": "paused", "created_at": 1_793_836_800u64, "updated_at": 1_793_836_801u64 },
+            { "id": "c", "name": "ms", "status": "idle", "created_at": 1_793_700_000_000u64, "updated_at": 1_793_700_000_001u64, "last_activity_at": 1_793_700_005_000u64,
+              "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 0.25 },
+            { "id": "d", "name": "old", "status": "deleted", "created_at": 1_793_491_199u64, "updated_at": 1_793_491_199u64, "total_cpu_ns": 3.6e13, "total_compute_cost_usd": 9.0 }
+        ])
+    }
+
+    #[test]
+    fn listed_boxes_become_usage_rows_newest_first() {
+        let (rows, _) = usage_boxes(&parse_all(&usage_list()).unwrap(), NOVEMBER);
+        assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["b", "c", "a", "d"]);
+        let (a, b, c) = (&rows[2], &rows[0], &rows[1]);
+        assert_eq!((a.name.as_str(), a.size.as_deref(), a.status.as_str(), a.created, a.last_activity), ("web", Some("large"), "running", 1_793_588_400, Some(1_794_398_400)));
+        assert!((a.cpu_hours.unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!((a.compute_usd, a.pinned.clone()), (Some(1.5), None));
+        assert_eq!(*b, UsageBox { id: "b".into(), name: "".into(), size: None, status: "paused".into(), created: 1_793_836_800, last_activity: None, cpu_hours: None, compute_usd: None, pinned: None });
+        assert_eq!((c.created, c.last_activity), (1_793_700_000, Some(1_793_700_005)), "a millisecond stamp reads as seconds");
+        assert!((c.cpu_hours.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn totals_count_only_the_boxes_created_this_month() {
+        let (_, totals) = usage_boxes(&parse_all(&usage_list()).unwrap(), NOVEMBER);
+        assert_eq!(totals.boxes, 3, "the box created a second before the month began is out");
+        assert!((totals.cpu_hours - 3.0).abs() < 1e-9);
+        assert!((totals.compute_usd - 1.75).abs() < 1e-9);
+        assert_eq!(usage_boxes(&[], NOVEMBER).1, Totals::default());
+    }
+
+    #[test]
+    fn the_month_starts_at_midnight_utc_on_the_first() {
+        assert_eq!(month_start(1_794_398_400), NOVEMBER);
+        assert_eq!(month_start(NOVEMBER), NOVEMBER);
+        assert_eq!(month_start(NOVEMBER - 1), 1_790_812_800, "October 2026 began on the 1st");
+    }
+
+    #[test]
+    fn a_list_that_is_not_one_is_refused() {
+        assert!(parse_all(&json!({ "boxes": [] })).unwrap_err().contains("isn't one"));
+        assert!(parse_all(&json!([{ "name": "no id" }])).unwrap_err().contains("cannot read"));
     }
 
     #[test]

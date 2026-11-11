@@ -6720,6 +6720,19 @@
                 ]
               },
               {
+                "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
                 "type": "object",
                 "properties": {
@@ -16688,6 +16701,19 @@
                 ]
               },
               {
+                "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
                 "type": "object",
                 "properties": {
@@ -22838,6 +22864,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -29607,6 +29646,19 @@
                 ]
               },
               {
+                "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
                 "type": "object",
                 "properties": {
@@ -34247,6 +34299,426 @@
             "format": "uint32",
             "minimum": 0,
             "default": null
+          }
+        }
+      }
+    },
+    "BoxUsage": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "BoxUsage",
+        "description": "The answer of `HubCall::BoxUsage`: the account's Upstash Box usage, and pinned's own count of\nthe box time its delegated tasks used.",
+        "type": "object",
+        "properties": {
+          "connected": {
+            "description": "Whether the account saved an Upstash connection. Without one everything else is empty.",
+            "type": "boolean",
+            "default": false
+          },
+          "error": {
+            "description": "Why Upstash gave no boxes, in plain text. `boxes` is empty then; `pinned` is still filled.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "boxes": {
+            "description": "Every box the key lists, newest first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/UsageBox"
+            },
+            "default": []
+          },
+          "upstash": {
+            "description": "The listed boxes created this UTC month.",
+            "$ref": "#/$defs/Totals",
+            "default": {
+              "cpu_hours": 0.0,
+              "compute_usd": 0.0,
+              "boxes": 0
+            }
+          },
+          "pinned": {
+            "$ref": "#/$defs/PinnedCount",
+            "default": {
+              "box_hours": 0.0,
+              "tasks": 0,
+              "since": 0
+            }
+          }
+        },
+        "required": [
+          "connected",
+          "error",
+          "boxes",
+          "upstash",
+          "pinned"
+        ],
+        "$defs": {
+          "UsageBox": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "size": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "type": "string",
+                "default": ""
+              },
+              "created": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "last_activity": {
+                "description": "Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "cpu_hours": {
+                "description": "`total_cpu_ns` in hours.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "compute_usd": {
+                "description": "`total_compute_cost_usd`.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "pinned": {
+                "description": "Only when pinned opened this box.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PinnedBox"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "size",
+              "status",
+              "created",
+              "last_activity",
+              "cpu_hours",
+              "compute_usd",
+              "pinned"
+            ]
+          },
+          "PinnedBox": {
+            "description": "What the hub knows of a box it opened.",
+            "type": "object",
+            "properties": {
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "project",
+              "role",
+              "machine"
+            ]
+          },
+          "Totals": {
+            "description": "Upstash's own figures for the boxes created this UTC month.",
+            "type": "object",
+            "properties": {
+              "cpu_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "compute_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "boxes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              }
+            },
+            "required": [
+              "cpu_hours",
+              "compute_usd",
+              "boxes"
+            ]
+          },
+          "PinnedCount": {
+            "description": "pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.",
+            "type": "object",
+            "properties": {
+              "box_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "tasks": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "since": {
+                "description": "The month's start, in unix seconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              }
+            },
+            "required": [
+              "box_hours",
+              "tasks",
+              "since"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "BoxUsage",
+        "description": "The answer of `HubCall::BoxUsage`: the account's Upstash Box usage, and pinned's own count of\nthe box time its delegated tasks used.",
+        "type": "object",
+        "properties": {
+          "connected": {
+            "description": "Whether the account saved an Upstash connection. Without one everything else is empty.",
+            "type": "boolean",
+            "default": false
+          },
+          "error": {
+            "description": "Why Upstash gave no boxes, in plain text. `boxes` is empty then; `pinned` is still filled.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "boxes": {
+            "description": "Every box the key lists, newest first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/UsageBox"
+            },
+            "default": []
+          },
+          "upstash": {
+            "description": "The listed boxes created this UTC month.",
+            "$ref": "#/$defs/Totals",
+            "default": {
+              "cpu_hours": 0.0,
+              "compute_usd": 0.0,
+              "boxes": 0
+            }
+          },
+          "pinned": {
+            "$ref": "#/$defs/PinnedCount",
+            "default": {
+              "box_hours": 0.0,
+              "tasks": 0,
+              "since": 0
+            }
+          }
+        },
+        "$defs": {
+          "UsageBox": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "size": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "type": "string",
+                "default": ""
+              },
+              "created": {
+                "description": "Unix seconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "last_activity": {
+                "description": "Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "cpu_hours": {
+                "description": "`total_cpu_ns` in hours.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "compute_usd": {
+                "description": "`total_compute_cost_usd`.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "default": null
+              },
+              "pinned": {
+                "description": "Only when pinned opened this box.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PinnedBox"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "PinnedBox": {
+            "description": "What the hub knows of a box it opened.",
+            "type": "object",
+            "properties": {
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "role": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            }
+          },
+          "Totals": {
+            "description": "Upstash's own figures for the boxes created this UTC month.",
+            "type": "object",
+            "properties": {
+              "cpu_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "compute_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "boxes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              }
+            }
+          },
+          "PinnedCount": {
+            "description": "pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.",
+            "type": "object",
+            "properties": {
+              "box_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "tasks": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "since": {
+                "description": "The month's start, in unix seconds.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              }
+            }
           }
         }
       }

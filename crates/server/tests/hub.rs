@@ -21,7 +21,7 @@ use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use futures_util::future::BoxFuture;
 use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
@@ -232,13 +232,17 @@ impl Client {
     }
 
     fn wait(&mut self, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+        self.wait_within(WAIT, what, pred)
+    }
+
+    fn wait_within(&mut self, limit: Duration, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
         let start = Instant::now();
         loop {
             if let Some(found) = self.frames.iter().find(|f| pred(f)) {
                 return found.clone();
             }
             assert!(self.pump(), "the socket closed while waiting for {what}");
-            assert!(start.elapsed() < WAIT, "timed out waiting for {what}; got {:#?}", self.frames);
+            assert!(start.elapsed() < limit, "timed out waiting for {what}; got {:#?}", self.frames);
         }
     }
 
@@ -246,12 +250,16 @@ impl Client {
         self.ws.send(Message::text(frame.to_string())).unwrap();
     }
 
-    fn request(&mut self, mut frame: Value) -> Result<Value, String> {
+    fn request(&mut self, frame: Value) -> Result<Value, String> {
+        self.request_within(WAIT, frame)
+    }
+
+    fn request_within(&mut self, limit: Duration, mut frame: Value) -> Result<Value, String> {
         let id = self.next;
         self.next += 1;
         frame["id"] = json!(id);
         self.send(frame);
-        let reply = self.wait(&format!("reply {id}"), |f| f["type"] == "reply" && f["id"] == id);
+        let reply = self.wait_within(limit, &format!("reply {id}"), |f| f["type"] == "reply" && f["id"] == id);
         match reply.get("err") {
             Some(e) => Err(e.as_str().unwrap().to_owned()),
             None => Ok(reply["ok"].clone()),
@@ -2184,7 +2192,7 @@ impl FakeBoxes {
     }
 
     fn refuse(key: &str) -> Result<(), String> {
-        (key == BOX_KEY).then_some(()).ok_or_else(|| "Upstash Box refused the key: Invalid box API key".into())
+        key.starts_with(BOX_KEY).then_some(()).ok_or_else(|| "Upstash Box refused the key: Invalid box API key".into())
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
@@ -7962,4 +7970,189 @@ fn placing_follows_the_accounts_policy_skips_a_machine_that_went_offline_and_nev
 
     let bruno_placed = bruno.ask(place_call()).unwrap();
     assert_eq!(bruno_placed, json!({ "machine": bruno_id, "machineName": "bruno-mac", "by": "ranked", "reason": "no preferred machine fits, so the least busy one that does" }), "Ana's policy and machines never reach Bruno");
+}
+
+/// What the stand-in Upstash Box API answers to a key: a status and body, or `None` to never answer.
+static UPSTASH_ANSWERS: Mutex<BTreeMap<String, Option<(u16, String)>>> = Mutex::new(BTreeMap::new());
+
+/// Has the stand-in answer `GET /v2/box` for `key`, starting it, and pointing the hub at it with
+/// UPSTASH_BOX_BASE_URL, on first use. Each test names its own key, so they share the one server.
+fn upstash_answers(key: &str, answer: Option<(u16, Value)>) {
+    static SERVER: OnceLock<()> = OnceLock::new();
+    SERVER.get_or_init(|| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        std::env::set_var(pinned_core::upstash::BASE_URL_ENV, format!("http://{}", listener.local_addr().unwrap()));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || upstash_answer(stream));
+            }
+        });
+    });
+    UPSTASH_ANSWERS.lock().unwrap().insert(key.into(), answer.map(|(status, body)| (status, body.to_string())));
+}
+
+fn upstash_answer(mut stream: TcpStream) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut head = vec![];
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|n| n == 1) {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
+    let key = head.lines().find_map(|l| l.to_ascii_lowercase().starts_with("x-box-api-key:").then(|| l.split_once(':').unwrap().1.trim().to_owned()));
+    let found = head.starts_with("GET /v2/box ").then(|| key.and_then(|k| UPSTASH_ANSWERS.lock().unwrap().get(&k).cloned())).flatten();
+    let (status, body) = match found {
+        Some(Some(answer)) => answer,
+        Some(None) => {
+            std::thread::sleep(Duration::from_secs(20));
+            return;
+        }
+        None => (404, json!({ "error": "no such route or key" }).to_string()),
+    };
+    let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+}
+
+/// A signed-in account with `key` as its Upstash Box key, and the account's id.
+fn usage_account(url: &str, email: &str, key: &str) -> (String, String, Client) {
+    let (token, id, mut client) = signed_in(url, email);
+    client.hub(json!({ "cmd": "connect_upstash", "key": key, "claude_token": CLAUDE_TOKEN })).unwrap();
+    (token, id, client)
+}
+
+/// This UTC month's first second, in unix seconds.
+fn month_start() -> u64 {
+    pinned_core::upstash::month_start(now_ms() / 1000)
+}
+
+/// One finished delegated task that billed `box_ms` of box time (none for `None`) at `ended` (unix ms).
+fn box_task(hub: &TestHub, account: &str, machine: &str, id: &str, ended: u64, box_ms: Option<u64>) {
+    let usage = box_ms.map_or(json!({}), |ms| json!({ "box_ms": ms }));
+    admin_on(&hub.database, &format!("insert into delegation_tasks (account, machine, id, ended, record) values ('{account}', '{machine}', '{id}', {ended}, '{}')", json!({ "usage": usage })));
+}
+
+/// A box row the hub opened under Upstash id `upstash`, for the project `repo`, held by `machine`'s tab.
+fn opened_box(hub: &TestHub, account: &str, machine: &str, id: &str, upstash: &str, repo: &str) {
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('{id}', '{account}', '{machine}', '{upstash}', 'c1', '{{\"issue\":\"ISSUE-1\"}}', '{}', 'small', 'running');
+             insert into agent_boxes (box, account, machine, tab, role, started) values ('{id}', '{account}', '{machine}', 'tab-1', 'worker', 1)",
+            json!({ "folder": "/work/site", "repo": repo, "args": [], "token": "ghp_SECRETTOKEN" })
+        ),
+    );
+}
+
+#[test]
+fn box_usage_without_an_upstash_connection_is_empty() {
+    let hub = TestHub::start("usage_none");
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let answer = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(
+        answer,
+        json!({ "connected": false, "error": null, "boxes": [], "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 }, "pinned": { "box_hours": 0.0, "tasks": 0, "since": 0 } })
+    );
+}
+
+#[test]
+fn box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened() {
+    let hub = TestHub::start("usage_list");
+    let key = "box_testkey-usage-list";
+    let (token, id, mut ana) = usage_account(&hub.url, "ana@acme.dev", key);
+    let (machine, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let month = month_start();
+    upstash_answers(
+        key,
+        Some((
+            200,
+            json!([
+                { "id": "u-old", "name": "last month", "status": "deleted", "created_at": (month - 86_400) * 1000, "updated_at": (month - 86_400) * 1000, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 0.5 },
+                { "id": "u-web", "name": "web", "size": "large", "status": "running", "labels": ["hub:1"], "created_at": month + 10, "updated_at": month + 20, "last_activity_at": (month + 30) * 1000,
+                  "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 1.5, "total_token_cost_usd": 4.0 }
+            ]),
+        )),
+    );
+    opened_box(&hub, &id, &machine.id, "box-1", "u-web", "git@github.com:acme/site.git");
+    let now = now_ms();
+    box_task(&hub, &id, &machine.id, "t1", now, Some(5_400_000));
+    box_task(&hub, &id, &machine.id, "t2", now, Some(1_800_000));
+    box_task(&hub, &id, &machine.id, "t3", now, None);
+    box_task(&hub, &id, &machine.id, "t4", (month - 1) * 1000, Some(3_600_000));
+
+    let answer = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    println!("box_usage answer: {answer}");
+    assert_eq!(
+        answer,
+        json!({
+            "connected": true,
+            "error": null,
+            "boxes": [
+                { "id": "u-web", "name": "web", "size": "large", "status": "running", "created": month + 10, "last_activity": month + 30, "cpu_hours": 2.0, "compute_usd": 1.5,
+                  "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } },
+                { "id": "u-old", "name": "last month", "size": null, "status": "deleted", "created": month - 86_400, "last_activity": null, "cpu_hours": 1.0, "compute_usd": 0.5, "pinned": null }
+            ],
+            "upstash": { "cpu_hours": 2.0, "compute_usd": 1.5, "boxes": 1 },
+            "pinned": { "box_hours": 2.0, "tasks": 2, "since": month }
+        })
+    );
+    for secret in [key, "ghp_SECRETTOKEN", CLAUDE_TOKEN] {
+        assert!(!answer.to_string().contains(secret), "the answer holds {secret}: {answer}");
+    }
+}
+
+#[test]
+fn box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own() {
+    let hub = TestHub::start("usage_fail");
+    let (key, hang) = ("box_testkey-usage-500", "box_testkey-usage-hang");
+    let (_, id, mut ana) = usage_account(&hub.url, "ana@acme.dev", key);
+    let (_, hung_id, mut bob) = usage_account(&hub.url, "bob@acme.dev", hang);
+    upstash_answers(key, Some((500, json!({ "error": "boom" }))));
+    upstash_answers(hang, None);
+    let machine = uuid::Uuid::new_v4().to_string();
+    box_task(&hub, &id, &machine, "t1", now_ms(), Some(7_200_000));
+    box_task(&hub, &hung_id, &machine, "t1", now_ms(), Some(900_000));
+    let month = month_start();
+
+    let answer = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(
+        answer,
+        json!({
+            "connected": true,
+            "error": "Upstash did not answer: Upstash Box answered 500: boom",
+            "boxes": [],
+            "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 },
+            "pinned": { "box_hours": 2.0, "tasks": 1, "since": month }
+        })
+    );
+
+    let started = Instant::now();
+    let silent = bob.request_within(Duration::from_secs(19), json!({ "type": "hub", "call": { "cmd": "box_usage" } })).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(19), "the hub waits 15 s for Upstash, not longer");
+    let error = silent["error"].as_str().unwrap();
+    assert!(error.starts_with("Upstash did not answer: Upstash Box unreachable: "), "{error}");
+    assert!(!silent.to_string().contains(hang), "{silent}");
+    assert_eq!((silent["connected"].clone(), silent["boxes"].clone(), silent["pinned"].clone()), (json!(true), json!([]), json!({ "box_hours": 0.25, "tasks": 1, "since": month })));
+}
+
+#[test]
+fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
+    let hub = TestHub::start("usage_accounts");
+    let (key_a, key_b) = ("box_testkey-usage-a", "box_testkey-usage-b");
+    let (token_a, id_a, mut ana) = usage_account(&hub.url, "ana@acme.dev", key_a);
+    let (_, _, mut bob) = usage_account(&hub.url, "bob@acme.dev", key_b);
+    let (machine, _) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    let month = month_start();
+    let listed = |ids: &[&str]| json!(ids.iter().map(|id| json!({ "id": id, "name": id, "status": "idle", "created_at": month + 5, "updated_at": month + 5 })).collect::<Vec<_>>());
+    upstash_answers(key_a, Some((200, listed(&["a-1"]))));
+    upstash_answers(key_b, Some((200, listed(&["b-1", "a-1"]))));
+    opened_box(&hub, &id_a, &machine.id, "box-a1", "a-1", "git@github.com:acme/site.git");
+    box_task(&hub, &id_a, &machine.id, "t1", now_ms(), Some(3_600_000));
+
+    let a = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!((a["boxes"][0]["id"].clone(), a["boxes"][0]["pinned"]["project"].clone(), a["pinned"]["box_hours"].clone(), a["pinned"]["tasks"].clone()), (json!("a-1"), json!("site"), json!(1.0), json!(1)));
+    let b = bob.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(b["boxes"].as_array().unwrap().iter().map(|x| (x["id"].clone(), x["pinned"].clone())).collect::<Vec<_>>(), [(json!("a-1"), Value::Null), (json!("b-1"), Value::Null)], "a box row of ana's names no box of bob's, even under the same Upstash id");
+    assert_eq!(b["pinned"], json!({ "box_hours": 0.0, "tasks": 0, "since": month }));
+    for leaked in ["site", "ana-mac", "worker", "ghp_"] {
+        assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
+    }
 }

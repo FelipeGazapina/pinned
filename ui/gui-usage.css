@@ -262,3 +262,33 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
 #shell-dialog .dialog-foot button.ghost:hover:not(:disabled) { background: var(--g-hover); }
 #shell-dialog .dialog-foot button:disabled { opacity: 0.64; cursor: default; }
 #usage-pop:has(.segment-pop) { max-width: none; padding: 10px 14px; border-radius: 10px; box-shadow: 0 16px 40px -18px var(--g-shadow); }
+
+/* The "Upstash Box" section. */
+.usage .box-usage { display: flex; flex-direction: column; gap: 12px; }
+.usage .box-usage .box-title { display: flex; align-items: baseline; gap: 8px; }
+.usage .box-usage .sub-title { font-size: 12px; }
+.usage .box-usage h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.usage .box-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.usage .limit-card.box-figure { grid-template-columns: minmax(0, 1fr); align-items: start; }
+.usage .box-figure .box-nums { display: flex; flex-wrap: wrap; gap: 8px 32px; }
+.usage .box-figure .note { font-size: 12px; }
+.usage .box-usage table { table-layout: fixed; }
+.usage .box-usage :is(th, td) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage .box-usage th.box { width: 28%; }
+.usage .box-usage th.size { width: 11%; }
+.usage .box-usage th.who { width: 25%; }
+.usage .box-usage th.up { width: 14%; }
+.usage .box-usage th.cpu { width: 11%; }
+.usage .box-usage th.cost { width: 11%; }
+.usage .box-usage td .sub { display: none; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.usage .box-others > summary { width: fit-content; padding: 4px 0; color: var(--g-muted); font-size: 12px; cursor: pointer; }
+.usage .box-others > .table-region { margin-top: 8px; }
+@media (max-width: 639px) {
+  .usage .box-usage .opt { display: none; }
+  .usage .box-usage table.by-time :is(th, td):not(:first-child) { padding-left: 10px; }
+  .usage .box-usage th.box { width: 34%; }
+  .usage .box-usage th.up { width: 26%; }
+  .usage .box-usage th.cpu { width: 22%; }
+  .usage .box-usage th.cost { width: 18%; }
+  .usage .box-usage td .sub { display: block; }
+}

@@ -696,6 +696,7 @@ impl Hub {
                 stats.unreadable = unreadable;
                 return json(stats);
             }
+            HubCall::BoxUsage => return json(boxes::usage(self, account).await?),
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {
                 marks::check(&changes)?;
