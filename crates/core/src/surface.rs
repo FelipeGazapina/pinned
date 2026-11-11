@@ -165,6 +165,7 @@ pub const ACTIONS: &[Action] = &[
     n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
     n("auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
+    n("set_background", Excluded, "the user's own setting for whether the app on a machine keeps a window"),
     n("read_session", Read, "A session's state and its last items (20, at most 50) of conversation, read from the end of its transcript, on the session's machine or the one machine names.").named("node_read_session").wired(),
     n("memory_search", Read, "The memories of the project at path that best match query, best first, or the latest for an empty query. Any project of the account: pass machine for one on another machine.").wired(),
     n("memory_save", Write, "Saves a memory in the project at path, any project of the account (pass machine for another machine). With id, replaces that memory. Refused when the project has one with the same title or nearly the same meaning.").wired(),

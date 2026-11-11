@@ -174,6 +174,8 @@ struct Online {
     /// What the machine last reported about its load and accounts. It goes with the connection, so
     /// an offline machine shows none.
     state: Option<pinned_core::load::MachineState>,
+    /// Whether its desktop app runs in the background, as it last reported. A node reports none.
+    background: Option<bool>,
 }
 
 impl Online {
@@ -897,7 +899,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -1117,6 +1119,10 @@ impl Account {
                 m.state = Some(pinned_core::load::MachineState { reported_at, ..state.clone() });
                 return;
             }
+            MachineEvent::Background { on } => {
+                m.background = Some(*on);
+                return;
+            }
             _ => {}
         }
         let thread_tab = match &event {
@@ -1284,6 +1290,7 @@ fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machin
         machine.online = live.machines.contains_key(&machine.id);
         machine.update = updates.get(&machine.id).cloned();
         machine.state = live.machines.get(&machine.id).and_then(|online| online.state.clone());
+        machine.background = live.machines.get(&machine.id).and_then(|online| online.background);
         if let Some(version) = live.machines.get(&machine.id).map(|online| online.version.clone()).filter(|version| !version.is_empty()) {
             machine.version = version;
         }

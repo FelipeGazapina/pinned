@@ -668,12 +668,22 @@ pub struct Machine {
     hub_id: Mutex<crate::wire::MachineId>,
     /// This machine's name on the hub, which the user may have changed from its hostname.
     hub_name: Mutex<String>,
+    /// The desktop app's window. A node has none.
+    window: std::sync::OnceLock<Arc<dyn AppWindow>>,
 }
 
 pub trait SelfUpdate: Send + Sync {
     /// Check the release. When this build is behind, install it and arm a restart.
     /// Publish each phase through `machine.report` before returning it.
     fn install(&self, machine: &Machine) -> UpdateStatus;
+}
+
+/// The desktop app's window, which a machine running without the app does not have.
+pub trait AppWindow: Send + Sync {
+    /// Whether Run in the background is on.
+    fn background(&self) -> bool;
+    /// Saves Run in the background and applies it: on closes the window, off opens it.
+    fn set_background(&self, on: bool) -> Result<(), String>;
 }
 
 struct Gate {
@@ -841,6 +851,7 @@ impl Machine {
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
             hub_name: Mutex::default(),
+            window: std::sync::OnceLock::new(),
         });
         machine.start_auto_archive();
         machine
@@ -872,6 +883,22 @@ impl Machine {
 
     pub fn set_flusher(&self, flush: Arc<dyn Fn(&MachineEvent) -> bool + Send + Sync>) {
         self.gate.lock().unwrap().flusher = Some(flush);
+    }
+
+    pub fn set_window(&self, window: Arc<dyn AppWindow>) {
+        let _ = self.window.set(window);
+    }
+
+    /// Whether the desktop app runs in the background. None on a machine without the app.
+    pub fn background(&self) -> Option<bool> {
+        self.window.get().map(|window| window.background())
+    }
+
+    fn set_background(&self, on: bool) -> Result<bool, String> {
+        let window = self.window.get().ok_or("this machine runs pinned without the app, so it has no window")?;
+        window.set_background(on)?;
+        self.emit(MachineEvent::Background { on });
+        Ok(on)
     }
 
     fn update_self(&self) -> UpdateStatus {
@@ -1103,6 +1130,7 @@ impl Machine {
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
+            Call::SetBackground { on } => json(self.set_background(on)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
@@ -5514,7 +5542,7 @@ impl Machine {
         let own = self.state();
         let mut views = match self.call_hub(HubCall::MachineStates).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
             Ok(views) => views,
-            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None }],
+            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None, background: None }],
         };
         for view in views.iter_mut().filter(|view| view.id == id) {
             view.state = Some(own.clone());
