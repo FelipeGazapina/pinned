@@ -27,7 +27,6 @@ function renderWorkerBanner() {
   const at = Math.max(0, rows.findIndex((r) => r.key === workerShown));
   const row = rows[at];
   workerBanner.hidden = !row;
-  composer.dataset.workerWaiting = !!row;
   const html = row ? workerBannerHtml(row, at, rows.length, workerAnswering.has(row.key)) : "";
   workerBanner.dataset.worker = row?.key ?? "";
   setHtml(workerBanner, html);

@@ -1513,7 +1513,7 @@ function renderControls(tab) {
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
   // A plain effort level reads "High effort" above phone width; the word is drawn by the stylesheet.
-  const level = label && Object.values(REASONING).includes(label) && !["Ultracode", "Ultrathink"].includes(label);
+  const level = label && label === REASONING[tab.traits.effort];
   if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name"${level ? ` data-unit="effort"` : ""}>${esc(label)}</span>${icon("chevron-down")}`);
   traitsButton.setAttribute("aria-label", label ? (level ? `${label} effort` : label) : "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
@@ -1530,7 +1530,7 @@ function renderControls(tab) {
   for (const seg of planToggle.children) {
     const on = (seg.dataset.planSeg === "plan") === plan;
     seg.setAttribute("aria-pressed", on);
-    seg.title = plan ? "Plan mode. Click to return to normal build mode" : "Default mode. Click to enter plan mode";
+    seg.title = seg.dataset.planSeg === "plan" ? "Plan mode" : "Build mode";
     if (!seg.firstChild) seg.innerHTML = seg.dataset.planSeg === "plan" ? `${icon("pencil-ruler")}<span class="name">Plan</span>` : `${icon("bot")}<span class="name">Build</span>`;
   }
 }
