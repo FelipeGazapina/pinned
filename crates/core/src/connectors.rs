@@ -922,6 +922,7 @@ impl Store {
                                     posts: trigger_posts(&posts),
                                     note: Some(note),
                                     mentioned: vec![thread.clone()],
+                                    request: None,
                                 },
                             });
                         }
@@ -1147,6 +1148,10 @@ pub enum TriggerInput {
         note: Option<String>,
         #[serde(default)]
         mentioned: Vec<String>,
+        /// The ts of the mention that started the run inside a thread that was already there.
+        /// A classify sorts the posts from it on, and reads the earlier ones as context only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<String>,
     },
 }
 
@@ -1252,6 +1257,7 @@ impl Found {
                 posts: trigger_posts(posts),
                 note: mention_note(mention, now).map(str::to_owned),
                 mentioned: vec![mention.ts.clone()],
+                request: (mention.ts != mention.thread).then(|| mention.ts.clone()),
             }),
             Found::Replies { .. } | Found::Stopped { .. } | Found::Routed { .. } => None,
         }
@@ -1758,7 +1764,9 @@ impl Connectors {
         }
     }
 
-    /// A graph watches the channel's new threads and lets the runner classify them.
+    /// A graph watches the channel's new threads and lets the runner classify them. A mention of
+    /// the bot inside a thread nothing handles starts a run too, however old the thread, once the
+    /// mention is past the watermark. That run sorts the mention, with the thread as context.
     async fn scan_graph_channel(&self, c: &Connector, name: &str, now: DateTime<Utc>) -> Result<Option<Vec<Found>>, String> {
         let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
         let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
@@ -1777,7 +1785,16 @@ impl Connectors {
                 posts,
             });
         }
-        let activity = slack::activity(&token, &channel, &bot, now, &cursors(&c.followed, &channel)).await?;
+        let activity = slack::activity(&token, &channel, &bot, since, &cursors(&c.followed, &channel)).await?;
+        // A mention that is itself a top-level message started a new thread, found above.
+        for mention in activity.mentions.into_iter().filter(|mention| mention.ts != mention.thread) {
+            let key = thread_key(&channel, &mention.thread);
+            if self.busy(&key) || found.iter().any(|f| f.key() == key) {
+                continue;
+            }
+            let posts = slack::thread(&token, &channel, &mention.thread).await?;
+            found.push(Found::Mention { channel: channel.clone(), channel_name: channel_name.clone(), mention, posts });
+        }
         found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
         found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
         Ok(Some(found))
@@ -2201,8 +2218,25 @@ fn trigger_text(input: &TriggerInput) -> String {
         TriggerInput::Issue { identifier, title, url, description, .. } => {
             format!("{identifier}: {title}\n{url}\n\n{}", description.as_deref().unwrap_or("(no description)"))
         }
-        TriggerInput::Slack { posts, .. } => posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n"),
+        TriggerInput::Slack { posts, request, .. } => post_lines(split_at_request(posts, request.as_deref()).1),
     }
+}
+
+fn post_lines(posts: &[TriggerPost]) -> String {
+    posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n")
+}
+
+/// The thread before its request, and the posts from the request on, which are what a classify
+/// sorts. A trigger with no request is all request.
+fn split_at_request<'a>(posts: &'a [TriggerPost], request: Option<&str>) -> (&'a [TriggerPost], &'a [TriggerPost]) {
+    posts.split_at(request.and_then(|ts| posts.iter().position(|post| post.ts == ts)).unwrap_or(0))
+}
+
+/// The thread a classify reads as context only, for a run a mention started inside it.
+fn thread_context(trigger: &TriggerInput) -> Option<String> {
+    let TriggerInput::Slack { posts, request, .. } = trigger else { return None };
+    let (earlier, _) = split_at_request(posts, request.as_deref());
+    (!earlier.is_empty()).then(|| post_lines(earlier))
 }
 
 fn set_note(trigger: &mut TriggerInput, note: String) {
@@ -2317,7 +2351,8 @@ fn ask_from(classify: &crate::graph::Classify) -> Ask {
 
 fn decide_state(trigger: &TriggerInput) -> Value {
     match trigger {
-        TriggerInput::Slack { channel_name, posts, .. } => {
+        TriggerInput::Slack { channel_name, posts, request, .. } => {
+            let posts = split_at_request(posts, request.as_deref()).1;
             let author = posts.first().map(|post| post.author.as_str()).unwrap_or("");
             let message = posts.first().map(|post| post.text.as_str()).unwrap_or("");
             json!({ "channel": format!("#{channel_name}"), "author": author, "message": message })
@@ -2746,7 +2781,7 @@ pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[Class
             let issue = linear::Issue { id: id.clone(), identifier: identifier.clone(), title: title.clone(), description: description.clone(), url: url.clone() };
             run(owner, &issue, exe)
         }
-        TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned } => {
+        TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned, .. } => {
             let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
             let mut opened = slack_run(owner, channel, channel_name, thread, &posts, note.as_deref(), exe);
             opened.mentioned = mentioned.clone();
@@ -3252,7 +3287,8 @@ impl Connectors {
                         _ => return Err(format!("node {} is not a classify", node.0)),
                     }
                 };
-                Ok(Supplied::Classified(self.classify(&classify, &trigger_of(run)?, None).await?))
+                let trigger = trigger_of(run)?;
+                Ok(Supplied::Classified(self.classify(&classify, &trigger, thread_context(&trigger).as_deref()).await?))
             }
             Effect::Page { connector, group } => {
                 let Subject::SlackThread { channel, thread } = &run.subject else {
@@ -3353,7 +3389,9 @@ impl Connectors {
     }
 
     /// Starts a follow-up run for `item` when its thread's routing classify sends it down a branch
-    /// that needs no session. Answers whether it did.
+    /// that needs no session. When the thread's run ended without a session, no session is there to
+    /// take the mention, so it starts a run of its own instead, sorted like the first. Answers
+    /// whether it did either.
     async fn follow_up(&self, item: &GraphInbox, library: &runner::Library) -> Result<bool, String> {
         let subject = Subject::SlackThread { channel: item.channel.clone(), thread: item.thread.clone() };
         let run = {
@@ -3361,9 +3399,7 @@ impl Connectors {
             runs.iter().rev().find(|run| run.subject == subject && !run.follow_up && !matches!(run.status, Status::Failed { .. })).cloned()
         };
         let Some(run) = run else { return Ok(false) };
-        let started = self.runs.lock().unwrap().iter().any(|have| {
-            have.follow_up && have.subject == subject && have.context["trigger"]["mentioned"] == json!(item.mentioned)
-        });
+        let started = self.runs.lock().unwrap().iter().any(|have| have.subject == subject && have.context["trigger"]["mentioned"] == json!(item.mentioned));
         if started {
             let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
             let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
@@ -3374,9 +3410,25 @@ impl Connectors {
             return Ok(false);
         }
         let Some((node, classify)) = runner::routing_classify(library, &run.connector) else { return Ok(false) };
-        let Ok(TriggerInput::Slack { channel, channel_name, thread, posts, .. }) = trigger_of(&run) else { return Ok(false) };
-        let input = TriggerInput::Slack { channel, channel_name, thread, posts: item.posts.clone(), note: None, mentioned: item.mentioned.clone() };
-        let context = posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n");
+        let Ok(TriggerInput::Slack { channel, channel_name, thread, mut posts, .. }) = trigger_of(&run) else { return Ok(false) };
+        if matches!((&run.status, &run.session), (Status::Done, Session::None)) {
+            let request = item.posts.first().map(|post| post.ts.clone());
+            posts.retain(|post| !item.posts.iter().any(|new| new.ts == post.ts));
+            posts.extend(item.posts.iter().cloned());
+            let input = TriggerInput::Slack { channel, channel_name, thread, posts, note: None, mentioned: item.mentioned.clone(), request };
+            let value = serde_json::to_value(&input).map_err(|e| e.to_string())?;
+            let started = runner::start(library, &run.connector, subject, value, &Utc::now().to_rfc3339());
+            if let Status::Failed { why } = &started.status {
+                return Err(why.clone());
+            }
+            self.runs.lock().unwrap().push(started);
+            self.save_runs()?;
+            let _ = self.follow(&run.connector, &item.channel, &item.thread, item.cursor.clone());
+            let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+            return Ok(true);
+        }
+        let input = TriggerInput::Slack { channel, channel_name, thread, posts: item.posts.clone(), note: None, mentioned: item.mentioned.clone(), request: None };
+        let context = post_lines(&posts);
         let answers = self.classify(&classify, &input, Some(&context)).await?;
         let port = runner::classify_port(library, &run.connector, &node, &classify, &answers);
         if !runner::branch_without_session(library, &run.connector, &node, &port) {
@@ -6294,6 +6346,7 @@ mod tests {
             posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text }).collect(),
             note,
             mentioned: vec!["1792400050.000200".into()],
+            request: None,
         }
     }
 
@@ -6864,6 +6917,17 @@ mod tests {
     /// A stand-in for Slack and Linear on one port. It records each request's path and body, and
     /// files every Linear issue as BLO-1.
     fn serve_slack_and_linear(seen: std::sync::Arc<Mutex<Vec<String>>>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> String {
+        serve_channel_and_linear(seen, stop, std::sync::Arc::new(Mutex::new(json!({}))))
+    }
+
+    /// `serve_slack_and_linear`, whose channel is `channel`: its `history`, the top-level messages
+    /// newest first, which a read gets after its `oldest`, and its `threads`, each thread's
+    /// messages by thread ts. Users U1 and U2 are ana and bruno, and UBOT is pinned.
+    fn serve_channel_and_linear(
+        seen: std::sync::Arc<Mutex<Vec<String>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        channel: std::sync::Arc<Mutex<Value>>,
+    ) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -6898,14 +6962,29 @@ mod tests {
                 let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or_default().to_owned();
                 seen.lock().unwrap().push(format!("{path} {body}"));
+                let param = |name: &str| path.split(['?', '&']).find_map(|pair| pair.strip_prefix(&format!("{name}="))).unwrap_or_default().to_owned();
                 let answer = if path.starts_with("/graphql") && body.contains("issueCreate") {
-                    r#"{"data":{"issueCreate":{"success":true,"issue":{"id":"lin-1","identifier":"BLO-1","title":"t","description":"d","url":"https://linear.example/BLO-1"}}}}"#
+                    r#"{"data":{"issueCreate":{"success":true,"issue":{"id":"lin-1","identifier":"BLO-1","title":"t","description":"d","url":"https://linear.example/BLO-1"}}}}"#.to_owned()
                 } else if path.starts_with("/graphql") {
-                    r#"{"data":{"viewer":{"id":"u1"},"users":{"nodes":[]},"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]},"issueLabels":{"nodes":[]}}}"#
+                    r#"{"data":{"viewer":{"id":"u1"},"users":{"nodes":[]},"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]},"issueLabels":{"nodes":[]}}}"#.to_owned()
                 } else if path.starts_with("/chat.getPermalink") {
-                    r#"{"ok":true,"permalink":"https://slack.example/archives/C0123ABCD/p1792400050000200"}"#
+                    r#"{"ok":true,"permalink":"https://slack.example/archives/C0123ABCD/p1792400050000200"}"#.to_owned()
+                } else if path.starts_with("/conversations.history") {
+                    let oldest: f64 = param("oldest").parse().unwrap_or(0.0);
+                    let history = channel.lock().unwrap()["history"].clone();
+                    let after: Vec<&Value> = history.as_array().into_iter().flatten().filter(|m| m["ts"].as_str().and_then(|ts| ts.parse::<f64>().ok()).is_some_and(|ts| ts > oldest)).collect();
+                    json!({ "ok": true, "messages": after }).to_string()
+                } else if path.starts_with("/conversations.replies") {
+                    json!({ "ok": true, "messages": channel.lock().unwrap()["threads"][param("ts")].clone() }).to_string()
+                } else if path.starts_with("/users.info") {
+                    let name = match param("user").as_str() {
+                        "U1" => "ana",
+                        "U2" => "bruno",
+                        _ => "pinned",
+                    };
+                    json!({ "ok": true, "user": { "name": name } }).to_string()
                 } else {
-                    r#"{"ok":true}"#
+                    r#"{"ok":true}"#.to_owned()
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
                 let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
@@ -7044,6 +7123,168 @@ mod tests {
         // Fix stays off: the session still may not file an issue or change code.
         assert_eq!(connectors.store.lock().unwrap().connectors[0].fix, Fix::Off);
         let refused = block_on(connectors.linear_create("c2", "C0123ABCD", "1792400050.000200", "t", "d", "")).unwrap_err();
+        assert!(refused.contains("only analyze and reply"), "{refused}");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn slack_ts(at: DateTime<Utc>) -> String {
+        format!("{}.{:06}", at.timestamp(), at.timestamp_subsec_micros())
+    }
+
+    fn slack_message(ts: &str, thread: &str, user: &str, text: &str) -> Value {
+        json!({ "ts": ts, "thread_ts": thread, "user": user, "text": text })
+    }
+
+    /// A thread's root as `conversations.history` lists it, with its newest reply.
+    fn thread_root(thread: &[Value]) -> Value {
+        let mut root = thread[0].clone();
+        root["latest_reply"] = thread.last().unwrap()["ts"].clone();
+        root["reply_count"] = json!(thread.len() - 1);
+        root
+    }
+
+    #[test]
+    fn a_mention_in_an_old_thread_nothing_follows_is_sorted_on_the_mention() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(r#"{"kind":"ticket-request"}"#.into());
+        install_rustls();
+        let now = Utc::now();
+        let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
+        const DAY: i64 = 86_400;
+        // A month-old thread someone now asks the bot, in a reply, to file a ticket for.
+        let old = ago(30 * DAY);
+        let mut asked = vec![
+            slack_message(&old, &old, "U2", "the financial flow on staging is slow"),
+            slack_message(&ago(29 * DAY), &old, "U1", "same here"),
+            slack_message(&ago(120), &old, "U1", "<@UBOT> please create a ticket for this"),
+        ];
+        // An old thread with a new reply that doesn't mention the bot.
+        let chatter = ago(20 * DAY);
+        let chatter_thread = [slack_message(&chatter, &chatter, "U2", "deploy notes"), slack_message(&ago(180), &chatter, "U1", "anyone looked at this?")];
+        // An old thread whose mention came before the workflow's watermark, and a plain reply after it.
+        let before = ago(40 * DAY);
+        let before_thread = [
+            slack_message(&before, &before, "U1", "export broke"),
+            slack_message(&ago(DAY), &before, "U1", "<@UBOT> can you file this?"),
+            slack_message(&ago(60), &before, "U2", "bump"),
+        ];
+        let channel = std::sync::Arc::new(Mutex::new(Value::Null));
+        let publish = |threads: &[&[Value]]| {
+            let history: Vec<Value> = threads.iter().map(|thread| thread_root(thread)).collect();
+            let replies: serde_json::Map<String, Value> = threads.iter().map(|thread| (thread[0]["ts"].as_str().unwrap().to_owned(), json!(thread))).collect();
+            *channel.lock().unwrap() = json!({ "history": history, "threads": replies });
+        };
+        publish(&[&chatter_thread, &asked, &before_thread]);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), channel.clone());
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = ticket_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let (connectors, dir) = stored("old-thread-ticket", vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        let prepare = |connectors: &Connectors| {
+            connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+            connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        };
+        prepare(&connectors);
+        let key = format!("C0123ABCD:{old}");
+        let sent = std::sync::Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            match &work {
+                Work::Prompt { text, .. } => sent.lock().unwrap().push(text.clone()),
+                Work::Run(run) => sent.lock().unwrap().push(run.args.last().cloned().unwrap_or_default()),
+                _ => {}
+            }
+            placed(work)
+        };
+        let filed = || seen.lock().unwrap().iter().filter(|request| request.contains("issueCreate")).count();
+        let posted = || seen.lock().unwrap().iter().filter(|request| request.starts_with("/chat.postMessage")).cloned().collect::<Vec<_>>();
+        let threads_run = |connectors: &Connectors| connectors.graph_runs().into_iter().map(|run| subject_key(&run.subject)).collect::<Vec<_>>();
+        crate::vercel::take_test_inputs();
+
+        // The mention starts a run for the thread: it is sorted, with the thread as context, and
+        // the ticket branch files one issue and replies with its link. No session opens.
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        assert_eq!(threads_run(&connectors), [key.as_str()], "only the mention past the watermark starts a run");
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(
+            crate::vercel::take_test_inputs(),
+            ["ana: @pinned please create a ticket for this\n\nEarlier in the Slack thread, for context only; sort the message above:\nbruno: the financial flow on staging is slow\nana: same here"]
+        );
+        assert_eq!(filed(), 1);
+        assert_eq!(posted().len(), 1);
+        assert!(posted()[0].contains(&format!(r#""thread_ts":"{old}""#)) && posted()[0].contains("Ticket: https://linear.example/BLO-1"), "{:?}", posted());
+        assert!(sent.lock().unwrap().is_empty(), "a session got {:?}", sent.lock().unwrap());
+        {
+            let store = connectors.store.lock().unwrap();
+            let c = &store.connectors[0];
+            assert_eq!(c.handled, [key.as_str()], "the thread is claimed once, and the other threads not at all");
+            assert_eq!(c.created[&key].identifier, "BLO-1");
+            assert_eq!(c.followed[&key].cursor, ago(120), "the mention is read");
+        }
+
+        // The bot's reply lands in the thread. The next check starts nothing and files nothing.
+        asked.push(json!({ "ts": ago(50), "thread_ts": old, "user": "UBOT", "text": "Ticket: https://linear.example/BLO-1" }));
+        publish(&[&chatter_thread, &asked, &before_thread]);
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(threads_run(&connectors), [key.as_str()]);
+        assert_eq!((filed(), posted().len()), (1, 1));
+        assert!(crate::vercel::take_test_inputs().is_empty(), "nothing new to sort");
+
+        // After a restart, a second request in the thread gets the same link and no new issue.
+        drop(connectors);
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        prepare(&connectors);
+        asked.push(slack_message(&ago(30), &old, "U2", "<@UBOT> can you file a ticket?"));
+        publish(&[&chatter_thread, &asked, &before_thread]);
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(
+            crate::vercel::take_test_inputs(),
+            ["bruno: @pinned can you file a ticket?\n\nEarlier in the Slack thread, for context only; sort the message above:\nbruno: the financial flow on staging is slow\nana: same here\nana: @pinned please create a ticket for this"]
+        );
+        assert_eq!(filed(), 1, "one ticket per thread");
+        assert_eq!(posted().len(), 2);
+        assert!(posted()[1].contains(&format!(r#""thread_ts":"{old}""#)) && posted()[1].contains("Ticket: https://linear.example/BLO-1"), "{:?}", posted());
+        assert!(sent.lock().unwrap().is_empty(), "a session got {:?}", sent.lock().unwrap());
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].followed[&key].cursor, ago(30));
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].handled, [key.as_str()]);
+
+        // A mention the classify sorts as a bug starts the thread's run like a new message would:
+        // its session opens on the whole thread, and fix stays off.
+        crate::vercel::set_test_content(Some(r#"{"kind":"bug"}"#.into()));
+        let broken = ago(25 * DAY);
+        let bug_thread = [slack_message(&broken, &broken, "U2", "payments page times out"), slack_message(&ago(20), &broken, "U1", "<@UBOT> is this still happening?")];
+        publish(&[&chatter_thread, &asked, &before_thread, &bug_thread]);
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(
+            crate::vercel::take_test_inputs(),
+            ["ana: @pinned is this still happening?\n\nEarlier in the Slack thread, for context only; sort the message above:\nbruno: payments page times out"]
+        );
+        let opening = sent.lock().unwrap().pop().expect("the bug branch opened a session");
+        assert!(opening.contains(TRIAGE_ONLY), "{opening}");
+        assert!(
+            opening.contains("Slack thread in #support, oldest first:\nbruno: payments page times out\nana: @pinned is this still happening?\n\nBefore this session, typesafe-ai/jev on Vercel's AI Gateway read the thread and answered:\n- kind: bug"),
+            "{opening}"
+        );
+        assert!(sent.lock().unwrap().is_empty());
+        assert_eq!((filed(), posted().len()), (1, 2));
+        let handled = connectors.store.lock().unwrap().connectors[0].handled.clone();
+        assert_eq!(handled, [key.clone(), format!("C0123ABCD:{broken}")], "the old reply without a mention and the mention before the watermark stay ignored");
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].fix, Fix::Off);
+        let refused = block_on(connectors.linear_create("c2", "C0123ABCD", &broken, "t", "d", "")).unwrap_err();
         assert!(refused.contains("only analyze and reply"), "{refused}");
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(dir);

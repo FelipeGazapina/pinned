@@ -44,6 +44,16 @@ pub(crate) fn set_test_content(content: Option<String>) {
     *TEST_CONTENT.lock().unwrap() = content;
 }
 
+/// What `ask` was given while a test answered for the gateway, oldest first.
+#[cfg(test)]
+static TEST_INPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Takes the inputs `ask` was given since the last call.
+#[cfg(test)]
+pub(crate) fn take_test_inputs() -> Vec<String> {
+    std::mem::take(&mut *TEST_INPUTS.lock().unwrap())
+}
+
 /// Asks a chat model for one JSON object, for workflow generation. The answer parses as JSON;
 /// prose around it is trimmed. Tests run it offline through the same canned content as `ask`.
 pub async fn chat_json(key: &str, model: &str, system: &str, user: &str) -> Result<Value, String> {
@@ -193,6 +203,7 @@ async fn kind_of(model: &str) -> Result<Kind, String> {
 pub async fn ask(key: &str, ask: &Ask, input: &str) -> Result<Vec<(String, String)>, String> {
     #[cfg(test)]
     if let Some(content) = TEST_CONTENT.lock().unwrap().clone() {
+        TEST_INPUTS.lock().unwrap().push(input.to_owned());
         return parse_completion(
             ask,
             &json!({ "choices": [{ "message": { "content": content } }] }),
