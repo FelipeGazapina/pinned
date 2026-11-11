@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// Shoots "Waiting on you" with the threads that decide it, at 1440x900 and 390x844: an approval
+// Shoots the Needs you page with the threads that decide it, at 1440x900 and 390x844: an approval
 // pending mid-turn, a failure, and four finished or stopped threads whose last reply asked something
 // (a loose thread, a Captain, a worker, a stopped thread). Before the change every one of them is a
-// Question; after it only the pending approval and the failure wait, and the loose thread and the
-// Captain sit greyed under "Asked in its last reply". The worker (its result went up) and the
-// stopped thread drop out.
+// Question; after it only the pending approval and the failure wait, counted on the Needs you row,
+// and the loose thread and the Captain sit below them as quiet cards that block nobody. The worker
+// (its result went up) and the stopped thread drop out.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... WAITING_TAG=before node scripts/web-sweep/waiting-asks.js
 //
 // Writes waiting-asks-<WAITING_TAG>-<screen>-<desktop|phone>.png into scripts/web-sweep/screens/ and
-// prints the sidebar's rows as text. WAITING_EXPECT=before|after fails the run when the rows differ
+// prints the page's cards as text. WAITING_EXPECT=before|after fails the run when the rows differ
 // from what that side should show. The node's tabs events replace each view, so the seed applies
 // itself again before every sidebar render.
 const fs = require("fs");
@@ -69,23 +69,25 @@ function seedThreads(dir) {
   renderSidebar();
 }
 
-// Runs in the page: what the sidebar's waiting area shows, as text, in order.
+// Runs in the page: the Needs you page's cards as text, in order. A card that waits on the user is a
+// ROW; a finished thread's or one whose last reply asked something is an OFFER, since it blocks nobody.
 const waitingArea = () => {
-  const list = document.getElementById("thread-list");
-  const out = [];
-  for (const el of list.children) {
-    if (el.matches(".thread-row, .project-head, .side-heading, .empty")) break;
-    if (el.matches(".waiting-head, .offers-head")) out.push(`HEAD ${el.textContent.replace(/\s+/g, " ").trim()}`);
-    else if (el.matches(".waiting-row")) out.push(`${el.classList.contains("offer") ? "OFFER" : "ROW"} ${el.textContent.replace(/\s+/g, " ").trim()}`);
+  const out = [`HEAD Needs you ${document.querySelector("#page-view .ny-title .ny-count")?.textContent ?? ""}`.trim()];
+  for (const el of document.querySelectorAll("#page-view .ny-card")) {
+    const quiet = ["offer", "review"].includes(el.dataset.kind);
+    out.push(`${quiet ? "OFFER" : "ROW"} ${el.getAttribute("aria-label")} ${el.textContent.replace(/\s+/g, " ").trim()}`);
   }
   return out;
 };
+// Runs in the page: the count on the Needs you row (the phone's tab), which counts only what blocks.
+const needsYouCount = () => (document.querySelector('#side-nav [data-nav="needs-you"] .count:not([hidden])') ?? document.querySelector('#phone-tabs [data-phone-tab="needs-you"] .badge:not([hidden])'))?.textContent ?? "0";
 
 (async () => {
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const errors = [];
   const alpha = fs.realpathSync(path.join(WORK, "alpha"));
   const seen = {};
+  const counts = {};
   for (const [size, viewport] of SIZES) {
     const phone = size === "phone";
     const context = await browser.newContext({ viewport, deviceScaleFactor: phone ? 2 : 1, colorScheme: "dark", isMobile: phone, hasTouch: phone });
@@ -117,17 +119,17 @@ const waitingArea = () => {
       }
     }, alpha);
     await page.evaluate((src) => (0, eval)(src), `${seedThreads}; seedThreads(${JSON.stringify(alpha)});`);
-    if (phone) await page.evaluate(() => toggleSidebar(true));
-    await page.evaluate(() => { ui.waitingOpen = true; ui.offersOpen = true; renderSidebar(); });
-    await waitFor("the waiting rows", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length > 0));
-    await page.evaluate(() => document.getElementById("thread-list").scrollTo(0, 0));
+    // Needs you also lists a finished thread the user has not read; the threads here were read, so what
+    // their last reply asked is what puts them on the page.
+    await page.evaluate((dir) => tabs.filter((t) => t.view.cwd === dir).forEach(markThreadSeen), alpha);
+    await page.click(phone ? '#phone-tabs [data-phone-tab="needs-you"]' : '#side-nav [data-nav="needs-you"]');
+    await waitFor("the Needs you page", () => page.evaluate(() => shellPage() === "needs-you"));
+    await waitFor("the cards", () => page.evaluate(() => document.querySelectorAll("#page-view .ny-card").length > 0));
+    await page.waitForTimeout(400);
     seen[size] = await page.evaluate(waitingArea);
-    console.log(`${size}:\n  ${seen[size].join("\n  ")}`);
+    counts[size] = await page.evaluate(needsYouCount);
+    console.log(`${size} (Needs you ${counts[size]}):\n  ${seen[size].join("\n  ")}`);
     await shot("open");
-    if (TAG === "after") {
-      await page.evaluate(() => { ui.offersOpen = false; renderSidebar(); });
-      await shot("collapsed");
-    }
     await context.close();
   }
   await browser.close();
@@ -137,8 +139,11 @@ const waitingArea = () => {
     const offers = lines.filter((l) => l.startsWith("OFFER ")).length;
     if (expect === "before") check(rows === 6 && offers === 0, `${size}: before, six threads wait on the user (${rows} rows)`);
     if (expect === "after") {
-      check(rows === 2 && offers === 2, `${size}: after, two threads wait and two offers sit below (${rows} rows, ${offers} offers)`);
-      check(lines.some((l) => /Needs input/.test(l)) && lines.some((l) => /Failed/.test(l)) && lines.some((l) => /Asked in its last reply/.test(l)), `${size}: the kinds read as text`);
+      check(rows === 2 && offers === 2, `${size}: after, two threads wait and two quiet cards sit below (${rows} rows, ${offers} offers)`);
+      check(counts[size] === "2", `${size}: the Needs you count reads ${counts[size]}, the two that wait`);
+      check(lines.some((l) => /^ROW Approval: Apply the orders migration/.test(l)) && lines.some((l) => /^ROW Failed: Fix the flaky checkout test/.test(l)), `${size}: the kinds read as text`);
+      check(lines.some((l) => /^OFFER .*Release v0\.17\.24/.test(l)) && lines.some((l) => /^OFFER .*Why did the CI fail\?/.test(l)), `${size}: the Captain and the loose thread sit below`);
+      check(!lines.some((l) => /Changelog for v0\.17\.24|Tidy the README/.test(l)), `${size}: the worker or the stopped thread shows`);
     }
   }
   check(!errors.length, `no page errors${errors.length ? `:\n${errors.slice(0, 5).join("\n")}` : ""}`);

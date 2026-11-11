@@ -177,6 +177,8 @@ struct Online {
     /// What the machine last reported about its load and accounts. It goes with the connection, so
     /// an offline machine shows none.
     state: Option<pinned_core::load::MachineState>,
+    /// Whether its desktop app runs in the background, as it last reported. A node reports none.
+    background: Option<bool>,
 }
 
 impl Online {
@@ -927,7 +929,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -1147,6 +1149,10 @@ impl Account {
                 m.state = Some(pinned_core::load::MachineState { reported_at, ..state.clone() });
                 return;
             }
+            MachineEvent::Background { on } => {
+                m.background = Some(*on);
+                return;
+            }
             _ => {}
         }
         let thread_tab = match &event {
@@ -1314,6 +1320,7 @@ fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machin
         machine.online = live.machines.contains_key(&machine.id);
         machine.update = updates.get(&machine.id).cloned();
         machine.state = live.machines.get(&machine.id).and_then(|online| online.state.clone());
+        machine.background = live.machines.get(&machine.id).and_then(|online| online.background);
         if let Some(version) = live.machines.get(&machine.id).map(|online| online.version.clone()).filter(|version| !version.is_empty()) {
             machine.version = version;
         }
@@ -1484,6 +1491,30 @@ mod tests {
             frames.push(serde_json::from_str::<Value>(&text).unwrap());
         }
         assert_eq!(frames, vec![serde_json::json!({ "type": "watch_threads", "viewer": "client-1", "tabs": ["tab-1"] })], "the watch of client 1, which never saw the machine leave, and none for client 2, which unwatched it");
+    }
+
+    #[test]
+    fn a_machine_reports_run_in_the_background_on_its_view_while_it_is_online() {
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (client, mut heard, _) = Outbox::new();
+        account.client_connected(1, vec![], false, None, client, vec![]);
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("m", 1, "studio".into(), false, "0.17.24".into(), out);
+        let view = || MachineView { id: "m".into(), name: "studio".into(), os: "macos".into(), online: false, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None, background: None };
+        let shown = |account: &Account| {
+            let mut views = [view()];
+            account.overlay(&mut views);
+            views[0].background
+        };
+        assert_eq!(shown(&account), None, "nothing until the app reports it");
+        while heard.try_recv().is_ok() {}
+        account.machine_event("m", 1, MachineEvent::Background { on: true });
+        assert_eq!(shown(&account), Some(true));
+        account.machine_event("m", 1, MachineEvent::Background { on: false });
+        assert_eq!(shown(&account), Some(false));
+        assert!(heard.try_recv().is_err(), "clients get it with the machines list, not as an event");
+        assert!(account.went_offline("m", Some(1)));
+        assert_eq!(shown(&account), None, "an offline machine can't be switched");
     }
 
     #[test]

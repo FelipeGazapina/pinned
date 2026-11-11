@@ -239,7 +239,9 @@ function diffRows(lines, { lang, comments, draft, selection, path }) {
 const rangeLabel = (c) => (c.start === c.end ? `L${c.end}` : `L${c.start} to L${c.end}`);
 /** DiffCommentAnnotation.tsx: a saved comment, and the draft being written. */
 const commentHtml = (c) => c.html ?? `<div class="dcomment">${icon("message-circle")}<p>${esc(c.text)}</p><button type="button" class="icon" data-comment-delete="${esc(c.id)}" aria-label="Delete comment">${icon("trash-2")}</button></div>`;
-const draftHtml = (d) => `<div class="dcomment draft"><textarea rows="3" placeholder="Add a comment…" aria-label="Comment on lines ${esc(rangeLabel(d))}" data-comment-text>${esc(d.text ?? "")}</textarea>
+/** A thread's comment goes out with the next message; a pull request's waits in its pending review. */
+const draftAbout = (d) => `Review comment on ${d.start === d.end ? `line ${d.end}` : `lines ${d.start} to ${d.end}`}. ${d.pr ? "It waits in your pending review." : "It goes out with your next message."}`;
+const draftHtml = (d) => `<div class="dcomment draft"><p class="about">${esc(draftAbout(d))}</p><textarea rows="3" placeholder="Add a comment…" aria-label="Comment on lines ${esc(rangeLabel(d))}" data-comment-text>${esc(d.text ?? "")}</textarea>
   <div class="row"><span class="hint">⌘/Ctrl Enter to send</span><button type="button" class="ghost" data-comment-cancel>Cancel</button><button type="button" class="primary" data-comment-save${(d.text ?? "").trim() ? "" : " disabled"}>Comment</button></div></div>`;
 
 /** Rows past the first `EAGER_ROWS` of a diff wait in sized placeholders until they scroll near,
@@ -390,18 +392,21 @@ function fileIcon(path) {
   return `<span class="ficon" style="color:${hit?.[2] ?? "#a3a3a3"}">${icon(hit?.[1] ?? "file")}</span>`;
 }
 
-/** DiffPanel.tsx's header row. The totals, collapse-all and file-tree toggle show only with files;
- * Refresh spins while `refreshing`. */
+/** DiffPanel.tsx's header row: the scope and its totals, then the layout, wrap and file-tree switches,
+ * named above phone width and icons on a phone, where CSS puts the totals back after the spacer.
+ * Refresh, collapse-all and the whitespace switch keep icons. The totals, collapse-all and the file
+ * tree show only with files; Refresh spins while `refreshing`. */
 function diffToolbar(files, key, scope, { refresh = false, refreshing = false } = {}) {
   const on = (b) => (b ? " on" : "");
+  const pressed = (b) => ` aria-pressed="${!!b}"`;
   const any = files.length > 0;
   const allCollapsed = any && files.every((f) => ui.collapsed.has(`${key}:${f.path}`));
   const tip = (text) => `title="${text}" aria-label="${text}"`;
-  return `<div class="diff-bar">${scope}<span class="spacer"></span>${any ? `<span class="add">+${sum(files, "added")}</span><span class="del">-${sum(files, "removed")}</span>` : ""}
+  return `<div class="diff-bar">${scope}${any ? `<span class="add">+${sum(files, "added")}</span><span class="del">-${sum(files, "removed")}</span>` : ""}
     ${refresh ? `<button type="button" data-diff="refresh" class="icon${refreshing ? " refreshing" : ""}" title="${refreshing ? "Refreshing diff…" : "Refresh diff"}" aria-label="${refreshing ? "Refreshing diff" : "Refresh diff"}">${icon("refresh-cw")}</button>` : ""}
-    ${any ? `<button type="button" data-diff="collapse" class="icon" ${tip(allCollapsed ? "Expand all files" : "Collapse all files")}>${icon(allCollapsed ? "chevrons-up-down" : "chevrons-down-up")}</button>` : ""}
-    <span class="seg"><button type="button" data-diff="unified" class="icon${on(ui.diffView === "unified")}" title="Stacked" aria-label="Stacked diff view">${icon("rows-3")}</button><button type="button" data-diff="split" class="icon${on(ui.diffView === "split")}" title="Split" aria-label="Split diff view">${icon("columns-2")}</button></span>
-    <button type="button" data-diff="wrap" class="icon${on(ui.diffWrap)}" title="${ui.diffWrap ? "Disable line wrapping" : "Enable line wrapping"}" aria-label="${ui.diffWrap ? "Disable diff line wrapping" : "Enable diff line wrapping"}">${icon("text-wrap")}</button>
+    ${any ? `<button type="button" data-diff="collapse" class="icon" ${tip(allCollapsed ? "Expand all files" : "Collapse all files")}>${icon(allCollapsed ? "chevrons-up-down" : "chevrons-down-up")}</button>` : ""}<span class="spacer"></span>
+    <span class="seg" role="group" aria-label="Diff layout"><button type="button" data-diff="unified" class="icon text${on(ui.diffView === "unified")}"${pressed(ui.diffView === "unified")} title="Stacked" aria-label="Stacked diff view">${icon("rows-3")}<span class="label">Stacked</span></button><button type="button" data-diff="split" class="icon text${on(ui.diffView === "split")}"${pressed(ui.diffView === "split")} title="Split" aria-label="Split diff view">${icon("columns-2")}<span class="label">Split</span></button></span>
+    <button type="button" data-diff="wrap" class="icon text${on(ui.diffWrap)}"${pressed(ui.diffWrap)} title="${ui.diffWrap ? "Disable line wrapping" : "Enable line wrapping"}" aria-label="${ui.diffWrap ? "Disable diff line wrapping" : "Enable diff line wrapping"}">${icon("text-wrap")}<span class="label">Wrap</span></button>
     <button type="button" data-diff="whitespace" class="icon${on(ui.diffHideSpace)}" ${tip(ui.diffHideSpace ? "Show whitespace changes" : "Hide whitespace changes")}>${icon("pilcrow")}</button>
-    ${any ? `<button type="button" data-diff="tree" class="icon${on(ui.diffTree)}" ${tip(ui.diffTree ? "Hide file tree" : "Show file tree")}>${icon("folder-tree")}</button>` : ""}</div>`;
+    ${any ? `<button type="button" data-diff="tree" class="icon text${on(ui.diffTree)}"${pressed(ui.diffTree)} ${tip(ui.diffTree ? "Hide file tree" : "Show file tree")}>${icon("folder-tree")}<span class="label">Files</span></button>` : ""}</div>`;
 }

@@ -330,3 +330,32 @@ test("a project's row shows what its threads and workers cost, and a project wit
   const html = pages.at(-1);
   assert.equal([...html.matchAll(/<span class="gp-cost"[^>]*>([^<]*)<\/span>/g)].map((m) => m[1]).join("|"), "$1.26 · 2 workers");
 });
+
+const rail = () => {
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { captainRailSub, reportCaptainState, CAPTAIN_STATE_LABELS };`, context);
+  return context.api;
+};
+const fact = (over) => ({ state: "idle", machine: { id: "mm", name: "mac-mini" }, workers: 0, working: 0, needs: [], reported: null, seen: null, ...over });
+
+test("the Captains rail says what each state counts, then what waits on the user", () => {
+  const { captainRailSub } = rail();
+  assert.equal(captainRailSub(fact({ state: "working", workers: 3, needs: ["a"] })), "mac-mini · 3 workers · 1 needs you");
+  assert.equal(captainRailSub(fact({ state: "working", workers: 1 })), "mac-mini · 1 worker");
+  assert.equal(captainRailSub(fact({ state: "idle", reported: "6:47 PM" })), "mac-mini · reported 6:47 PM");
+  assert.equal(captainRailSub(fact({ state: "idle" })), "mac-mini");
+  assert.equal(captainRailSub(fact({ state: "none", machine: { name: "vps" }, working: 1 })), "vps · 1 thread working");
+  assert.equal(captainRailSub(fact({ state: "none", machine: { name: "vps" }, working: 2, needs: ["a", "b"] })), "vps · 2 threads working · 2 needs you");
+  assert.equal(captainRailSub(fact({ state: "offline", machine: { name: "windows-pc" }, seen: "seen 2 h ago", reported: "6:47 PM" })), "windows-pc · seen 2 h ago");
+});
+
+test("a report card counts the threads at work and waiting, or names the Captain state after its machine", () => {
+  const { reportCaptainState, CAPTAIN_STATE_LABELS } = rail();
+  assert.deepEqual(here(reportCaptainState(fact({ state: "working", working: 1, needs: ["a"] }))), { chips: [{ tone: "working", text: "1 working" }, { tone: "needs", text: "1 needs you" }], where: "" });
+  assert.deepEqual(here(reportCaptainState(fact({ state: "idle" }))), { chips: [], where: " · idle now" });
+  assert.deepEqual(here(reportCaptainState(fact({ state: "working" }))), { chips: [], where: " · working now" });
+  assert.deepEqual(here(reportCaptainState(fact({ state: "offline" }))), { chips: [], where: " · offline" });
+  assert.deepEqual(here(reportCaptainState(fact({ state: "none", needs: ["a", "b"] }))), { chips: [{ tone: "needs", text: "2 needs you" }], where: "" });
+  assert.deepEqual(here(CAPTAIN_STATE_LABELS), { working: "Working", idle: "Idle", none: "No Captain", offline: "Offline" });
+});

@@ -437,6 +437,9 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
     shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
+    if let Some(on) = machine.background() {
+        shared.send(&MachineFrame::Event { event: MachineEvent::Background { on } });
+    }
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();

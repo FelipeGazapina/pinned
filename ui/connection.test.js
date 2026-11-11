@@ -100,47 +100,60 @@ const element = () => ({
   },
 });
 
-/** The sidebar's orchestrator row on a page whose machines are `entries`, with the rest stubbed. */
-function sidebarTop(entries) {
+/** The sidebar nav's Orchestrator row on a page whose machines are `entries`, with the rest stubbed. */
+function orchestratorNav(entries) {
   const machines = new Map(entries);
+  const part = () => ({
+    ...element(),
+    textContent: "",
+    hidden: false,
+    style: {},
+    parts: {},
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+    querySelector(selector) {
+      return (this.parts[selector] ??= part());
+    },
+  });
+  const rows = {};
   const context = {
     machines,
     LOCAL: "local",
-    document: { createElement: element },
     active: null,
-    ui: { waitingOpen: true, offersOpen: false },
     globalSettings: { name: "Orchestrator" },
-    agentConfirmations: [],
     askGlobalSettings() {},
-    agentWaitingRows: () => [],
-    globalWaitingRows: () => [],
-    globalOfferRows: () => [],
+    navCounts: () => ({ needsYou: 0, orchestrator: 0, reviews: 0, usage: null, machinesOnline: 0, machinesTotal: machines.size }),
+    shellPage: () => null,
+    navRow: (name) => (rows[name] ??= part()),
     isGlobalOrchestratorTab: () => false,
     machineName: (id) => machines.get(id)?.view.name ?? "machine",
-    esc: (text) => String(text),
-    icon: (name) => `<i ${name}>`,
     globalHostMachine: () => [...machines.entries()].find(([, m]) => m.view.online)?.[0] ?? null,
+    document: { getElementById: () => part() },
+    accountButton: part(),
+    bindingLabel: () => null,
   };
   vm.createContext(context);
-  vm.runInContext(`${fn(sidebarSrc, "globalSidebarTop")}\nthis.top = globalSidebarTop;`, context);
-  return context.top();
+  vm.runInContext(`${line(sidebarSrc, "const setText")}\n${fn(sidebarSrc, "drawCount")}\n${fn(sidebarSrc, "drawNav")}\ndrawNav();`, context);
+  return rows.orchestrator;
 }
 
 test("with every machine offline the Orchestrator row stays, disabled, with the machine's name and why", () => {
-  const [row, ...rest] = sidebarTop([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", false)]]);
-  assert.equal(rest.length, 0);
-  assert.equal(row.dataset.globalOpen, "true");
+  const row = orchestratorNav([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", false)]]);
+  assert.equal(row.hidden, false);
   assert.equal(row.attributes["aria-disabled"], "true");
   assert.ok(row.classList.names.has("disabled"));
   assert.equal(row.title, "sweep-node is offline, so the orchestrator can't open");
-  assert.match(row.innerHTML, /<span class="host">sweep-node · offline<\/span>/);
+  assert.equal(row.parts[".host"].textContent, "sweep-node · offline");
+  assert.equal(row.parts[".name"].textContent, "Orchestrator");
 });
 
 test("with a machine online the Orchestrator row is on it and not disabled", () => {
-  const [row] = sidebarTop([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", true)]]);
+  const row = orchestratorNav([["a", machine("sweep-node", false)], ["b", machine("sweep-node-2", true)]]);
   assert.ok(!row.classList.names.has("disabled"));
   assert.equal(row.attributes["aria-disabled"], undefined);
-  assert.match(row.innerHTML, /sweep-node-2 · all projects/);
+  assert.equal(row.title, "");
+  assert.equal(row.parts[".host"].textContent, "sweep-node-2");
 });
 
 test("a machine that dropped is named in the sidebar by a note with its name and last seen", () => {

@@ -30,7 +30,7 @@ function page() {
   };
   vm.createContext(context);
   vm.runInContext(updateAllSrc, context);
-  vm.runInContext([lines("const gigabytes"), fn("machineStateHtml"), fn("machineWork"), fn("updateButtonHtml"), fn("machineEntryHtml")].join("\n"), context);
+  vm.runInContext([lines("const gigabytes"), fn("machineStateHtml"), fn("machineWork"), fn("updateButtonHtml"), fn("machineEntryHtml"), fn("machineBackgroundHtml")].join("\n"), context);
   return context;
 }
 

@@ -1,0 +1,117 @@
+/* The global orchestrator's chat: its header, the tags and routed line of a sent message, the report
+   cards, the quick replies, the routing strip under the composer, and the Captains rail. */
+
+/* Header: the mark, the name with the thread's menu, where it runs, then Memory and Way of working. */
+#chat-head .crumb .orchestrator-mark { display: flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px;
+  background: var(--g-primary); color: var(--g-on-primary); }
+#chat-head .crumb .orchestrator-mark svg { width: 13px; height: 13px; }
+#chat-head .crumb .orchestrator-where { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--g-muted); }
+#chat-head .crumb .orchestrator-actions { display: flex; flex: none; gap: 10px; margin-left: auto; }
+#chat-head .crumb .orchestrator-actions button { height: 30px; padding: 0 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 8px; background: transparent;
+  color: var(--g-fg); font-size: 12.5px; font-weight: 400; }
+#chat-head .crumb .orchestrator-actions button:hover { background: var(--g-hover); }
+/* Scripts, Open in and Git act on a project's checkout, which the orchestrator's own folder is not;
+   Thread details still offers all three. */
+#chat-head:has(.orchestrator-mark) :is(#scripts-control, #open-in, #git-action) { display: none; }
+/* The composer's line on what a tag does, and the board's narrower lane beside the rail. */
+#tag-hint { flex: 0 1 auto; min-width: 0; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#tag-hint[hidden] { display: none; }
+html:not([data-chat-width="wide"], [data-chat-width="full"]) #chat[data-rail] { --lane: 680px; }
+@media (max-width: 768px) {
+  #chat-head .crumb :is(.orchestrator-where, .orchestrator-actions) { display: none; }
+  #tag-hint { display: none; }
+}
+
+/* A sent message: its tags as pills, and the Captains it went to under it. */
+.turn .bubble .tag { padding: 1px 6px; border-radius: 5px; font-weight: 600; }
+.turn .bubble .tag.project { background: rgb(var(--g-primary-rgb) / 0.22); color: color-mix(in srgb, var(--g-link) 75%, white); }
+.turn .bubble .tag.machine { background: color-mix(in srgb, var(--g-success) 18%, transparent); color: color-mix(in srgb, var(--g-success) 70%, white); }
+.turn .bubble .tag.unknown { padding: 0; background: none; color: inherit; font-weight: inherit; }
+.turn .user .routed { margin: 6px 0 0; font-size: 12px; color: var(--g-muted); text-align: right; }
+
+/* Captain reports: one card under "N reports", a row per report. */
+.reports { margin-bottom: 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 12px; background: color-mix(in srgb, var(--g-raised) 70%, var(--g-canvas));
+  overflow: hidden; }
+.reports-head { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 12px; text-align: left; color: var(--g-fg); }
+.reports-head:not(:last-child) { border-bottom: 1px solid var(--g-border); }
+button.reports-head:hover { background: var(--g-accent); }
+.reports-head .count { flex: none; font-size: 12.5px; font-weight: 600; }
+.reports-head .names { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#thread .reports-head .when { margin: 0; padding: 0; font-size: 12px; opacity: 1; }
+.reports-head .chev { width: 13px; height: 13px; flex: none; color: var(--g-side-muted); transition: transform 0.15s; }
+.reports-head[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.report-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; }
+.report-row:not(:last-child) { border-bottom: 1px solid var(--g-border); }
+.captain-mono { display: flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; margin-top: 1px; border-radius: 6px;
+  background: color-mix(in srgb, var(--mono) 20%, var(--g-canvas)); color: var(--mono); font-size: 9px; font-weight: 700; line-height: 1; }
+.report-row .main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.report-row .head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.report-row .who { flex: none; padding: 0; font-size: 13px; font-weight: 600; color: var(--g-fg); }
+.report-row .who:hover { text-decoration: underline; }
+.report-row .where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+.report-row .captain-count { flex: none; font-size: 12px; }
+.report-row .captain-count.working { color: var(--g-blue); }
+.report-row .captain-count.needs { color: var(--g-warning-fg); }
+#thread .report-row:hover .head .when { opacity: 1; }
+.report-row .body { font-size: 14px; color: rgb(var(--g-fg-rgb) / 0.9); }
+.report-row .body > :first-child { margin-top: 0; }
+.report-row .body > :last-child { margin-bottom: 0; }
+.report-row :is(.review, .open-thread) { flex: none; height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
+.report-row .review { background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
+.report-row .review:hover { background: var(--g-primary-hover); }
+.report-row .open-thread { border: 1px solid rgb(var(--g-ink-rgb) / 0.1); background: transparent; color: var(--g-fg); }
+.report-row .open-thread:hover { background: var(--g-hover); }
+@media (max-width: 768px) {
+  .report-row { flex-wrap: wrap; }
+  .report-row .main { flex-basis: calc(100% - 30px); }
+  .report-row > :is(.review, .open-thread):nth-child(3) { margin-left: 30px; }
+}
+
+/* The quick replies the latest answer offers. */
+.quick-replies { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 16px; }
+.quick-reply { height: 32px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 16px; background: transparent; color: var(--g-fg); font-size: 13px; }
+.quick-reply:hover { background: var(--g-hover); }
+@media (pointer: coarse) { .quick-reply { height: auto; min-height: 40px; } }
+
+/* Under the composer: where each paragraph of the draft goes. */
+#tag-route { display: flex; flex-direction: column; gap: 4px; width: calc(100% - 28px); max-width: calc(var(--lane) - 28px); padding: 7px 12px;
+  border: 1px solid rgb(var(--g-ink-rgb) / 0.07); border-top: 0; border-radius: 0 0 12px 12px; font-size: 12px; color: var(--g-side-muted); }
+#tag-route[hidden] { display: none; }
+#tag-route .route { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; border-radius: 0; font-size: 12px; }
+#tag-route .arrow { flex: none; }
+#tag-route .preview { flex: 0 1 auto; max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
+#tag-route .where { flex: 1; min-width: 0; color: var(--g-side-muted); }
+#tag-route .where b { color: var(--g-fg); font-weight: 600; }
+#tag-route .route.untagged .where { color: var(--g-muted); }
+#tag-route .route.ambiguous :is(.arrow, .where) { color: var(--g-warning); }
+#tag-route .route.unknown :is(.arrow, .where) { color: var(--g-error); }
+#tag-route .route.unknown .where { font-weight: 600; }
+#tag-route .choices { display: flex; flex: none; gap: 4px; }
+#tag-route .choices button { height: 22px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--g-success) 40%, transparent); border-radius: 6px;
+  background: color-mix(in srgb, var(--g-success) 12%, transparent); color: var(--g-success); font-size: 12px; }
+
+/* The Captains rail beside the chat, below the header. */
+#captains-rail { position: absolute; top: 49px; right: 0; bottom: 0; z-index: 6; display: flex; flex-direction: column; gap: 4px; width: 296px; padding: 16px 12px;
+  overflow-y: auto; border-left: 1px solid var(--g-border); background: var(--g-bg); font-size: 13px; }
+#captains-rail[hidden] { display: none; }
+#chat[data-rail] #thread { margin-right: 296px; }
+#chat[data-rail] #composer { right: 296px; }
+#chat[data-rail] #thread-find { right: 308px; }
+#chat[data-rail] #scroll-end { left: calc(50% - 148px); }
+#captains-rail .rail-head { display: flex; align-items: center; padding: 0 6px 8px; }
+#captains-rail .rail-head h2 { flex: 1; margin: 0; font-size: 12px; font-weight: 600; color: var(--g-side-muted); }
+#captains-rail .rail-head .all { padding: 0; font-size: 12px; color: color-mix(in srgb, var(--g-link) 75%, white); }
+#captains-rail .rail-head .all:hover { text-decoration: underline; }
+#captains-rail .captain-row { display: flex; flex: none; align-items: flex-start; gap: 10px; width: 100%; padding: 9px 8px; border-radius: 10px; text-align: left; color: var(--g-fg); }
+#captains-rail .captain-row:hover:not(:disabled) { background: var(--g-hover); }
+#captains-rail .captain-row:disabled { opacity: 0.6; cursor: default; }
+#captains-rail .captain-row .text { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
+#captains-rail .captain-row .top { display: flex; align-items: center; gap: 8px; }
+#captains-rail .captain-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#captains-rail .captain-row :is(.state, .start) { flex: none; font-size: 12px; color: var(--g-side-muted); }
+#captains-rail .captain-row[data-state="working"] .state { color: var(--g-blue); }
+#captains-rail .captain-row .start { display: none; color: color-mix(in srgb, var(--g-link) 75%, white); }
+#captains-rail .captain-row:is(:hover, :focus-visible) .start { display: inline; }
+#captains-rail .captain-row:is(:hover, :focus-visible):has(.start) .state { display: none; }
+#captains-rail .captain-row .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#captains-rail .rail-empty { margin: 0; padding: 0 6px; font-size: 12px; color: var(--g-muted); }

@@ -55,6 +55,16 @@ test("an old report with no reply says so in words, with the Captain's thread on
   assert.doesNotMatch(html, /\(no reply\)|show-full/);
 });
 
+test("a report card shows its Captain's tile, state, Review and Open thread, both opening by the report's ids", () => {
+  const captain = { mono: `<span class="captain-mono">SI</span>`, where: "", chips: `<span class="captain-count working">1 working</span>`, review: `<button type="button" class="review" data-review-thread="m1:t9">Review</button>` };
+  const html = context.reportRowHtml({ project: "site", machineName: "macbook", machineId: "m1", tabId: "t1", text: "Published v2." }, "t0", { open: new Set() }, "full:u1:0", captain);
+  assert.match(html, /^<div class="report-row"><span class="captain-mono">SI<\/span><div class="main"><div class="head"><button type="button" class="who" data-report-machine="m1" data-report-tab="t1" data-report-project="site" title="Open this thread">Captain site<\/button><span class="where">macbook<\/span><span class="captain-count working">1 working<\/span>/);
+  assert.match(html, /<button type="button" class="review" data-review-thread="m1:t9">Review<\/button><button type="button" class="open-thread" data-report-machine="m1" data-report-tab="t1" data-report-project="site">Open thread<\/button><\/div>$/);
+  const idle = context.reportRowHtml({ project: "site", machineName: "macbook", machineId: "m1", tabId: "t1", text: "ok" }, "t0", { open: new Set() }, "k", { mono: "", where: " · idle now", chips: "", review: "" });
+  assert.match(idle, /<span class="where">macbook · idle now<\/span>/);
+  assert.doesNotMatch(idle, /class="review"/);
+});
+
 test("a row drawn without a view state still draws", () => {
   assert.match(context.reportRowHtml({ project: "p", machineName: "n", machineId: "m", tabId: "t", text: "ok" }, "t0"), /class="report-row"/);
 });

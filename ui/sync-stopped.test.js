@@ -148,6 +148,7 @@ function entry(syncStopped) {
     machineWork: () => ({ running: 0, waiting: 0 }),
     lastSeen: () => "",
     machineStateHtml: () => "",
+    machineBackgroundHtml: () => "",
   }).machineEntryHtml("box", { id: "box", name: "box", os: "linux", online: true });
 }
 

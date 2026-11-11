@@ -25,9 +25,10 @@ PASSWORD="sweep password 1"
 SERVER=${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned-server
 
 stop() {
-  for name in node node-b hub go; do
-    [ -f "$DIR/$name.pid" ] && kill "$(cat "$DIR/$name.pid")" 2>/dev/null || true
-    rm -f "$DIR/$name.pid"
+  # Every pid file: the stack's own, and the extra nodes sweeps start beside it (node2, node-<name>).
+  for pid in "$DIR"/*.pid; do
+    [ -f "$pid" ] && kill "$(cat "$pid")" 2>/dev/null || true
+    rm -f "$pid"
   done
   [ -d "$DIR/pg" ] && pg_ctl -D "$DIR/pg" -m fast stop >/dev/null 2>&1 || true
 }

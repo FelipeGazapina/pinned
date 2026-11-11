@@ -149,7 +149,7 @@ const hubUp = () => {
   }
   for (const n of NODES) pairNode(n);
   for (const n of NODES.slice(1)) startNode(n);
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const errors = [];
   for (const [size, viewport] of SIZES) {
     const phone = size === "phone";
