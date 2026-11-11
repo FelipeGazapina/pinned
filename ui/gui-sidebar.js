@@ -23,11 +23,23 @@ Object.assign(ICON_PATHS, {
   gear: `<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>`,
   inbox: `<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`,
   trash: `<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>`,
+  "chevron-up": `<path d="m18 15-6-6-6 6"/>`,
+  "side-toggle": `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>`,
+  "side-search": `<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>`,
+  "side-new": `<path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L12 15.6l-4 1 1-4z"/>`,
+  "side-bot": `<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><path d="M9 14v2"/><path d="M15 14v2"/>`,
+  "side-inbox": `<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/>`,
+  "side-pr": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/>`,
+  "side-usage": `<path d="M5 20V10"/><path d="M12 20V4"/><path d="M19 20v-6"/>`,
+  "side-add-project": `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="M9 13h6"/>`,
+  "side-machines": `<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>`,
+  "side-terminal": `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/>`,
 });
+for (const el of document.querySelectorAll("#sidebar [data-side-icon]")) el.insertAdjacentHTML("afterbegin", icon(el.dataset.sideIcon));
 
 const SETTLED_FIRST = 10;
 const SETTLED_PAGE = 25;
-const SIDEBAR_WIDTH = 256;
+const SIDEBAR_WIDTH = 264;
 const MOD_KEY = IS_MAC ? "Meta" : "Control";
 const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl+";
 /** T3 Code's project colors, Tailwind's 400 shades, picked by a hash of the project's name. */
@@ -305,13 +317,19 @@ function markThreadSeen(tab) {
 }
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
-/** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
+/** How long the thread has worked, as `1h 12m`, or "". A running turn counts until its end reports the exact time. */
+function activeLabel(tab) {
+  const stats = tab?.view.stats;
+  if (stats?.active_ms == null) return "";
+  const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
+  return durationLabel(stats.active_ms / 1000 + running);
+}
+/** The thread's active time and cost, as `1h 12m · $3.42`. */
 function statsLabel(tab, costOnly = false) {
   const stats = tab?.view.stats;
   const work = tab?.view.work;
   if (!stats && !work) return "";
-  const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
-  const active = stats?.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
+  const active = activeLabel(tab);
   // A thread that delegated shows the cost of the whole piece of work: its own session and its workers.
   const usd = work ? work.usd : stats?.cost_usd;
   const cost = usd == null ? "" : costLabel(usd, work?.unknown);
@@ -363,12 +381,12 @@ function statusSlot(tab) {
   return null;
 }
 
-/** T3 Code's project monogram: the first letter and a later digit, last word's initial or last letter. */
+/** A project's monogram: the first two letters of a one-word name, or the first and last words' initials. */
 function monogram(name) {
   const words = name.normalize("NFKC").trim().match(/[\p{L}\p{N}]+/gu) ?? [];
   if (!words.length) return "PR";
   const glyphs = [...words[0]];
-  const second = glyphs.slice(1).find((g) => /\p{N}/u.test(g)) ?? (words.length > 1 ? [...words.at(-1)][0] : glyphs.at(-1));
+  const second = words.length > 1 ? [...words.at(-1)][0] : glyphs[1] ?? "";
   return [...`${glyphs[0]}${second}`.toUpperCase()].slice(0, 2).join("");
 }
 /** Project icons the machines found, by machine and project folder: `{ url, at }`, `url` a data URL or null. */
@@ -397,6 +415,8 @@ function projectIcon(name, tab) {
   if (url?.startsWith("data:image/")) return `<img class="favicon" src="${esc(url)}" alt="" aria-hidden="true">`;
   let hash = 0;
   for (const c of name.normalize("NFKC").trim().toLowerCase() || "project") hash = (hash * 31 + c.codePointAt(0)) % MONOGRAM_COLORS.length;
+  // Threads without a project are not a project, so their group keeps the neutral grey.
+  if (tab && threadOf(tab).workspace?.scratch) hash = 0;
   const text = monogram(name);
   return `<svg class="monogram" viewBox="0 0 16 16" style="color:${MONOGRAM_COLORS[hash]}" aria-hidden="true"><text x="8" y="10.8" text-anchor="middle" fill="currentColor" font-size="8.25" font-weight="700" textLength="${[...text].length === 1 ? 6 : 12}" lengthAdjust="spacingAndGlyphs">${esc(text)}</text></svg>`;
 }
@@ -449,132 +469,12 @@ function machineNote(machine) {
   return note;
 }
 
-/** The fixed rows above the projects: the global orchestrator's own row, with how many things
- * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
- * orchestrator as its settings do and its host machine under that, and is left out while no
- * machine can hold the conversation. */
-function globalSidebarTop() {
-  askGlobalSettings();
-  const online = globalHostMachine();
-  // With no machine online the row stays, on the machine that held it last, and says why it can't open.
-  const host = online ?? [...machines.keys()].find((id) => id !== LOCAL) ?? null;
-  const away = !!host && machines.get(host)?.view?.online !== true;
-  const asks = agentWaitingRows();
-  if (!host && !asks.length) return [];
-  const threads = globalWaitingRows();
-  const waiting = [...asks, ...threads];
-  const n = agentConfirmations.length + threads.length;
-  const top = [];
-  if (host) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "global-row";
-    row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
-    row.classList.toggle("disabled", away);
-    if (away) {
-      row.setAttribute("aria-disabled", "true");
-      row.title = `${machineName(host)} is offline, so the orchestrator can't open`;
-    }
-    row.dataset.globalOpen = "true";
-    const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
-    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · ${away ? "offline" : "all projects"}</span></span>${count}`;
-    top.push(row);
-  }
-  const offers = globalOfferRows();
-  if (!waiting.length && !offers.length) return top;
-  const sections = [];
-  if (waiting.length) {
-    const head = document.createElement("button");
-    head.type = "button";
-    head.className = "waiting-head";
-    head.dataset.shelf = "waiting";
-    head.setAttribute("aria-expanded", ui.waitingOpen);
-    head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-    sections.push(head, ...(ui.waitingOpen ? waiting : []));
-  }
-  if (offers.length) {
-    const head = document.createElement("button");
-    head.type = "button";
-    head.className = "waiting-head offers-head";
-    head.dataset.shelf = "offers";
-    head.setAttribute("aria-expanded", ui.offersOpen);
-    head.innerHTML = `${icon("message-circle")}<span>Asked in its last reply</span><span class="count">${offers.length}</span>${icon(ui.offersOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-    sections.push(head, ...(ui.offersOpen ? offers : []));
-  }
-  return [...top, ...sections];
-}
-
-/** What each kind of blocked thread reads as on its row: the word that names it, and the dot's tone.
- * The word is text on the row, so colour is never the only sign. */
-const WAITING_LOOKS = { approval: ["Approval", "approval"], question: ["Question", "question"], failed: ["Failed", "failed"] };
-
-/** The kind a blocked thread's row shows. `waitingKindOf` says it waits; a `needs_input` is an
+/** The kind a blocked thread shows on Needs you and its card. `waitingKindOf` says it waits; a `needs_input` is an
  * approval or a question by `askOf`; and a thread the hooks call failed whose card shows a
  * permission menu is an approval, as its card says, so the card and the list never disagree. */
 function waitingLookOf(tab, kind) {
   if (kind === "failed") return phaseOf(tab) === "asking" && !menuIsQuestion(tab) ? "approval" : "failed";
   return askOf(tab.view).kind;
-}
-
-/** What the thread is blocked on, as the row's third line: the tool and the command an approval
- * is for, the question, or the error that stopped it. Empty when the machine reported nothing but
- * the generic notice. */
-function askedOf(tab, look) {
-  const view = tab.view;
-  const detail = String(view.ask_detail ?? "").trim();
-  if (look === "approval") {
-    const tool = askOf(view).tool;
-    return { tool, text: detail };
-  }
-  const message = String(view.message ?? "").trim();
-  const generic = /^claude needs your (input|attention)\.?$/i.test(message) || /waiting for your input/i.test(message);
-  return { tool: null, text: look === "question" ? detail || (generic ? "" : message) : message };
-}
-
-/** One row of the waiting area: a dot, the thread's title, under it the kind in words with where
- * the thread is and since when, and, when there is one, what it asks. Clicking it opens the thread
- * on its machine. */
-function waitingRow(tab, label, tone, extra = "", asked = { tool: null, text: "" }) {
-  const row = document.createElement("div");
-  row.className = `waiting-row${extra}`;
-  row.dataset.waiting = tab.key;
-  row.setAttribute("role", "button");
-  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)} on ${machineName(tab.machine)}`);
-  row.tabIndex = 0;
-  const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
-  const what = asked.tool || asked.text ? `<span class="asked">${asked.tool ? `<span class="tool">${esc(asked.tool)}</span>` : ""}${esc(asked.text)}</span>` : "";
-  if (asked.tool || asked.text) row.title = [asked.tool, asked.text].filter(Boolean).join(" ");
-  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span>${what}</span>`;
-  return row;
-}
-
-/** Every thread on every machine that is blocked on Felipe, newest first: an approval or a question
- * pending, or a failure, each with its title, the kind in words, where it is, since when and what it
- * asks. A worker a Captain started on another machine shows here under that machine's name. */
-function globalWaitingRows() {
-  return tabs
-    .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
-    .filter((w) => w.kind)
-    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
-    .map(({ tab, kind }) => {
-      const look = waitingLookOf(tab, kind);
-      return waitingRow(tab, ...(WAITING_LOOKS[look] ?? [look, "other"]), "", askedOf(tab, look));
-    });
-}
-
-/** The threads whose finished turn ended asking something, newest first, greyed: they wait on
- * nobody, and the question is the row's tooltip. */
-function globalOfferRows() {
-  const now = nowS();
-  return tabs
-    .map((tab) => ({ tab, offer: offerOf(tab.view, now) }))
-    .filter((o) => o.offer)
-    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
-    .map(({ tab, offer }) => {
-      const row = waitingRow(tab, "Asked", "offer", " offer");
-      row.title = offer;
-      return row;
-    });
 }
 
 /** Selects the host's global orchestrator tab, or asks the host to open one and selects that. The
@@ -602,7 +502,7 @@ function renderSidebar() {
   const scope = projectGroups().find((g) => g.key === ui.project);
   if (!scope && !projectListsPending()) ui.project = "";
   const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
-  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
+  const trigger = `<span class="lead">Threads in</span>${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
   projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
   const inScope = tabs.filter((t) => (!ui.project || projectKeyOf(t) === ui.project) && !isGlobalOrchestratorTab(t));
@@ -610,16 +510,16 @@ function renderSidebar() {
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
   for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
-  manyMachines = projectsOnManyMachines();
   const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
-  threadList.replaceChildren(...away.map(machineNote), ...globalSidebarTop(), ...list);
-  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
+  threadList.replaceChildren(...away.map(machineNote), ...list);
+  if (!list.length) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
   drawSidebarToggle();
   tickDurations();
   scheduleWake();
+  modelChanged();
 }
 
 /** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
@@ -699,7 +599,7 @@ function toggleFold(tab) {
  * that folds the threads under it. */
 function spawnRow({ tab, depth, under }) {
   const section = sectionOf(tab);
-  const row = section === "snoozed" ? slimRow(tab, "wake") : section === "settled" ? slimRow(tab, "unsettle") : cardRow(tab);
+  const row = section === "snoozed" ? slimRow(tab, "wake") : section === "settled" ? slimRow(tab, "unsettle") : depth ? childRow(tab) : cardRow(tab);
   if (depth) {
     row.classList.add("child");
     row.style.setProperty("--depth", depth);
@@ -707,8 +607,11 @@ function spawnRow({ tab, depth, under }) {
   if (!under) return row;
   const folded = isFolded(tab);
   const label = `${folded ? "Show" : "Hide"} ${under} ${under === 1 ? "worker" : "workers"}`;
-  const fold = `<span class="fold" role="button" tabindex="0" data-act="fold" aria-expanded="${!folded}" aria-label="${label}" title="${label}">${icon(folded ? "chevron-right" : "chevron-down")}${folded ? `<span class="count">${under}</span>` : ""}</span>`;
-  (row.querySelector(".l1") ?? row).insertAdjacentHTML("afterbegin", fold);
+  const fold = `<span class="fold${folded ? " folded" : ""}" role="button" tabindex="0" data-act="fold" aria-expanded="${!folded}" aria-label="${label}" title="${label}">${icon(folded ? "chevron-right" : "chevron-down")}${folded ? `<span class="count">${under}</span>` : ""}</span>`;
+  // A card folds from its second line; a one-line row, from beside its slot.
+  const l3 = row.querySelector(".l3");
+  if (l3) l3.insertAdjacentHTML("beforeend", fold);
+  else row.querySelector(".slot").insertAdjacentHTML("beforebegin", fold);
   return row;
 }
 
@@ -739,7 +642,8 @@ function shelfRows(list) {
     sink = false;
     head.dataset.shelf = kind;
     head.dataset.open = open;
-    head.innerHTML = `<span>${open ? label : `${label} (${list.length})`}</span><span class="line"></span>${icon("chevron-down")}`;
+    head.setAttribute("aria-expanded", open);
+    head.innerHTML = `${icon("chevron-right")}<span class="label">${label}</span><span class="count">${list.length}</span>`;
     rows.push(head, ...(open ? visible : list.filter((t) => t === active)).flatMap(branch));
   };
   shelf("working", by.working, "Working", ui.workingOpen, by.working);
@@ -757,55 +661,58 @@ function shelfRows(list) {
   return rows;
 }
 
-/** The inbox by project under a Projects heading, which opens the projects page when it is loaded:
- * each project's head, then its Captains with their workers under them, then its other threads.
- * Projects come in the order of their first thread in `list`. */
+/** The inbox by project: each project's head, then its Captains with their workers under them,
+ * then its other threads. Projects come in the order of their first thread in `list`. */
 function projectRows(list, kids, branch) {
   const groups = new Map();
   for (const tab of list) {
     const key = projectKeyOf(tab);
     groups.set(key, [...(groups.get(key) ?? []), tab]);
   }
-  const page = typeof openGlobalProjects === "function";
-  if (!groups.size && !page) return [];
-  const heading = Object.assign(document.createElement("div"), { className: "side-heading", textContent: "Projects" });
-  if (page) Object.assign(heading, { role: "button", tabIndex: 0, title: "Open the projects page" }).dataset.globalProjects = "";
   const captainsFirst = (roots) => [...roots].sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
-  return [heading, ...[...groups].flatMap(([key, roots]) => [projectHead(key, roots, kids), ...captainsFirst(roots).flatMap(branch)])];
+  return [...groups].flatMap(([key, roots]) => [projectHead(key, roots, kids), ...captainsFirst(roots).flatMap(branch)]);
 }
 /** The machines a project's threads are on, each one whole so a long list breaks between names, never inside one. */
 const projectMachinesHtml = (names) => names.map((name, i) => `<span class="m">${esc(name)}${i < names.length - 1 ? "," : ""}</span>`).join(" ");
-/** The icon that says a card's thread is on another machine. A project on more than one machine
- * names the machine as text, since a phone has no tooltip to ask. */
+/** A thread's machine as its hover card names it: an icon, and the name as text when `named`. */
 const remoteMark = (name, named) => `<span class="remote${named ? " named" : ""}" title="${esc(name)}">${icon("monitor")}${named ? `<span class="name">${esc(name)}</span>` : ""}</span>`;
-/** The projects whose threads run on more than one machine, by project key. */
-function projectsOnManyMachines() {
-  const machinesOf = new Map();
-  for (const tab of tabs) {
-    const key = projectKeyOf(tab);
-    machinesOf.set(key, (machinesOf.get(key) ?? new Set()).add(tab.machine));
-  }
-  return new Set([...machinesOf].filter(([, on]) => on.size > 1).map(([key]) => key));
-}
-let manyMachines = new Set();
-/** A project's head: its icon and name, how many messages wait for its threads and how many of its
- * workers run, and the machines its threads are on. */
+/** A project's head: its icon and name, then in one line how many messages wait for its threads,
+ * how many of its threads work and the machines they are on, with what they cost as that line's
+ * tooltip. A project with no Captain offers to start one. */
 function projectHead(key, roots, kids) {
   const all = roots.flatMap(function under(tab) {
     return [tab, ...(kids.get(tab.key) ?? []).flatMap(under)];
   });
   const queued = all.reduce((n, t) => n + (t.view.queued ?? 0), 0);
-  const running = all.filter((t) => t.view.role === "worker" && ["working", "delegating"].includes(phaseOf(t))).length;
-  const states = [queued ? `<span class="state queued">${queued} queued</span>` : "", running ? `<span class="state running">${running} running</span>` : ""].join("");
+  const running = all.filter((t) => ["working", "delegating"].includes(phaseOf(t))).length;
   const names = [...new Set(all.map((t) => machineName(t.machine)))];
   const where = names.join(", ");
+  const meta = [
+    queued ? `<span class="state queued">${queued} queued</span>` : "",
+    running ? `<span class="state running">${running} running</span>` : "",
+    `<span class="where" title="${esc(where)}">${projectMachinesHtml(names)}</span>`,
+  ].filter(Boolean).join(`<span class="sep" aria-hidden="true">·</span>`);
   const spent = projectCostLabel(roots);
   const name = projectName(roots[0]);
   const head = document.createElement("div");
   head.className = "project-head";
   head.dataset.project = key;
-  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}${spent ? `<span class="state cost" title="What this project's threads and workers cost">${esc(spent)}</span>` : ""}<span class="where" title="${esc(where)}">${projectMachinesHtml(names)}</span>`;
+  head.dataset.headTab = roots[0].key;
+  const captain = roots.some(isOrchestrator) || threadOf(roots[0]).workspace?.scratch
+    ? ""
+    : `<button type="button" class="head-act" data-head-act="captain" aria-label="Open the ${esc(name)} Captain" data-tip="Open the ${esc(name)} Captain">${icon("side-bot")}</button>`;
+  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span><span class="meta"${spent ? ` data-tip="What this project's threads and workers cost: ${esc(spent)}"` : ""}>${meta}</span>${captain}`;
   return head;
+}
+/** What a project's head offers on a right-click: its Captain, a new thread in it, its filter and settings. */
+function projectHeadItems(tab) {
+  const project = projectName(tab);
+  return [
+    ...(threadOf(tab).workspace?.scratch ? [] : [{ label: `Open the ${project} Captain`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) }]),
+    { label: `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
+    { label: ui.project === projectKeyOf(tab) ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === projectKeyOf(tab) ? "" : projectKeyOf(tab)) },
+    { label: "Project settings", icon: "gear", sep: true, run: () => openProjectSettings(tab) },
+  ];
 }
 
 function rowShell(tab, cls) {
@@ -922,9 +829,19 @@ function openLinkedPrs(tab) {
   if (tab !== active) activate(tab);
   addSurface(tab, { id: "prs", kind: "prs" });
 }
+/** A card's pull request in words, `#214 open`, or the badge of several linked ones. */
+function prWords(tab) {
+  const links = linkedPrs(tab);
+  if (links.length > 1) return rowPrBadge(tab);
+  const pr = links[0] ? prsOf(tab).find((p) => p.url === links[0].url) ?? links[0] : prOf(tab);
+  if (!pr) return "";
+  const state = prStatus(tab, pr)?.state;
+  const word = state ? ` ${PR_LOOKS[state].label.toLowerCase()}` : "";
+  return `<span class="pr" data-pr="${esc(pr.url)}"${state ? ` data-state="${state}"` : ""} aria-label="PR #${pr.number}${word}">#${pr.number}${word}</span>`;
+}
 const isOrchestrator = (tab) => tab.view.role === "orchestrator";
 const roleMark = (tab) =>
-  isOrchestrator(tab) ? `<span class="role">Captain</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker another thread started">${icon("bot")}</span>` : "";
+  isOrchestrator(tab) ? `<span class="role">Captain</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker another thread started">Worker</span>` : "";
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
@@ -970,34 +887,73 @@ async function refreshBoxInfo() {
     if (active) renderThread();
   }
 }
-function cardRow(tab) {
+/** A row's state at its right, in words or as a time: what `statusSlot` names, with a live clock
+ * while the thread works, or else how long ago the user last wrote, in the unread tone when the
+ * answer is unseen. A worker's one line says only how long it has worked, and "Done" once done. */
+function stampHtml(tab, child = false) {
   const slot = statusSlot(tab);
+  if (slot) {
+    const woke = !!slot.woke;
+    const clock = phaseOf(tab) === "working" && slot.since ? `<span class="since" data-since="${slot.since}"></span>` : "";
+    const text = child && clock ? "" : slot.text;
+    const attrs = woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : slot.title ? ` title="${esc(slot.title)}"` : "";
+    // A phone shows a clock alone (gui-phone.css), as its dot already says the thread works.
+    return `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${attrs}>${text && clock ? `<span class="word">${text}</span> ` : text}${clock}</span>`;
+  }
+  if (child && threadState(tab) === "done") return `<span class="stamp when done">Done</span>`;
+  return `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
+}
+/** The hover actions every row carries: discard a draft, snooze, settle. */
+const rowActs = (tab, draft) =>
+  `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
+/** Marks a row by its state: the open, waiting or unread rows stand out, the rest recede. */
+function toneRow(row, tab, state) {
   const phase = phaseOf(tab);
-  const woke = !!slot?.woke;
-  const row = rowShell(tab, "tall");
-  row.classList.toggle("receded", tab !== active && (["working", "delegating"].includes(phase) || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
-  row.classList.toggle("bright", unseenDone(tab) || woke || phase === "input");
+  const woke = !!statusSlot(tab)?.woke;
+  row.classList.toggle("bright", tab === active || state === "needs" || state === "unread" || woke);
+  row.classList.toggle("receded", !row.classList.contains("bright"));
   row.classList.toggle("working", ["working", "delegating"].includes(phase) && tab !== active);
+}
+/** A thread on two lines: its status dot, title and state, then its role, the draft waiting in its
+ * composer, its branch, and its pull request or, when no clock runs on the first line, how long it
+ * worked. Its machine, account and model are in its hover card. */
+function cardRow(tab) {
+  const state = threadState(tab);
+  const row = rowShell(tab, "tall");
+  toneRow(row, tab, state);
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
-  // As T3 Code's: the branch, or a project-less thread's machine once threads span machines, or nothing.
-  const scratchMachine = !ws?.branch && ws && !ws.repo && new Set(tabs.map((t) => t.machine)).size > 1;
-  const where = ws?.branch
-    ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
-    : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
-  const box = tab.machine !== LOCAL && !scratchMachine && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
-  const boxLost = !box && tab.machine !== LOCAL && !scratchMachine && boxDown.has(tab.machine);
-  const remote = box ? boxChipHtml(box) : boxLost ? boxUnavailableHtml() : tab.machine !== LOCAL && !scratchMachine ? remoteMark(machineName(tab.machine), manyMachines.has(projectKeyOf(tab))) : "";
-  const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
-  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
-  const state = slot
-    ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : slot.title ? ` title="${esc(slot.title)}"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
-    : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
-  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
-  row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${roleMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
-    <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon(provider)}</span></span></span>`;
+  const pr = prWords(tab);
+  const worked = !pr && phaseOf(tab) !== "working" && tab.view.stats?.active_ms >= 1000 ? activeLabel(tab) : "";
+  const sub = [
+    draft ? `<span class="draft-pen">Unsent draft</span>` : "",
+    // Pinned rows sit above the projects, so they name theirs.
+    isPinned(tab) && !ui.project ? `<span class="project">${esc(projectName(tab))}</span>` : "",
+    ws?.branch ? `<span class="branch">${ws.worktree ? icon("folder-git", "dim") : ""}${middle(ws.branch)}</span>` : "",
+    pr,
+    worked ? `<span class="time">${esc(worked)}</span>` : "",
+  ].filter(Boolean).join(`<span class="sep" aria-hidden="true">·</span>`);
+  row.innerHTML = `${glyphHtml(state)}<span class="lines"><span class="l1"><span class="l2">${titleHtml(tab)}</span><span class="slot">${stampHtml(tab)}${rowActs(tab, draft)}</span></span>
+    <span class="l3">${roleMark(tab)}${pinMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}${terminalPulse(tab)}${sub}${phoneSubHtml(tab, state, draft, pr)}</span></span>`;
+  return row;
+}
+/** What a phone's row says on its second line in place of the branch and time, when that differs:
+ * how far a Captain's workers are, or that an unread thread finished. gui-phone.css swaps it in. */
+function phoneSubHtml(tab, state, draft, pr) {
+  const workers = isOrchestrator(tab) ? workersSummary(workersOf(tab)) : null;
+  const lead = workers?.total ? `${workers.done} of ${workers.total} ${workers.total === 1 ? "worker" : "workers"} done` : state === "unread" ? "Finished" : "";
+  if (!lead) return "";
+  const parts = [draft ? `<span class="draft-pen">Unsent draft</span>` : "", `<span>${lead}</span>`, workers?.total ? "" : pr].filter(Boolean);
+  return `<span class="phone-sub">${parts.join(`<span class="sep" aria-hidden="true">·</span>`)}</span>`;
+}
+/** A worker under its Captain on one line: its dot, title, and how long it has worked or what it waits on. */
+function childRow(tab) {
+  const state = threadState(tab);
+  const row = rowShell(tab, "line");
+  toneRow(row, tab, state);
+  const draft = tab !== active && hasDraft(tab);
+  row.innerHTML = `${glyphHtml(state, 9)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${terminalPulse(tab)}<span class="slot">${stampHtml(tab, true)}${rowActs(tab, draft)}</span>`;
   return row;
 }
 
@@ -1020,17 +976,26 @@ const prItem = (tab, pr, link = true) => {
   const tag = link ? `a href="${esc(pr.url)}" data-card-pr="${esc(pr.url)}"` : "span";
   return `<li><${tag}${status ? ` data-state="${status.state}"` : ""}>${icon(PR_LOOKS[status?.state]?.icon ?? "git-pull-request-arrow")}<span class="num">#${pr.number}</span><span class="what">${esc(status?.title ?? "Pull request")}</span></${link ? "a" : "span"}></li>`;
 };
+/** A row's hover card: the title, then the project, the machine with a box's age and cost, the
+ * branch, the model with its provider and any account other than the default, the time and cost,
+ * how many of a Captain's workers are done, a failure, and the pull requests. */
 function rowCardHtml(tab) {
   const ws = threadOf(tab).workspace;
   const line = (glyph, text, cls = "") => `<div class="${cls}">${glyph}<span>${text}</span></div>`;
   const failed = phaseOf(tab) === "failed";
   const prs = prsOf(tab);
+  const box = tab.machine !== LOCAL && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
+  const machine = box ? boxChipHtml(box) : tab.machine !== LOCAL && boxDown.has(tab.machine) ? boxUnavailableHtml() : remoteMark(machineName(tab.machine), true);
+  const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
+  const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
+  const workers = isOrchestrator(tab) ? workersSummary(workersOf(tab)) : null;
   return `<div class="card-title">${esc(threadTitle(tab))}</div><div class="card-lines">
     ${line(projectIcon(projectName(tab), tab), esc(projectName(tab)))}
-    ${line(icon("monitor"), esc(machineName(tab.machine)))}
-    ${ws?.branch ? line(icon("git-branch"), middle(ws.branch, 30), "branch") : ""}
-    ${line(icon("claude"), esc(modelName(tab)))}
+    <div class="machine">${machine}</div>
+    ${ws?.branch ? line(icon(ws.worktree ? "folder-git" : "git-branch"), middle(ws.branch, 30), "branch") : ""}
+    <div class="model"><span class="provider">${icon(provider)}</span><span>${esc(modelName(tab))}</span>${account}</div>
     ${statsLabel(tab) ? line(icon("clock"), statsHtml(tab), "stats") : ""}
+    ${workers?.total ? line(icon("bot"), `${workers.done} of ${workers.total} ${workers.total === 1 ? "worker" : "workers"} done`, "workers") : ""}
     ${failed ? line(icon("circle-alert"), tab.view.resume_at ? "Usage limit reached" : "Error occurred", tab.view.resume_at ? "warning" : "error") : ""}
   </div>${prs.length ? `<ul class="card-foot">${prs.map((p) => prItem(tab, p, false)).join("")}</ul>` : ""}`;
 }
@@ -1087,7 +1052,9 @@ document.addEventListener("pointerover", (e) => {
   const target = sideMenu.hidden && !document.body.classList.contains("dragging-row") ? cardTarget(e.target) : null;
   if (target?.key === card?.key) {
     if (target) card.anchor = target.anchor;
-    return clearTimeout(cardTimer);
+    // Moving within the row while its card is still on its way keeps it coming.
+    if (!hoverCard.hidden) clearTimeout(cardTimer);
+    return;
   }
   const wasPr = card?.side === "top" && !hoverCard.hidden;
   clearTimeout(cardTimer);
@@ -1598,20 +1565,12 @@ function editTitle(tab, input) {
 }
 
 threadList.addEventListener("click", (e) => {
-  const projectsLink = e.target.closest("[data-global-projects]");
-  if (projectsLink && typeof openGlobalProjects === "function") return openGlobalProjects();
-  if (e.target.closest("[data-global-open]")) return openGlobalChat();
-  if (e.target.closest("[data-agent]")) return agentSurfaceClick(e);
-  const waiting = e.target.closest(".waiting-row");
-  if (waiting) {
-    const tab = tabByKey(waiting.dataset.waiting);
-    if (tab) {
-      activate(tab);
-      if (narrow(768)) toggleSidebar(false);
-    }
-    return;
+  const headAct = e.target.closest("[data-head-act]");
+  if (headAct) {
+    const tab = tabByKey(headAct.closest(".project-head").dataset.headTab);
+    return tab && openOrchestrator(tab.machine, projectPathOf(tab));
   }
-  const head = e.target.closest(".settled-head, .waiting-head");
+  const head = e.target.closest(".settled-head");
   if (head) {
     const shelf = head.dataset.shelf;
     ui[`${shelf}Open`] = !ui[`${shelf}Open`];
@@ -1643,11 +1602,17 @@ threadList.addEventListener("dblclick", (e) => {
   if (row && e.target.closest(".l2") && !e.target.closest("input")) startRename(tabByKey(row.dataset.tab));
 });
 threadList.addEventListener("contextmenu", (e) => {
+  const at = { x: e.clientX, y: e.clientY };
+  const head = e.target.closest(".project-head");
+  const headTab = head && tabByKey(head.dataset.headTab);
+  if (headTab) {
+    e.preventDefault();
+    return showMenu(projectHeadItems(headTab), at);
+  }
   const row = e.target.closest(".thread-row");
   const tab = row && tabByKey(row.dataset.tab);
   if (!tab || e.target.closest("input")) return;
   e.preventDefault();
-  const at = { x: e.clientX, y: e.clientY };
   if (selected.size > 1 && selected.has(tab.key)) {
     const list = [...selected].map(tabByKey).filter(Boolean);
     const done = (items) => items.map((item) => ({ ...item, run: item.run && (() => (item.run(), clearSelection())), children: item.children && (() => done(item.children())) }));
@@ -1657,7 +1622,7 @@ threadList.addEventListener("contextmenu", (e) => {
   showMenu(rowMenuItems(tab), at);
 });
 threadList.addEventListener("keydown", (e) => {
-  const row = e.target.closest(".thread-row, .waiting-row, .side-heading[data-global-projects]");
+  const row = e.target.closest(".thread-row");
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     row.click();
@@ -2043,7 +2008,7 @@ function openProjectMenu() {
     openGroup(item.dataset.project, openProjectAt);
   };
   draw();
-  const anchor = document.querySelector("#sidebar .search").getBoundingClientRect();
+  const anchor = document.querySelector("#sidebar .threads-head").getBoundingClientRect();
   projectMenu.hidden = false;
   projectMenu.style.left = `${anchor.left}px`;
   projectMenu.style.top = `${anchor.bottom + 4}px`;
@@ -2083,11 +2048,20 @@ async function newThreadIn(tab) {
     tell(`Couldn't open a thread: ${esc(e)}`, 6000);
   }
 }
+/** On a phone the thread list gives way to the palette, and comes back when the palette is cancelled. */
+function paletteFromList() {
+  if (!narrow(768)) return null;
+  const list = ui.sidebarOpen;
+  toggleSidebar(false);
+  return list ? () => {
+    document.activeElement?.blur();
+    toggleSidebar(true);
+  } : null;
+}
 /** T3 Code's chat.new: with more than one project the palette asks where, otherwise the thread opens here. */
 function newThread(here = false) {
-  if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  openPalette({ mode: "new-thread-in" });
+  openPalette({ mode: "new-thread-in", onCancel: paletteFromList() });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
@@ -2097,8 +2071,7 @@ function newThreadWithoutProject() {
 }
 /** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
 function addProject(machine = active?.machine) {
-  if (narrow(768)) toggleSidebar(false);
-  openPalette({ mode: "add-project", machine });
+  openPalette({ mode: "add-project", machine, onCancel: paletteFromList() });
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
 document.getElementById("add-project").onclick = () => addProject();
@@ -2239,8 +2212,7 @@ function toggleSidebar(open = !ui.sidebarOpen, auto = false) {
   ui.sidebarOpen = open;
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
-document.getElementById("sidebar-toggle").innerHTML = icon("panel-left-close");
-document.getElementById("add-project").innerHTML = icon("folder-plus");
+document.getElementById("sidebar-toggle").innerHTML = icon("side-toggle");
 for (const id of ["sidebar-toggle", "chat-sidebar-toggle"]) document.getElementById(id).onclick = () => toggleSidebar();
 onGuiKey("b", () => toggleSidebar());
 onGuiKey("n", () => newThread());
@@ -2252,6 +2224,11 @@ onGuiKey("p", () => active && pin(active), { shift: true });
 onGuiKey("c", () => copyThreadReference(), { shift: true });
 onGuiKey("t", () => reopenClosed(), { shift: true });
 onGuiKey(["1", "2", "3", "4", "5", "6", "7", "8", "9"], (e) => jumpToRow(Number(e.key)));
+onGuiCommand("sidebar.search", () => {
+  if (!ui.sidebarOpen) toggleSidebar(true);
+  threadSearch.focus();
+  threadSearch.select();
+});
 document.getElementById("workspace").addEventListener("click", (e) => {
   if (e.target.id === "workspace" && narrow(768) && ui.sidebarOpen) toggleSidebar(false);
 });
@@ -2281,8 +2258,8 @@ window.addEventListener("keydown", (e) => !(e.repeat && e.key === MOD_KEY) && sh
 window.addEventListener("keyup", (e) => e.key === MOD_KEY && showJumpHints(false), true);
 window.addEventListener("blur", () => showJumpHints(false));
 
-/** T3 Code's update control at the footer's end, in the desktop app: it checks for a new version, or
- * installs the one found, which restarts the app. */
+/** T3 Code's update control at the footer's end, shown while there is something to do: in the
+ * desktop app, a check in progress or a found version to install, which restarts the app. */
 const sideUpdate = document.getElementById("side-update");
 let updateBusy = null;
 /** In a browser the footer's control shows only while a machine runs an older pinned than the hub, and opens Machines. */
@@ -2294,8 +2271,8 @@ function updateTip(version, behind) {
 function drawUpdate() {
   const version = document.body.dataset.update;
   const behind = machinesToUpdate();
-  if (!TAURI) sideUpdate.hidden = !behind.length;
   const state = updateBusy ?? (version || behind.length ? "available" : "idle");
+  sideUpdate.hidden = state === "idle";
   const [glyph, tip] = {
     idle: ["refresh-cw", "Check for updates"],
     checking: ["refresh-cw", "Checking for updates…"],
@@ -2308,25 +2285,123 @@ function drawUpdate() {
   sideUpdate.setAttribute("aria-disabled", String(!!updateBusy));
   sideUpdate.innerHTML = `<span class="glyph">${icon(glyph, state === "checking" ? "spin" : "")}</span>`;
 }
-sideUpdate.onclick = async () => {
+/** Checks for a new version of the desktop app, or installs the one found; a browser opens Machines. */
+async function runUpdate(said = false) {
   if (!TAURI) return openSettings("machines");
   if (updateBusy) return;
   const install = !!document.body.dataset.update;
   updateBusy = install ? "downloading" : "checking";
   drawUpdate();
-  await (install ? installUpdate() : checkUpdate());
+  const found = await (install ? installUpdate() : checkUpdate());
   updateBusy = null;
   drawUpdate();
-};
-if (TAURI) {
-  sideUpdate.hidden = false;
-  drawUpdate();
-  new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
-} else {
-  drawUpdate();
+  if (said && !install && !found) tell("pinned is up to date");
+}
+sideUpdate.onclick = () => runUpdate();
+drawUpdate();
+if (TAURI) new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
+else {
   viewListeners.push(drawUpdate);
   document.addEventListener("newest-version", drawUpdate);
 }
+
+/** The nav above the threads: the orchestrator on its host with the Captains' reports not yet seen,
+ * what needs you, the pull requests that ask your review, and the 5-hour usage. */
+const sideNav = document.getElementById("side-nav");
+const navRow = (name) => sideNav.querySelector(`[data-nav="${name}"]`);
+const setText = (el, text) => el.textContent !== text && (el.textContent = text);
+function drawCount(el, n, title) {
+  el.hidden = !n;
+  setText(el, n ? String(n) : "");
+  el.title = n ? title : "";
+}
+function drawNav() {
+  askGlobalSettings();
+  const counts = navCounts();
+  const page = shellPage();
+  const orchestrator = navRow("orchestrator");
+  // With no machine online the row stays, on the machine that held it last, and says why it can't open.
+  const host = globalHostMachine() ?? [...machines.keys()].find((id) => id !== LOCAL) ?? null;
+  const away = !!host && machines.get(host)?.view?.online !== true;
+  orchestrator.hidden = !host;
+  orchestrator.classList.toggle("active", !page && !!active && isGlobalOrchestratorTab(active));
+  orchestrator.classList.toggle("disabled", away);
+  if (away) orchestrator.setAttribute("aria-disabled", "true");
+  else orchestrator.removeAttribute("aria-disabled");
+  orchestrator.title = away ? `${machineName(host)} is offline, so the orchestrator can't open` : "";
+  setText(orchestrator.querySelector(".name"), globalSettings.name);
+  setText(orchestrator.querySelector(".host"), host ? `${machineName(host)}${away ? " · offline" : ""}` : "");
+  drawCount(orchestrator.querySelector(".count"), counts.orchestrator, `${counts.orchestrator} ${counts.orchestrator === 1 ? "report" : "reports"} from the Captains you haven't read`);
+  drawCount(navRow("needs-you").querySelector(".count"), counts.needsYou, `${counts.needsYou} waiting on you`);
+  const reviews = navRow("pull-requests").querySelector(".meta");
+  reviews.hidden = !(counts.reviews > 0);
+  setText(reviews, counts.reviews > 0 ? `${counts.reviews} to review` : "");
+  const usage = navRow("usage").querySelector(".meta");
+  usage.hidden = !counts.usage;
+  if (counts.usage) {
+    const percent = Math.round(counts.usage.percent);
+    setText(usage.querySelector(".text"), `5h ${percent}%`);
+    usage.querySelector(".bar > span").style.width = `${Math.min(100, Math.max(0, percent))}%`;
+    usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
+  }
+  for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
+  setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
+  accountButton.classList.toggle("offline", !counts.machinesOnline);
+  const searchKey = document.getElementById("search-key");
+  setText(searchKey, bindingLabel("sidebar.search") ?? "");
+  searchKey.hidden = !searchKey.textContent;
+}
+navRow("orchestrator").onclick = () => openGlobalChat();
+// The model and the page scripts load after this one.
+document.addEventListener("DOMContentLoaded", () => {
+  onModelChange(drawNav);
+  drawNav();
+}, { once: true });
+new MutationObserver(() => guiOn() && drawNav()).observe(document.body, { attributeFilter: ["data-page"] });
+
+/** The footer's Account and pages menu: Settings, Way of working, Skills, Projects, Machines,
+ * Archive and Check for updates, each with what it holds now. */
+const accountButton = document.getElementById("account-pages");
+const accountMenu = document.getElementById("account-menu");
+function drawAccountMenu() {
+  const hint = (name, text) => setText(accountMenu.querySelector(`[data-hint="${name}"]`), text);
+  hint("settings", `${MOD_LABEL},`);
+  const catalog = typeof globalProjectsCatalog === "function" ? globalProjectsCatalog() : null;
+  const machineCount = catalog?.machines.length ?? 0;
+  hint("projects", catalog ? `${catalog.projects.length} on ${machineCount} ${machineCount === 1 ? "machine" : "machines"}` : "");
+  const behind = machinesBehind();
+  hint("machines", behind.length ? `${behind.length} to update` : newestVersion ? "all up to date" : "");
+  hint("version", document.body.dataset.update ? `${document.body.dataset.update} ready` : document.body.dataset.version ?? "");
+}
+function toggleAccountMenu(open = accountMenu.hidden) {
+  if (open) drawAccountMenu();
+  accountMenu.hidden = !open;
+  accountButton.setAttribute("aria-expanded", String(open));
+  accountButton.classList.toggle("open", open);
+  if (open) accountMenu.querySelector("button").focus();
+}
+accountButton.onclick = () => toggleAccountMenu();
+accountMenu.addEventListener("click", (e) => {
+  const item = e.target.closest("[role=menuitem]");
+  if (!item) return;
+  toggleAccountMenu(false);
+  if (item.dataset.settings) openSettings(item.dataset.settings);
+  else if (item.matches("[data-update-check]")) runUpdate(true);
+});
+accountMenu.addEventListener("keydown", (e) => {
+  const items = [...accountMenu.querySelectorAll("[role=menuitem]")];
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleAccountMenu(false);
+    return accountButton.focus();
+  }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const at = items.indexOf(document.activeElement);
+  items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+});
+window.addEventListener("mousedown", (e) => !accountMenu.hidden && !e.target.closest("#account-menu, #account-pages") && toggleAccountMenu(false), true);
 
 const sidebarEl = document.getElementById("sidebar");
 function setSidebarWidth(px) {
@@ -2352,13 +2427,17 @@ sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(
  * the title, whose chevron shows on hover and whose click opens the thread's menu; a double-click
  * renames it. A subagent's own title opens nothing. */
 function crumbHtml(tab, sub = null) {
+  if (!sub && isGlobalOrchestratorTab(tab)) return orchestratorCrumbHtml(tab);
   const name = projectName(tab);
   const sep = `<span class="sep" aria-hidden="true">/</span>`;
   const parent = threadTitle(tab);
   const title = sub ? sub.title : parent;
+  // A worker's crumb names the thread that started it, and opens it.
+  const spawner = !sub && tab.view.role === "worker" ? tabByKey(spawnerKey(tab)) : null;
+  const spawnerCrumb = spawner ? `<button type="button" class="parent" data-parent-thread="${esc(spawner.key)}" aria-label="Open parent thread: ${esc(threadTitle(spawner))}" data-tip="${esc(threadTitle(spawner))}"><span class="text">${esc(threadTitle(spawner))}</span></button>${sep}` : "";
   return `<button type="button" class="project" data-new-here aria-label="New thread in ${esc(name)}" data-tip="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button>${sep}${sub
     ? `<button type="button" class="parent" data-subagent-back aria-label="Open parent thread: ${esc(parent)}" data-tip="${esc(parent)}"><span class="text">${esc(parent)}</span></button>${sep}<h2 class="title sub" data-tip="${esc(title)}"><span class="text">${esc(title)}</span></h2>`
-    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}${statsHtml(tab)}`;
+    : `${spawnerCrumb}<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>${roleChipHtml(tab)}`}${headStatsHtml(tab)}`;
 }
 /** A parent crumb that would push the title out folds to "...", as T3 Code's does. */
 function fitParentCrumb() {

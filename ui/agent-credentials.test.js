@@ -4,6 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+/** The agents' requests as the Needs you page and Agent activity draw them. */
+const ASKS_HTML = `function asksHtml() { return agentShownHtml() + agentConfirmations.map(agentConfirmationHtml).join(""); }`;
 const fn = (src, name) => {
   const at = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
   assert.ok(at >= 0, `${name} is in the source`);
@@ -106,6 +108,7 @@ function app({ answer, machines = [] } = {}) {
       fn(read("main.js"), "setAccounts"),
       fn(read("gui-shell.js"), "openSettings"),
       read("agent-surface.js"),
+      ASKS_HTML,
       read("accounts.js"),
     ].join("\n"),
     context,
@@ -121,7 +124,7 @@ function click(context, agent, confirmation) {
   return flush();
 }
 
-const waitingIds = (context) => [...(context.agentWaitingRows()[0]?.innerHTML ?? "").matchAll(/data-confirmation="([^"]+)"/g)].map(([, id]) => id);
+const waitingIds = (context) => [...context.asksHtml().matchAll(/data-confirmation="([^"]+)"/g)].map(([, id]) => id);
 
 test("Approve on connect_linear opens the Connectors page's Linear form, says who asked, and sends nothing", async () => {
   const { context, calls, dom, state } = app();
@@ -163,7 +166,7 @@ test("a key the service refuses shows in the form's error line, the request keep
   assert.equal(dom["linear-error"].textContent, "Linear refused the key");
   assert.deepEqual(told, []);
   assert.deepEqual(waitingIds(context), ["c-5"]);
-  assert.match(context.agentWaitingRows()[0].innerHTML, /data-agent="approve">Approve<\/button>/);
+  assert.match(context.asksHtml(), /data-agent="approve">Approve<\/button>/);
   dom["linear-key"].value = "lin_api_right";
   await actions["connect-linear"]();
   assert.deepEqual(here(calls), [

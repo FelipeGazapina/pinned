@@ -260,7 +260,7 @@ actions["sign-out"] = async () => {
   showAccount();
 };
 
-let machinesUi = { renaming: null, removing: null, pair: null, error: "" };
+let machinesUi = { renaming: null, removing: null, pair: null, error: "", background: null };
 
 function lastSeen(unix) {
   if (!unix) return "never seen";
@@ -392,11 +392,45 @@ function machineEntryHtml(id, view) {
     : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
-      <div class="who">${name}<span class="hint">${esc(where)}</span>${standing.text ? `<span class="hint" data-standing="${standing.standing}">${esc(standing.text)}</span>` : ""}${machineStateHtml(view, machineWork(id))}</div>
+      <div class="who">${name}<span class="hint">${esc(where)}</span>${standing.text ? `<span class="hint" data-standing="${standing.standing}">${esc(standing.text)}</span>` : ""}${machineStateHtml(view, machineWork(id))}${machineBackgroundHtml(id, view)}</div>
       ${updateId && machinesUi.renaming !== id ? updateButtonHtml(standing.button) : ""}
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
     </div>${sync}${confirm}`;
+}
+
+/** The Run in the background switch of a machine running the desktop app, here and on this app's
+ * General page. A node, an app older than the setting and an offline machine report none, so they
+ * get no switch. Signed out, this app's switch is off and disabled: no web app can reach it. */
+function machineBackgroundHtml(id, view) {
+  if (view.background == null) return "";
+  const local = id === LOCAL && TAURI;
+  const why = local && !account ? `Sign in under Account first. With no window, the web app is how you reach this ${COMPUTER}.` : "";
+  const about = local
+    ? "While on, pinned keeps running with no window, so it uses less memory, and you use it from the web app. Opening pinned again shows its window."
+    : "While on, pinned runs there with no window, so it uses less memory. Opening pinned on that machine shows its window again.";
+  const failed = machinesUi.background?.id === id ? machinesUi.background.error : "";
+  // Shown only in a window opened while the setting is on, which closing puts back in the background.
+  const close = local && view.background ? `<button class="secondary" data-action="machine-background-close">Close window</button>` : "";
+  return `<div class="side-setting" data-setting="background" data-machine="${esc(id)}">
+      <div><label>Run in the background</label><p class="meta">${about}</p>${why ? `<p class="meta" data-why>${why}</p>` : ""}${failed ? `<p class="error">${esc(failed)}</p>` : ""}${close}</div>
+      <label class="switch" data-action="machine-background" data-on="${!!view.background && !why}"><input type="checkbox" aria-label="Run in the background"${view.background && !why ? " checked" : ""}${why ? " disabled" : ""}><span></span></label>
+    </div>`;
+}
+
+/** Turns Run in the background `on` or off on machine `id`, then redraws the page the switch is on. */
+async function setMachineBackground(id, on) {
+  machinesUi.background = null;
+  try {
+    await callOn(id, { cmd: "set_background", on });
+    const m = machines.get(id);
+    const view = id === LOCAL ? m?.hubView : m?.view;
+    if (view) view.background = on;
+  } catch (e) {
+    machinesUi.background = { id, error: String(e) };
+  }
+  if (page === "machines") showMachinesPage();
+  if (page === "general") showGeneral();
 }
 
 const rowMachine = (button) => button.closest("[data-machine]").dataset.machine;
@@ -443,6 +477,12 @@ Object.assign(actions, {
     }
     showMachinesPage();
   },
+  // The box has already flipped when the click lands on it, and not when it lands on the label
+  // around it, so the value comes from what the row was drawn with.
+  "machine-background"(label) {
+    if (!label.querySelector("input").disabled) return setMachineBackground(rowMachine(label), label.dataset.on !== "true");
+  },
+  "machine-background-close": (button) => setMachineBackground(rowMachine(button), true),
   "go-account": () => showPage("account"),
   "rename-machine"(button) {
     machinesUi.renaming = rowMachine(button);

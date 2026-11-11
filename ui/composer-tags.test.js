@@ -105,8 +105,17 @@ test("a paragraph routes to its project's Captain on the one machine it is on", 
   assert.deepEqual(routeParagraph("sobe a v0.17.19 no #pinned", catalog), {
     preview: "sobe a v0.17.19 no #pinned",
     kind: "routed",
-    text: "→ Captain pinned · Mac mini",
+    text: "Goes to Captain pinned on Mac mini.",
+    project: "pinned",
+    machine: "Mac mini",
+    captain: "idle",
   });
+});
+
+test("a project whose machine has no Captain says one starts", () => {
+  assert.equal(routeParagraph("limpa as notas no #sistema-notas", catalog).text, "Goes to Captain sistema-notas on Mac mini. It has no Captain yet, so one starts.");
+  assert.equal(routeParagraph("#site @mac-mini publica", catalog).captain, "none");
+  assert.equal(routeParagraph("#site @macbook publica", catalog).captain, "working");
 });
 
 test("a repo on two machines with no @ is ambiguous and offers each machine", () => {
@@ -119,9 +128,9 @@ test("a repo on two machines with no @ is ambiguous and offers each machine", ()
 });
 
 test("an @ picks the machine for its paragraph", () => {
-  assert.equal(routeParagraph("#site @mac-mini publica", catalog).text, "→ Captain site · Mac mini");
-  assert.equal(routeParagraph("#site @macbook publica", catalog).text, "→ Captain site · MacBook");
-  assert.equal(routeParagraph("#pinned @linux-vps sobe", catalog).text, "→ Captain pinned · Linux VPS");
+  assert.equal(routeParagraph("#site @mac-mini publica", catalog).text, "Goes to Captain site on Mac mini. It has no Captain yet, so one starts.");
+  assert.equal(routeParagraph("#site @macbook publica", catalog).text, "Goes to Captain site on MacBook.");
+  assert.equal(routeParagraph("#pinned @linux-vps sobe", catalog).text, "Goes to Captain pinned on Linux VPS. It has no Captain yet, so one starts.");
 });
 
 test("an untagged paragraph is the orchestrator's call, and an unknown project is flagged", () => {
@@ -147,7 +156,7 @@ test("a tag routes only its own paragraph", () => {
   assert.deepEqual(
     routePreview(text, catalog).map((row) => [row.index, row.kind, row.text]),
     [
-      [0, "routed", "→ Captain site · MacBook"],
+      [0, "routed", "Goes to Captain site on MacBook."],
       [1, "untagged", "no project: Orchestrator decides"],
       [2, "ambiguous", "site is on 2 machines"],
       [3, "unknown", "unknown project #fantasma"],
@@ -303,4 +312,40 @@ test("the popover lists repo or no remote, machines with offline ones dimmed, an
   const machinesHtml = composerTagPopoverHtml({ sign: "@", query: "" }, tagOptions({ sign: "@", query: "" }, catalog), 0, esc);
   assert.match(machinesHtml, /<span class="name">Linux VPS<\/span><span class="about">offline<\/span><\/span><span class="state">@linux-vps<\/span>/);
   assert.equal(composerTagPopoverHtml({ sign: "#", query: "zz" }, [], 0, esc), `<p class="heading">Projects</p><p class="none">No project matches 'zz'</p>`);
+});
+
+const routedLine = call("routedLine");
+const tagsInHtml = call("tagsInHtml");
+const composerRoutingHtml = call("composerRoutingHtml");
+
+test("a sent message names the Captain of each tagged paragraph, joined as a sentence", () => {
+  assert.equal(routedLine("#pinned sobe a versão.\n\n#site @macbook publica a v2.", catalog), "Routed to Captain pinned on Mac mini and Captain site on MacBook");
+  assert.equal(routedLine("#pinned a.\n\n#site @macbook b.\n\n#infra c.", catalog), "Routed to Captain pinned on Mac mini, Captain site on MacBook and Captain infra on Linux VPS");
+  assert.equal(routedLine("#pinned a.\n\nsem tag aqui.\n\n#pinned b.", catalog), "Routed to Captain pinned on Mac mini");
+});
+
+test("a sent message draws no routed line when a tag no longer resolves to one Captain", () => {
+  assert.equal(routedLine("só texto", catalog), null);
+  assert.equal(routedLine("#pinned a.\n\n#site b.", catalog), null, "site is on two machines and no @ picks one");
+  assert.equal(routedLine("#pinned a.\n\n#apagado b.", catalog), null, "a project that left the catalog");
+  assert.equal(routedLine("#pinned a.", { ...catalog, projects: [] }), null);
+});
+
+test("a sent message paints its tags as the mirror does, but not inside code or links", () => {
+  const known = { project: new Set(["pinned"]), machine: new Set(["macbook"]) };
+  assert.equal(
+    tagsInHtml('<p>#pinned release it @macbook, a #x and it&#39;s <code>#pinned</code> <a href="#pinned">#pinned</a></p>', known),
+    '<p><span class="tag project">#pinned</span> release it <span class="tag machine">@macbook</span>, a <span class="tag project unknown">#x</span> and it&#39;s <code>#pinned</code> <a href="#pinned">#pinned</a></p>',
+  );
+  assert.equal(tagsInHtml("<p>no tags</p>", known), "<p>no tags</p>");
+});
+
+test("the routing strip says where a paragraph goes, and that a missing Captain starts", () => {
+  const esc = (text) => text;
+  const one = composerRoutingHtml(routePreview("#sistema-notas limpa", catalog), esc);
+  assert.match(one, /<span class="where">Goes to <b>Captain sistema-notas<\/b> on Mac mini\. It has no Captain yet, so one starts\.<\/span>/);
+  assert.doesNotMatch(one, /class="preview"/, "one paragraph needs no preview");
+  const two = composerRoutingHtml(routePreview("#pinned sobe\n\n#site publica", catalog), esc);
+  assert.match(two, /<span class="preview">#pinned sobe<\/span><span class="where">Goes to <b>Captain pinned<\/b> on Mac mini\.<\/span>/);
+  assert.match(two, /<div class="route ambiguous" data-index="1">.*<span class="where">site is on 2 machines<\/span><span class="choices"><button type="button" data-machine="macbook">@macbook<\/button>/);
 });

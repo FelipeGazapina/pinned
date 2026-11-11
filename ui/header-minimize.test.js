@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 const style = read("style.css");
@@ -55,4 +56,23 @@ test("the app header keeps its control cluster from shrinking", () => {
 test("both minimize buttons still shrink to the pill", () => {
   assert.match(main, /getElementById\("minimize"\)\.onclick = \(\) => setView\("pill"\)/);
   assert.match(guiJs, /getElementById\("gui-minimize"\)\.onclick = \(\) => setView\("pill"\)/);
+});
+
+// The diff toolbar at a panel width: its controls need `need` pixels with labels and `icons`
+// without, and the bar is `width` wide. A wrapped bar never overflows.
+test("the diff toolbar turns its labels to icons first, and wraps only when icons are not enough", () => {
+  const src = read("gui-diff.js");
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(src.slice(src.indexOf("function fitDiffBar"), src.indexOf("const fitDiffBars")), context);
+  const fit = (width, need, icons) => {
+    const bar = { dataset: {}, clientWidth: width };
+    Object.defineProperty(bar, "scrollWidth", { get: () => ({ none: need, icons, wrap: width })[bar.dataset.fold] });
+    context.fitDiffBar(bar);
+    return bar.dataset.fold;
+  };
+  assert.equal(fit(539, 470, 370), "none", "at the default panel width the labels fit");
+  assert.equal(fit(419, 470, 370), "icons");
+  assert.equal(fit(359, 470, 370), "wrap");
+  assert.equal(fit(760, 470, 370), "none", "growing the panel back brings the labels back");
 });

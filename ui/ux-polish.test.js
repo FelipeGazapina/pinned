@@ -35,7 +35,7 @@ function sidebar(extra = {}) {
   vm.createContext(context);
   vm.runInContext(
     [line(settingsSrc, "const esc = "), fn(sidebarSrc, "sidebarSummary"), fn(sidebarSrc, "sidebarToggleHtml"), line(sidebarSrc, "const sidebarToggleLabel"), "let sidebarTouched = false;\nlet phoneDrawerUntil = 0;", fn(sidebarSrc, "drawSidebarToggle"),
-      line(sidebarSrc, "const projectMachinesHtml"), line(sidebarSrc, "const remoteMark"), fn(sidebarSrc, "projectsOnManyMachines"), "this.remoteMark = remoteMark; this.projectMachinesHtml = projectMachinesHtml;"].join("\n"),
+      line(sidebarSrc, "const projectMachinesHtml"), line(sidebarSrc, "const remoteMark"), "this.remoteMark = remoteMark; this.projectMachinesHtml = projectMachinesHtml;"].join("\n"),
     context,
   );
   return { context, toggle, calls };
@@ -95,13 +95,11 @@ test("the drawer stays shut on a phone when nothing waits, when the user moved i
   assert.deepEqual(calls, [], "after the first seconds a new question doesn't move the sidebar");
 });
 
-test("a card names its machine as text when the project spans machines, and only then", () => {
+test("a hover card names the thread's machine as text, escaped", () => {
   const { context } = sidebar();
   assert.equal(context.remoteMark("sweep-node-2", true), `<span class="remote named" title="sweep-node-2"><i monitor><span class="name">sweep-node-2</span></span>`);
   assert.equal(context.remoteMark("sweep-node-2", false), `<span class="remote" title="sweep-node-2"><i monitor></span>`);
   assert.equal(context.remoteMark(`a&b<`, true), `<span class="remote named" title="a&#38;b&#60;"><i monitor><span class="name">a&#38;b&#60;</span></span>`);
-  context.tabs.push(tab("idle", null, "alpha", "m1"), tab("idle", null, "alpha", "m2"), tab("idle", null, "beta", "m1"), tab("idle", null, "beta", "m1"));
-  assert.deepEqual([...context.projectsOnManyMachines()], ["alpha"]);
 });
 
 test("a project header breaks its machine list between names, with the commas kept", () => {

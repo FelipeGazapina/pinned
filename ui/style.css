@@ -504,6 +504,8 @@ body[data-empty="true"] :is(#actions-edge, #actions), #projects:not([hidden]) ~ 
 #settings .machine-load .stat[data-level="warn"] b { color: #d9822b; }
 #settings .machine-load .stat[data-level="hot"] b { color: #e5484d; }
 .machine-row .who > .machine-accounts { gap: 4px 6px; }
+.machine-row .who > .side-setting { overflow: visible; white-space: normal; text-overflow: clip; }
+#settings-page .machine-row .side-setting { margin: 8px 0 0; }
 .acct { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; color: var(--fg); }
 .acct[data-state="limited"] { color: #d9822b; border-color: rgb(217 130 43 / 0.4); }
 .acct[data-state="off"] { color: var(--muted); border-style: dashed; }

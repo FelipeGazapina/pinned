@@ -5,7 +5,7 @@
 // machine in both lists, a save that reaches the hub, and a reload that shows the saved policy.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
-//   SWEEP_DIR=... PLAYWRIGHT=... SWEEP_CHANNEL=chrome node scripts/web-sweep/placement.js
+//   SWEEP_DIR=... PLAYWRIGHT=... node scripts/web-sweep/placement.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop   # stops sweep-mini too: placement.js writes node-b.pid
 //
 // Writes placement-{empty,filled}-{desktop,phone}.png into scripts/web-sweep/screens/placement/.
@@ -83,7 +83,7 @@ const toPlacement = async (page) => {
 (async () => {
   fs.mkdirSync(SCREENS, { recursive: true });
   if (!fs.existsSync(path.join(DIR, "node-b.pid"))) pairMini();
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const shoot = async (state, open) => {
     for (const [size, viewport] of SIZES) {
       const ctx = await browser.newContext({ viewport, colorScheme: "dark", deviceScaleFactor: size === "phone" ? 2 : 1 });
