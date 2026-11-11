@@ -291,7 +291,7 @@ async function onWorkersSheetClick(e, tab) {
   if (agent) {
     workersSheet?.sheet.close();
     threadOf(tab).open.add(`worker:${agent.dataset.wsAgent}`);
-    renderThread();
+    rerender();
     return threadView.querySelector(`.worker-row[data-worker="${CSS.escape(agent.dataset.wsAgent)}"]`)?.scrollIntoView({ block: "center" });
   }
   const answer = e.target.closest("[data-ws-answer]");
