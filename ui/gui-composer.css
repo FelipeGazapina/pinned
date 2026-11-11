@@ -659,9 +659,8 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
   #composer[data-empty="true"] .send { opacity: 1; }
   #composer[data-asking="true"][data-empty="true"] .send { background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-side-muted); }
 
-  #composer-footer { gap: 14px; margin-top: 0; padding: 7px 12px; border-color: rgb(var(--g-ink-rgb) / 0.07); border-radius: 0 0 12px 12px; box-shadow: none;
+  #composer-footer { gap: 14px; margin-top: 0; padding: 7px 12px; border-color: rgb(var(--g-ink-rgb) / 0.07); border-radius: 0 0 12px 12px;
     font-size: 12px; line-height: 1.45; color: var(--g-muted); }
-  html[data-appearance="light"] #composer-footer { box-shadow: none; }
   #composer-footer > * { gap: 6px; height: auto; padding: 0; border-radius: 4px; }
   #composer-footer .i { width: 13px; height: 13px; }
   #composer-footer .where :is(.ws-icon, .label) { display: none; }

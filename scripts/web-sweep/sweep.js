@@ -4653,7 +4653,8 @@ async function sweep(profileName) {
     await sendPrompt("/ask");
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     const placeholder = await page.getAttribute("#prompt", "placeholder");
-    check(placeholder === "Send feedback to decline this request", `placeholder: ${placeholder}`);
+    const declines = (await page.evaluate(() => narrow(768))) ? "Send feedback to decline this request" : "Or type what it should do instead. Sending declines the command.";
+    check(placeholder === declines, `placeholder: ${placeholder}`);
     await sendPrompt("use the trash instead");
     await waitTerm(/declined: use the trash instead/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
@@ -5425,7 +5426,8 @@ async function sweep(profileName) {
   });
 
   await step("composer: Send says Connecting or Environment disconnected, and the placeholder is T3's", async () => {
-    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything, @tag files/folders, $use skills, or / for commands", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
+    const ask = (await page.evaluate(() => narrow(768))) ? "Ask anything, @tag files/folders, $use skills, or / for commands" : "Ask anything, @ files, $ skills, / commands";
+    check((await page.getAttribute("#prompt", "placeholder")) === ask, `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
     await page.fill("#prompt", "while offline");
     try {
       await page.evaluate(() => {
