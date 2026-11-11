@@ -57,23 +57,34 @@
       <aside id="sidebar">
         <div class="brand" data-tauri-drag-region><button id="sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button><b data-tauri-drag-region>pinned</b></div>
         <div class="side-head">
-          <div class="row"><label class="search"><i data-icon="search"></i><input id="thread-search" placeholder="Search" autocomplete="off" spellcheck="false"><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
-            <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N)"><i data-icon="square-pen"></i></button></div>
-          <div class="row"><button id="project-filter" class="projects" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
-            <button id="add-project" class="icon" aria-label="Add project" data-tip="Add project"></button></div>
+          <div class="row"><label class="search"><span class="glyph" data-side-icon="side-search"></span><input id="thread-search" placeholder="Search or jump to" autocomplete="off" spellcheck="false"><kbd id="search-key" hidden></kbd><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
+            <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N)" data-side-icon="side-new"></button></div>
         </div>
+        <nav id="side-nav" aria-label="Workspace">
+          <button type="button" class="nav-row global-row" data-global-open="true" data-nav="orchestrator"><span class="mark" data-side-icon="side-bot"></span><span class="label name">Orchestrator</span><span class="meta host"></span><span class="count" hidden></span></button>
+          <button type="button" class="nav-row" data-nav="needs-you" data-open-page="needs-you"><span class="mark" data-side-icon="side-inbox"></span><span class="label">Needs you</span><span class="count" hidden></span></button>
+          <button type="button" class="nav-row" data-nav="pull-requests" data-open-page="pull-requests"><span class="mark" data-side-icon="side-pr"></span><span class="label">Pull requests</span><span class="meta" hidden></span></button>
+          <button type="button" class="nav-row" data-nav="usage" data-open-page="usage"><span class="mark" data-side-icon="side-usage"></span><span class="label">Usage</span><span class="meta" hidden><span class="text"></span><span class="bar"><span></span></span></span></button>
+        </nav>
+        <div class="threads-head"><button id="project-filter" class="projects" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
+          <button id="add-project" class="icon" aria-label="Add project" data-tip="Add project" data-side-icon="side-add-project"></button></div>
         <div id="thread-list"></div>
         <p id="side-notice" role="status" hidden></p>
         <p id="sync-alert" role="alert" hidden></p>
         <span id="sidebar-resize" title="Drag to resize, double-click to reset"></span>
-        <footer><button id="gui-settings" class="icon" aria-label="Settings" data-tip="Settings"><i data-icon="settings"></i></button>
-          <button class="icon" data-open-page="pull-requests" aria-label="Pull Requests" data-tip="Pull Requests"><i data-icon="git-pull-request"></i></button>
-          <button class="icon" data-open-page="usage" aria-label="Usage" data-tip="Usage"><i data-icon="chart-column"></i></button>
-          <button class="icon" data-open-page="skills" aria-label="Skills" data-tip="Skills"><i data-icon="sparkles"></i></button>
-          <button class="icon" data-open-page="taste" aria-label="Way of working" data-tip="Way of working"><i data-icon="sliders-horizontal"></i></button>
-          <button id="mode-terminal" class="icon" aria-label="Terminal view" data-tip="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
+        <footer><button id="account-pages" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" data-side-icon="side-machines"></span><span class="texts"><span class="name">Account and pages</span><span class="sub" id="machines-online"></span></span><span class="chev" data-side-icon="chevron-up"></span></button>
+          <button id="mode-terminal" class="icon" aria-label="Terminal view" data-tip="Terminal view (⌘E)" data-side-icon="side-terminal"></button>
           <button class="back"><i data-icon="arrow-left"></i>Back</button>
-          <button id="side-update" class="icon" hidden></button></footer>
+          <button id="side-update" class="icon" hidden></button>
+          <div id="account-menu" role="menu" aria-label="Account and pages" hidden>
+            <button type="button" role="menuitem" id="gui-settings"><span class="label">Settings</span><span class="hint" data-hint="settings"></span></button>
+            <button type="button" role="menuitem" data-open-page="taste"><span class="label">Way of working</span><span class="hint">Captains and models</span></button>
+            <button type="button" role="menuitem" data-open-page="skills"><span class="label">Skills</span><span class="hint"></span></button>
+            <button type="button" role="menuitem" data-open-page="global-projects"><span class="label">Projects</span><span class="hint" data-hint="projects"></span></button>
+            <button type="button" role="menuitem" data-settings="machines"><span class="label">Machines</span><span class="hint" data-hint="machines"></span></button>
+            <button type="button" role="menuitem" data-settings="archive"><span class="label">Archive</span><span class="hint"></span></button>
+            <button type="button" role="menuitem" data-update-check><span class="label">Check for updates</span><span class="hint" data-hint="version"></span></button>
+          </div></footer>
       </aside>
       <section id="chat">
         <header id="chat-head" data-tauri-drag-region>

@@ -61,7 +61,8 @@ function closePage() {
   if (active) activate(active);
   else delete document.body.dataset.page;
 }
-for (const b of document.querySelectorAll("#sidebar footer [data-open-page]")) b.onclick = () => openPage(b.dataset.openPage);
+// A page whose script did not load stays shut rather than throwing.
+for (const b of document.querySelectorAll("#sidebar [data-open-page]")) b.onclick = () => b.dataset.openPage in SHELL_PAGES && openPage(b.dataset.openPage);
 document.querySelector("#sidebar footer .back").onclick = () => closePage();
 
 /** Where ⌘[ and ⌘] go: the threads and pages visited, as T3 Code's router history keeps them. */
