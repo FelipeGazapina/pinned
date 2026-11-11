@@ -640,6 +640,14 @@ function addTab(machine, view) {
   return tab;
 }
 
+const TERMINAL_PIECE = 4096;
+/** Writes a session's output to its terminal a few kilobytes at a time. xterm keeps a decode
+ * buffer as long as the longest piece it was ever given, so the replay written whole left half a
+ * megabyte in every terminal for good. */
+function feed(term, bytes) {
+  for (let at = 0; at < bytes.length; at += TERMINAL_PIECE) term.write(bytes.subarray(at, at + TERMINAL_PIECE));
+}
+
 /** Streams the tab's session into its terminal, after the output its machine keeps of it. A sink
  * that was replaced writes nothing, so what an earlier attach still delivers can't land twice. */
 function attachTerm(tab) {
@@ -650,7 +658,7 @@ function attachTerm(tab) {
   const sink = {
     write(bytes) {
       if (tab.sink !== sink) return;
-      tab.term.write(bytes);
+      feed(tab.term, bytes);
       // The terminal started over, so the line that says how to restart goes back under the replay.
       if (!replayed && before && tab.exitNote) tab.term.write(tab.exitNote);
       replayed = true;
