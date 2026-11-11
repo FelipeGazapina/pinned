@@ -70,6 +70,8 @@ body[data-phone-screen="threads"] #thread-list .thread-row { border-radius: 0; -
 body[data-phone-screen="threads"] #thread-list .thread-row:is(.active, .selected, :hover) { background: none; }
 body[data-phone-screen="threads"] #thread-list .thread-row:active { background: var(--g-row-hover); }
 body[data-phone-screen="threads"] #thread-list .thread-row .l2 { color: var(--g-fg); }
+/* The list is not beside the open thread here, so being open does not make a row stand out. */
+body[data-phone-screen="threads"] #thread-list .thread-row.active:not(:has(> .status-glyph[data-glyph="needs"], .woke)) .l2 { font-weight: 400; }
 body[data-phone-screen="threads"] #thread-list .thread-row .stamp { font-size: 13px; color: var(--phone-dim); }
 body[data-phone-screen="threads"] #thread-list .thread-row .stamp.status.info { color: var(--g-blue); }
 body[data-phone-screen="threads"] #thread-list .thread-row :is(.stamp.status:is(.warning, .limited, .input), .stamp.when.unread) { color: var(--g-warning-fg); }
