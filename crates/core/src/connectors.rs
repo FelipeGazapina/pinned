@@ -4283,7 +4283,7 @@ impl Connectors {
     }
 
     /// A session's ask. `Ask::Offer` answers the offer as JSON; a read answers `Value::String`.
-    pub async fn convex(&self, http: &dyn convex::client::Http, machine: &str, tab: &str, repo: Option<&str>, find: &dyn Fn(&str, &str) -> Option<TabView>, ask: convex::Ask) -> Result<Value, String> {
+    pub async fn convex(&self, http: &dyn convex::client::Http, machine: &str, tab: &str, repo: Option<&str>, find: &(dyn Fn(&str, &str) -> Option<TabView> + Sync), ask: convex::Ask) -> Result<Value, String> {
         let (connections, steps) = {
             let store = self.store.lock().unwrap();
             let steps: HashMap<String, Option<convex::access::Step>> = store.connectors.iter().map(|c| (c.id.clone(), convex_step(c))).collect();

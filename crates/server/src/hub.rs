@@ -441,6 +441,13 @@ impl Hub {
     }
 
     /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
+    /// A Convex tool's ask from the session in `tab` on `machine`, decided from the tabs the
+    /// account's machines reported, never from the call.
+    pub async fn convex(&self, account: &Arc<Account>, machine: &str, tab: &str, repo: Option<&str>, ask: pinned_core::convex::Ask) -> Result<Value, String> {
+        let find = |on: &str, id: &str| account.tab(on, id);
+        self.connectors(account).await?.convex(&*self.convex_http, machine, tab, repo, &find, ask).await
+    }
+
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
