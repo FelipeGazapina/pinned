@@ -30,6 +30,7 @@ function boxPage({ answer, hubOn = true } = {}) {
     renderUsagePage: () => renders.push(context.boxUsageHtml(context.usageState.box, NOW)),
     usageState: { box: { data: null, error: "", loading: false, seq: 0 } },
     hub: hubOn ? { hub: async (message) => (assert.equal(JSON.stringify(message), '{"cmd":"box_usage"}'), answer()) } : null,
+    pageView: { addEventListener: (type, handler) => (context.toggled = { type, handler }) },
     renders,
   };
   vm.createContext(context);
@@ -64,6 +65,17 @@ test("state a: Upstash's numbers, pinned's count, the running box and the other 
   assert.match(html, /<details class="box-others"><summary>Other boxes \(1\)<\/summary>/);
   assert.doesNotMatch(html, /<details[^>]* open/);
   assert.doesNotMatch(text(html.split("pinned's count")[1].split("</div></div>")[0]), /\$/, "no dollar figure for pinned's count");
+});
+
+test("Other boxes stays open when the page redraws while it was open", () => {
+  const page = boxPage();
+  assert.match(page.boxUsageHtml({ data: A, error: "", loading: false, open: true }, NOW), /<details class="box-others" open>/);
+  assert.match(page.boxUsageHtml({ data: A, error: "", loading: false, open: false }, NOW), /<details class="box-others"><summary>/);
+  assert.equal(page.toggled.type, "toggle");
+  page.toggled.handler({ target: { matches: (selector) => selector === ".box-others", open: true } });
+  assert.equal(page.usageState.box.open, true, "opening Other boxes is remembered");
+  page.toggled.handler({ target: { matches: () => false, open: false } });
+  assert.equal(page.usageState.box.open, true, "another element's toggle is not");
 });
 
 test("Running now holds creating, idle and running boxes; every other status goes under Other boxes", () => {
@@ -105,12 +117,12 @@ test("state b: no connection says where to connect and shows no figures or table
   assert.equal(text(html), "Upstash Box This month Connect Upstash in Settings › Connectors to see box usage.");
 });
 
-test("state c: an Upstash error is a warning with pinned's count only, and no tables", () => {
-  const html = show({ connected: true, error: "request timed out after 10 s", boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
-  assert.match(html, /<div class="limit-notices" role="alert">\[triangle-alert\]<div><p>Upstash did not answer: request timed out after 10 s<\/p><\/div><\/div>/);
+test("state c: an Upstash error, as the hub words it, is a warning with pinned's count only, and no tables", () => {
+  const html = show({ connected: true, error: "Upstash did not answer: Upstash Box answered 500: boom", boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
+  assert.match(html, /<div class="limit-notices" role="alert">\[triangle-alert\]<div><p>Upstash did not answer: Upstash Box answered 500: boom<\/p><\/div><\/div>/);
   assert.equal(
     text(html),
-    "Upstash Box This month [triangle-alert] Upstash did not answer: request timed out after 10 s pinned's count 2.0 box hours 2 tasks Box time pinned recorded for its delegated tasks; not a bill.",
+    "Upstash Box This month [triangle-alert] Upstash did not answer: Upstash Box answered 500: boom pinned's count 2.0 box hours 2 tasks Box time pinned recorded for its delegated tasks; not a bill.",
   );
 });
 

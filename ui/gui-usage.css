@@ -285,8 +285,10 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
 .usage .box-others > .table-region { margin-top: 8px; }
 @media (max-width: 639px) {
   .usage .box-usage .opt { display: none; }
-  .usage .box-usage th.box { width: 44%; }
-  .usage .box-usage th.up { width: 20%; }
-  .usage .box-usage th.cpu, .usage .box-usage th.cost { width: 18%; }
+  .usage .box-usage table.by-time :is(th, td):not(:first-child) { padding-left: 10px; }
+  .usage .box-usage th.box { width: 34%; }
+  .usage .box-usage th.up { width: 26%; }
+  .usage .box-usage th.cpu { width: 22%; }
+  .usage .box-usage th.cost { width: 18%; }
   .usage .box-usage td .sub { display: block; }
 }

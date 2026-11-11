@@ -615,22 +615,26 @@ function boxFiguresHtml(u) {
     "Box time pinned recorded for its delegated tasks; not a bill.");
   return `<div class="box-figures">${from}${own}</div>`;
 }
-function boxListsHtml(boxes, now) {
+function boxListsHtml(boxes, now, open) {
   const live = boxes.filter((b) => BOX_LIVE.includes(b.status));
   const others = boxes.filter((b) => !BOX_LIVE.includes(b.status));
   return `<div class="breakdown"><h3>Running now</h3>${live.length ? boxTableHtml(live, "Running boxes", "Up for", now) : `<p class="muted note">No boxes right now.</p>`}</div>
-    ${others.length ? `<details class="box-others"><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
+    ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
 const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
 function boxBodyHtml(box, now) {
   const u = box.data;
   if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
   if (!u.connected) return `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
-  return `${u.error ? boxNotice(`Upstash did not answer: ${u.error}`) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now)}`;
+  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
 }
 function boxUsageHtml(box, now) {
   return `<section class="box-usage" aria-busy="${box.loading}"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>${boxBodyHtml(box, now)}</section>`;
 }
+/** The page redraws whole, so "Other boxes" keeps its open state here. */
+pageView.addEventListener("toggle", (e) => {
+  if (e.target.matches?.(".box-others")) usageState.box.open = e.target.open;
+}, true);
 async function fetchBoxUsage() {
   if (!hub) return;
   const box = usageState.box;
