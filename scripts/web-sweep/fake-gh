@@ -132,6 +132,8 @@ if (cmd === "pr" && sub === "view") {
       labels: { nodes: [{ name: "build", color: "fbca04" }, { name: "beta", color: "0e8a16" }, { name: "ci", color: "1d76db" }, { name: "slow", color: "d93f0b" }] },
       commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } }),
     pr(40, "example/alpha", "Seed the notes", "sweeper", { state: "MERGED" }),
+    // $HOME/fake-gh-search.json, when a sweep writes it, adds [number, repo, title, author, extra] rows.
+    ...(fs.existsSync(path.join(process.env.HOME, "fake-gh-search.json")) ? JSON.parse(fs.readFileSync(path.join(process.env.HOME, "fake-gh-search.json"), "utf8")).map((row) => pr(...row)) : []),
   ];
   // "label:many" finds 150, two pages of GitHub's 100.
   if (/label:"?many/.test(q)) {
