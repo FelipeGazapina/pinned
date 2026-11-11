@@ -132,6 +132,8 @@ body[data-shell="web"] #gui-minimize { display: none !important; }
 #thread { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 48px 200px; overscroll-behavior: contain;
   scrollbar-width: thin; scrollbar-color: var(--g-scrollbar) transparent; }
 #thread .lane { max-width: var(--lane); margin: 0 auto; }
+/* Beside the open panel the chat is narrow, and its turns take the composer's 24px gutters. */
+@media (min-width: 769px) { body[data-panel="open"] #thread { padding-left: 24px; padding-right: 24px; } }
 #thread .blank { max-width: var(--lane); margin: 18vh auto 0; text-align: center; color: rgb(var(--g-muted-rgb) / 0.7); }
 #thread .blank .hint { font-size: 12px; }
 #thread .blank .primary { margin-top: 8px; }
