@@ -700,6 +700,32 @@ pub(crate) fn clip(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads the transcript `PINNED_BENCH_TRANSCRIPT` names to its end, a page at a time as the
+    /// app view does, and prints what the process holds before and after, as `footprint` reads it.
+    #[test]
+    #[ignore]
+    fn reading_a_long_transcript_leaves_little_behind() {
+        let file = std::path::PathBuf::from(std::env::var_os("PINNED_BENCH_TRANSCRIPT").expect("PINNED_BENCH_TRANSCRIPT names a transcript"));
+        let held = || {
+            let out = crate::process::command("footprint").args(["-f", "bytes", "--noCategories", &std::process::id().to_string()]).output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let bytes: u64 = text.split("Footprint:").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+            bytes / (1 << 20)
+        };
+        let before = held();
+        let (mut from, mut items, mut pages) = (0, 0, 0);
+        loop {
+            let page = read(&file, from).unwrap();
+            items += page.items.len();
+            pages += 1;
+            if page.next == from {
+                break;
+            }
+            from = page.next;
+        }
+        eprintln!("{pages} pages, {items} items; footprint {before} MB before, {} MB after", held());
+    }
     use std::io::Write;
 
     #[test]
