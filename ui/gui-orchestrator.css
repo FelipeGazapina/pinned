@@ -13,8 +13,13 @@
 /* Scripts, Open in and Git act on a project's checkout, which the orchestrator's own folder is not;
    Thread details still offers all three. */
 #chat-head:has(.orchestrator-mark) :is(#scripts-control, #open-in, #git-action) { display: none; }
+/* The composer's line on what a tag does, and the board's narrower lane beside the rail. */
+#tag-hint { flex: 0 1 auto; min-width: 0; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#tag-hint[hidden] { display: none; }
+html:not([data-chat-width="wide"], [data-chat-width="full"]) #chat[data-rail] { --lane: 680px; }
 @media (max-width: 768px) {
   #chat-head .crumb :is(.orchestrator-where, .orchestrator-actions) { display: none; }
+  #tag-hint { display: none; }
 }
 
 /* A sent message: its tags as pills, and the Captains it went to under it. */

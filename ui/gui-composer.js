@@ -1500,9 +1500,17 @@ onGuiKey("e", () => {
 
 const modeButton = document.getElementById("mode-button");
 const planToggle = document.getElementById("plan-toggle");
+/** The model the composer names: the thread's own, else the one its parent's delegate_task started it on. */
+function chipModel(tab) {
+  const own = modelName(tab);
+  const parent = own === "Default" && parentOf(tab);
+  return (parent && modelLabel(delegatedModels(parent).get(tab.view.id))) || own;
+}
+const tagHint = document.getElementById("tag-hint");
 function renderControls(tab) {
+  tagHint.hidden = !tab || !isGlobalOrchestratorTab(tab);
   const t = tab && threadOf(tab);
-  const name = tab ? modelName(tab) : "Default";
+  const name = tab ? chipModel(tab) : "Default";
   const modelButton = document.getElementById("model-button");
   // An unchanged label is left alone: rewriting it swaps the node a press landed on, and WebKit then drops the click.
   const nameEl = modelButton.querySelector(".name");
