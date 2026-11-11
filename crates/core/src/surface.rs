@@ -924,8 +924,9 @@ pub fn mask_secrets(text: &str) -> String {
     out
 }
 
-/// A Convex deploy key: `dev:`, `prod:` or `preview:` and a name, or a bare name with a token of
-/// 16 characters or more, then `|` and the token.
+/// A Convex deploy key: `dev:`, `prod:` or `preview:`, a name, `|` and a token of 16 characters or
+/// more. With no prefix the name must read as a deployment's and the token be 40 characters or
+/// more, so a shell pipe, a regex alternation or a table rule is not taken for a key.
 fn convex_key(text: &str) -> Option<usize> {
     let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-');
     let token = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=');
@@ -934,8 +935,16 @@ fn convex_key(text: &str) -> Option<usize> {
     let name = rest.chars().take_while(|c| named(*c) || (*c == ':' && prefix == "preview:")).count();
     let tail = rest[name..].strip_prefix('|')?;
     let run = tail.chars().take_while(|c| token(*c)).count();
-    let enough = if prefix.is_empty() { 16 } else { 1 };
+    let enough = if prefix.is_empty() { deployment_name(&rest[..name]).then_some(40)? } else { 16 };
     (name > 0 && run >= enough).then(|| prefix.len() + name + 1 + run)
+}
+
+/// `happy-otter-123` or `anonymous-agent`: words joined by hyphens, the last one maybe a number.
+fn deployment_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('-').collect();
+    let word = |part: &str| part.starts_with(|c: char| c.is_ascii_alphabetic());
+    let number = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    parts.len() >= 2 && parts.iter().enumerate().all(|(at, part)| word(part) || (at + 1 == parts.len() && number(part)))
 }
 
 fn jwt(text: &str) -> Option<usize> {
@@ -1416,15 +1425,33 @@ mod tests {
     fn a_convex_deploy_key_is_hidden_and_its_deployment_name_is_not() {
         let cases = [
             ("key dev:quick-lemur-789|eyJ2MiI6ImExYjIifQ== failed", "key [hidden] failed"),
-            ("prod:happy-otter-123|t0k3n, preview:calm-fox-456|abc", "[hidden], [hidden]"),
+            ("prod:happy-otter-123|eyJ2MiI6IjBhMWIyYzNkNGU1ZjYwNzE4MjkzYTRiNWM2ZDdlOGY5In0=, preview:calm-fox-456|eyJ2MiI6InByZXZpZXcifQ", "[hidden], [hidden]"),
             ("preview:acme:site|eyJ2MiI6InByZXZpZXcifQ", "[hidden]"),
-            ("CONVEX_DEPLOY_KEY=happy-otter-123|0123456789abcdef0123", "CONVEX_DEPLOY_KEY=[hidden]"),
+            ("CONVEX_DEPLOY_KEY=happy-otter-123|eyJ2MiI6IjBhMWIyYzNkNGU1ZjYwNzE4MjkzYTRiNWM2ZDdlOGY5In0=", "CONVEX_DEPLOY_KEY=[hidden]"),
+            ("adminKey anonymous-agent|01a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809 ok", "adminKey [hidden] ok"),
             ("CONVEX_DEPLOYMENT=dev:quick-lemur-789", "CONVEX_DEPLOYMENT=dev:quick-lemur-789"),
             ("ls|grep foo", "ls|grep foo"),
             ("dev:quick-lemur-789 | tail", "dev:quick-lemur-789 | tail"),
         ];
         for (text, shown) in cases {
             assert_eq!(mask_secrets(text), shown, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_pipe_in_ordinary_text_is_not_taken_for_a_convex_key() {
+        let kept = [
+            "sed 's|/usr/local/share|/opt|' config",
+            "sed 's|/usr/local/share/pinned/a/very/long/path/of/more/than/forty/characters|/opt|'",
+            "grep -E \"timeout|connection_refused_error\" hub.log",
+            "| name | value |\n|------------------|------------------|\n| a | b |",
+            "|--------------------------------------------|--------------------------------------------|",
+            "npm run dev:api|tee build.log",
+            "cat file|base64_decode_then_write_it_out_to_the_log_file_named",
+            "happy-otter-123|short-token-of-20ch",
+        ];
+        for text in kept {
+            assert_eq!(mask_secrets(text), text);
         }
     }
 
