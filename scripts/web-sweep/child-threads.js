@@ -141,10 +141,6 @@ async function launchBrowser(errors) {
 
 // Runs in the page: the sidebar from the top, each element as a token.
 const sidebarTokens = () => [...document.querySelectorAll("#thread-list > *")].map((el) => {
-  if (el.matches(".global-row")) return `orchestrator ${el.querySelector(".count")?.textContent ?? 0}`;
-  if (el.matches(".waiting-head")) return `waiting ${el.querySelector(".count")?.textContent ?? 0}`;
-  if (el.matches(".waiting-row")) return `asks ${el.dataset.waiting}`;
-  if (el.matches(".side-heading")) return `heading ${el.textContent}`;
   if (el.matches(".project-head")) return `project ${[...el.querySelectorAll(".name, .state, .where")].map((e) => e.textContent).join(" ")}`;
   if (el.matches(".thread-row")) return `${el.classList.contains("child") ? `  `.repeat(Number(el.style.getPropertyValue("--depth"))) : ""}${el.dataset.tab}`;
   return el.className;
@@ -215,9 +211,13 @@ const sendText = (page, text) => page.evaluate((t) => {
     const at = tokens.indexOf(captain.key);
     check(at >= 0 && JSON.stringify(tokens.slice(at + 1, at + 3)) === JSON.stringify(children.map((c) => `  ${c.key}`)),
       `the Captain with both children nested under it: ${JSON.stringify(tokens.slice(at, at + 3))}`);
-    const slot = await page.evaluate((k) => document.querySelector(`.thread-row[data-tab="${k}"]`)?.innerText.replace(/\s+/g, " ").trim(), captain.key);
+    // The Captain's row names its role on its second line and sums up its working child in its slot.
+    const slot = await page.evaluate((k) => {
+      const row = document.querySelector(`.thread-row[data-tab="${k}"]`);
+      return row && `${row.querySelector(".role")?.textContent} | ${row.querySelector(".stamp.status")?.textContent.trim()}`;
+    }, captain.key);
     console.log("captain card:", JSON.stringify(slot));
-    check(/Captain.* 1 working/.test(slot), `the Captain's card sums up its working child: ${slot}`);
+    check(/^Captain \| 1 working/.test(slot ?? ""), `the Captain's card sums up its working child: ${slot}`);
     await page.screenshot(path.join(SCREENS, "child-threads.png"));
 
     await page.click(`.thread-row[data-tab="${children[0].key}"]`);

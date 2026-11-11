@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Shoots every screen of the global orchestrator release at 1440x900 and 390x844, to put beside
-// its board in prototype/live: Main (sidebar, Captain card, global chat), Waiting on you,
+// its board in prototype/live: Main (sidebar, Captain card, global chat), Needs you,
 // Projects, the orchestrator's settings, and Way of working with Chat to adjust.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
@@ -123,7 +123,7 @@ const captainCard = () => {
       await shot("main-chat");
       await page.evaluate(() => toggleSidebar(true));
     }
-    await page.evaluate(() => { ui.waitingOpen = false; renderSidebar(); });
+    await page.evaluate(() => renderSidebar());
     await waitFor("the Captain card", () => page.evaluate(captainCard));
     const card = await page.evaluate(captainCard);
     console.log("captain card:", JSON.stringify(card));
@@ -132,13 +132,12 @@ const captainCard = () => {
     if (phone) await shot("main-captain");
     cards.push([size, card]);
 
-    // Waiting on you, open in the sidebar, and the question's thread.
-    await page.evaluate(() => { ui.waitingOpen = true; renderSidebar(); });
-    await waitFor("the waiting rows", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length > 0));
-    if (phone) await page.evaluate(() => document.getElementById("thread-list").scrollTo(0, 0));
+    // Needs you, and a waiting thread opened from its card.
+    await page.evaluate(() => openPage("needs-you"));
+    await waitFor("the waiting cards", () => page.evaluate(() => document.querySelectorAll("#page-view .ny-card").length > 0));
     await shot("waiting");
-    await page.click(".waiting-row");
-    if (phone) await page.evaluate(() => toggleSidebar(false));
+    await page.click('#page-view .ny-card [data-ny="open"]');
+    await waitFor("the card's thread", () => page.evaluate(() => !shellPage() && !!active));
     await shot("waiting-thread");
 
     // Projects.

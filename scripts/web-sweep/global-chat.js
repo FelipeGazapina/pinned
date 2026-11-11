@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Drives the global orchestrator's chat on the real page: the sidebar row, the grouped §8 report
-// rows, the Opções quick replies, Waiting on you, read aloud held back on desktop but spoken on a
-// phone, and the sidebar's project tree with the projects page's worker counts.
+// Drives the global orchestrator's chat on the real page: the sidebar's Orchestrator row, the grouped
+// §8 report rows, the Opções quick replies, the Needs you page and its count, read aloud held back on
+// desktop but spoken on a phone, and the sidebar's project tree with the projects page's worker counts.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... node scripts/web-sweep/global-chat.js
@@ -151,12 +151,14 @@ async function launchBrowser(errors) {
 const state = () => ({
   row: document.querySelector(".global-row")?.innerText.replace(/\s+/g, " ").trim() ?? null,
   name: globalSettings.name,
-  waitingHead: document.querySelector(".waiting-head")?.innerText.replace(/\s+/g, " ").trim() ?? null,
-  waitingRows: [...document.querySelectorAll(".waiting-row")].map((r) => r.innerText.replace(/\s+/g, " ").trim()),
+  needsYou: document.querySelector('#side-nav [data-nav="needs-you"] .count:not([hidden])')?.textContent ?? "0",
+  waitingRows: [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((r) =>
+    [".ny-name", ".ny-where"].map((q) => r.querySelector(q)?.textContent.trim()).join(" · ")),
   threadRows: [...document.querySelectorAll("#thread-list .thread-row")].map((r) => r.dataset.tab),
   orquestradorProject: projectGroups().some((g) => /orquestrador/i.test(g.name)),
   fold: document.querySelector(".report-fold")?.innerText.replace(/\s+/g, " ").trim() ?? null,
-  reportRows: [...document.querySelectorAll(".report-row")].map((r) => r.innerText.replace(/\s+/g, " ").trim()),
+  // A report row reads its Captain, machine and words in its main column, beside the project tile and Open thread.
+  reportRows: [...document.querySelectorAll(".report-row")].map((r) => (r.querySelector(".main") ?? r).innerText.replace(/\s+/g, " ").trim()),
   quickReplies: [...document.querySelectorAll(".quick-reply")].map((b) => b.dataset.reply),
   thread: document.getElementById("thread").innerText,
   active: active?.key ?? null,
@@ -203,10 +205,6 @@ function seedTree(keys) {
 
 // Runs in the page: the sidebar from the top, each element as a token.
 const sidebarTokens = () => [...document.querySelectorAll("#thread-list > *")].map((el) => {
-  if (el.matches(".global-row")) return `orchestrator ${el.querySelector(".count")?.textContent ?? 0}`;
-  if (el.matches(".waiting-head")) return `waiting ${el.querySelector(".count")?.textContent ?? 0}`;
-  if (el.matches(".waiting-row")) return `asks ${el.dataset.waiting}`;
-  if (el.matches(".side-heading")) return `heading ${el.textContent}`;
   if (el.matches(".project-head")) return `project ${[...el.querySelectorAll(".name, .state, .where")].map((e) => e.textContent).join(" ")}`;
   if (el.matches(".thread-row")) return `${el.classList.contains("child") ? `  `.repeat(Number(el.style.getPropertyValue("--depth"))) : ""}${el.dataset.tab}`;
   return el.className;
@@ -248,7 +246,7 @@ const sendText = (page, text) => page.evaluate((t) => {
     await waitFor("the orchestrator's row", () => page.evaluate(() => !!document.querySelector(".global-row")));
     let s = await page.evaluate(state);
     console.log("the row:", JSON.stringify(s.row));
-    check(s.row === `${s.name} sweep-node · all projects`, `row: ${s.row}`);
+    check(s.row === `${s.name} sweep-node`, `row: ${s.row}`);
     check(!s.orquestradorProject, "orquestrador is a project in the tree");
 
     await page.click(".global-row");
@@ -330,13 +328,14 @@ const sendText = (page, text) => page.evaluate((t) => {
 
     await page.evaluate((k) => activate(tabByKey(k)), keys.site);
     await sendText(page, "/question");
-    await waitFor("Waiting on you", () => page.evaluate(() => !!document.querySelector(".waiting-row")));
+    await waitFor("the Needs you count", () => page.evaluate(() => !document.querySelector('#side-nav [data-nav="needs-you"] .count').hidden));
+    await page.click('#side-nav [data-nav="needs-you"]');
+    await waitFor("the Needs you card", () => page.evaluate(() => document.querySelectorAll('#page-view .ny-card[data-kind="question"]').length === 1));
     s = await page.evaluate(state);
-    console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
-    check(s.waitingHead === "Waiting on you 1", `head: ${s.waitingHead}`);
-    check(s.waitingRows.length === 1 && /^\/question site · sweep-node · \S+$/.test(s.waitingRows[0]), `rows: ${JSON.stringify(s.waitingRows)}`);
-    check(await page.evaluate(() => !!document.querySelector(".waiting-row .dot.question")), "the question's dot is not the question tone");
-    check(s.row.endsWith("all projects 1"), `the orchestrator's row does not count the one waiting thread: ${s.row}`);
+    console.log("waiting:", JSON.stringify({ needsYou: s.needsYou, rows: s.waitingRows }));
+    check(s.needsYou === "1", `the Needs you row counts ${s.needsYou}`);
+    check(s.waitingRows.length === 1 && s.waitingRows[0] === "/question · site · sweep-node", `rows: ${JSON.stringify(s.waitingRows)}`);
+    check(await page.evaluate(() => document.querySelector('#page-view .ny-card[data-kind="question"] .ny-kind')?.textContent === "Question"), "the question's card does not say Question");
     check(!s.threadRows.includes(globalKey), "the global tab joined the thread list");
     check(await page.evaluate((k) => tabByKey(k).view.status === "needs-input" && !tabByKey(k).view.interrupted, keys.pinned), "the pinned Captain left its idle notice");
 
@@ -344,26 +343,28 @@ const sendText = (page, text) => page.evaluate((t) => {
     // monorepo-photoshot's "PR #254" did, and so does a failure.
     await page.evaluate((k) => activate(tabByKey(k)), keys.pinned);
     await sendText(page, "asks");
-    await waitFor("the asked question", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 2));
+    await waitFor("the asked question", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"));
     await waitFor("the idle notice after the question", () => page.evaluate((k) => tabByKey(k).view.status === "needs-input", keys.pinned));
     const asked = await page.evaluate((k) => tabByKey(k).view, keys.pinned);
     console.log("asked:", JSON.stringify({ status: asked.status, interrupted: asked.interrupted ?? false, message: asked.message, question: asked.question }));
     check(!asked.interrupted && asked.question === "Should I cut the release now?", "the pinned Captain's question did not survive its idle notice");
-    check(await page.evaluate(() => document.querySelectorAll(".waiting-row").length === 2), "the idle notice took the question off the list");
+    check(await page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"), "the idle notice took the question off the list");
     await page.evaluate((k) => activate(tabByKey(k)), keys.api);
     await sendText(page, "spent");
-    await waitFor("the failure", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 3));
-    await page.evaluate(() => activate(tabs.find(isGlobalOrchestratorTab)));
+    await waitFor("the failure", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "3"));
+    await page.click('#side-nav [data-nav="needs-you"]');
+    await waitFor("three cards", () => page.evaluate(() => document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])').length === 3));
     s = await page.evaluate(state);
-    console.log("waiting:", JSON.stringify({ head: s.waitingHead, rows: s.waitingRows }));
-    check(s.waitingHead === "Waiting on you 3", `head: ${s.waitingHead}`);
-    check(s.row.endsWith("all projects 3"), `the orchestrator's row does not count three waiting threads: ${s.row}`);
-    const kinds = await page.evaluate(() => [...document.querySelectorAll(".waiting-row")].map((r) => `${r.querySelector(".dot").classList[1]} ${r.querySelector(".where").innerText.split(" · ")[0]}`).sort());
+    console.log("waiting:", JSON.stringify({ needsYou: s.needsYou, rows: s.waitingRows }));
+    check(s.needsYou === "3", `the Needs you row counts ${s.needsYou}`);
+    const kinds = await page.evaluate(() => [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((r) => `${r.dataset.kind} ${r.querySelector(".ny-where").textContent.split(" · ")[0]}`).sort());
     check(JSON.stringify(kinds) === JSON.stringify(["failed api", "question pinned", "question site"]), `rows: ${JSON.stringify(kinds)}`);
     await page.screenshot(path.join(SCREENS, "global-chat-waiting.png"));
 
-    await page.click(`.waiting-row[data-waiting="${keys.site}"]`);
-    await waitFor("the question's thread to open", () => page.evaluate((k) => active?.key === k, keys.site));
+    // Needs you answers a question on its card; a failure's card opens its thread.
+    check(await page.evaluate((k) => document.querySelectorAll(`#page-view .ny-card[data-key="thread:${k}"] .ny-option`).length > 0, keys.site), "the question's card offers no answers");
+    await page.click(`#page-view .ny-card[data-key="thread:${keys.api}"] [data-ny="open"]`);
+    await waitFor("the failure's thread to open", () => page.evaluate((k) => active?.key === k, keys.api));
 
     // Read aloud stays silent on a desktop even with the setting on.
     await page.evaluate(() => {
@@ -387,11 +388,10 @@ const sendText = (page, text) => page.evaluate((t) => {
     const phone = await browser.tab(true);
     await phone.goto(HUB);
     await waitFor("the hub on the phone", () => phone.evaluate(() => document.body.dataset.hub === "online"));
-    await waitFor("the orchestrator's row on the phone", () => phone.evaluate(() => !!document.querySelector(".global-row")));
+    await waitFor("the Orchestrator tab on the phone", () => phone.evaluate(() => !!document.querySelector('#phone-tabs [data-phone-tab="orchestrator"]')?.checkVisibility()));
     check(await phone.evaluate(() => touchComposer() === true), "the phone emulation did not report a coarse pointer");
-    await phone.evaluate(() => toggleSidebar(true));
     await phone.screenshot(path.join(SCREENS, "global-chat-phone-sidebar.png"));
-    await phone.click(".global-row");
+    await phone.click('#phone-tabs [data-phone-tab="orchestrator"]');
     await waitFor("the global tab on the phone", () => phone.evaluate(() => active ? isGlobalOrchestratorTab(active) : false));
     await phone.evaluate(() => {
       window.__spoken = [];
@@ -412,11 +412,11 @@ const sendText = (page, text) => page.evaluate((t) => {
       await page.evaluate((k) => activate(tabByKey(k)), keys[name]);
       await sendText(page, "ok");
     }
-    await waitFor("the answered threads to leave the list", () => page.evaluate(() => document.querySelectorAll(".waiting-row").length === 1));
+    await waitFor("the answered threads to leave the list", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "1"));
     check(await page.evaluate((k) => !tabByKey(k).view.question, keys.pinned), "the pinned Captain kept its question after the next turn");
 
-    // The sidebar tree: the orchestrator's row with its count, Waiting on you, then each project
-    // with its Captain, the Captain's workers under it, and the project's plain threads.
+    // The sidebar tree: the Needs you row with its count above the list, then each project with its
+    // Captain, the Captain's workers under it, and the project's plain threads.
     await page.size(1440, 900);
     const alpha = fs.realpathSync(path.join(WORK, "alpha"));
     const beta = fs.realpathSync(path.join(WORK, "beta"));
@@ -432,24 +432,26 @@ const sendText = (page, text) => page.evaluate((t) => {
     await page.shotOf(`.thread-row[data-tab="${tree.plain}"]`, path.join(SCREENS, `sidebar-card-plain-${shot}.png`));
     const tokens = await page.evaluate(sidebarTokens);
     console.log("sidebar:", JSON.stringify(tokens, null, 1));
-    const asks = tokens.filter((t) => t.startsWith("asks "));
-    check(asks.length === 2 && asks.includes(`asks ${tree.waiting}`), `waiting rows: ${JSON.stringify(asks)}`);
-    check(tokens[0] === "orchestrator 2" && tokens[1] === "waiting 2", `the orchestrator's count and the waiting head: ${JSON.stringify(tokens.slice(0, 2))}`);
-    const projectsAt = tokens.indexOf("heading Projects");
-    check(projectsAt === 2 + asks.length, `the Projects heading is not right under Waiting on you: ${projectsAt}`);
+    await waitFor("the Needs you count of 2", () => page.evaluate(() => document.querySelector('#side-nav [data-nav="needs-you"] .count').textContent === "2"));
+    await page.click('#side-nav [data-nav="needs-you"]');
+    await waitFor("the waiting cards", () => page.evaluate(() => document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])').length === 2));
+    const asks = await page.evaluate(() => [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((c) => c.dataset.key.replace(/^thread:/, "")));
+    check(asks.length === 2 && asks.includes(tree.waiting), `waiting cards: ${JSON.stringify(asks)}`);
+    check(tokens[0].startsWith("project "), `the list does not start with a project: ${JSON.stringify(tokens.slice(0, 2))}`);
     const alphaAt = tokens.indexOf("project alpha 1 queued 1 running sweep-node");
-    check(alphaAt > projectsAt, `alpha's head: ${JSON.stringify(tokens.filter((t) => t.startsWith("project ")))}`);
+    check(alphaAt >= 0, `alpha's head: ${JSON.stringify(tokens.filter((t) => t.startsWith("project ")))}`);
     check(JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5)) === JSON.stringify([tree.captain, `  ${tree.w1}`, `  ${tree.w2}`, tree.plain]),
       `alpha's Captain, its two workers under it, then the plain thread: ${JSON.stringify(tokens.slice(alphaAt + 1, alphaAt + 5))}`);
     const betaAt = tokens.indexOf("project beta sweep-node");
-    check(betaAt > projectsAt && tokens[betaAt + 1] === tree.waiting, `beta's head and its waiting thread: ${JSON.stringify(tokens.slice(betaAt, betaAt + 2))}`);
+    check(betaAt >= 0 && tokens[betaAt + 1] === tree.waiting, `beta's head and its waiting thread: ${JSON.stringify(tokens.slice(betaAt, betaAt + 2))}`);
     const headCount = tokens.filter((t) => t.startsWith("project ")).length;
     check(new Set(tokens.filter((t) => t.startsWith("project ")).map((t) => t.split(" ")[1])).size === headCount, "a project has two heads");
     await page.screenshot(path.join(SCREENS, "sidebar-tree.png"));
 
-    // The Projects heading opens the projects page, which counts alpha's two running workers, for
-    // the project and for its checkout.
-    await page.click(".side-heading[data-global-projects]");
+    // Projects in the account menu opens the projects page, which counts alpha's two running workers,
+    // for the project and for its checkout.
+    await page.click("#account-pages");
+    await page.click('#account-menu [data-open-page="global-projects"]');
     await waitFor("the projects page", () => page.evaluate(() => shellPage() === "global-projects"));
     const alphaProject = () => page.evaluate(() => {
       renderGlobalProjectsPage();
@@ -471,7 +473,8 @@ const sendText = (page, text) => page.evaluate((t) => {
     await small.evaluate(() => toggleSidebar(true));
     await waitFor("alpha's head on the phone", () => small.evaluate(() => [...document.querySelectorAll(".project-head")].some((h) => /queued/.test(h.innerText))));
     const phoneTokens = await small.evaluate(sidebarTokens);
-    check(phoneTokens.includes("project alpha 1 queued 1 running sweep-node") && phoneTokens[0] === "orchestrator 2", `phone sidebar: ${JSON.stringify(phoneTokens)}`);
+    const badge = await small.evaluate(() => document.querySelector('#phone-tabs [data-phone-tab="needs-you"] .badge:not([hidden])')?.textContent ?? "0");
+    check(phoneTokens.includes("project alpha 1 queued 1 running sweep-node") && badge === "2", `phone sidebar: ${JSON.stringify(phoneTokens)}, Needs you ${badge}`);
     await small.screenshot(path.join(SCREENS, "sidebar-tree-phone.png"));
     await small.evaluate(() => document.querySelector(".project-head").scrollIntoView());
     await small.screenshot(path.join(SCREENS, "sidebar-tree-phone-projects.png"));

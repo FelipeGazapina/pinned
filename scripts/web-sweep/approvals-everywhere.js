@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Shoots "Waiting on you" with approvals from two machines, at 1440x900 and 390x844: a Captain on
+// Shoots the Needs you page with approvals from two machines, at 1440x900 and 390x844: a Captain on
 // sweep-node delegates a worker to a second node (sweep-mini), the worker hits a permission prompt,
-// and two loose threads ask a question and fail. The rows say Approval, Question and Failed in
-// words, name their machine and show what is asked. Then the worker is answered and its row goes.
+// and two loose threads ask a question and fail. The cards say Approval, Question and Failed in
+// words, name their machine and show what is asked. Then the Captain's thread hears of the approval.
 //
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh start
 //   SWEEP_DIR=... PLAYWRIGHT=<dir>/node_modules/playwright node scripts/web-sweep/approvals-everywhere.js
@@ -60,9 +60,16 @@ function startMini() {
   return proc;
 }
 
-// Runs in the page: the waiting area as text, in order.
+// Runs in the page: the Needs you page's cards that wait on the user, as text, in order: the kind,
+// where, the title, then what it asks.
 const waitingArea = () =>
-  [...document.querySelectorAll("#thread-list .waiting-row:not(.offer)")].map((el) => el.textContent.replace(/\s+/g, " ").trim());
+  [...document.querySelectorAll('#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])')].map((el) =>
+    [".ny-kind", ".ny-where", ".ny-name", "pre, .ny-line, .ny-options"].map((s) => el.querySelector(s)?.textContent.replace(/\s+/g, " ").trim()).filter(Boolean).join(" · "));
+const WAITING = '#page-view .ny-card:not([data-kind="offer"], [data-kind="review"])';
+const openNeedsYou = async (page, phone) => {
+  await page.click(phone ? '#phone-tabs [data-phone-tab="needs-you"]' : '#side-nav [data-nav="needs-you"]');
+  await waitFor("the Needs you page", () => page.evaluate(() => shellPage() === "needs-you"));
+};
 
 const send = (page, key, text) =>
   page.evaluate(async ({ key, text }) => {
@@ -120,13 +127,14 @@ const send = (page, key, text) =>
     await loose("Fix the flaky checkout test", "limited");
 
     // The worker's brief is marked [ask], which the fake claude answers with a Bash permission prompt.
-    await waitFor("three rows in Waiting on you", () => page.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 40000).catch(async (e) => {
+    await openNeedsYou(page, false);
+    await waitFor("three cards on Needs you", () => page.evaluate((sel) => document.querySelectorAll(sel).length >= 3, WAITING), 40000).catch(async (e) => {
       console.log(JSON.stringify(await page.evaluate(() => tabs.map((t) => ({ title: t.view.title, machine: machines.get(t.machine)?.view.name, status: t.view.status, running: t.view.running, interrupted: t.view.interrupted, message: t.view.message, detail: t.view.ask_detail, menu: !!t.menu }))), null, 1));
       throw e;
     });
 
     // The machine reads what each thread waits on from its transcript a moment after the notice.
-    await waitFor("the worker's command and the question in the rows", () => page.evaluate(() => /rm -rf build/.test(document.getElementById("thread-list").innerText) && /Which color\?/.test(document.getElementById("thread-list").innerText)), 20000);
+    await waitFor("the worker's command and the question on the cards", () => page.evaluate(() => /rm -rf build/.test(document.getElementById("page-view").innerText) && /Which color\?/.test(document.getElementById("page-view").innerText)), 20000);
     for (const [size, viewport] of SIZES) {
       const phone = size === "phone";
       const view = phone ? await browser.newContext({ viewport, deviceScaleFactor: 2, colorScheme: "dark", isMobile: phone, hasTouch: phone }) : context;
@@ -141,14 +149,9 @@ const send = (page, key, text) =>
         }
         await waitFor("the hub on the phone", () => shot.evaluate(() => document.body.dataset.hub === "online"));
         await shot.evaluate(() => setMode("gui"));
-        await waitFor("the rows on the phone", () => shot.evaluate(() => document.querySelectorAll("#thread-list .waiting-row:not(.offer)").length >= 3), 60000);
-        await shot.evaluate(() => toggleSidebar(true));
+        await openNeedsYou(shot, true);
+        await waitFor("the cards on the phone", () => shot.evaluate((sel) => document.querySelectorAll(sel).length >= 3, WAITING), 60000);
       }
-      await shot.evaluate(() => {
-        ui.waitingOpen = true;
-        renderSidebar();
-        document.getElementById("thread-list").scrollTo(0, 0);
-      });
       const rows = await shot.evaluate(waitingArea);
       console.log(`${size}:\n  ${rows.join("\n  ")}`);
       await shot.waitForTimeout(500);
@@ -156,9 +159,9 @@ const send = (page, key, text) =>
       await shot.screenshot({ path: path.join(SCREENS, `real-${size === "phone" ? "390x844" : "1440x900"}.png`) });
       if (!phone) {
         const text = rows.join("\n");
-        check(/Approval · alpha · sweep-mini · \w+Bash\s?rm -rf build/.test(rows.find((r) => /sweep-mini/.test(r)) ?? ""), `the worker's approval reads Approval, names sweep-mini and shows Bash rm -rf build: ${rows.find((r) => /sweep-mini/.test(r))}`);
-        check(/Question · alpha · sweep-node/.test(text), "the question reads Question and names its machine");
-        check(/Failed · alpha · sweep-node/.test(text), "the failure reads Failed and names its machine");
+        check(/^Approval · alpha · sweep-mini · Apply the orders migration · rm -rf build$/.test(rows.find((r) => /sweep-mini/.test(r)) ?? ""), `the worker's approval reads Approval, names sweep-mini and shows rm -rf build: ${rows.find((r) => /sweep-mini/.test(r))}`);
+        check(/Question · alpha · sweep-node · .*Which color\?/.test(text), "the question reads Question, names its machine and shows the question");
+        check(/(Failed|Usage limit) · alpha · sweep-node/.test(text), "the failure reads Failed or Usage limit and names its machine");
       }
       if (phone) await view.close();
     }

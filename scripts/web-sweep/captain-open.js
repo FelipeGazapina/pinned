@@ -90,9 +90,10 @@ async function shoot(browser, size, setUp) {
   result.captain = { opened: await page.evaluate((k) => active?.key === k && document.getElementById("thread").innerText.includes("Started 2 workers"), captain), toast: await toast() };
   await page.screenshot({ path: path.join(SCREENS, `captain-open-${LABEL}-captain-${name}.png`) });
 
+  // A phone opens the orchestrator from its tab bar, which shows on the Threads screen.
   await openSidebar();
   await page.waitForTimeout(400);
-  await page.click("[data-global-open]", { timeout: 5000 }).catch((e) => errors.push(`no orchestrator row: ${e.message.split("\n")[0]}`));
+  await page.click(phone ? '#phone-tabs [data-phone-tab="orchestrator"]' : "[data-global-open]", { timeout: 5000 }).catch((e) => errors.push(`no orchestrator row: ${e.message.split("\n")[0]}`));
   await page.waitForTimeout(1500);
   // The toast sits in the sidebar, which the click closed on a phone.
   if (phone && (await toast())) await openSidebar();
