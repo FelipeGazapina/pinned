@@ -276,6 +276,8 @@ test("the panel shows the connection, Only these, and the picked tables ticked i
   const all = context.graphNodePanel(editing(context, { step: step() }));
   assert.match(all, /class="chip active" data-action="convex-all-tables"/);
   assert.doesNotMatch(all, /convex-step-tables/);
+  assert.match(all, /<p class="hint">All tables also lets this run execute queries and read logs\. A query can read the deployment's environment variables by name\. A table list turns both off\.<\/p>/);
+  assert.doesNotMatch(html, /environment variables/);
 });
 
 test("with 128 tables the filter narrows the list and picked tables stay as chips", () => {

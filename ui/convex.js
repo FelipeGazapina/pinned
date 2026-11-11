@@ -305,7 +305,7 @@ function convexStepPanel(node) {
       <div class="chips"><button type="button" class="chip${only ? "" : " active"}" data-action="convex-all-tables">All tables</button><button type="button" class="chip${only ? " active" : ""}" data-action="convex-only-tables">Only these</button></div>
       ${only ? `<div id="convex-step-tables">${convexTablesHtml(node)}</div>` : ""}
     </div>
-    <p class="hint">With a table list, queries and logs are off for this run.</p>`;
+    <p class="hint">${only ? "With a table list, queries and logs are off for this run." : "All tables also lets this run execute queries and read logs. A query can read the deployment's environment variables by name. A table list turns both off."}</p>`;
 }
 
 /** All tables (`null`) or a list. Picking Only these again keeps the list already picked. */
