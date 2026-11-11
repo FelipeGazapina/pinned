@@ -512,6 +512,29 @@ test("a thread off screen keeps only what the sidebar reads once its first read 
   assert.equal(net.reads, reads + 1, "one read from the start brings the thread back");
 });
 
+test("a thread that comes on screen while a read of its newest lines is out still shows all of it", async () => {
+  clearScreen();
+  const kinds = (tab) => Array.from(tab.thread.items, (item) => item.kind);
+  const [background, shown] = [tabFor("tab-1", "idle"), tabFor("tab-2", "idle")];
+  const quiet = transcript();
+  quiet.append({ item: { kind: "tool", at: "t1", id: "toolu_1", name: "Bash", summary: "cargo test", detail: "cargo test" } });
+  quiet.append({ item: text("Done.") });
+  const net = network({ "tab-1": quiet, "tab-2": transcript() });
+  sandbox.tabs = [background, shown];
+  sandbox.active = shown;
+  sandbox.fetchThread(background);
+  sandbox.fetchThread(shown);
+  await net.drain();
+  assert.deepEqual(kinds(background), ["user", "text"]);
+  quiet.append({ item: text("One more thing.") });
+  await startUnansweredRead(background);
+  assert.equal(net.queue.length, 1, "the read of the newest lines is out");
+  sandbox.active = background;
+  sandbox.renderGui();
+  await net.drain();
+  assert.deepEqual(kinds(background), ["user", "tool", "text", "text"]);
+});
+
 test("what was drawn for a thread is forgotten when another thread comes on screen, and kept while it stays", async () => {
   clearScreen();
   const [first, second] = [tabFor("tab-1", "idle"), tabFor("tab-2", "idle")];

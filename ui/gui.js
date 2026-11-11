@@ -142,7 +142,13 @@ async function fetchThread(tab) {
       t.again = false;
       t.readAt = performance.now();
       const before = drawnOf(t);
-      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
+      const from = t.next;
+      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from });
+      // The thread started over while this read was out: what came back follows a place it left.
+      if (t.next !== from) {
+        t.again = true;
+        continue;
+      }
       t.error = null;
       if (!page.session && t.session) return;
       if (page.reset) Object.assign(t, { items: [], todos: null, branch: null, context: null, resets: (t.resets ?? 0) + 1 });
