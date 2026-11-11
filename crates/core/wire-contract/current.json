@@ -250,6 +250,37 @@
                 ]
               },
               {
+                "description": "Null. The tab is on the client's screen: a session that sleeps starts at this size, and\none that runs stays awake. The client sends it again while the tab stays there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "wake"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "cols": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "cols",
+                  "rows"
+                ]
+              },
+              {
                 "description": "The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the\ntab's conversation; a session already running that way is left alone.",
                 "type": "object",
                 "properties": {
@@ -9771,6 +9802,37 @@
                   "cmd": {
                     "type": "string",
                     "const": "start_claude"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "cols": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "cols",
+                  "rows"
+                ]
+              },
+              {
+                "description": "Null. The tab is on the client's screen: a session that sleeps starts at this size, and\none that runs stays awake. The client sends it again while the tab stays there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "wake"
                   },
                   "tab": {
                     "type": "string"
@@ -52719,6 +52781,37 @@
                 ]
               },
               {
+                "description": "Null. The tab is on the client's screen: a session that sleeps starts at this size, and\none that runs stays awake. The client sends it again while the tab stays there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "wake"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "cols": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "cols",
+                  "rows"
+                ]
+              },
+              {
                 "description": "The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the\ntab's conversation; a session already running that way is left alone.",
                 "type": "object",
                 "properties": {
@@ -58095,6 +58188,37 @@
                   "cmd": {
                     "type": "string",
                     "const": "start_claude"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "cols": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "cols",
+                  "rows"
+                ]
+              },
+              {
+                "description": "Null. The tab is on the client's screen: a session that sleeps starts at this size, and\none that runs stays awake. The client sends it again while the tab stays there.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "wake"
                   },
                   "tab": {
                     "type": "string"

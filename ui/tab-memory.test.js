@@ -271,3 +271,26 @@ test("a thread never shown keeps its first read, and one with a turn running kee
   sandbox.lightenThreads();
   assert.deepEqual(tabs.map((tab) => sandbox.threadOf(tab).items.length), [7, 7, 4, 7, 7, 7, 7, 7, 7]);
 });
+
+test("the tab on screen is named to its machine when it comes on screen and every minute it stays, and a stopped tab or a sign-in is not", () => {
+  const calls = [];
+  const timers = [];
+  const state = { active: null };
+  const sandbox = { callOn: (machine, call) => (calls.push([machine, call]), Promise.resolve()), visibleInterval: (fn, ms) => timers.push([fn, ms]) };
+  Object.defineProperty(sandbox, "active", { get: () => state.active });
+  vm.createContext(sandbox);
+  vm.runInContext(slice(source("main.js"), "const AWAKE_EVERY_MS", "function show("), sandbox);
+  const tab = (view) => ({ machine: "m", view: { id: "tab-1", program: "agent", ...view }, term: { cols: 120, rows: 40 } });
+  sandbox.wakeSession(tab({ running: true }));
+  sandbox.wakeSession(tab({ running: false }));
+  sandbox.wakeSession(tab({ running: true, program: "sign-in" }));
+  sandbox.wakeSession(undefined);
+  const wake = ["m", { cmd: "wake", tab: "tab-1", cols: 120, rows: 40 }];
+  assert.equal(JSON.stringify(calls), JSON.stringify([wake]));
+  assert.deepEqual(timers.map(([, ms]) => ms), [60000]);
+  timers[0][0]();
+  assert.equal(calls.length, 1, "no tab is on screen yet");
+  state.active = tab({ running: true });
+  timers[0][0]();
+  assert.equal(JSON.stringify(calls), JSON.stringify([wake, wake]));
+});

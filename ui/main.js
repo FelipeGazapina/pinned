@@ -817,6 +817,16 @@ function activate(tab) {
   show(tab);
 }
 
+const AWAKE_EVERY_MS = 60 * 1000;
+/** Tells the tab's machine that the tab is on screen: a session that sleeps starts, and one that
+ * runs is not put to sleep. A machine from before sessions slept does not know the call, and
+ * needs none. */
+function wakeSession(tab) {
+  if (tab?.view.running && tab.view.program !== "sign-in") callOn(tab.machine, { cmd: "wake", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
+}
+// Said again while the tab stays on screen, and at once when the window comes back.
+visibleInterval(() => wakeSession(active), AWAKE_EVERY_MS);
+
 function show(tab) {
   if (tab !== active) showTermText(false);
   active = tab;
@@ -825,6 +835,7 @@ function show(tab) {
     t.button.classList.toggle("active", t === tab);
   }
   refit(tab);
+  wakeSession(tab);
   render();
   // On a phone the prompt's focus raises the keyboard over the thread just picked.
   if (!pickerOpen() && !settingsOpen() && !(guiOn() && touchComposer())) focusInput();
