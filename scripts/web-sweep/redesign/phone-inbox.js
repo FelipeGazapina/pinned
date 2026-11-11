@@ -117,7 +117,7 @@ module.exports = {
     await unlock(page);
   },
   async open(page, ctx) {
-    await page.evaluate(() => openPage("needs-you"));
+    await page.evaluate(() => phoneGo("needs-you"));
     await ctx.waitFor("the four cards", () => page.evaluate(() => document.querySelectorAll("#page-view .ny-card").length >= 4), 15000);
   },
 };

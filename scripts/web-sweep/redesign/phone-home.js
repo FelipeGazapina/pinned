@@ -1,5 +1,5 @@
-// Phone-Home.dc.html: the Threads tab, by project, above the tab bar. Today's phone has no tab bar
-// and no Threads screen; the live side opens the sidebar drawer, its nearest thing.
+// Phone-Home.dc.html: the Threads tab, by project, above the tab bar. The live side goes to the
+// Threads screen with every project shown, scrolled to the top.
 module.exports = {
   board: "Phone-Home",
   phone: true,
@@ -12,6 +12,10 @@ module.exports = {
     { name: "tabs", x: 0, y: 760, width: 390, height: 84 },
   ],
   async open(page) {
-    await page.evaluate(() => toggleSidebar(true));
+    await page.evaluate(() => {
+      setProjectFilter("");
+      phoneGo("threads");
+      threadList.scrollTop = 0;
+    });
   },
 };

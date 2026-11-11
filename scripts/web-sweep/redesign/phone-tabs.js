@@ -1,6 +1,5 @@
-// PhoneTabs.dc.html: the phone tab bar (Threads, Needs you, Orchestrator, More), 390x84. Today's
-// phone has no tab bar; the live side opens the sidebar drawer at 390x844 and keeps its bottom 84
-// pixels, where the drawer's page icons sit.
+// PhoneTabs.dc.html: the phone tab bar (Threads, Needs you, Orchestrator, More), 390x84, with
+// Threads current. The live side shows the Threads screen at 390x844 and keeps its bottom 84 pixels.
 module.exports = {
   board: "PhoneTabs",
   phone: true,
@@ -14,6 +13,6 @@ module.exports = {
     { name: "more", x: 290, y: 0, width: 100, height: 84 },
   ],
   async open(page) {
-    await page.evaluate(() => toggleSidebar(true));
+    await page.evaluate(() => phoneGo("threads"));
   },
 };
