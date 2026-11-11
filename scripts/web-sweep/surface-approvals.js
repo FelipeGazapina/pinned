@@ -95,11 +95,12 @@ async function signIn(page) {
   return waitFor("the sweep node", () => page.evaluate(() => [...machines.entries()].find(([, m]) => m.view.online && m.view.name === "sweep-node")?.[0]));
 }
 
-const openWaiting = (page) => page.evaluate(() => {
-  ui.waitingOpen = true;
-  renderSidebar();
-});
-const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll("#thread-list .agent-confirm .title")].map((t) => t.textContent));
+// The agents' requests wait on the Needs you page: the sidebar's Needs you row, a phone's Needs you tab.
+const openWaiting = async (page) => {
+  await page.click((await page.evaluate(() => narrow(768))) ? '#phone-tabs [data-phone-tab="needs-you"]' : '#side-nav [data-nav="needs-you"]');
+  await waitFor("the Needs you page", () => page.evaluate(() => shellPage() === "needs-you"));
+};
+const asksShown = (page) => page.evaluate(() => [...document.querySelectorAll('#page-view .ny-card[data-kind="agent"] .ny-name')].map((t) => t.textContent));
 const threadText = (page) => page.evaluate(() => document.querySelector("#thread")?.innerText ?? "");
 
 const PROMPT = "dialog[open] form";
@@ -144,10 +145,10 @@ async function approveBoth(view, agent, shot, name) {
   check(refused === "an agent never sends a password, key or token: key. The user enters it in the app.", `${shot}: an agent's key is refused: ${refused}`);
 
   await openWaiting(view);
-  await waitFor(`${shot}: both in Waiting on you`, async () => (await asksShown(view)).length === 2);
+  await waitFor(`${shot}: both on Needs you`, async () => (await asksShown(view)).length === 2);
   check((await asksShown(view)).join(" | ") === "Pair a machine | Add account", `${shot}: the items name the action in words: ${(await asksShown(view)).join(" | ")}`);
 
-  await view.click(`#thread-list .agent-confirm[data-confirmation="${account.id}"] [data-agent=approve]`);
+  await view.click(`#page-view .ny-card[data-confirmation="${account.id}"] [data-agent=approve]`);
   await waitFor(`${shot}: the Accounts form`, () => view.evaluate(() => document.getElementById("agent-asking")?.textContent.includes("Entering the key here approves it.")));
   const form = await view.evaluate(() => {
     const f = document.querySelector("form.add-account");
@@ -166,11 +167,10 @@ async function approveBoth(view, agent, shot, name) {
   await waitFor(`${shot}: the account the approval added`, () => view.evaluate((n) => document.getElementById("account-list")?.innerText.includes(n), name));
   check(await view.evaluate(() => !document.getElementById("agent-asking")), `${shot}: the form forgets the request once it ran`);
   await view.evaluate(() => settingsOpen() && toggleSettings());
-  if (shot === "phone") await view.evaluate(() => toggleSidebar(true));
   await openWaiting(view);
   await waitFor(`${shot}: pair_code still waits`, async () => (await asksShown(view)).join(" | ") === "Pair a machine");
-  await view.click(`#thread-list .agent-confirm[data-confirmation="${pair.id}"] [data-agent=approve]`);
-  const command = await waitFor(`${shot}: the pairing command`, () => view.evaluate(() => document.querySelector("#thread-list .agent-once code")?.textContent));
+  await view.click(`#page-view .ny-card[data-confirmation="${pair.id}"] [data-agent=approve]`);
+  const command = await waitFor(`${shot}: the pairing command`, () => view.evaluate(() => document.querySelector("#page-view .agent-once code")?.textContent));
   check(/^curl -fsSL http:\/\/127\.0\.0\.1:\d+\/install\.sh \| sh -s -- \S+$/.test(command), `${shot}: the user sees the pairing command: ${command}`);
   const code = command.split(" ").at(-1);
   await view.screenshot({ path: path.join(SCREENS, `approvals-pair-${shot}.png`) });
@@ -181,7 +181,7 @@ async function approveBoth(view, agent, shot, name) {
 
 (async () => {
   const work = fs.realpathSync(path.join(WORK, "alpha"));
-  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {}) });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const errors = [];
   const contextOf = async (viewport, phone) => {
     const context = await browser.newContext({ viewport, deviceScaleFactor: phone ? 2 : 1, colorScheme: "dark", isMobile: phone, hasTouch: phone });
@@ -218,7 +218,6 @@ async function approveBoth(view, agent, shot, name) {
 
   const phone = await contextOf({ width: 390, height: 844 }, true);
   await signIn(phone);
-  await phone.evaluate(() => toggleSidebar(true));
   await approveBoth(phone, agent, "phone", "Go phone");
   await sideBySide(browser, path.join(SCREENS, "approvals-pair-phone.png"), path.join(SCREENS, "approvals-form-phone.png"), path.join(SCREENS, "approvals-phone.png"), [390, 844]);
 

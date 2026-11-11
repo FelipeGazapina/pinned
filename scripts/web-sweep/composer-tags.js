@@ -63,7 +63,7 @@ const state = () => ({
 });
 
 (async () => {
-  const browser = await playwright.chromium.launch({ headless: true });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "dark" });
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
