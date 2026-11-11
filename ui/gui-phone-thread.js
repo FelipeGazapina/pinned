@@ -195,7 +195,7 @@ const workersPill = Object.assign(document.createElement("button"), { type: "but
 document.getElementById("chat-head").after(workersPill);
 function renderWorkersPill() {
   const tab = active;
-  const rows = tab && guiOn() && onPhone() && !terminalOnly(tab) ? workersOf(tab) : [];
+  const rows = tab && guiOn() && onPhone() && !terminalOnly(tab) ? workersNow(tab) : [];
   if (workersPill.hidden !== !rows.length) {
     // The pill takes its height from the thread, which keeps to its end if it was there.
     const atEnd = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight <= 40;
@@ -237,7 +237,7 @@ function paintWorkersSheet() {
   if (!workersSheet) return;
   const tab = tabByKey(workersSheet.tab);
   if (!tab || tab !== active || !onPhone()) return workersSheet.sheet.close();
-  const rows = workersOf(tab);
+  const rows = workersNow(tab);
   if (!rows.length) return workersSheet.sheet.close();
   const s = workersSummary(rows);
   const { cards, rest } = workersSheetRows(rows, workersSheet.first);

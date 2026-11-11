@@ -56,11 +56,13 @@
 //   already answered and its menu still on screen, the choice is not offered, or the ask needs the
 //   thread open. The caller then repaints.
 //
-// workersKey(tab), onModelChange(fn), modelChanged()
-//   workersKey is in renderThread's `content` key, so a worker's change repaints its parent.
-//   modelChanged runs after every sidebar render, which follows every tab event, screen change and
-//   thread read: it repaints the open thread when its workers changed and calls each onModelChange
-//   listener. onModelChange returns a function that unsubscribes.
+// workersKey(tab), workersNow(tab), onModelChange(fn), modelChanged()
+//   workersKey is in renderThread's `content` key, so a worker's change repaints its parent; a new
+//   step of a collapsed row does not, as patchWorkerSteps writes it in place. modelChanged runs
+//   after every sidebar render, which follows every tab event, screen change and thread read: it
+//   reads the open thread's workers once, repaints the thread when they changed, else patches their
+//   steps, and calls each onModelChange listener. workersNow(tab) is that one reading while
+//   modelChanged runs, else workersOf(tab). onModelChange returns a function that unsubscribes.
 //
 // glyphHtml(state, size = 10) -> the status dot for a threadState or a worker state (gui-glyph.css).
 
@@ -302,7 +304,16 @@ async function answerAsk(tab, choice, seen) {
   return true;
 }
 
-const workersKey = (tab) => JSON.stringify(workersOf(tab).map((r) => [r.key, r.state, r.step, r.model, r.ask && [r.ask.kind, r.ask.command, r.ask.choices?.length ?? null]]));
+/** The open thread's workersOf, read once per modelChanged and shared by every surface it repaints. */
+let workersShared = null;
+const workersNow = (tab) => (workersShared?.tab === tab ? workersShared.rows : workersOf(tab));
+
+/** A collapsed row's step only says whether it has one: its words change on every step, and
+ * patchWorkerSteps writes them in place rather than repainting the whole thread. */
+const workersKey = (tab) => {
+  const open = threadOf(tab).open;
+  return JSON.stringify(workersNow(tab).map((r) => [r.key, r.depth ?? 0, r.state, open.has(`worker:${r.key}`) ? r.step : !!r.step, r.model, r.ask && [r.ask.kind, r.ask.command, r.ask.choices?.length ?? null]]));
+};
 
 const modelListeners = new Set();
 function onModelChange(fn) {
@@ -311,13 +322,19 @@ function onModelChange(fn) {
 }
 let drawnWorkers = "";
 function modelChanged() {
-  const key = active ? workersKey(active) : "";
-  if (key !== drawnWorkers) {
-    drawnWorkers = key;
-    if (active && guiOn() && !terminalOnly(active) && !threadOf(active).unsupported) renderThread();
+  workersShared = active ? { tab: active, rows: workersOf(active) } : null;
+  try {
+    const key = active ? workersKey(active) : "";
+    const shown = active && guiOn() && !terminalOnly(active) && !threadOf(active).unsupported;
+    if (key !== drawnWorkers) {
+      drawnWorkers = key;
+      if (shown) renderThread();
+    } else if (shown) patchWorkerSteps(active, workersShared.rows);
+    if (!reviewsAt && tabs.length) fetchReviews();
+    for (const fn of modelListeners) fn();
+  } finally {
+    workersShared = null;
   }
-  if (!reviewsAt && tabs.length) fetchReviews();
-  for (const fn of modelListeners) fn();
 }
 
 const GLYPH_LOOKS = { working: "working", needs: "needs", unread: "unread", done: "done", idle: "idle", failed: "failed", stopped: "idle" };

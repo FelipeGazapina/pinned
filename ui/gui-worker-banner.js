@@ -10,7 +10,7 @@ let workerDrawn = null;
 const workerAnswering = new Set();
 
 /** The parent's waiting workers, the one that has waited longest first. */
-const waitingWorkers = (tab) => workersOf(tab).filter((r) => r.ask && r.tab).sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity));
+const waitingWorkers = (tab) => workersNow(tab).filter((r) => r.ask && r.tab).sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity));
 
 const ASK_WORDS = { approval: "needs your approval", question: "has a question", plan: "has a plan to approve" };
 const PHONE_ASK_WORDS = { ...ASK_WORDS, approval: "needs approval" };

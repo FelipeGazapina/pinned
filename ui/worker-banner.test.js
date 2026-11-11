@@ -7,7 +7,7 @@ const src = readFileSync(new URL("./gui-worker-banner.js", import.meta.url), "ut
 const context = {
   icon: (name) => `<svg data-icon="${name}"></svg>`,
   esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
-  workersOf: () => context.rows,
+  workersNow: () => context.rows,
   rows: [],
 };
 vm.createContext(context);

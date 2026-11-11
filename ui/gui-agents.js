@@ -204,9 +204,21 @@ function workerRowHtml(tab, row, t) {
   return `<div class="worker-row" data-worker="${id}" data-state="${row.state}" data-open${agentId}>${head}${body}</div>`;
 }
 
+/** Writes each drawn worker row's latest step in place, which workersKey leaves out for a collapsed
+ * row so that a step does not repaint the whole thread. */
+function patchWorkerSteps(tab, rows) {
+  for (const row of rows) {
+    const el = threadView.querySelector(`.worker-row[data-worker="${CSS.escape(row.key)}"] > .worker-head .worker-step`);
+    const { text } = workerLine(tab, row);
+    if (!el || el.textContent === text) continue;
+    el.textContent = text;
+    el.title = text;
+  }
+}
+
 /** The thread's workers in one block: how many are done, at work and waiting on the user, then a row each. */
 function workersBlockHtml(tab, t) {
-  const rows = workersOf(tab);
+  const rows = workersNow(tab);
   if (!rows.length) return "";
   const s = workersSummary(rows);
   const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since)}` : ""}</span>` : "";

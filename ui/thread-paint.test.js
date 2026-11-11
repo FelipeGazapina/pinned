@@ -135,6 +135,7 @@ function renderDialog() {}
 function showScrollEnd() {}
 function renderMinimap() {}
 function workersKey() { return ""; }
+function workersNow(tab) { return workersOf(tab); }
 function threadTitle(tab) { return tab.view.title ?? "New thread"; }
 function threadState() { return "idle"; }
 function pendingAsk() { return null; }

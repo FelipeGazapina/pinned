@@ -75,7 +75,7 @@ const QUESTION_SET = [
 
 /** The page's real rules for phases, asks and answers, around `world`, with the page's I/O stubbed. */
 function page(world) {
-  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [], told: [] };
+  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [], told: [], patched: [] };
   const timers = new Map();
   let timerIds = 0;
   const context = {
@@ -125,6 +125,7 @@ function page(world) {
     esc: (text) => String(text),
     tell: (html) => calls.told.push(html),
     rerender: () => {},
+    patchWorkerSteps: (tab, rows) => calls.patched.push(rows.map((r) => [r.key, r.step])),
     fetchThread: () => {},
     visibleInterval: () => {},
     openProjects: () => new Map([["mini", new Set(["/w/pinned"])], ["book", new Set(["/w/site"])]]),
@@ -577,6 +578,29 @@ test("workersKey changes when a worker's ask is answered, and modelChanged repai
   assert.equal(p.calls.thread, 2, "the worker's change repaints its parent");
   assert.equal(seen.length, 3);
   assert.notEqual(seen[1], seen[2]);
+});
+
+test("a worker's new step patches its row instead of repainting the Captain, and one change reads the workers once", () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  Object.assign(p.context, { captain: w.captain, reads: 0 });
+  p.run("const realWorkersOf = workersOf; globalThis.workersOf = (tab) => (reads++, realWorkersOf(tab))");
+  p.run("onModelChange(() => workersNow(captain)); onModelChange(() => workersNow(captain).filter((r) => r.ask)); onModelChange(() => workersSummary(workersNow(captain)))");
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 1);
+  p.context.reads = 0;
+  w.ci.thread.items.push({ kind: "tool", name: "Bash", input: { command: "cargo clippy" } });
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 1, "the collapsed row's step does not repaint the thread");
+  assert.deepEqual(p.calls.patched.at(-1).find(([key]) => key === w.ci.key), [w.ci.key, "Ran cargo clippy"], "its words are written in place");
+  assert.equal(p.context.reads, 1, "the block, the banner, the pill and the sheet share one reading");
+  w.captain.thread.open.add(`worker:${w.ci.key}`);
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 2, "an opened row draws its latest steps, so it repaints");
+  w.ci.thread.items.push({ kind: "tool", name: "Bash", input: { command: "cargo fmt" } });
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 3, "and repaints on its next step");
 });
 
 test("glyphHtml draws each state's dot at its size", () => {
