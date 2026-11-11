@@ -396,9 +396,11 @@ function questionTabsOf(text) {
   const items = row ? [...row[1].matchAll(/([☐☒✔])\s(.+?)(?=\s{2,}[☐☒✔]|$)/g)].filter((m) => m[1] !== "✔") : [];
   return items.length ? { headers: items.map((m) => m[2].trim()), answered: items.map((m) => m[1] === "☒") } : null;
 }
-/** The tabs on the tab's screen, and the one shown, which claude draws on a background; one past
- * the last question is its review of the answers. */
+/** The tabs over the tab's menu, and the one shown, which claude draws on a background; one past
+ * the last question is its review of the answers. An earlier set's row can stay on the screen above
+ * a later single question, so only a menu that holds a row has tabs. */
 function questionTabs(tab) {
+  if (!tab.menu?.question.split("\n").some((l) => TAB_ROW.test(l))) return null;
   const buffer = tab.term.buffer.active;
   for (let y = buffer.baseY + tab.term.rows - 1; y >= buffer.baseY; y--) {
     const line = buffer.getLine(y);

@@ -281,6 +281,30 @@ test("a worker whose menu is not read yet asks with its command and offers only 
   assert.equal(set.choices, null, "several questions in a row cannot be answered in one tap");
 });
 
+test("a single question after a set of questions answers in one tap, though the set's tab row is still on the screen", () => {
+  const later = [
+    "────────────────────────────────────────",
+    "←  ☒ Color  ☒ Sizes  ✔ Submit  →",
+    "● User answered Claude's questions: Color: Red, Sizes: S",
+    "────────────────────────────────────────",
+    "☐ Hero",
+    "",
+    "Which hero image?",
+    "",
+    "❯ 1. The product screenshot",
+    "  2. The team photo",
+    "  3. Type something.",
+    "",
+    "Enter to select · Esc to cancel",
+  ];
+  const quiz = tab("Pick the hero", { ...waiting, message: "Claude needs your input" }, { screen: later });
+  const p = page({ tabs: [quiz], active: quiz });
+  p.context.quiz = quiz;
+  readMenus(p);
+  assert.equal(p.run("questionTabs(quiz)"), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(p.run("pendingAsk(quiz).choices.map((c) => c.label)"))), ["The product screenshot", "The team photo"]);
+});
+
 test("needsYouItems lists what waits on the user, newest first, with each kind, and leaves a snoozed thread out until it asks again", () => {
   const approval = tab("Tidy the README", { ...waiting, ask_detail: "git push origin readme-tidy", updated: S - 120 }, { screen: PUSH_MENU });
   const question = tab("Hero image", { ...waiting, message: "Claude needs your input", ask_detail: "Which hero image should the launch page use?", updated: S - 60 }, { project: "site", machine: "book" });
