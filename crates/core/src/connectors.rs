@@ -4215,7 +4215,10 @@ fn convex_note(connection: &convex::Connection, tables: Option<&[String]>) -> St
 fn repo_keys(repos: Vec<String>) -> Result<Vec<String>, String> {
     let mut keys: Vec<String> = vec![];
     for repo in repos {
-        if repo.trim().is_empty() || repo.trim() != repo || !repo.contains('/') || repo.chars().any(char::is_whitespace) {
+        // A machine names a project by `repo_key`: lowercase, with no scheme, user or `.git`. Any
+        // other spelling would be stored and never match a session's project.
+        let spelled = repo.to_lowercase() == repo && !repo.ends_with(".git") && !repo.ends_with('/') && !repo.contains("://") && !repo.contains('@');
+        if repo.trim().is_empty() || repo.trim() != repo || !repo.contains('/') || repo.chars().any(char::is_whitespace) || !spelled {
             return Err("a project is its repository, as github.com/owner/repo".into());
         }
         if !keys.contains(&repo) {
@@ -6851,7 +6854,10 @@ mod tests {
             assert_eq!(back.repos, [SITE]);
             assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()]), ("happy-otter-123".to_owned(), vec![SHOP.to_owned()])]);
             assert_eq!(connectors.set_convex_repos("gone-deployment-1", vec![]).unwrap_err(), "No Convex deployment gone-deployment-1 is connected.");
-            assert_eq!(connectors.set_convex_repos("quick-lemur-789", vec![" github.com/acme/site".into()]).unwrap_err(), "a project is its repository, as github.com/owner/repo");
+            for spelling in [" github.com/acme/site", "github.com/Acme/Site", "github.com/acme/site.git", "https://github.com/acme/site", "git@github.com:acme/site", "github.com/acme/site/", "site"] {
+                assert_eq!(connectors.set_convex_repos("quick-lemur-789", vec![spelling.into()]).unwrap_err(), "a project is its repository, as github.com/owner/repo", "{spelling}");
+            }
+            assert_eq!(repos(&connectors)[0], ("quick-lemur-789".to_owned(), vec![SITE.to_owned()]), "a refused list changes nothing");
         }
 
         #[test]
