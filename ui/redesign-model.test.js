@@ -75,6 +75,7 @@ function page(world) {
     tabs: world.tabs,
     active: world.active ?? null,
     seenAt: world.seenAt ?? {},
+    sideMarks: { snoozed: world.snoozed ?? {} },
     machines: world.machines ?? new Map(),
     DEFAULT_ACCOUNT: "claude",
     statusOf: (tab) => tab.view.status ?? "idle",
@@ -119,6 +120,10 @@ function page(world) {
       decl(agents, "function stepLine"),
       line(sidebar, "const unixOf"),
       line(sidebar, "const lastPrompt"),
+      line(sidebar, "const nowS"),
+      line(sidebar, "const canSnooze"),
+      decl(sidebar, "const raisedHand"),
+      line(sidebar, "const snoozedNow"),
       line(sidebar, "const menuIsQuestion"),
       decl(sidebar, "function waitingLookOf"),
       decl(composer, "function menuKind"),
@@ -269,7 +274,7 @@ test("a worker whose menu is not read yet asks with its command and offers only 
   assert.equal(set.choices, null, "several questions in a row cannot be answered in one tap");
 });
 
-test("needsYouItems lists what waits on the user, newest first, with each kind", () => {
+test("needsYouItems lists what waits on the user, newest first, with each kind, and leaves a snoozed thread out until it asks again", () => {
   const approval = tab("Tidy the README", { ...waiting, ask_detail: "git push origin readme-tidy", updated: S - 120 }, { screen: PUSH_MENU });
   const question = tab("Hero image", { ...waiting, message: "Claude needs your input", ask_detail: "Which hero image should the launch page use?", updated: S - 60 }, { project: "site", machine: "book" });
   const limit = tab("Rate limit the webhook", { status: "failed", resume_at: S + 3000, account: "claude", updated: S - 90 }, { project: "api" });
@@ -277,10 +282,13 @@ test("needsYouItems lists what waits on the user, newest first, with each kind",
   const review = tab("Fix hero spacing on mobile", { status: "done", updated: S - 30 }, { project: "site", machine: "book" });
   const workerDone = tab("Changelog", { status: "done", role: "worker", spawned_by: "x", updated: S - 10 });
   const working = tab("Rate", { status: "working", updated: S - 5 });
-  const p = page({ tabs: [approval, question, limit, failed, review, workerDone, working] });
+  const snoozed = tab("Snoozed limit", { status: "failed", resume_at: S + 3000, updated: S - 40 });
+  const asksAgain = tab("Snoozed, then asked", { ...waiting, updated: S - 20 });
+  const p = page({ tabs: [approval, question, limit, failed, review, workerDone, working, snoozed, asksAgain], snoozed: { [snoozed.key]: { until: S + 3000, at: S - 30 }, [asksAgain.key]: { until: S + 3000, at: S - 30 } } });
   readMenus(p);
   const items = p.run("needsYouItems().map(({ tab, ask, ...i }) => ({ ...i, ask: ask && ask.kind + ' ' + (ask.command ?? ask.text) + ' ' + (ask.choices ? ask.choices.length : 'open') }))");
   assert.deepEqual(JSON.parse(JSON.stringify(items)), [
+    { kind: "approval", title: "Snoozed, then asked", project: "pinned", machine: "mac-mini", since: (S - 20) * 1000, limit: null, ask: "approval null open" },
     { kind: "review", title: "Fix hero spacing on mobile", project: "site", machine: "macbook", since: (S - 30) * 1000, limit: null, ask: null },
     { kind: "question", title: "Hero image", project: "site", machine: "macbook", since: (S - 60) * 1000, limit: null, ask: "question Which hero image should the launch page use? open" },
     { kind: "limit", title: "Rate limit the webhook", project: "api", machine: "mac-mini", since: (S - 90) * 1000, limit: { resumesAt: (S + 3000) * 1000, account: "Claude Code", held: false, switchTo: [{ id: "work", name: "Work" }] }, ask: null },
