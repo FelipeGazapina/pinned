@@ -604,6 +604,16 @@ fn main() {
             let signed_in = app.state::<account::Account>().is_signed_in();
             if background::has_window(Moment::Settle, app.state::<Background>().is_on(), signed_in) {
                 open_main(app.handle())?;
+            } else {
+                // The window's boot reopens the sessions still going at the last quit; with no
+                // window the app does it, as a node does, and the window later finds them open.
+                std::thread::spawn(move || {
+                    for tab in machine.restore_working() {
+                        if let Err(e) = machine.start_claude(&tab, 120, 32) {
+                            eprintln!("pinned: could not resume {tab}: {e}");
+                        }
+                    }
+                });
             }
             #[cfg(debug_assertions)]
             run_probe(app);
