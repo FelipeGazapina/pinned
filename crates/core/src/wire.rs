@@ -1050,8 +1050,9 @@ pub enum HubCall {
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
     OpenBox {
         repo: String,
-        #[serde(default)]
-        size: BoxSize,
+        /// None follows the project's and the account's default box size (`Tastes::box_size`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget_usd: Option<f64>,
     },
@@ -1142,6 +1143,23 @@ pub enum HubCall {
     ResetTasteField { scope: TasteScope, field: TasteField },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
+    /// `taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,
+    /// or none, and which setting chose it. Without `repo`, a box of no project: the account's.
+    GetBoxSize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
+    },
+    /// `taste::Tastes`, once the default box size of `repo`'s project, or the account's without
+    /// `repo`, is `size`. No `size` clears it: the project inherits the account's again, and the
+    /// account's goes back to the built-in small.
+    SetBoxSize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
+    },
     /// From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of
     /// `project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a
     /// Capitão runs in, the asking machine's own, or the first online one; with `machine`,

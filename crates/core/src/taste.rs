@@ -9,6 +9,7 @@
 //! its own, but pinned enforces them on `delegate_task` and on boxes instead of only telling the
 //! session. `Limits` is that group, resolved.
 
+use crate::connectors::BoxSize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -148,6 +149,11 @@ pub struct Taste {
     pub time_limit_min: u32,
     /// A box's budget in US cents: the default and the ceiling of its `budget_usd`. 0 sets neither.
     pub box_budget_cents: u32,
+    /// The size of a box opened with none named: the Captains' is the account's default, a
+    /// project's overrides it. None is the built-in default, small. The orchestrator's is never
+    /// set, since every box belongs to a project. Always written, null included, so a page tells a
+    /// hub that has it from one that predates it.
+    pub box_size: Option<BoxSize>,
 }
 
 /// A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.
@@ -196,6 +202,10 @@ pub struct TastePatch {
     pub time_limit_min: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub box_budget_cents: Option<u32>,
+    /// A project's box size over the account's. A patch can set it but not clear it; resetting
+    /// the field clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_size: Option<BoxSize>,
     /// The account's placement policy. Only the Captains' and the orchestrator's scope take it:
     /// it belongs to the account, and a project's own comes later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +243,7 @@ pub enum TasteField {
     TimeLimitMin,
     BoxBudgetCents,
     Placement,
+    BoxSize,
 }
 
 /// An account's tastes.
@@ -300,6 +311,7 @@ fn balanced() -> Taste {
         budget_cents: 0,
         time_limit_min: DEFAULT_TIME_LIMIT_MIN,
         box_budget_cents: 0,
+        box_size: None,
     }
 }
 
@@ -438,6 +450,7 @@ impl Taste {
             TasteField::TimeLimitMin => self.time_limit_min = default.time_limit_min,
             TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
             TasteField::Placement => {}
+            TasteField::BoxSize => self.box_size = default.box_size,
         }
     }
 }
@@ -568,6 +581,9 @@ impl TastePatch {
         put(&self.budget_cents, &mut taste.budget_cents);
         put(&self.time_limit_min, &mut taste.time_limit_min);
         put(&self.box_budget_cents, &mut taste.box_budget_cents);
+        if self.box_size.is_some() {
+            taste.box_size = self.box_size;
+        }
     }
 
     /// Takes each field `newer` sets, and keeps the rest.
@@ -592,6 +608,7 @@ impl TastePatch {
         take(newer.budget_cents, &mut self.budget_cents);
         take(newer.time_limit_min, &mut self.time_limit_min);
         take(newer.box_budget_cents, &mut self.box_budget_cents);
+        take(newer.box_size, &mut self.box_size);
         take(newer.placement, &mut self.placement);
     }
 
@@ -621,6 +638,9 @@ impl TastePatch {
         drop_same(&mut self.budget_cents, &base.budget_cents);
         drop_same(&mut self.time_limit_min, &base.time_limit_min);
         drop_same(&mut self.box_budget_cents, &base.box_budget_cents);
+        if self.box_size.is_some() && self.box_size == base.box_size {
+            self.box_size = None;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -653,6 +673,7 @@ impl TastePatch {
             TasteField::TimeLimitMin => self.time_limit_min = None,
             TasteField::BoxBudgetCents => self.box_budget_cents = None,
             TasteField::Placement => self.placement = None,
+            TasteField::BoxSize => self.box_size = None,
         }
     }
 }
@@ -700,6 +721,9 @@ impl Tastes {
             changed.set(scope, patch)?;
             *self = changed;
             return Ok(());
+        }
+        if patch.box_size.is_some() && *scope == TasteScope::Orchestrator {
+            return Err("the box size belongs to the projects: set the account's for Captains (all), or one project's".into());
         }
         let taste = match scope {
             TasteScope::Orchestrator => &mut self.orchestrator,
@@ -757,6 +781,53 @@ impl Tastes {
         self.captains.check()?;
         self.placement.check()?;
         self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())
+    }
+}
+
+/// Which setting chose a box's size, as the app names it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxSizeSource {
+    /// The call that opens the box named it.
+    Call,
+    /// The project's Way of working.
+    Project,
+    /// The account's Way of working, under Captains (all).
+    Account,
+    /// Nothing named one: small.
+    BuiltIn,
+}
+
+/// The size a box opens at, and which setting chose it. Only `Tastes::box_size` makes one, so a
+/// path that opens a box cannot pick a size around the project's and the account's defaults.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoxSizeChoice {
+    size: BoxSize,
+    from: BoxSizeSource,
+}
+
+impl BoxSizeChoice {
+    pub fn size(self) -> BoxSize {
+        self.size
+    }
+
+    pub fn from(self) -> BoxSizeSource {
+        self.from
+    }
+}
+
+impl Tastes {
+    /// The size of a box that clones `repo`, in any form `machine::repo_key` reads: the size the
+    /// call names, else the project's default box size, else the account's, else small.
+    pub fn box_size(&self, repo: Option<&str>, asked: Option<BoxSize>) -> BoxSizeChoice {
+        let project = repo.and_then(crate::machine::repo_key).and_then(|key| self.projects.get(&key)).and_then(|patch| patch.box_size);
+        let (size, from) = match (asked, project, self.captains.box_size) {
+            (Some(size), _, _) => (size, BoxSizeSource::Call),
+            (None, Some(size), _) => (size, BoxSizeSource::Project),
+            (None, None, Some(size)) => (size, BoxSizeSource::Account),
+            (None, None, None) => (BoxSize::default(), BoxSizeSource::BuiltIn),
+        };
+        BoxSizeChoice { size, from }
     }
 }
 
@@ -845,7 +916,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none). The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
@@ -1001,6 +1072,7 @@ mod tests {
             budget_cents: 0,
             time_limit_min: 480,
             box_budget_cents: 0,
+            box_size: None,
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");

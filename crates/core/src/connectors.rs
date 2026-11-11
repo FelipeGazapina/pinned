@@ -416,18 +416,31 @@ pub enum RunsOn {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxStep {
-    #[serde(default)]
-    pub size: BoxSize,
+    /// The size the workflow names. None follows the project's and the account's default box size
+    /// (`Tastes::box_size`) when the box opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<BoxSize>,
 }
 
 /// Serialized names match Upstash's `size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxSize {
-    Small,
+    /// The built-in default, when neither the call, the project nor the account names a size.
     #[default]
+    Small,
     Medium,
     Large,
+}
+
+impl BoxSize {
+    pub fn name(self) -> &'static str {
+        match self {
+            BoxSize::Small => "small",
+            BoxSize::Medium => "medium",
+            BoxSize::Large => "large",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -540,8 +553,10 @@ enum StoredRunsOn {
     Machine(String),
     Box {
         kind: UpstashBoxKind,
-        #[serde(default)]
-        size: BoxSize,
+        /// Left out when the workflow names none. A workflow saved before the default box size
+        /// always has one, since the old app wrote its default, medium, out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
     },
 }
 
@@ -5820,8 +5835,9 @@ mod tests {
         for (stored, runs_on) in [
             (serde_json::json!(""), RunsOn::Any),
             (serde_json::json!("m1"), RunsOn::Machine("m1".into())),
-            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Medium })),
-            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Large })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Medium) })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Large) })),
+            (serde_json::json!({ "kind": "upstash-box" }), RunsOn::FreshBox(BoxStep { size: None })),
         ] {
             let mut saved = base.clone();
             saved["machine"] = stored.clone();
@@ -5832,7 +5848,7 @@ mod tests {
         }
         let mut sizeless = base.clone();
         sizeless["machine"] = serde_json::json!({ "kind": "upstash-box" });
-        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: None }), "a workflow that names no size follows the default box size");
         let mut unknown = base;
         unknown["machine"] = serde_json::json!({ "kind": "lambda" });
         assert!(serde_json::from_value::<Connector>(unknown).is_err());
@@ -5862,7 +5878,7 @@ mod tests {
     fn a_box_workflows_run_goes_to_a_box_with_the_box_note_and_no_account() {
         let boxed = Connector { runs_on: RunsOn::FreshBox(BoxStep::default()), account: "work".into(), proof: true, ..linear_connector() };
         let box_run = run(&boxed, &issue(), "/bin/pinned");
-        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: None }));
         assert_eq!(box_run.account, None, "a box signs in only with the Claude token");
         let prompt = box_run.args.last().unwrap();
         assert!(prompt.contains(&format!("{PROOF}{BOX_NOTE}\n\nLinear issue ENG-7")), "{prompt}");
@@ -5922,7 +5938,7 @@ mod tests {
 
     #[test]
     fn box_permissions_round_trip_and_an_older_workflow_machine_stays() {
-        let workflow = Connector { runs_on: RunsOn::FreshBox(BoxStep { size: BoxSize::Small }), ..linear_connector() };
+        let workflow = Connector { runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), ..linear_connector() };
         let (connectors, dir) = stored("box-access", vec![workflow]);
         let before = serde_json::to_value(&connectors.get_settings().connectors[0]).unwrap()["machine"].clone();
         assert_eq!(before, json!({ "kind": "upstash-box", "size": "small" }));

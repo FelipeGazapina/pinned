@@ -7,7 +7,7 @@ use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn
 use pinned_core::convex::client::Http as ConvexHttp;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
-use pinned_core::taste::Tastes;
+use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use pinned_core::wire::BOX_USD_PER_HOUR;
 use pinned_core::upstash;
 use base64::Engine;
@@ -662,6 +662,21 @@ impl Hub {
                     Ok(())
                 };
                 return self.change_tastes(account, reset).await;
+            }
+            HubCall::GetBoxSize { repo, size } => return json(crate::boxes::box_size(self, account, repo.as_deref(), size).await?),
+            HubCall::SetBoxSize { repo, size } => {
+                let scope = match repo {
+                    Some(repo) => TasteScope::Project { repo: crate::boxes::project_key(&repo).ok_or_else(|| format!("{repo} names no repository: use owner/repo or its clone URL"))? },
+                    None => TasteScope::Captains,
+                };
+                let set = |tastes: &mut Tastes| match size {
+                    Some(size) => tastes.set(&scope, TastePatch { box_size: Some(size), ..TastePatch::default() }),
+                    None => {
+                        tastes.reset(&scope, TasteField::BoxSize);
+                        Ok(())
+                    }
+                };
+                return self.change_tastes(account, set).await;
             }
             HubCall::ImportTastes { tastes } => {
                 tastes.check()?;
