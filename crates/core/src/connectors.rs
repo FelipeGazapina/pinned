@@ -426,7 +426,8 @@ pub struct BoxStep {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxSize {
-    /// The built-in default, when neither the call, the project nor the account names a size.
+    // The built-in default, when neither the call, the project nor the account names a size. A
+    // plain comment: a doc on one variant would turn the schema's enum into a oneOf.
     #[default]
     Small,
     Medium,
