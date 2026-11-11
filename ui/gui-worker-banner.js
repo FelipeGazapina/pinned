@@ -5,6 +5,8 @@ const workerBanner = Object.assign(document.createElement("div"), { id: "worker-
 workerBanner.setAttribute("role", "status");
 document.getElementById("limit-note").before(workerBanner);
 let workerShown = null;
+/** The waiting worker the banner drew last, with the ask as it drew it. */
+let workerDrawn = null;
 const workerAnswering = new Set();
 
 /** The parent's waiting workers, the one that has waited longest first. */
@@ -26,11 +28,28 @@ function workerBannerHtml(row, at, count, busy) {
 const phoneWorkerBannerHtml = (row) =>
   `<span class="dot" aria-hidden="true"></span><span class="text">${esc(row.title)} ${PHONE_ASK_WORDS[row.ask.kind] ?? PHONE_ASK_WORDS.question}</span><button type="button" class="primary" data-worker-review>Review</button>`;
 
+/** Answers a waiting worker's ask as `row` drew it, once: `busy` holds its buttons while the answer
+ * goes out, and `paint` redraws the surface they are on. */
+async function answerWorker(row, choice, busy, paint) {
+  if (!row?.tab || busy.has(row.key)) return;
+  busy.add(row.key);
+  paint();
+  try {
+    if (!(await answerAsk(row.tab, choice, row.ask))) showComposerNote(`${row.title} changed its question. Open it to answer.`, true);
+  } catch (err) {
+    showComposerNote(String(err), true);
+  } finally {
+    busy.delete(row.key);
+    paint();
+  }
+}
+
 function renderWorkerBanner() {
   const tab = active;
   const rows = tab && guiOn() && !terminalOnly(tab) ? waitingWorkers(tab) : [];
   const at = Math.max(0, rows.findIndex((r) => r.key === workerShown));
   const row = rows[at];
+  workerDrawn = row ?? null;
   workerBanner.hidden = !row;
   const html = !row ? "" : narrow(768) ? phoneWorkerBannerHtml(row) : workerBannerHtml(row, at, rows.length, workerAnswering.has(row.key));
   workerBanner.dataset.worker = row?.key ?? "";
@@ -40,26 +59,16 @@ onModelChange(renderWorkerBanner);
 
 // A press keeps the focus where it was, in the prompt most of all.
 workerBanner.addEventListener("pointerdown", (e) => e.target.closest("button") && e.preventDefault());
-workerBanner.addEventListener("click", async (e) => {
+workerBanner.addEventListener("click", (e) => {
   const rows = active ? waitingWorkers(active) : [];
-  const row = rows.find((r) => r.key === workerBanner.dataset.worker);
-  if (!row) return;
+  const row = workerDrawn;
+  if (!row || row.key !== workerBanner.dataset.worker) return;
   if (e.target.closest("[data-worker-step]")) {
-    workerShown = rows[(rows.indexOf(row) + 1) % rows.length].key;
+    workerShown = rows[(rows.findIndex((r) => r.key === row.key) + 1) % rows.length]?.key ?? null;
     return renderWorkerBanner();
   }
   if (e.target.closest("[data-worker-open]")) return activate(row.tab);
   if (e.target.closest("[data-worker-review]")) return openWorkersSheet(active, row.key);
   const answer = e.target.closest("[data-worker-answer]");
-  if (!answer || workerAnswering.has(row.key)) return;
-  workerAnswering.add(row.key);
-  renderWorkerBanner();
-  try {
-    if (!(await answerAsk(row.tab, answer.dataset.workerAnswer))) showComposerNote(`${row.title} changed its question. Open it to answer.`, true);
-  } catch (err) {
-    showComposerNote(String(err), true);
-  } finally {
-    workerAnswering.delete(row.key);
-    renderWorkerBanner();
-  }
+  if (answer) answerWorker(row, answer.dataset.workerAnswer, workerAnswering, renderWorkerBanner);
 });

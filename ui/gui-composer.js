@@ -338,16 +338,65 @@ function redrawAsk(tab) {
   renderSidebar();
 }
 
+/** Whether two menus read off a screen are the same ask: its question, command and options. */
+const sameMenu = (a, b) => !!a && !!b && JSON.stringify([a.question, a.box, a.options.map((o) => o.label)]) === JSON.stringify([b.question, b.box, b.options.map((o) => o.label)]);
+const answeredKey = (menu) => (menu ? JSON.stringify([menu.question, menu.box]) : "");
+/** A redraw that never comes frees an answered menu after this long, so it cannot lock the thread. */
+const ANSWERED_MS = 15000;
+
+/** Keeps `tab` answering from now until `menu`, which it answered, leaves its screen. Until then no
+ * surface draws that menu and no tap sends it a second key, which would land on whatever claude
+ * draws next. */
+function holdAnswered(tab, menu) {
+  const key = answeredKey(menu);
+  tab.answered?.release(false);
+  tab.answering = true;
+  tab.menu = null;
+  let timer = null;
+  let parsed = null;
+  const hold = {
+    key,
+    release(redraw = true) {
+      if (tab.answered !== hold) return;
+      tab.answered = null;
+      clearTimeout(timer);
+      parsed?.dispose();
+      tab.answering = false;
+      if (!redraw) return;
+      tab.menu = terminalMenu(tab);
+      redrawAsk(tab);
+    },
+  };
+  tab.answered = hold;
+  timer = setTimeout(() => hold.release(), ANSWERED_MS);
+  parsed = tab.term.onWriteParsed(() => answeredKey(terminalMenu(tab)) !== key && hold.release());
+  if (answeredKey(terminalMenu(tab)) !== key) hold.release();
+  return hold;
+}
+
+/** Whether the menu the open thread drew is still the one on its screen; if not, draws the new one,
+ * so a tap on the old one's Approve never picks the new one's. */
+function drawnMenuShown(tab) {
+  const menu = terminalMenu(tab);
+  if (sameMenu(tab.menu, menu)) return true;
+  tab.menu = tab.answering ? null : menu;
+  redrawAsk(tab);
+  return false;
+}
+
 function chooseOption(tab, n, label) {
   const menu = terminalMenu(tab);
-  if (menu?.options[n - 1]?.label !== label) {
-    tab.menu = menu;
+  if (menu?.options[n - 1]?.label !== label || tab.answered?.key === answeredKey(menu)) {
+    if (!tab.answering) tab.menu = menu;
     redrawAsk(tab);
     return null;
   }
-  tab.menu = null;
+  const hold = holdAnswered(tab, menu);
   redrawAsk(tab);
-  return writeTo(tab, arrowsTo(menu, n) + "\r");
+  return writeTo(tab, arrowsTo(menu, n) + "\r").catch((e) => {
+    hold.release();
+    throw e;
+  });
 }
 
 /** Answers claude's menu with `text`. A question takes it as its free-text option. A permission is
@@ -356,12 +405,13 @@ function chooseOption(tab, n, label) {
 async function answerWith(tab, text) {
   const menu = terminalMenu(tab);
   const option = menu && (freeOption(menu) || declineOption(menu));
-  if (!option) return false;
+  if (!option || tab.answered?.key === answeredKey(menu)) return false;
   const line = text.replace(/\s*\n\s*/g, " ");
   const shown = () => terminalMenu(tab)?.options[option.n - 1]?.head.includes(line.slice(0, 20));
   tab.answering = true;
   tab.menu = null;
   redrawAsk(tab);
+  let sent = false;
   try {
     await writeTo(tab, arrowsTo(menu, option.n));
     await until(() => terminalMenu(tab)?.options.find((o) => o.chosen)?.n === option.n);
@@ -382,8 +432,10 @@ async function answerWith(tab, text) {
       }
       await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
     }
+    sent = true;
   } finally {
-    tab.answering = false;
+    if (sent) holdAnswered(tab, menu);
+    else tab.answering = false;
   }
   return true;
 }
@@ -534,6 +586,7 @@ approval.addEventListener("click", (e) => {
   const tab = active;
   if (!tab) return;
   const answer = e.target.closest("[data-approval]");
+  if ((answer || e.target.closest("[data-option]")) && tab.menu && menuKind(tab.menu) !== "question" && !drawnMenuShown(tab)) return;
   if (answer && tab.menu) {
     const choice = approvalChoices(tab.menu)[answer.dataset.approval];
     if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();

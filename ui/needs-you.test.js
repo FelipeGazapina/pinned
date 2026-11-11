@@ -214,6 +214,20 @@ test("the list puts asks first, newest first, then limits, failures, reviews and
   assert.equal(page({ items: [item(push, "failed")], agents: [{ id: "c", action: "x", args: {}, role: "worker", title: "t", at: S }] })("needsYouSummary(needsYouCards())"), "1 thread on 1 machine · 1 agent request");
 });
 
+test("a card answers the ask it drew, and says so when the thread asks something else by then", async () => {
+  const push = tab("Tidy the README", { updated: S - 120 });
+  const drawn = { kind: "approval", text: null, command: "git push", choices: [approve, decline], typed: true };
+  const run = page({ items: [item(push, "approval", { ask: drawn })] });
+  run("globalThis.shellPage = () => null; globalThis.asked = []; globalThis.answerAsk = async (tab, choice, seen) => (asked.push([tab.title, choice, seen]), seen.command === 'git push' && asked.length === 1)");
+  run("needsYouCards()");
+  const card = () => run("needsYouCards()[0]");
+  await run("needsYouAnswer(args.card, 'approve')", { card: card() });
+  assert.deepEqual(JSON.parse(JSON.stringify(run("asked"))), [["Tidy the README", "approve", drawn]]);
+  assert.equal(run("needsYouAnswers.get(args.key).state", { key: `thread:${push.key}` }), "sent");
+  await run("needsYouAnswer(args.card, 'approve')", { card: card() });
+  assert.equal(run("needsYouAnswers.get(args.key).state", { key: `thread:${push.key}` }), "missed");
+});
+
 test("while an answer is on its way the card's controls are disabled, and once sent they give way to a note", () => {
   const push = tab("Tidy the README", { updated: S - 120 });
   const run = page({ items: [item(push, "approval", { ask: { kind: "approval", text: null, command: "git push", choices: [approve, decline], typed: true } })] });

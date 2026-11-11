@@ -44,10 +44,13 @@
 //   account, provider, week } of the 5-hour window of the active thread's account, else the most
 //   used one, or null; `week` is that account's 7-day window { percent, resetsAt }, or null.
 //
-// answerAsk(tab, choice) -> Promise<boolean>
+// answerAsk(tab, choice, seen) -> Promise<boolean>
 //   Answers any thread's ask without opening it and without touching the open thread's composer.
-//   `choice` is "approve" | "decline" | "always" | { option: n } | { text }. False when the menu is
-//   gone or changed, the choice is not offered, or the ask needs the thread open.
+//   `choice` is "approve" | "decline" | "always" | { option: n } | { text }. `seen` is the ask the
+//   caller drew; nothing is sent unless the ask on screen still matches it in kind, command, text
+//   and choice labels. False, with nothing sent, when the menu is gone or changed, the ask is
+//   already answered and its menu still on screen, the choice is not offered, or the ask needs the
+//   thread open. The caller then repaints.
 //
 // workersKey(tab), onModelChange(fn), modelChanged()
 //   workersKey is in renderThread's `content` key, so a worker's change repaints its parent.
@@ -270,11 +273,17 @@ function navCounts() {
 }
 
 const PICKS = { approve: "accept", decline: "decline", always: "always" };
-async function answerAsk(tab, choice) {
+/** What a surface draws of an ask, which the ask on screen must still match when its answer goes out. */
+const askSig = (ask) => JSON.stringify(ask ? [ask.kind, ask.command, ask.text, ask.choices?.map((c) => c.label) ?? null] : null);
+async function answerAsk(tab, choice, seen) {
   const menu = !tab.answering && terminalMenu(tab);
   if (!menu) return false;
   tab.menu = menu;
   const ask = pendingAsk(tab);
+  if (!seen || askSig(ask) !== askSig(seen)) {
+    redrawAsk(tab);
+    return false;
+  }
   if (typeof choice === "object" && "text" in choice) return !!ask?.typed && answerWith(tab, choice.text);
   if (!ask?.choices?.some((c) => JSON.stringify(c.choice) === JSON.stringify(choice))) return false;
   const option = typeof choice === "string" ? approvalChoices(menu)[PICKS[choice]] : menu.options[choice.option - 1];

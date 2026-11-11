@@ -27,8 +27,22 @@ const decl = (src, start) => {
 const NOW = Date.parse("2026-11-11T18:10:00Z");
 const S = NOW / 1000;
 
-/** A terminal holding `lines` as its screen, as xterm's buffer reads. */
-const term = (lines) => ({ rows: lines.length, buffer: { active: { baseY: 0, getLine: (i) => ({ translateToString: () => lines[i] ?? "", isWrapped: false, getCell: () => ({ isBgDefault: () => true }) }) } } });
+/** A terminal holding `lines` as its screen, as xterm's buffer reads. `show(next)` writes a new
+ * screen and tells the onWriteParsed listeners, as xterm does after it parses a write. */
+function term(lines) {
+  const parsed = new Set();
+  const t = {
+    rows: lines.length,
+    buffer: { active: { baseY: 0, getLine: (i) => ({ translateToString: () => lines[i] ?? "", isWrapped: false, getCell: () => ({ isBgDefault: () => true }) }) } },
+    onWriteParsed: (fn) => (parsed.add(fn), { dispose: () => parsed.delete(fn) }),
+    show(next) {
+      lines = next;
+      t.rows = next.length;
+      for (const fn of [...parsed]) fn();
+    },
+  };
+  return t;
+}
 const PUSH_MENU = [
   "> ",
   "────────────────────────────────────────",
@@ -62,8 +76,13 @@ const QUESTION_SET = [
 /** The page's real rules for phases, asks and answers, around `world`, with the page's I/O stubbed. */
 function page(world) {
   const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [] };
+  const timers = new Map();
+  let timerIds = 0;
   const context = {
     console,
+    setTimeout: (fn, ms) => (timers.set(++timerIds, { fn, ms }), timerIds),
+    clearTimeout: (id) => timers.delete(id),
+    timers,
     Date: class extends Date {
       constructor(...a) {
         super(...(a.length ? a : [NOW]));
@@ -138,6 +157,10 @@ function page(world) {
       decl(composer, "const arrowsTo"),
       decl(composer, "async function until"),
       decl(composer, "function redrawAsk"),
+      line(composer, "const sameMenu"),
+      line(composer, "const answeredKey"),
+      line(composer, "const ANSWERED_MS"),
+      decl(composer, "function holdAnswered"),
       decl(composer, "function chooseOption"),
       decl(composer, "async function answerWith"),
       line(composer, "const TAB_ROW"),
@@ -379,22 +402,92 @@ test("answerAsk answers a worker from its Captain without touching the Captain's
   const p = page({ tabs: Object.values(w), active: w.captain });
   readMenus(p);
   p.context.worker = w.readme;
-  assert.equal(await p.run("answerAsk(worker, 'decline')"), true);
+  assert.equal(await p.run("answerAsk(worker, 'decline', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.writes, [[w.readme.key, "\x1b[B\x1b[B\r"]], "arrows down to No, then Enter, into the worker's session");
   assert.deepEqual(p.calls.composer, [], "the open thread's composer is not redrawn");
   assert.equal(p.calls.sidebar, 1, "the lists that show the ask redraw");
   assert.equal(w.readme.menu, null);
 
-  readMenus(p);
-  assert.equal(await p.run("answerAsk(worker, 'always')"), true);
-  assert.equal(await p.run("answerAsk(worker, 'approve')"), true);
+  const askAgain = () => {
+    w.readme.term.show(["> "]);
+    w.readme.term.show(PUSH_MENU);
+    readMenus(p);
+  };
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, 'always', pendingAsk(worker))"), true);
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.writes.slice(1), [[w.readme.key, "\x1b[B\r"], [w.readme.key, "\r"]]);
-  assert.equal(await p.run("answerAsk(worker, { option: 7 })"), false, "a choice the ask does not offer is refused");
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, { option: 7 }, pendingAsk(worker))"), false, "a choice the ask does not offer is refused");
   assert.deepEqual(p.calls.composer, []);
 
   p.context.active = w.readme;
-  assert.equal(await p.run("answerAsk(worker, 'approve')"), true);
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.composer, [w.readme.key], "answered in its own open thread, its composer redraws");
+});
+
+const RM_MENU = PUSH_MENU.map((l) => l.replace("git push origin readme-tidy", "rm -rf ~/pinned").replace("git push commands", "rm commands"));
+const COLOR_MENU = (a, b) => ["────────────────────────────────────────", "Which color?", "", `❯ 1. ${a}`, `  2. ${b}`, "", "Enter to select · Esc to cancel"];
+
+test("answerAsk sends nothing when the ask on screen is not the one the caller drew", async () => {
+  const w = captainWorld();
+  const quiz = tab("Pick a color", { ...waiting, message: "Claude needs your input" }, { screen: COLOR_MENU("Red", "Blue") });
+  const p = page({ tabs: [...Object.values(w), quiz], active: w.captain });
+  readMenus(p);
+  Object.assign(p.context, { worker: w.readme, quiz });
+  p.run("globalThis.seen = pendingAsk(worker); globalThis.seenQuiz = pendingAsk(quiz)");
+  assert.equal(p.run("seen.command"), "git push origin readme-tidy");
+
+  w.readme.term.show(RM_MENU);
+  assert.equal(await p.run("answerAsk(worker, 'approve', seen)"), false, "the worker moved on to another command between paint and tap");
+  assert.equal(await p.run("answerAsk(worker, { text: 'use a fork' }, seen)"), false, "a typed decline is held back the same way");
+  assert.equal(w.readme.menu.box, "rm -rf ~/pinned", "the new menu is read, so the caller's repaint shows it");
+  assert.ok(p.calls.sidebar >= 1, "the lists that show the ask redraw");
+
+  quiz.term.show(COLOR_MENU("Green", "Blue"));
+  assert.equal(await p.run("answerAsk(quiz, { option: 1 }, seenQuiz)"), false, "a question card's option 1 is not Green when the card drew Red");
+  assert.equal(await p.run("answerAsk(worker, 'approve')"), false, "a caller that drew no ask sends nothing");
+  assert.deepEqual(p.calls.writes, []);
+
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true, "once the caller drew the new ask, its answer goes out");
+  assert.deepEqual(p.calls.writes, [[w.readme.key, "\r"]]);
+});
+
+test("a second tap on an answered ask sends nothing while its menu is still on screen", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  p.context.worker = w.readme;
+  p.run("globalThis.seen = pendingAsk(worker)");
+  const [first, second] = await Promise.all([p.run("answerAsk(worker, 'approve', seen)"), p.run("answerAsk(worker, 'approve', seen)")]);
+  assert.deepEqual([first, second], [true, false], "a double tap answers once");
+  readMenus(p);
+  assert.equal(await p.run("answerAsk(worker, 'approve', seen)"), false, "a render that reads the old menu again offers nothing to tap");
+  assert.equal(p.run("pendingAsk(worker).choices"), null, "the answered ask draws no buttons");
+  assert.equal(await p.run("chooseOption(worker, 1, 'Yes')"), null, "nor does the open thread's own card send a second Enter");
+  assert.deepEqual(p.calls.writes, [[w.readme.key, "\r"]]);
+
+  w.readme.term.show(["> ", "⏺ Bash(git push origin readme-tidy)"]);
+  assert.equal(w.readme.answering, false, "the menu left the screen, so the worker is no longer held");
+  w.readme.term.show(RM_MENU);
+  readMenus(p);
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true, "the next ask answers as usual");
+  assert.equal(p.calls.writes.length, 2);
+});
+
+test("an answered menu that claude never redraws is freed after 15 seconds", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  p.context.worker = w.readme;
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
+  const [timer] = [...p.context.timers.values()];
+  assert.equal(timer.ms, 15000);
+  timer.fn();
+  assert.equal(w.readme.answering, false);
+  assert.equal(w.readme.menu.box, "git push origin readme-tidy", "the menu shows again");
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
 });
 
 test("answerAsk refuses a question set and a thread with no menu, and types nothing", async () => {

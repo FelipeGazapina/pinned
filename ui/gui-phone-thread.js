@@ -239,6 +239,7 @@ function paintWorkersSheet() {
   if (!rows.length) return workersSheet.sheet.close();
   const s = workersSummary(rows);
   const { cards, rest } = workersSheetRows(rows, workersSheet.first);
+  workersSheet.drawn = new Map(rows.map((r) => [r.key, r]));
   const el = workersSheet.sheet.el;
   setHtml(el.querySelector(".ws-count"), `${s.done} of ${s.total} done`);
   setHtml(el.querySelector(".ws-list"), [...cards.map(workerCardHtml), ...rest.map(workerSheetRowHtml)].join(""));
@@ -259,7 +260,7 @@ function openWorkersSheet(tab, first = null) {
     off?.();
     if (workersSheet?.sheet === sheet) workersSheet = null;
   } });
-  workersSheet = { tab: tab.key, first, sheet };
+  workersSheet = { tab: tab.key, first, sheet, drawn: new Map() };
   off = onModelChange(paintWorkersSheet);
   paintWorkersSheet();
   if (first) sheet.el.querySelector(`[data-ws-card="${CSS.escape(first)}"]`)?.scrollIntoView({ block: "nearest" });
@@ -279,7 +280,7 @@ async function messageAllWorkers(tab, input) {
   await Promise.all(targets.map((r) => sayToWorker(r.key, text)));
 }
 
-async function onWorkersSheetClick(e, tab) {
+function onWorkersSheetClick(e, tab) {
   if (e.target.closest(".ws-close")) return workersSheet?.sheet.close();
   const open = e.target.closest("[data-ws-open]");
   if (open) {
@@ -295,21 +296,7 @@ async function onWorkersSheetClick(e, tab) {
     return threadView.querySelector(`.worker-row[data-worker="${CSS.escape(agent.dataset.wsAgent)}"]`)?.scrollIntoView({ block: "center" });
   }
   const answer = e.target.closest("[data-ws-answer]");
-  if (answer) {
-    const row = workersOf(tab).find((r) => r.key === answer.dataset.wsRow);
-    if (!row?.tab || sheetAnswering.has(row.key)) return;
-    sheetAnswering.add(row.key);
-    paintWorkersSheet();
-    try {
-      if (!(await answerAsk(row.tab, answer.dataset.wsAnswer))) showComposerNote(`${row.title} changed its question. Open it to answer.`, true);
-    } catch (err) {
-      showComposerNote(String(err), true);
-    } finally {
-      sheetAnswering.delete(row.key);
-      paintWorkersSheet();
-    }
-    return;
-  }
+  if (answer) return answerWorker(workersSheet?.drawn.get(answer.dataset.wsRow), answer.dataset.wsAnswer, sheetAnswering, paintWorkersSheet);
   const act = e.target.closest("[data-ws]")?.dataset.ws;
   if (act === "message") {
     const form = workersSheet?.sheet.el.querySelector(".ws-say");
@@ -465,6 +452,7 @@ function onAskClick(e) {
   const menu = tab?.menu;
   if (!menu) return;
   const answer = e.target.closest("[data-approval]");
+  if ((answer || e.target.closest("[data-option]")) && menuKind(menu) !== "question" && !drawnMenuShown(tab)) return;
   if (answer) {
     const choice = approvalChoices(menu)[answer.dataset.approval];
     if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
