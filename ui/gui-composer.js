@@ -163,8 +163,10 @@ const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find(
 /** The collapsed phone row still says what its Send does while claude waits on an approval or a plan. */
 function placeholderFor(tab, t) {
   const menu = tab.menu;
+  const desk = matchMedia("(min-width: 769px)").matches;
   if (menu && menuKind(menu) === "approval") {
     if (!declineOption(menu)) return "Choose an option above";
+    if (desk) return "Or type what it should do instead. Sending declines the command.";
     return menu.amend ? "Send feedback to decline this request" : "Send a message to decline and redirect the agent";
   }
   if (menu && menuKind(menu) === "plan") return "Add feedback to refine the plan, or leave this blank to implement it";
@@ -172,7 +174,9 @@ function placeholderFor(tab, t) {
   if (composer.dataset.collapsed === "true") return "Ask anything...";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
   if (!tab.view.running) return touchComposer() ? "claude isn't running. Use the send button to start it." : "claude isn't running. Press Enter to start it.";
-  return "Ask anything, @tag files/folders, $use skills, or / for commands";
+  if (!desk) return "Ask anything, @tag files/folders, $use skills, or / for commands";
+  if (tab.view.role === "orchestrator" && !tab.view.orchestrator_global) return "Message the Captain. It keeps working while you type.";
+  return "Ask anything, @ files, $ skills, / commands";
 }
 
 function renderComposer(tab) {
@@ -199,6 +203,8 @@ function renderComposer(tab) {
   prompt.enterKeyHint = touch ? "enter" : "send";
   send.setAttribute("aria-label", send.title);
   renderApproval(tab);
+  composer.dataset.asking = !approval.hidden && approval.dataset.kind === "approval";
+  if (typeof renderWorkerBanner === "function") renderWorkerBanner();
   renderBanners(tab);
   renderTasks(tab);
   renderLimitNote(tab);
@@ -410,7 +416,8 @@ function renderApproval(tab) {
   const kind = menuKind(menu);
   const tabs = kind === "question" ? questionTabs(tab) : null;
   const t = threadOf(tab);
-  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null]);
+  const since = waitingKindOf(tab.view) === "needs_input" && tab.view.updated ? tab.view.updated * 1000 : null;
+  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since]);
   if (approval.dataset.key === key) return;
   approval.dataset.key = key;
   const lines = menu.question.split("\n").filter((l) => !TAB_ROW.test(l));
@@ -419,7 +426,7 @@ function renderApproval(tab) {
   if (kind === "question") return renderQuestion(tab, menu, tabs, lines);
   delete approval.dataset.collapsed;
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
-  if (permission) return renderPermission(menu, lines, label);
+  if (permission) return renderPermission(menu, lines, label, since);
   const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
   approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
       <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
@@ -437,17 +444,24 @@ function approvalChoices(menu) {
 }
 /** As T3 Code's approval panel: what is asked, the command or file, and why, then Decline,
  * Approve and "…" at its right. */
-function renderPermission(menu, lines, label) {
+function renderPermission(menu, lines, label, since) {
   const question = lines.at(-1);
   const middle = lines.slice(1, -1).filter((l) => !/^Tip:/.test(l));
   const detail = menu.box || middle.join("\n");
   const about = menu.box ? middle.join("\n") : "";
-  const { accept, decline } = approvalChoices(menu);
-  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+  const { accept, decline, always } = approvalChoices(menu);
+  const waiting = since ? `<span class="waiting">Waiting <span class="ticker" data-since="${since}">${durationLabel(Math.max(0, Date.now() - since) / 1000)}</span></span>` : "";
+  // Above phone width the card is a column with Always allow and Show in terminal beside the answers.
+  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>${waiting}
       ${detail ? `<pre tabindex="0">${esc(detail)}</pre>` : ""}${about ? `<p class="about">${esc(about)}</p>` : ""}${/^Do you want to proceed\?$/.test(question) ? "" : `<p class="about">${esc(question)}</p>`}</div>
-    <div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
-      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`;
+    <div class="answer-row"><div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
+      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis", "dots")}${icon("chevron-down", "chev")}</button></div>
+    <div class="extra">${always ? `<button type="button" class="outline always" data-approval="always" title="${esc(always.label)}"><span>${esc(always.head)}</span></button>` : ""}<button type="button" class="ghost" data-show-terminal>Show in terminal</button></div></div>`;
 }
+const composerTickers = () => {
+  for (const ticker of composer.querySelectorAll(".ticker[data-since]")) ticker.textContent = durationLabel(Math.max(0, Date.now() - Number(ticker.dataset.since)) / 1000);
+};
+visibleInterval(composerTickers, 1000);
 function approvalMore(tab, anchor) {
   const menu = tab.menu;
   const { always, rest } = approvalChoices(menu);
@@ -781,7 +795,11 @@ function rest() {
   const phone = narrow(640);
   const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
   const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
-  const resting = collapsed || (!phone && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
+  // A lane narrowed by the side panel rests as one row with the model, the mic and Send. A press in
+  // the composer, or a menu open from it, holds the row or the full box, so what it points at stays put.
+  const slim = composerPressed || !composerMenu.hidden ? composer.dataset.slim === "true" : !narrow(768) && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
+  const resting = collapsed || (!phone && !slim && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
+  if (composer.dataset.slim !== String(slim)) composer.dataset.slim = slim;
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;
   if (composer.dataset.collapsed !== String(collapsed)) {
     composer.dataset.collapsed = collapsed;
@@ -1493,8 +1511,10 @@ function renderControls(tab) {
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
-  if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`);
-  traitsButton.setAttribute("aria-label", label || "Reasoning");
+  // A plain effort level reads "High effort" above phone width; the word is drawn by the stylesheet.
+  const level = label && label === REASONING[tab.traits.effort];
+  if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name"${level ? ` data-unit="effort"` : ""}>${esc(label)}</span>${icon("chevron-down")}`);
+  traitsButton.setAttribute("aria-label", label ? (level ? `${label} effort` : label) : "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
   document.getElementById("mode-block").hidden = !mode;
   document.getElementById("more-button").hidden = !(tab?.view.running && (mode || label)) || composer.dataset.compact !== "true";
@@ -1506,9 +1526,12 @@ function renderControls(tab) {
   modeButton.innerHTML = `${icon(MODES[access].icon)}<span class="name">${esc(MODES[access].label)}</span>${icon("chevron-down")}`;
   modeButton.title = `${MODES[access].hint} (${bindingLabel("composer.mode") ?? ""})`;
   const plan = mode === "plan";
-  planToggle.setAttribute("aria-pressed", plan);
-  planToggle.title = plan ? "Plan mode. Click to return to normal build mode" : "Default mode. Click to enter plan mode";
-  planToggle.innerHTML = `${icon(plan ? "pencil-ruler" : "bot")}<span class="name">${plan ? "Plan" : "Build"}</span>`;
+  for (const seg of planToggle.children) {
+    const on = (seg.dataset.planSeg === "plan") === plan;
+    seg.setAttribute("aria-pressed", on);
+    seg.title = seg.dataset.planSeg === "plan" ? "Plan mode" : "Build mode";
+    if (!seg.firstChild) seg.innerHTML = seg.dataset.planSeg === "plan" ? `${icon("pencil-ruler")}<span class="name">Plan</span>` : `${icon("bot")}<span class="name">Build</span>`;
+  }
 }
 const accessEntries = (tab) => {
   const mode = tab.mode === "plan" ? threadOf(tab).access ?? "manual" : tab.mode;
@@ -1518,7 +1541,12 @@ modeButton.onclick = (e) => {
   if (!composerMenu.hidden && composerMenu.dataset.kind === "access") return (composerMenu.hidden = true);
   if (active?.mode) openMenu(e.currentTarget, accessEntries(active), "access");
 };
-planToggle.onclick = () => active && togglePlan(active);
+/** Build | Plan: the other segment switches. A phone shows only the current one, which switches. */
+planToggle.onclick = (e) => {
+  const seg = e.target.closest("[data-plan-seg]");
+  if (!seg || !active) return;
+  if ((seg.dataset.planSeg === "plan") !== (active.mode === "plan") || narrow(768)) togglePlan(active);
+};
 onGuiKey("a", () => {
   if (document.getElementById("mode-block").hidden) return;
   if (composer.dataset.compact === "true") document.getElementById("more-button").click();
@@ -1577,6 +1605,7 @@ new ResizeObserver(([entry]) => {
   composer.dataset.compact = width < 620;
   composer.dataset.narrow = width < 640;
   if (active) renderControls(active);
+  rest();
 }).observe(composer.querySelector(".box"));
 
 const formatTokens = (n) => (n < 1000 ? `${Math.round(n)}` : n < 10_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : n < 999_500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}m`);
@@ -2248,7 +2277,8 @@ function workspaceHtml(tab) {
   const open = workspaceOpen(tab);
   const { label, icon: name } = workspaceLabel(tab, open);
   const remote = tab.machine !== LOCAL;
-  const content = `${remote ? icon("monitor") : ""}<span class="ws-icon" title="${esc(label)}">${icon(name)}</span><span class="label">${esc(remote ? machineName(tab.machine) : label)}</span>`;
+  // Above phone width the strip names the machine, then the workspace, in words (.host, .ws-label).
+  const content = `${icon("monitor", remote ? "" : "desk")}<span class="ws-icon" title="${esc(label)}">${icon(name)}</span><span class="label">${esc(remote ? machineName(tab.machine) : label)}</span><span class="host">${esc(machineName(tab.machine))}</span><span class="ws-label">${esc(label)}</span>`;
   return open
     ? `<button type="button" class="where" title="${esc(tab.view.cwd)} · ${bindingLabel("composer.workspace") ?? ""}">${content}${icon("chevron-down", "chev")}</button>`
     : `<span class="where" title="${esc(tab.view.cwd)}">${content}</span>`;

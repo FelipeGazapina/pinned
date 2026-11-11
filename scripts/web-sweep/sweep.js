@@ -4653,7 +4653,8 @@ async function sweep(profileName) {
     await sendPrompt("/ask");
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     const placeholder = await page.getAttribute("#prompt", "placeholder");
-    check(placeholder === "Send feedback to decline this request", `placeholder: ${placeholder}`);
+    const declines = (await page.evaluate(() => narrow(768))) ? "Send feedback to decline this request" : "Or type what it should do instead. Sending declines the command.";
+    check(placeholder === declines, `placeholder: ${placeholder}`);
     await sendPrompt("use the trash instead");
     await waitTerm(/declined: use the trash instead/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
@@ -4691,28 +4692,30 @@ async function sweep(profileName) {
       await openAccess();
       await press(page.locator("#composer-menu button", { hasText: label }).last());
     };
+    const PLAN_SHOWN = '#plan-toggle [aria-pressed="true"]';
     const togglePlan = async (to) => {
-      if (!folded) return tapOrClick("#plan-toggle");
+      // Build | Plan is two segments; a phone shows only the current one, which switches.
+      if (!folded) return tapOrClick((await page.evaluate(() => narrow(768))) ? PLAN_SHOWN : `#plan-toggle [data-plan-seg="${to === "Plan" ? "plan" : "build"}"]`);
       await tapOrClick("#more-button");
       await press(page.locator("#composer-menu button", { hasText: to }).last());
     };
     check(!(await page.locator("#mode-button").isVisible()), "a mode shows before claude drew its mode line");
     await sendPrompt("/modes");
-    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised" && (await text("#plan-toggle")) === "Build");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised" && (await text(PLAN_SHOWN)) === "Build");
     await openAccess();
     const modes = await accessRows();
     check(modes.join("|") === "Supervised*|Auto-accept edits|Auto|Full access", `access modes: ${modes.join("|")}`);
     await press(page.locator("#composer-menu button", { hasText: "Auto-accept edits" }).last());
     await waitFor("Auto-accept edits", async () => (await text("#mode-button")) === "Auto-accept edits");
     await togglePlan("Plan");
-    await waitFor("Plan", async () => (await text("#plan-toggle")) === "Plan" && (await page.getAttribute("#plan-toggle", "aria-pressed")) === "true");
+    await waitFor("Plan", async () => (await text(PLAN_SHOWN)) === "Plan" && (await page.getAttribute('#plan-toggle [data-plan-seg="plan"]', "aria-pressed")) === "true");
     check(/plan mode on/.test(await termText()), "claude's screen never reached plan mode");
     check((await text("#mode-button")) === "Auto-accept edits", `in Plan, Access shows ${await text("#mode-button")}`);
     await pickAccess("Supervised");
     await waitFor("Supervised kept for Build", async () => (await text("#mode-button")) === "Supervised");
-    check((await text("#plan-toggle")) === "Plan", "picking an access mode left Plan");
+    check((await text(PLAN_SHOWN)) === "Plan", "picking an access mode left Plan");
     await togglePlan("Chat");
-    await waitFor("Build in Supervised", async () => (await text("#plan-toggle")) === "Build" && (await text("#mode-button")) === "Supervised");
+    await waitFor("Build in Supervised", async () => (await text(PLAN_SHOWN)) === "Build" && (await text("#mode-button")) === "Supervised");
     check(/manual mode on/.test((await termText()).split("\n").filter(Boolean).slice(-3).join("\n")), "Build didn't go back to claude's manual mode");
     if (!touch) {
       await page.focus("#prompt");
@@ -4809,7 +4812,8 @@ async function sweep(profileName) {
     await page.focus("#prompt");
     await waitFor("the full composer", () => page.evaluate(() => composer.dataset.resting === "false"));
     const full = (await rect("#composer .box")).height;
-    check(full > 100, `the focused composer is ${Math.round(full)}px tall`);
+    // Main.dc.html draws the full box 88px tall, a line of prompt over its row of controls.
+    check(full >= 88, `the focused composer is ${Math.round(full)}px tall`);
     check(await page.locator("#composer .tools #model-button").isVisible(), "the model control didn't come back");
     await page.fill("#prompt", "sent while scrolled up");
     await page.evaluate(() => (threadView.scrollTop = 0));
@@ -5423,7 +5427,8 @@ async function sweep(profileName) {
   });
 
   await step("composer: Send says Connecting or Environment disconnected, and the placeholder is T3's", async () => {
-    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything, @tag files/folders, $use skills, or / for commands", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
+    const ask = (await page.evaluate(() => narrow(768))) ? "Ask anything, @tag files/folders, $use skills, or / for commands" : "Ask anything, @ files, $ skills, / commands";
+    check((await page.getAttribute("#prompt", "placeholder")) === ask, `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
     await page.fill("#prompt", "while offline");
     try {
       await page.evaluate(() => {
