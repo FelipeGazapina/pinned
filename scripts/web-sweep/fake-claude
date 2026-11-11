@@ -234,8 +234,9 @@ function answerSettings(key) {
 let line = "";
 // $HOME/fake-turns.json, when a sweep writes it, scripts the turn for any prompt holding one of its
 // `prompt` strings: tools as [name, input, result] already done, `running` as a tool still at work
-// (the turn holds), `say` as the answer, `pr` as the {number, repo} it opened, and `ask` as a Bash
-// {command, description} to approve.
+// (the turn holds), `say` as the answer, `pr` as the {number, repo} it opened, `ask` as a Bash
+// {command, description} to approve, and `question` as an AskUserQuestion {header, question,
+// options: [[label, description]]} with claude's free-text row under its options.
 const scriptedTurns = () => {
   try {
     return JSON.parse(fs.readFileSync(path.join(process.env.HOME, "fake-turns.json"), "utf8"));
@@ -254,6 +255,18 @@ function scriptedTurn(turn) {
     hook("Notification", { message: "Claude needs your permission to use Bash" });
     asking = 1;
     return drawMenu();
+  }
+  if (turn.question) {
+    const { header, question, options } = turn.question;
+    choosing = {
+      head: ` ☐ ${header}\r\n\r\n${question}\r\n\r\n`,
+      options: [...options, ["Type something.", ""], ["Chat about this", ""]],
+      free: options.length + 1, rule: options.length + 2, indent: "", footer: "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    };
+    wrote([{ type: "tool_use", id: `question-${lines}`, name: "AskUserQuestion", input: { questions: [{ question, header, options: options.map(([label, description]) => ({ label, description })) }] } }]);
+    hook("Notification", { message: "Claude needs your input" });
+    questioning = 1;
+    return drawQuestion();
   }
   if (turn.running) wrote([{ type: "tool_use", id: `tool-${lines}`, name: turn.running[0], input: turn.running[1] }]);
   out(`${turn.say ?? "working"}\r\n`);
