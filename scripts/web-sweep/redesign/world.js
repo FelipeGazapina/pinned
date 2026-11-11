@@ -86,22 +86,39 @@ const HERO_PROMPT = "The hero overlaps the nav below 400px. Fix the spacing.";
 const CI_TASK = "Run the CI on main. Report what fails.";
 const CHANGELOG_TASK = "Write the changelog for v0.17.21 from the merged pull requests.";
 // A worker's first prompt is its title, a blank line and its task, so each matches on its task alone;
-// the Captain hears of the README worker's approval as "... needs input: ...".
+// the Captain hears of the README worker's approval as "... needs input: ..." and answers the
+// changelog's report, as Main draws it, with nothing to say on the approval it already relays.
 const CAPTAIN_TURNS = [
   { prompt: WORLD.captain.prompt, say: "I split this into three workers. I will cut the release once the CI is green and the changelog has landed." },
-  { prompt: "needs input: Claude needs your permission", say: "The changelog is in and linked from #231. The CI is on its last suite. The README worker is waiting for you to allow one push." },
+  { prompt: '"Changelog for v0.17.21" (Claude Code', say: "The changelog is in and linked from #231. The CI is on its last suite. The README worker is waiting for you to allow one push." },
+  { prompt: "needs input: Claude needs your permission" },
   { prompt: CI_TASK, tools: [["Bash", { command: "cargo fmt --check", description: "Check formatting" }, ""], ["Bash", { command: "cargo clippy --workspace", description: "Lint the workspace" }, "Finished"]], running: ["Bash", { command: "cargo test -p pinned-server", description: "Run the pinned-server tests" }] },
-  { prompt: README_BRIEF, say: "The README is tidied and committed on readme-tidy. I need to push the branch so the Captain can open the pull request.", ask: { command: "git push origin readme-tidy", description: "Pushes one commit to a new remote branch. Nothing on main changes." } },
+  { prompt: README_BRIEF, say: "The README is tidied and committed on `readme-tidy`. I need to push the branch so the Captain can open the pull request.", ask: { command: "git push origin readme-tidy", description: "Pushes one commit to a new remote branch. Nothing on main changes.", always: "Yes, and don't ask again for git push commands" } },
   { prompt: CHANGELOG_TASK, say: "Wrote CHANGELOG.md with 14 entries and opened #231", pr: { number: 231, repo: "example/pinned" } },
 ];
+// The hero fix edits Hero.css and commits it in its turn, so its turn has the change and its branch
+// is clean, and it leaves Panel's task list with one task to go.
+const HERO_TODOS = [
+  { content: "Read the hero styles", status: "completed", activeForm: "Reading the hero styles" },
+  { content: "Use the nav height for the margin", status: "completed", activeForm: "Using the nav height for the margin" },
+  { content: "Pad the hero below 400px", status: "completed", activeForm: "Padding the hero below 400px" },
+  { content: "Check the fix at 390px", status: "in_progress", activeForm: "Checking the fix at 390px" },
+];
 const LOOSE_TURNS = [
-  { prompt: HERO_PROMPT, tools: [["Edit", { file_path: "src/components/Hero.css", old_string: "margin-top: 64px;", new_string: "margin-top: var(--nav-height);" }, "The file src/components/Hero.css has been updated."]], say: "The hero used a fixed top margin that ignored the taller nav on small screens. It now reads the nav height. I checked it at 390px in the preview.", pr: { number: 12, repo: "example/site" } },
+  { prompt: HERO_PROMPT, files: {}, commit: "Fix the hero spacing on small screens", todos: HERO_TODOS, tools: [["Edit", { file_path: "src/components/Hero.css", old_string: "margin-top: 64px;", new_string: "margin-top: var(--nav-height);" }, "The file src/components/Hero.css has been updated."]], say: "The hero used a fixed top margin that ignored the taller nav on small screens. It now reads the nav height. I checked it at 390px in the preview.", pr: { number: 12, repo: "example/site" } },
   { prompt: T.updater.title, say: "The updater now retries three times with backoff before it reports a failure.", pr: { number: 214, repo: "example/pinned" } },
   { prompt: T.rate.title, running: ["Bash", { command: "cargo test webhook", description: "Run the webhook tests" }] },
 ];
 
 const HERO_CSS_BEFORE = ":root {\n  --nav-height: 72px;\n}\n\n.nav {\n  height: var(--nav-height);\n}\n.hero {\n  display: grid;\n  margin-top: 64px;\n  padding: 0 24px;\n}\n\n@media (max-width: 400px) { .hero { margin-top: 64px; } }\n";
 const HERO_CSS_AFTER = ":root {\n  --nav-height: 72px;\n}\n\n.nav {\n  height: var(--nav-height);\n}\n.hero {\n  display: grid;\n  margin-top: var(--nav-height);\n  padding: 0 24px;\n}\n\n@media (max-width: 400px) {\n  .hero { padding: 0 16px; }\n}\n";
+LOOSE_TURNS[0].files["src/components/Hero.css"] = HERO_CSS_AFTER;
+// Three open pull requests that ask the user's review, which the sidebar counts as "3 to review".
+const REVIEWS = [
+  [301, "example/pinned", "Retry the updater's download", "octocat"],
+  [302, "example/pinned", "Speed up the sidebar", "hubot"],
+  [57, "example/site", "Add the pricing page", "octocat"],
+].map(([n, repo, title, author]) => [n, repo, title, author, { reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] } }]);
 
 const SERVER = path.join(process.env.CARGO_TARGET_DIR || path.join(__dirname, "../../../target"), "debug", "pinned-server");
 const GO = `http://127.0.0.1:${process.env.SWEEP_GO_PORT || 8798}`;
@@ -191,9 +208,9 @@ async function ensureMachines(page, ctx) {
 // Runs in the page: the key of the open thread titled `title`, if any.
 const keyTitled = (title) => tabs.find((t) => threadTitle(t) === title)?.key ?? null;
 
-/** Opens a thread in `cwd`, or without a project when `cwd` is null, sends `prompt`, retitles it
- * `title`, and waits for `until` statuses. */
-async function thread(page, ctx, { machine, cwd, title, prompt, until, orchestrator = false }) {
+/** Opens a thread in `cwd`, or without a project when `cwd` is null, runs `before` with its key,
+ * sends `prompt`, retitles it `title`, and waits for `until` statuses. */
+async function thread(page, ctx, { machine, cwd, title, prompt, until, orchestrator = false, before }) {
   const found = await page.evaluate(keyTitled, title);
   if (found) return found;
   const key = await page.evaluate(async ({ machine, cwd, orchestrator }) => {
@@ -203,6 +220,7 @@ async function thread(page, ctx, { machine, cwd, title, prompt, until, orchestra
     return tab.key;
   }, { machine, cwd, orchestrator });
   await ctx.waitFor(`${title} to start`, () => page.evaluate((k) => tabByKey(k)?.view.running === true, key));
+  await before?.(key);
   await page.evaluate(({ key, text, title }) => {
     const tab = tabByKey(key);
     activate(tab);
@@ -219,16 +237,24 @@ async function seedOnce(page, ctx) {
   const home = (m) => homeOf(ctx, m);
   for (const m of new Set(Object.values(T).map((t) => t.machine))) {
     fs.writeFileSync(path.join(home(m), "fake-turns.json"), JSON.stringify([...CAPTAIN_TURNS, ...LOOSE_TURNS], null, 1));
+    fs.writeFileSync(path.join(home(m), "fake-gh-search.json"), JSON.stringify(REVIEWS));
   }
-  const pinned = repo(home(T.release.machine), "pinned", WORLD.captain.branch);
-  // A `claude --worktree` checkout reports to the repository that holds it, so the updater's
-  // thread joins the pinned project as on the board.
+  const pinned = repo(home(T.release.machine), "pinned", "main");
+  // A `claude --worktree` checkout reports to the repository that holds it, so the Captain's and the
+  // updater's threads join the pinned project as on the board, and the Captain's footer reads Worktree.
   const exclude = path.join(pinned, ".git", "info", "exclude");
   if (!fs.readFileSync(exclude, "utf8").includes(".claude/")) fs.appendFileSync(exclude, ".claude/\n");
+  const release = worktree(pinned, WORLD.captain.branch, path.join(pinned, ".claude", "worktrees", "release"));
   const updater = worktree(pinned, "fix/updater-retry", path.join(pinned, ".claude", "worktrees", "updater-retry"));
-  const site = repo(home(T.hero.machine), "site", "fix/hero-spacing", { "src/components/Hero.css": HERO_CSS_BEFORE }, { "src/components/Hero.css": HERO_CSS_AFTER });
+  const site = repo(home(T.hero.machine), "site", "fix/hero-spacing", { "src/components/Hero.css": HERO_CSS_BEFORE });
   const api = repo(home(T.rate.machine), "api", "feat/rate-limit");
 
+  // The user opened a thread in pinned's main checkout once, so mac-mini lists it among its projects and
+  // its worktrees group with it.
+  await page.evaluate(async ({ machine, cwd }) => {
+    const tab = await callOn(machine, { cmd: "open_tab", path: cwd, bypass: false });
+    await callOn(machine, { cmd: "close_tab", tab });
+  }, { machine: ids[HOST], cwd: pinned });
   const keys = {};
   keys.two = await thread(page, ctx, { machine: ids[T.two.machine], cwd: null, title: T.two.title, prompt: "Should the Captain run two workers at a time?", until: ["done"] });
   keys.rate = await thread(page, ctx, { machine: ids[T.rate.machine], cwd: api, title: T.rate.title, prompt: T.rate.title, until: ["working"] });
@@ -242,9 +268,12 @@ async function seedOnce(page, ctx) {
       task: { ci: CI_TASK, readme: README_BRIEF, changelog: CHANGELOG_TASK }[w.thread],
       title: w.title,
       target: { providerInstanceId: "claude", model: w.model },
+      ...(w.thread === "readme" ? { isolation: "worktree" } : {}),
     }));
     fs.writeFileSync(path.join(home(T.release.machine), "delegate-calls.jsonl"), calls.map((c) => JSON.stringify(c)).join("\n"));
-    keys.release = await thread(page, ctx, { machine: ids[T.release.machine], cwd: pinned, title: T.release.title, prompt: WORLD.captain.prompt, orchestrator: true });
+    keys.release = await thread(page, ctx, { machine: ids[T.release.machine], cwd: release, title: T.release.title, prompt: WORLD.captain.prompt, orchestrator: true,
+      // Main's chips, set with the composer's pickers before the Captain starts work.
+      before: (key) => pickChips(page, ctx, key, { effort: "high", access: "accept", model: "Opus" }) });
     await ctx.waitFor("the Captain's three workers", () => page.evaluate((k) => tabs.filter((t) => t.view.spawned_by === tabByKey(k).view.id).length >= 3, keys.release), 30000);
   }
   for (const w of WORLD.captain.workers) keys[w.thread] = await page.evaluate(keyTitled, w.title);
@@ -284,6 +313,61 @@ async function seedOnce(page, ctx) {
 }
 
 /**
+ * Sets the composer's chips of `key`'s thread through its own pickers: `effort` ("high"), `access`
+ * ("accept", "auto") and `model` (a /model menu row, "Opus"). The fake claude draws claude 2.1's
+ * effort marks and mode line once told /traits and /modes.
+ */
+async function pickChips(page, ctx, key, { effort, access, model }) {
+  const looks = () => page.evaluate((key) => {
+    const tab = tabByKey(key);
+    return { effort: traitsOn(screenLines(tab))?.effort ?? null, mode: terminalMode(tab), model: modelName(tab) };
+  }, key);
+  const tell = (text) => page.evaluate(({ key, text }) => { const tab = tabByKey(key); return callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text }); }, { key, text });
+  // claude's menus are read off the open thread's terminal.
+  await page.evaluate((key) => activate(tabByKey(key)), key);
+  await ctx.waitFor("the thread idle at its prompt", () => page.evaluate((key) => {
+    const tab = tabByKey(key);
+    return phaseOf(tab) !== "working" && screenLines(tab).some((l) => /^> /.test(l)) && !!accountOf(tab.machine, tab.view.account ?? DEFAULT_ACCOUNT);
+  }, key), 30000);
+  const now = await looks();
+  if (effort && !now.effort) {
+    await tell("/traits");
+    await ctx.waitFor("the effort marks", async () => !!(await looks()).effort);
+  }
+  if (access && !now.mode) {
+    await tell("/modes");
+    await ctx.waitFor("the mode line", async () => !!(await looks()).mode);
+  }
+  if (effort) {
+    await page.evaluate(({ key, effort }) => {
+      const tab = tabByKey(key);
+      tab.traits = traitsOn(screenLines(tab));
+      tab.mode = terminalMode(tab);
+      pickEffort(tab, effort);
+    }, { key, effort });
+    await ctx.waitFor(`${effort} effort`, async () => (await looks()).effort === effort, 20000);
+  }
+  if (access) {
+    await page.evaluate(({ key, access }) => {
+      const tab = tabByKey(key);
+      tab.traits = traitsOn(screenLines(tab));
+      return pickAccess(tab, access);
+    }, { key, access });
+    await ctx.waitFor(`${access} mode`, async () => (await looks()).mode === access, 20000);
+  }
+  if (model) {
+    await page.evaluate(({ key, model }) => {
+      const tab = tabByKey(key);
+      pickModel(tab, modelsFor(tab).find((m) => m.menu === model), accountOf(tab.machine, tab.view.account ?? DEFAULT_ACCOUNT));
+    }, { key, model });
+    await ctx.waitFor(`the ${model} model`, async () => (await looks()).model.startsWith(model), 20000);
+  }
+  // The node counts the keys the pickers press in claude's menus (arrows, "s") as unsent prompt text,
+  // and holds the thread's queued notices behind it. Ctrl-U clears that prompt, as it clears claude's.
+  await page.evaluate((key) => writeTo(tabByKey(key), "\x15"), key);
+}
+
+/**
  * Brings the stack to the boards' shared state and fills ctx.machines (name to machine id) and
  * ctx.threads (Sidebar board row id to tab key). The first call per process seeds; every call
  * waits for this page to list the threads, and puts back the draft this browser keeps.
@@ -294,10 +378,13 @@ async function ensure(page, ctx) {
   if (!ctx.threads) Object.assign(ctx, await seedOnce(page, ctx));
   await ctx.waitFor("every seeded thread on this page", () => page.evaluate((keys) => keys.every((k) => tabByKey(k)), Object.values(ctx.threads)), 30000);
   await page.evaluate(({ two, hero }) => {
+    // The seed came after this page's first count of review requests; the five-minute tick would count again.
+    reviewsAt = 0;
+    fetchReviews();
     saveDraft(tabByKey(two), "Yes, two workers at a time.");
     if (active?.key !== hero) markUnread(tabByKey(hero));
     renderSidebar();
   }, ctx.threads);
 }
 
-module.exports = { EMAIL, PASSWORD, BOARD_DIR, WORLD, vals, ensure, homeOf };
+module.exports = { EMAIL, PASSWORD, BOARD_DIR, WORLD, vals, ensure, homeOf, pickChips };

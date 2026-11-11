@@ -1,15 +1,15 @@
 // Orchestrator.dc.html: the orchestrator's chat on mac-mini with two Captain reports, the Captains
-// rail on the right, and the sidebar's account menu open. Today's app has no account menu at the
-// sidebar's foot (its pages sit in an icon row), so that region compares against the sidebar.
+// rail on the right, and the sidebar's account menu open.
 //
 // seed sends the board's tagged request to the orchestrator for real. Its fake claude hands each
-// paragraph to that project's Captain with send_to_captain: pinned's Captain is open on mac-mini and
-// takes it at once, site's starts on macbook. Each Captain answers with the board's words. site's
-// report reaches the orchestrator by itself. pinned's CI worker is still at work, so the node holds
-// that report for up to CAPTAIN_HOLD; seed sends it up with the node's own orchestrator_report, as
-// the node does when the hold ends. The two reports arrive one after the other, so the chat draws
-// two cards where the board draws one card of two. The orchestrator's answer to the last one is the
-// board's summary with its quick replies. open leaves the #api draft in the composer.
+// paragraph to that project's Captain with send_to_captain and says nothing more: pinned's Captain
+// is open on mac-mini and queues its message behind its workers, site's starts on macbook and
+// answers with the board's words. site's report reaches the orchestrator by itself. pinned's CI
+// worker is still at work, so the node holds that report for up to CAPTAIN_HOLD; seed sends it up
+// with the node's own orchestrator_report, as the node does when the hold ends. The two reports
+// arrive one after the other, each to an idle orchestrator, so the chat draws two cards where the
+// board draws one card of two. The orchestrator's answer to the last one is the board's summary with
+// its quick replies. open leaves the #api draft in the composer and opens the account menu.
 const fs = require("fs");
 const path = require("path");
 const { WORLD, homeOf } = require("./world");
@@ -60,15 +60,19 @@ module.exports = {
   ],
   async seed(page, ctx) {
     if ((await at(page)).sent) return;
-    script(ctx, HOST, [{ prompt: TO_PINNED, say: PINNED_REPORT }, { prompt: SITE_REPORT, say: SITE_ANSWER }, { prompt: PINNED_REPORT, say: ANSWER }]);
-    script(ctx, SITE, [{ prompt: TO_SITE, say: SITE_REPORT }]);
-    // pinned has a second checkout on mac-mini (the updater's worktree), so each message names its folder.
-    const folder = (machine, name) => fs.realpathSync(path.join(homeOf(ctx, machine), "work", name));
+    // pinned has other checkouts on mac-mini (the updater's), so each message names its Captain's folder.
+    const pinnedFolder = await page.evaluate((key) => tabByKey(key).view.cwd, ctx.threads.release);
     const calls = [
-      { name: "send_to_captain", input: { project: folder(HOST, "pinned"), machine: HOST, message: TO_PINNED, request_id: "redesign-pinned" } },
-      { name: "send_to_captain", input: { project: folder(SITE, "site"), machine: SITE, message: TO_SITE, request_id: "redesign-site" } },
+      { name: "send_to_captain", input: { project: pinnedFolder, machine: HOST, message: TO_PINNED, request_id: "redesign-pinned" } },
+      { name: "send_to_captain", input: { project: fs.realpathSync(path.join(homeOf(ctx, SITE), "work", "site")), machine: SITE, message: TO_SITE, request_id: "redesign-site" } },
     ];
-    fs.writeFileSync(path.join(homeOf(ctx, HOST), "taste-calls.jsonl"), calls.map((c) => JSON.stringify(c)).join("\n"));
+    script(ctx, HOST, [
+      { prompt: "#pinned release 0.17.21", calls },
+      { prompt: TO_PINNED, say: PINNED_REPORT },
+      { prompt: PINNED_REPORT, say: ANSWER },
+      { prompt: SITE_REPORT, say: SITE_ANSWER },
+    ]);
+    script(ctx, SITE, [{ prompt: TO_SITE, say: SITE_REPORT }]);
     await page.evaluate(() => {
       const global = tabs.find(isGlobalOrchestratorTab);
       activate(global);
@@ -98,5 +102,7 @@ module.exports = {
       prompt.dispatchEvent(new Event("input"));
       prompt.blur();
     }, DRAFT);
+    await page.click("#account-pages");
+    await page.waitForSelector("#account-menu:not([hidden])");
   },
 };

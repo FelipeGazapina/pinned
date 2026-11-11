@@ -50,6 +50,7 @@ module.exports = {
   },
   async open(page, ctx) {
     await page.evaluate((key) => activate(tabByKey(key)), ctx.threads.readme);
+    await require("./main").pickEditor(page, ctx, "Zed");
     await ctx.waitFor("the worker's changed files", () => page.evaluate(() => !!document.querySelector("#thread .changes")), 15000).catch((e) => ctx.warn(e.message));
   },
 };
