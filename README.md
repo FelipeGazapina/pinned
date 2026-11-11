@@ -647,6 +647,60 @@ The **Prove it works** step is on by default. Remove it to leave the block out o
 workflow's sessions. A Slack workflow that only replies never opens a pull request, so its
 flow has no such step.
 
+### Convex
+
+A project that keeps its data in [Convex](https://convex.dev) can let its agents read that
+data. Convex needs pinned signed in. The hub keeps each deploy key and makes every read, so
+a key never reaches a machine, a session or the app.
+
+To connect a deployment, open **Connectors** and find **Convex**:
+
+1. Click **Open Convex ↗** and create a deploy key in the deployment's settings with the
+   permissions `deployment:data:view`, `deployment:functions:runInternalQueries`,
+   `deployment:functions:runTestQuery` and `deployment:logs:view`.
+2. Pick the pinned project whose agents read it, paste the key and click **Connect**. pinned
+   reads the deployment from the key. Development, production and preview deployments all
+   work.
+
+Connect as many deployments as you need, each with its own key, from any Convex account. A
+project reads one deployment at a time. pinned names a project by its git origin, so the
+project is connected on every machine, and a folder without an origin cannot be connected.
+When a project's `.env.local` or `.env` names a deployment that is not connected, the Convex
+card and the project's threads offer to connect it.
+
+A session that pinned starts in a connected project gets five tools:
+
+| Tool | What it does |
+|---|---|
+| `convex_tables` | Lists the table names. With `table`, shows one table's fields and indexes. |
+| `convex_data` | Reads documents of one table, 20 at a time and at most 100. |
+| `convex_query` | Runs a read-only JavaScript query. |
+| `convex_run` | Runs a deployed query function by path, such as `invoices:byNumber`. |
+| `convex_logs` | Shows recent function runs with their log lines and errors. |
+
+No tool writes. Convex refuses a mutation or an action that is run as a query, and pinned
+refuses Convex's own system functions. A session that started before its project was
+connected gets the tools when it restarts.
+
+A query can read an environment variable of the deployment by name, because Convex gives its
+functions `process.env`. Connect a deployment only for agents that may see those values.
+
+A workflow reads Convex only when its flow has the **Read Convex data** step, which no
+workflow has until you add it. The step names the connection:
+
+- **All tables** gives the run all five tools.
+- **Only these** limits the run to listing and reading the tables you pick. Queries and logs
+  are off for that run.
+
+Use a table list for a workflow that outside text starts, such as a Slack message or a
+Linear issue. A model that drafts a workflow for you never adds the step.
+
+The table list limits the tools. It is not a sandbox: a session has a shell on its machine,
+and a process there can ask pinned as another session of the same machine.
+
+These sessions get no Convex tools: a session in an Upstash Box that you opened by hand, a
+session that an external agent drives, the global orchestrator and the taste chat.
+
 ## Updates
 
 pinned checks GitHub Releases at launch and installs a newer version right away, then
