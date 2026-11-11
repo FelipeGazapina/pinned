@@ -11,7 +11,7 @@ const context = {
   rows: [],
 };
 vm.createContext(context);
-vm.runInContext(`${src.slice(src.indexOf("const waitingWorkers"), src.indexOf("function renderWorkerBanner"))}\nObject.assign(globalThis, { waitingWorkers, workerBannerHtml });`, context);
+vm.runInContext(`${src.slice(src.indexOf("const waitingWorkers"), src.indexOf("function renderWorkerBanner"))}\nObject.assign(globalThis, { waitingWorkers, workerBannerHtml, phoneWorkerBannerHtml });`, context);
 
 const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 const buttons = (html) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]);
@@ -44,4 +44,13 @@ test("several waiting workers show the oldest first and count them", () => {
   const html = context.workerBannerHtml(rows[1], 1, rows.length, true);
   assert.deepEqual(buttons(html), ["2 of 2", "Approve", "Open"]);
   assert.match(html, /data-worker-answer="approve" disabled/);
+});
+
+test("a phone's banner names the worker and what it waits on, with Review", () => {
+  const html = context.phoneWorkerBannerHtml({ title: "Tidy the README", ask: approval(["approve"]) });
+  assert.equal(text(html), "Tidy the README needs approval Review");
+  assert.deepEqual(buttons(html), ["Review"]);
+  assert.match(html, /data-worker-review/);
+  const question = context.phoneWorkerBannerHtml({ title: "Pick a color", ask: { kind: "question", text: "Which?", command: null, choices: null, typed: false } });
+  assert.equal(text(question), "Pick a color has a question Review");
 });
