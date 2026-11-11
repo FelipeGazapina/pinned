@@ -19,7 +19,7 @@ use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
-use pinned_core::taste::{BoxSizeChoice, TasteScope};
+use pinned_core::taste::{BoxSizeChoice, TasteScope, Tastes};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -307,9 +307,14 @@ enum Boot {
 /// project's and then the account's default box size in the way of working, else small. Every
 /// path that opens a box takes its size from here.
 pub async fn box_size(hub: &Hub, account: &Account, repo: Option<&str>, asked: Option<BoxSize>) -> Result<BoxSizeChoice, String> {
+    Ok(choose_box_size(&hub.db.tastes(account.id).await?.unwrap_or_default(), repo, asked))
+}
+
+/// `box_size` on tastes already read.
+fn choose_box_size(tastes: &Tastes, repo: Option<&str>, asked: Option<BoxSize>) -> BoxSizeChoice {
     // A workflow may name its repo as owner/repo, which `repo_key` does not read.
     let repo = repo.map(|repo| origin_repo(repo).unwrap_or_else(|| repo.to_owned()));
-    Ok(hub.db.tastes(account.id).await?.unwrap_or_default().box_size(repo.as_deref(), asked))
+    tastes.box_size(repo.as_deref(), asked)
 }
 
 pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked: Option<f64>) -> Result<Option<f64>, String> {
@@ -1684,5 +1689,32 @@ mod tests {
         let quoted = tail(&long);
         assert_eq!(quoted.chars().count(), TAIL);
         assert!(quoted.ends_with("last linecurl: (22) 404"));
+    }
+
+    #[test]
+    fn each_kind_of_box_takes_its_size_from_the_way_of_working() {
+        use pinned_core::taste::{BoxSizeSource, TastePatch};
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        tastes.set(&TasteScope::Project { repo: "github.com/acme/site".into() }, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }).unwrap();
+        let sized = |repo: &str, asked: Option<BoxSize>| {
+            let choice = choose_box_size(&tastes, Some(repo), asked);
+            (choice.size(), choice.from())
+        };
+        // A delegate box: `open_delegate` turns target.box.repo into the clone URL its RunSpec keeps.
+        let delegate = origin_repo("acme/site").unwrap();
+        assert_eq!(delegate, "https://github.com/acme/site.git");
+        assert_eq!(sized(&delegate, None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&delegate, Some(BoxSize::Small)), (BoxSize::Small, BoxSizeSource::Call));
+        // A Captain's box: `open_captain` reads the project's origin, an SSH one too.
+        let captain = origin_repo("git@github.com:acme/site.git").unwrap();
+        assert_eq!(sized(&captain, None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&origin_repo("git@github.com:acme/api.git").unwrap(), None), (BoxSize::Medium, BoxSizeSource::Account));
+        // A workflow's box: `open_new` passes the workflow's repo as it is written, owner/repo included.
+        assert_eq!(sized("acme/site", None), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized("acme/api", None), (BoxSize::Medium, BoxSizeSource::Account));
+        assert_eq!(sized("acme/site", Some(BoxSize::Medium)), (BoxSize::Medium, BoxSizeSource::Call));
+        let none = choose_box_size(&Tastes::default(), Some("acme/site"), None);
+        assert_eq!((none.size(), none.from()), (BoxSize::Small, BoxSizeSource::BuiltIn));
     }
 }

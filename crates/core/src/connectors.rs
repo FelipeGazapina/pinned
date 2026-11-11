@@ -7132,4 +7132,32 @@ mod tests {
     }
 
     include!("legacy_outcome.rs");
+
+    #[test]
+    fn a_workflow_box_keeps_the_size_it_was_saved_with_and_a_sizeless_one_takes_the_default() {
+        use crate::taste::{BoxSizeSource, TastePatch, TasteScope, Tastes};
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        tastes.set(&site, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }).unwrap();
+        let step = |machine: serde_json::Value| {
+            let mut saved = serde_json::to_value(linear_connector()).unwrap();
+            saved["machine"] = machine;
+            match serde_json::from_value::<Connector>(saved).unwrap().runs_on {
+                RunsOn::FreshBox(step) => step,
+                other => panic!("{other:?}"),
+            }
+        };
+        let sized = |step: &BoxStep, repo: &str| {
+            let choice = tastes.box_size(Some(repo), step.size);
+            (choice.size(), choice.from())
+        };
+
+        let small = step(serde_json::json!({ "kind": "upstash-box", "size": "small" }));
+        assert_eq!(small.size, Some(BoxSize::Small));
+        assert_eq!(sized(&small, "https://github.com/acme/site.git"), (BoxSize::Small, BoxSizeSource::Call), "a size the workflow names wins over the project's");
+        let sizeless = step(serde_json::json!({ "kind": "upstash-box" }));
+        assert_eq!(sized(&sizeless, "https://github.com/acme/site.git"), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&sizeless, "https://github.com/acme/api.git"), (BoxSize::Medium, BoxSizeSource::Account));
+    }
 }

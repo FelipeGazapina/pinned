@@ -2192,4 +2192,17 @@ mod tests {
             json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
     }
+
+    #[test]
+    fn an_open_box_from_an_older_app_keeps_its_size_and_a_newer_one_may_leave_it_out() {
+        let older = serde_json::from_value::<HubCall>(json!({ "cmd": "open_box", "repo": "acme/site", "size": "medium" })).unwrap();
+        assert!(matches!(older, HubCall::OpenBox { size: Some(BoxSize::Medium), budget_usd: None, .. }));
+        let sizeless = serde_json::from_value::<HubCall>(json!({ "cmd": "open_box", "repo": "acme/site" })).unwrap();
+        assert!(matches!(sizeless, HubCall::OpenBox { size: None, .. }));
+        assert_eq!(serde_json::to_value(sizeless).unwrap(), json!({ "cmd": "open_box", "repo": "acme/site" }));
+        let asked = serde_json::from_value::<HubCall>(json!({ "cmd": "get_box_size", "repo": "acme/site" })).unwrap();
+        assert!(matches!(asked, HubCall::GetBoxSize { repo: Some(ref repo), size: None } if repo == "acme/site"));
+        let cleared = serde_json::from_value::<HubCall>(json!({ "cmd": "set_box_size" })).unwrap();
+        assert!(matches!(cleared, HubCall::SetBoxSize { repo: None, size: None }));
+    }
 }

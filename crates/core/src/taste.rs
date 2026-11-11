@@ -1185,11 +1185,13 @@ Deploys go through the VPS."
                 "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 8, "autonomy": "report_at_end",
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+                "box_size": null,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
                 "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+                "box_size": null,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
@@ -1443,5 +1445,84 @@ Deploys go through the VPS."
         assert_eq!(serde_json::from_value::<Tastes>(older).unwrap().placement, Placement::default(), "tastes kept before placement read with none");
         tastes.reset(&TasteScope::Captains, TasteField::Placement);
         assert_eq!((tastes.placement, tastes.captains.parallel), (Placement::default(), 4), "the reset clears the policy only");
+    }
+
+    /// `(size, from)` of a box cloning `repo` whose call names `asked`.
+    fn sized(tastes: &Tastes, repo: Option<&str>, asked: Option<BoxSize>) -> (BoxSize, BoxSizeSource) {
+        let choice = tastes.box_size(repo, asked);
+        (choice.size(), choice.from())
+    }
+
+    #[test]
+    fn a_box_takes_the_calls_size_then_the_projects_then_the_accounts_then_small() {
+        let mut tastes = Tastes::default();
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Small, BoxSizeSource::BuiltIn));
+        assert_eq!(sized(&tastes, None, None), (BoxSize::Small, BoxSizeSource::BuiltIn));
+
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }).unwrap();
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Large, BoxSizeSource::Account));
+        assert_eq!(sized(&tastes, None, None), (BoxSize::Large, BoxSizeSource::Account), "a box of no project takes the account's");
+
+        tastes.set(&site(), TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Medium, BoxSizeSource::Project));
+        for other_form in ["https://github.com/acme/site.git", "git@github.com:acme/site.git", "https://github.com/Acme/Site"] {
+            assert_eq!(sized(&tastes, Some(other_form), None), (BoxSize::Medium, BoxSizeSource::Project), "{other_form}");
+        }
+        assert_eq!(sized(&tastes, Some("github.com/acme/api"), None), (BoxSize::Large, BoxSizeSource::Account), "another project keeps the account's");
+
+        assert_eq!(sized(&tastes, Some(SITE), Some(BoxSize::Small)), (BoxSize::Small, BoxSizeSource::Call));
+        assert_eq!(sized(&tastes, None, Some(BoxSize::Medium)), (BoxSize::Medium, BoxSizeSource::Call));
+        assert_eq!(serde_json::to_value(tastes.box_size(Some(SITE), None)).unwrap(), json!({ "size": "medium", "from": "project" }));
+    }
+
+    #[test]
+    fn a_project_with_no_box_size_inherits_the_accounts() {
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { parallel: Some(4), ..TastePatch::default() }).unwrap();
+        assert_eq!(tastes.resolve(&site()).box_size, Some(BoxSize::Medium));
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Medium, BoxSizeSource::Account));
+
+        tastes.set(&site(), TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4 } }), "the account's size set on the project is dropped, as any field");
+    }
+
+    #[test]
+    fn the_orchestrator_takes_no_box_size() {
+        let mut tastes = Tastes::default();
+        let before = tastes.clone();
+        assert_eq!(
+            tastes.set(&TasteScope::Orchestrator, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }),
+            Err("the box size belongs to the projects: set the account's for Captains (all), or one project's".into())
+        );
+        assert_eq!(tastes, before);
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Small, BoxSizeSource::BuiltIn));
+    }
+
+    #[test]
+    fn a_box_size_reset_makes_a_project_inherit_and_gives_the_account_small_back() {
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { box_size: Some(BoxSize::Large), parallel: Some(4), ..TastePatch::default() }).unwrap();
+        tastes.reset(&site(), TasteField::BoxSize);
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4 } }));
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Medium, BoxSizeSource::Account));
+
+        tastes.reset(&TasteScope::Captains, TasteField::BoxSize);
+        assert_eq!(tastes.captains.box_size, None);
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Small, BoxSizeSource::BuiltIn));
+    }
+
+    #[test]
+    fn tastes_kept_before_the_box_size_read_with_none_and_open_small() {
+        let older = json!({
+            "captains": { "parallel": 3, "box_budget_cents": 500 },
+            "projects": { "github.com/acme/site": { "parallel": 2 } }
+        });
+        let tastes: Tastes = serde_json::from_value(older).unwrap();
+        assert_eq!((tastes.captains.box_size, tastes.orchestrator.box_size, tastes.projects[SITE].box_size), (None, None, None));
+        assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Small, BoxSizeSource::BuiltIn));
+        assert_eq!(serde_json::to_value(&tastes.captains).unwrap()["box_size"], Value::Null, "the account's is written, null included");
+        assert!(serde_json::to_value(&tastes.projects[SITE]).unwrap().get("box_size").is_none(), "a project's patch leaves it out");
     }
 }
