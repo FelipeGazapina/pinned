@@ -520,9 +520,11 @@ function pickOption(tab, n) {
   const t = threadOf(tab);
   t.picking = n;
   renderComposer(tab);
+  // Every render reads the menu off the screen again as a new object, so the pick holds while the
+  // option is still there; chooseOption checks its label on the screen before it types.
   setTimeout(() => {
     t.picking = null;
-    if (tab.menu === menu) chooseOption(tab, n, option.label);
+    if (tab.menu?.options[n - 1]?.label === option.label) chooseOption(tab, n, option.label);
   }, 200);
 }
 
