@@ -2159,11 +2159,20 @@ async function newThreadIn(tab) {
     tell(`Couldn't open a thread: ${esc(e)}`, 6000);
   }
 }
+/** On a phone the thread list gives way to the palette, and comes back when the palette is cancelled. */
+function paletteFromList() {
+  if (!narrow(768)) return null;
+  const list = ui.sidebarOpen;
+  toggleSidebar(false);
+  return list ? () => {
+    document.activeElement?.blur();
+    toggleSidebar(true);
+  } : null;
+}
 /** T3 Code's chat.new: with more than one project the palette asks where, otherwise the thread opens here. */
 function newThread(here = false) {
-  if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  openPalette({ mode: "new-thread-in" });
+  openPalette({ mode: "new-thread-in", onCancel: paletteFromList() });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
@@ -2173,8 +2182,7 @@ function newThreadWithoutProject() {
 }
 /** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
 function addProject(machine = active?.machine) {
-  if (narrow(768)) toggleSidebar(false);
-  openPalette({ mode: "add-project", machine });
+  openPalette({ mode: "add-project", machine, onCancel: paletteFromList() });
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
 document.getElementById("add-project").onclick = () => addProject();

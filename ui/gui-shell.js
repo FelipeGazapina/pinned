@@ -451,12 +451,13 @@ function threadExcerptHtml({ source, snippet, query }) {
 }
 
 /** Opens the palette at `mode`: the root, or "new-thread-in", "add-project" or a view's name, with
- * `query` typed and, for a pull request's link, the `linkedThreads` it names. */
-function openPalette({ mode = "root", query = "", linkedThreads = null, machine = null } = {}) {
+ * `query` typed and, for a pull request's link, the `linkedThreads` it names. `onCancel` runs when
+ * Escape or a tap beside it closes it. */
+function openPalette({ mode = "root", query = "", linkedThreads = null, machine = null, onCancel = null } = {}) {
   closeSideMenu();
   palette.views = [{ view: "root", query }];
   palette.hi = 0;
-  Object.assign(palette, { publish: false, newMachine: null, linked: linkedThreads && { query, threads: linkedThreads }, search: null, adding: null });
+  Object.assign(palette, { publish: false, newMachine: null, linked: linkedThreads && { query, threads: linkedThreads }, search: null, adding: null, onCancel });
   paletteEl.hidden = false;
   paletteInput.value = query;
   if (mode === "add-project") startAddProject(machine);
@@ -475,6 +476,12 @@ function closePalette() {
   paletteEl.hidden = true;
   clearTimeout(threadSearchTimer);
   if (!shellPage()) focusInput();
+}
+function cancelPalette() {
+  const back = palette.onCancel;
+  palette.onCancel = null;
+  closePalette();
+  back?.();
 }
 const paletteView = () => palette.views.at(-1);
 /** A view's spec, or the one its `mode` gives for the query, as the root browses for a typed path. */
@@ -574,7 +581,7 @@ paletteInput.addEventListener("keydown", (e) => {
   } else if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) return;
   else if (e.key === "Enter" && spec.submit && (palette.hi < 0 || primary || spec.submitsFirst?.())) spec.submit(paletteInput.value);
   else if (e.key === "Enter") runPaletteItem(palette.shown[palette.hi >= 0 ? palette.hi : rows[0]]);
-  else if (e.key === "Escape") closePalette();
+  else if (e.key === "Escape") cancelPalette();
   else if (e.key === "Backspace" && !paletteInput.value && palette.views.length > 1) popPalette();
   else return;
   e.preventDefault();
@@ -591,10 +598,10 @@ paletteResults.addEventListener("click", (e) => {
 });
 paletteEl.querySelector(".accessory").onclick = (e) => e.target.closest("[data-submit]:not(:disabled)") && viewSpec().submit?.(paletteInput.value);
 paletteEl.querySelector("footer").onclick = (e) => e.target.closest("[data-footer-act]") && viewSpec().footerRun?.();
-paletteEl.querySelector(".backdrop").onclick = () => closePalette();
+paletteEl.querySelector(".backdrop").onclick = () => cancelPalette();
 paletteEl.querySelector(".lead").onclick = () => (palette.views.length > 1 ? popPalette() : paletteInput.focus());
 
-onGuiKey("k", () => (paletteOpen() ? closePalette() : openPalette()));
+onGuiKey("k", () => (paletteOpen() ? cancelPalette() : openPalette()));
 
 /** Draws the page, keeping where its body was scrolled. */
 function setPage(html) {
