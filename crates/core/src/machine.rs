@@ -2848,7 +2848,7 @@ impl Machine {
         let started = Instant::now();
         let answer = loop {
             match self.call_hub(HubCall::Convex { tab: tab.to_owned(), repo: repo.clone(), ask: ask.clone() }) {
-                Err(e) if offer && (e == crate::link::OFFLINE || e == UNKNOWN_TAB) && started.elapsed() < CONVEX_OFFER_WAIT => std::thread::sleep(CONVEX_OFFER_RETRY),
+                Err(e) if offer && e == UNKNOWN_TAB && started.elapsed() < CONVEX_OFFER_WAIT => std::thread::sleep(CONVEX_OFFER_RETRY),
                 answer => break answer,
             }
         };
@@ -10737,6 +10737,17 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(asked.lock().unwrap().len(), 5);
         assert_eq!(tool(&scratch, Ask::Offer), Err("This folder has no git origin, so it cannot be connected to Convex yet.".into()));
         assert_eq!(asked.lock().unwrap().len(), 5, "a folder with no origin asks the hub nothing");
+
+        let offline = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tried = offline.clone();
+        m.set_hub(Arc::new(move |_| {
+            tried.fetch_add(1, Ordering::SeqCst);
+            Err(crate::link::OFFLINE.into())
+        }));
+        let started = Instant::now();
+        assert_eq!(tool(&thread, Ask::Offer), Err(crate::link::OFFLINE.into()));
+        assert_eq!(offline.load(Ordering::SeqCst), 1, "a hub link that is down is not asked again, so a session's start does not wait on it");
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(dir);
     }
 
