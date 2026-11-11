@@ -1,12 +1,12 @@
-/** The Convex connector: its card on the Connectors page and the Read Convex data workflow step. The
- * hub keeps each deploy key; the card only sends what is typed into `#convex-key`, and every other
- * view shows the key's hint. */
+/** The Convex connector: its card on the Connectors page, the banner in a thread whose project uses
+ * Convex, and the Read Convex data workflow step. The hub keeps each deploy key; the card only sends
+ * what is typed into `#convex-key`, and every other view shows the key's hint. */
 
 const CONVEX_KEYS = "https://dashboard.convex.dev/deployment/settings";
 const CONVEX_PERMISSIONS = ["deployment:data:view", "deployment:functions:runInternalQueries", "deployment:functions:runTestQuery", "deployment:logs:view"];
 LOGOS.convex = `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="5" rx="1.6"/><rect x="3" y="9.5" width="18" height="5" rx="1.6"/><rect x="3" y="16" width="18" height="5" rx="1.6"/></svg>`;
 
-/** `prefill` is the repo the card was asked to connect. `tables` holds each connection's table
+/** `prefill` is the repo a banner asked the card to connect. `tables` holds each connection's table
  * names for the step's panel: "loading", "failed", or the names. `filter` narrows the panel's list. */
 const convexUi = { prefill: null, tables: {}, filter: "" };
 
@@ -132,7 +132,7 @@ async function loadConvexProjects() {
   if (JSON.stringify(convexProjects()) !== before) redrawConvexCard();
 }
 
-/** Opens the card with `repo` picked, as a step's panel does. */
+/** Opens the card with `repo` picked, from a thread's banner or a step's panel. */
 async function convexOpenCard(repo) {
   convexUi.prefill = repo;
   await openSettings("integrations");
@@ -174,6 +174,25 @@ settingsPage.addEventListener("change", (e) => {
   const id = e.target.dataset.convexAdd;
   if (id && e.target.value) convexSetRepos(id, (repos) => [...repos, e.target.value]);
 });
+
+/** Repos whose banner was dismissed this boot. */
+const convexDismissed = new Set();
+
+/** The banner a thread shows while its project names a deployment that no connection serves. */
+function convexBannerFor(tab) {
+  if (!account || !tab) return null;
+  const path = projectPathOf(tab);
+  const project = (machines.get(tab.machine)?.projects ?? []).find((p) => p.path === path);
+  if (!project?.convex || !project.repo || convexServing(project.repo) || convexDismissed.has(project.repo)) return null;
+  return { repo: project.repo, deployment: convexDeployment(project.convex) };
+}
+
+function convexBannerHtml(banner) {
+  return `<div class="resume-banner convex-banner" role="status"><span class="logo" data-tone="convex" data-logo="convex">${LOGOS.convex}</span><div><b>This project uses Convex.</b>
+    <span>Connect ${esc(banner.deployment)} so agents here can read its data.</span></div>
+    <button type="button" class="primary" data-convex-connect="${esc(banner.repo)}">Connect Convex</button>
+    <button type="button" class="icon" data-dismiss-convex="${esc(banner.repo)}" aria-label="Dismiss">${icon("x")}</button></div>`;
+}
 
 const CONVEX_STEP = { tone: "convex", icon: "▤", app: "Convex", title: "Read Convex data", about: "Lets this run's session read the project's Convex data." };
 

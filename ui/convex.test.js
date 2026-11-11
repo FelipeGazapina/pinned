@@ -69,6 +69,11 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
     externalAgentsCardHtml: () => "",
     icon: (name) => `<svg data-icon="${name}"></svg>`,
     PinnedGraph,
+    projectPathOf: (tab) => tab.view.cwd,
+    opened: [],
+    async openSettings(name) {
+      context.opened.push(name);
+    },
     document: {
       body: { dataset: {} },
       getElementById: byId,
@@ -78,7 +83,7 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${settingsSrc}\n${convexSrc}\nglobalThis.__settings = settings; globalThis.__actions = actions; globalThis.__sections = settingsSections; globalThis.__ui = convexUi; globalThis.__setView = (next) => { view = next; };`,
+    `${settingsSrc}\n${convexSrc}\nglobalThis.__settings = settings; globalThis.__actions = actions; globalThis.__sections = settingsSections; globalThis.__ui = convexUi; globalThis.__setView = (next) => { view = next; }; globalThis.__dismissed = convexDismissed;`,
     context,
   );
   context.__settings.convex = connections;
@@ -320,4 +325,41 @@ test("the panel fetches the names once, and types them when the fetch fails", as
   assert.deepEqual(plain(node.tables), ["invoices", "events"]);
   context.graphNodePanel(editing(context, { step: node }));
   assert.equal(calls.length, 1, "a failed fetch is not retried on every draw");
+});
+
+const thread = (path, machine = "local") => ({ key: `${machine}:t1`, machine, view: { cwd: path } });
+
+test("a thread whose project names an unconnected deployment offers to connect it", () => {
+  const { context } = load({ connections: [SITE_CONNECTION] });
+  const banner = context.convexBannerFor(thread(SHOP.path));
+  assert.deepEqual(plain(banner), { repo: "github.com/acme/shop", deployment: "quick-lemur-789" });
+  const html = context.convexBannerHtml(banner);
+  assert.match(html, /<b>This project uses Convex\.<\/b>\s*<span>Connect quick-lemur-789 so agents here can read its data\.<\/span>/);
+  assert.match(html, /<button type="button" class="primary" data-convex-connect="github\.com\/acme\/shop">Connect Convex<\/button>/);
+  assert.match(html, /data-dismiss-convex="github\.com\/acme\/shop" aria-label="Dismiss"/);
+});
+
+test("no banner once the repo is served, dismissed, signed out, or without Convex", () => {
+  const { context } = load({ connections: [SITE_CONNECTION] });
+  assert.equal(context.convexBannerFor(thread(SITE.path)), null, "served");
+  assert.equal(context.convexBannerFor(thread(BILLING.path)), null, "no Convex in its dotenv");
+  assert.equal(context.convexBannerFor(thread("/Users/ana/elsewhere")), null, "not a listed project");
+  assert.ok(context.convexBannerFor(thread(SHOP.path)));
+  context.__dismissed.add("github.com/acme/shop");
+  assert.equal(context.convexBannerFor(thread(SHOP.path)), null, "dismissed");
+  const signedOut = load({ signedIn: false });
+  assert.equal(signedOut.context.convexBannerFor(thread(SHOP.path)), null, "signed out");
+});
+
+test("Connect on the banner opens Connectors with that project picked", async () => {
+  const admin = { path: "/Users/ana/code/admin", name: "admin", repo: "github.com/acme/admin", convex: "prod:brave-fox-321" };
+  const { context, byId } = load({ projects: [SHOP, admin] });
+  const focused = [];
+  byId("convex-key").focus = () => focused.push("convex-key");
+  await context.convexOpenCard("github.com/acme/admin");
+  assert.deepEqual(plain(context.opened), ["integrations"]);
+  assert.deepEqual(focused, ["convex-key"]);
+  const html = context.convexCardHtml();
+  assert.match(html, /<option value="github\.com\/acme\/admin" selected>admin · ~\/code\/admin<\/option>/);
+  assert.match(html, /placeholder="prod:brave-fox-321\|…"/);
 });

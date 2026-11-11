@@ -109,6 +109,7 @@ function limitBanner() { return null; }
 const LOCAL = "local";
 function isBoxMachine() { return false; }
 const boxInfo = new Map();
+function convexBannerFor() { return null; }
 function tell() {}
 function icon(name, cls = "") { return '<svg data-icon="' + name + '" class="' + cls + '"></svg>'; }
 function esc(text) { return String(text ?? "").replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";"); }
