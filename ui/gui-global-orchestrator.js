@@ -171,9 +171,9 @@ function openGlobalProjects() {
 
 SHELL_PAGES["global-projects"] = { show() { renderGlobalProjectsPage(); } };
 
-/** How the page names a `captainState`. */
-const CAPTAIN_STATE_LABELS = { working: "Working", idle: "Idle", none: "No Captain" };
-const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+/** A project group's name and slug as the tag catalog names it, so counts and Captains find their row. */
+const groupName = (group) => projectTagName(group, group.checkouts.map((c) => projectRepos.get(`${c.machine}:${c.path}`)).find(Boolean));
+const groupSlug = (group) => tagSlug(groupName(group));
 
 /** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
  * session or a headless child at work, by project slug and machine id. */
@@ -182,7 +182,7 @@ function runningWorkers() {
   for (const group of projectGroups(true)) {
     const counts = new Map();
     for (const tab of group.tabs) if (tab.view.role === "worker" && (tab.view.running || tab.view.status === "working")) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
-    by.set(tagSlug(group.name), counts);
+    by.set(groupSlug(group), counts);
   }
   return by;
 }
@@ -190,7 +190,7 @@ function runningWorkers() {
 /** What each project's threads and workers cost, as `$1.26 · 2 workers`, by project slug. */
 function projectCosts() {
   const by = new Map();
-  for (const group of projectGroups(true)) by.set(tagSlug(group.name), projectCostLabel(spawnTree(group.tabs).roots));
+  for (const group of projectGroups(true)) by.set(groupSlug(group), projectCostLabel(spawnTree(group.tabs).roots));
   return by;
 }
 
@@ -223,7 +223,7 @@ function renderGlobalProjectsPage() {
 
 /** A project's Captain tab on one machine, when one is open; the chips that have one open it. */
 function captainTabFor(projectSlug, machineId) {
-  const group = projectGroups(true).find((g) => tagSlug(g.name) === projectSlug);
+  const group = projectGroups(true).find((g) => groupSlug(g) === projectSlug);
   return group?.tabs.find((t) => t.machine === machineId && t.view.role === "orchestrator") ?? null;
 }
 

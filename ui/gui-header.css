@@ -1,0 +1,87 @@
+/* The chat header and the terminal drawer above phone width: named actions, a Captain or Worker chip,
+   one layout group, and the steps it folds through as it narrows (data-fold, gui-header.js). */
+@media (min-width: 769px) {
+  #chat-head { height: 49px; box-sizing: border-box; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid var(--g-border); font-size: 13px; }
+  #chat-head .crumb { gap: 10px; font-weight: 400; }
+  #chat-head .crumb .project { flex: none; gap: 10px; padding: 4px 0; color: var(--g-side-muted); font-weight: 400; }
+  #chat-head .crumb :is(.monogram, .favicon) { width: 18px; height: 18px; border-radius: 5px; }
+  #chat-head .crumb .sep { color: rgb(var(--g-muted-rgb) / 0.6); }
+  #chat-head .crumb .parent { padding: 4px 0; color: var(--g-side-muted); font-weight: 400; }
+  #chat-head .crumb .title { font-weight: 600; }
+  #chat-head .crumb .title > .text { padding: 4px 0; }
+  /* The title's menu chevron takes room only while it shows. */
+  #chat-head .crumb .title .chev { width: 0; margin-left: -4px; transition: none; }
+  #chat-head .crumb .title:is(:hover, :focus-visible) .chev, #chat-head .crumb:is(.pulling, .armed) .title .chev { width: 14px; margin-left: 0; }
+  #chat-head .crumb .stats { margin-left: 0; color: var(--g-muted); }
+
+  #chat-head .role-chip { flex: none; padding: 0 6px; border-radius: 4px; background: rgb(var(--g-primary-rgb) / 0.2); color: var(--g-link); font-size: 11px; font-weight: 600; line-height: 18px; }
+  #chat-head .role-chip.worker { background: var(--g-input); color: var(--g-text); }
+
+  /* Each action is one outlined box: its button, then its menu's chevron. */
+  #chat-head :is(#scripts-control, #open-in, #git-action, #open-diff) { display: flex; flex: none; align-items: center; height: 30px; box-sizing: border-box; overflow: hidden;
+    border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 8px; background: transparent; }
+  #chat-head :is(#scripts-control, #open-in, #git-action)[hidden], #chat-head #open-diff[hidden] { display: none; }
+  #chat-head :is(#scripts-control, #open-in, #git-action) > button { display: flex; align-items: center; gap: 6px; height: 28px; min-width: 0; padding: 0 10px; border: 0; border-radius: 0;
+    background: transparent; color: var(--g-fg); font-size: 12.5px; white-space: nowrap; }
+  #chat-head :is(#scripts-control, #open-in, #git-action) > button:hover:not(:disabled) { background: var(--g-hover); }
+  #chat-head :is(#scripts-control .pick, #open-in .pick, #git-action .more) { width: auto; padding: 0 10px 0 2px; color: var(--g-side-muted); }
+  #chat-head :is(#scripts-control .pick, #open-in .pick, #git-action .more) .i { width: 12px; height: 12px; opacity: 1; }
+  #chat-head :is(#scripts-control .main:not(:only-child), #open-in .main, #git-action .main:has(+ .more:not([hidden]))) { padding-right: 4px; }
+  #chat-head :is(#scripts-control, #open-in, #git-action) .main .i, #chat-head #open-in .main > svg { width: 13px; height: 13px; }
+  #chat-head #open-in .main > svg { display: none; }
+  #chat-head #git-action { background: rgb(var(--g-ink-rgb) / 0.06); }
+  #chat-head #git-action .main { max-width: 288px; font-weight: 600; }
+  #chat-head #git-action > button[aria-disabled] { color: var(--g-muted); }
+  #chat-head #open-diff { gap: 6px; padding: 0 10px; color: var(--g-fg); font-size: 12.5px; white-space: nowrap; }
+  #chat-head #open-diff:hover { background: var(--g-hover); }
+  #chat-head #open-diff :is(.add, .del) { font-size: 11px; }
+  #chat-head #open-diff .add { color: var(--g-add); }
+  #chat-head #open-diff .del { color: color-mix(in srgb, var(--g-del) 80%, white); }
+
+  #chat-head .controls { align-items: center; gap: 10px; }
+  #chat-head .controls::before { content: ""; width: 1px; height: 20px; background: rgb(var(--g-ink-rgb) / 0.1); }
+  body[data-panel="open"] #chat-head .controls::before { display: none; }
+  #chat-head .controls .layout { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: rgb(var(--g-ink-rgb) / 0.05); }
+  #chat-head .controls .layout .icon { width: 28px; height: 26px; border-radius: 6px; color: var(--g-side-muted); }
+  #chat-head .controls .layout .icon[aria-pressed="true"] { background: rgb(var(--g-ink-rgb) / 0.12); color: var(--g-fg); }
+  #chat-head .controls .icon .i { width: 15px; height: 15px; }
+  #chat-head #gui-minimize { width: 28px; height: 28px; border-radius: 6px; color: var(--g-side-muted); }
+
+  #chat-head[data-fold="1"] #open-in .main .label { display: none; }
+  #chat-head[data-fold="1"] #open-in .main > svg { display: block; }
+  #chat-head:is([data-fold="2"], [data-fold="3"], [data-fold="4"], [data-fold="5"]) #open-in, #chat-head:is([data-fold="2"], [data-fold="3"]) #scripts-control .pick { display: none; }
+  #chat-head:is([data-fold="2"], [data-fold="3"]) #scripts-control .main { padding-right: 10px; }
+  #chat-head[data-fold="3"] :is(#scripts-control, #git-action) .main .label { display: none; }
+  #chat-head:is([data-fold="4"], [data-fold="5"]) :is(#scripts-control, #git-action) { display: none; }
+  #chat-head:is([data-fold="4"], [data-fold="5"]) #head-more { display: grid; }
+  #chat-head[data-fold="5"] .crumb :is(.role-chip, .stats) { display: none; }
+  #chat-head[data-fold="5"] .crumb .project { flex: 0 1 auto; }
+}
+.controls .layout { display: flex; gap: 4px; }
+@media (max-width: 768px) {
+  #chat-head .crumb :is(.role-chip, .parent[data-parent-thread], .parent[data-parent-thread] + .sep) { display: none; }
+}
+
+/* The drawer's tab row: claude's own terminal, a tab per shell with its live dot, New terminal, then
+   Split and Hide at the end. */
+@media (min-width: 769px) {
+  body[data-mode="gui"][data-drawer="open"] #drawer-tabs:not([hidden]) { top: 0; left: 0; right: 0; align-items: center; gap: 2px; height: 34px; padding: 0 10px;
+    border-bottom: 1px solid var(--g-border); }
+  body[data-mode="gui"][data-drawer="open"] #terms:has(#drawer-tabs:not([hidden])) .term { top: 45px; left: 14px; }
+  body[data-mode="gui"][data-drawer="open"] #drawer-resize { height: 4px; z-index: 8; }
+  #drawer-tabs button { height: 24px; padding: 0 10px; gap: 6px; border-radius: 6px; color: var(--g-side-muted); font-size: 12px; }
+  #drawer-tabs button[aria-pressed="true"] { background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-fg); }
+  #drawer-tabs button:hover { color: var(--g-fg); }
+  #drawer-tabs [data-shell] .i { display: none; }
+  #drawer-tabs .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--g-success); flex: none; }
+  #drawer-tabs .shell-tab { position: relative; }
+  #drawer-tabs .shell-tab .close { position: absolute; right: 0; top: 0; width: 24px; padding: 0; justify-content: center; opacity: 0; background: var(--g-term-bg); }
+  #drawer-tabs .shell-tab:is(:hover, :focus-within) .close { opacity: 1; }
+  #drawer-tabs .act { padding: 0 8px; }
+  #drawer-tabs :is(.new, .hide) { width: 24px; padding: 0; justify-content: center; }
+  #drawer-tabs .act .i { width: 13px; height: 13px; }
+  #drawer-tabs .spacer { flex: 1; }
+}
+@media (max-width: 768px) {
+  #drawer-tabs :is(.dot, .act, .spacer) { display: none; }
+}

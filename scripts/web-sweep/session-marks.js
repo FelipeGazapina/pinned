@@ -192,7 +192,6 @@ const notReloaded = async (page) => check(await page.evaluate(() => window.sweep
 
 // Runs in the page: the sidebar from the top, each element as a token.
 const sidebarTokens = () => [...document.querySelectorAll("#thread-list > *")].map((el) => {
-  if (el.matches(".side-heading")) return `heading ${el.textContent}`;
   if (el.matches(".project-head")) return `project ${el.querySelector(".name")?.textContent}`;
   if (el.matches(".thread-row")) return el.dataset.tab;
   return el.className;
@@ -202,7 +201,16 @@ const sidebarTokens = () => [...document.querySelectorAll("#thread-list > *")].m
  * reached as a user clicks there: Settings, then Archive once the page Settings opened on has drawn.
  * openSettings("archive") is not used: General, drawn async, lands over the page opened after it. */
 async function archiveLists(page, thread, name) {
-  await page.click("#gui-settings");
+  // Settings is behind the sidebar footer's account menu, and on a phone behind More.
+  if (await page.evaluate(() => narrow(768))) {
+    await page.click('#phone-tabs [data-phone-tab="more"]');
+    await waitFor(`${page.name}'s More page`, () => page.evaluate(() => !!document.querySelector('#page-view [data-more="settings"]')));
+    await page.click('#page-view [data-more="settings"]');
+  } else {
+    await page.click("#account-pages");
+    await waitFor(`${page.name}'s account menu`, () => page.evaluate(() => !document.getElementById("account-menu").hidden));
+    await page.click("#gui-settings");
+  }
   await waitFor(`${page.name}'s Settings page to draw`, () => page.evaluate(() => settingsOpen() && document.querySelector("#settings-page h2")?.textContent === document.querySelector("#settings-nav .links .active span")?.textContent));
   await page.click('#settings-nav [data-page="archive"]');
   const shown = () => page.evaluate(() => [...document.querySelectorAll("#archive-settings .archived label")].map((l) => l.textContent));
@@ -320,7 +328,7 @@ const errors = [];
       await B.tap(row(t1.key));
       await waitFor("the phone's sidebar to close on the tapped thread", () => B.evaluate(() => document.body.dataset.sidebar === "closed"));
     }
-    await B.tap("#chat-sidebar-toggle");
+    await B.tap("#chat-back");
     await waitFor("the phone's sidebar", () => B.evaluate(() => document.body.dataset.sidebar === "open" && !document.body.classList.contains("sidebar-animating")));
     check(await cardTitle(B, t1.key) === "Fix login" && await B.evaluate((s) => !!document.querySelector(`${s} .pin`), row(t2.key)), "the phone lost the rename or the pin");
     await B.screenshot(path.join(SCREENS, "session-marks-phone.png"));

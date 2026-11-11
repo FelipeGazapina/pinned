@@ -1,0 +1,12 @@
+/* The status dot of a thread or a worker, drawn by glyphHtml(state, size) in redesign-model.js. */
+.status-glyph { display: inline-block; flex: none; box-sizing: border-box; width: var(--glyph-size, 10px); height: var(--glyph-size, 10px); border-radius: 50%; --glyph-ring: 1.5px; }
+.status-glyph[data-glyph="working"] { border: var(--glyph-ring) dashed var(--g-info); animation: glyph-spin 2.4s linear infinite; }
+.status-glyph[data-glyph="needs"] { background: var(--g-warning); }
+.status-glyph[data-glyph="unread"] { background: var(--g-primary); }
+.status-glyph[data-glyph="done"] { background: var(--g-success); }
+.status-glyph[data-glyph="failed"] { background: var(--g-error); }
+.status-glyph[data-glyph="idle"] { border: var(--glyph-ring) solid var(--g-glyph-idle); }
+@keyframes glyph-spin { to { transform: rotate(360deg); } }
+@media (max-width: 639px) { .status-glyph { --glyph-ring: 2px; } }
+body[data-hub="offline"] .status-glyph[data-glyph="working"] { opacity: 0.45; animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .status-glyph[data-glyph="working"] { animation: none; } }

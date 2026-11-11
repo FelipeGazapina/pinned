@@ -232,6 +232,64 @@ function answerSettings(key) {
 }
 
 let line = "";
+// $HOME/fake-turns.json, when a sweep writes it, scripts the turn for any prompt holding one of its
+// `prompt` strings: tools as [name, input, result] already done, `running` as a tool still at work
+// (the turn holds), `say` as the answer, `pr` as the {number, repo} it opened, `ask` as a Bash
+// {command, description, always} to approve, with `always` its second option's words, and
+// `question` as an AskUserQuestion {header, question, options: [[label, description]]} with
+// claude's free-text row under its options. `files` ({path: text}) are written into the folder
+// during the turn and `commit` commits them with that message; `todos` is a TodoWrite list;
+// `calls` ([{name, input}]) are pinned tool calls the turn makes.
+const scriptedTurns = () => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(process.env.HOME, "fake-turns.json"), "utf8"));
+  } catch {
+    return [];
+  }
+};
+function scriptedTurn(turn) {
+  for (const [file, text] of Object.entries(turn.files ?? {})) {
+    fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+    fs.writeFileSync(file, text);
+  }
+  if (turn.commit) execFileSync("git", ["-c", "user.name=sweep", "-c", "user.email=sweep@example.test", "commit", "-qam", turn.commit], { stdio: "ignore" });
+  if (turn.todos) used("TodoWrite", { todos: turn.todos }, TODOS_SAVED);
+  for (const { name, input } of turn.calls ?? []) {
+    try {
+      used(`mcp__pinned__${name}`, input, callPinned(name, input));
+    } catch (e) {
+      used(`mcp__pinned__${name}`, input, e.message, true);
+    }
+  }
+  for (const [name, input, result] of turn.tools ?? []) used(name, input, result);
+  line = "";
+  if (turn.say) wrote([{ type: "text", text: turn.say }]);
+  if (turn.pr) record({ type: "pr-link", prNumber: turn.pr.number, prUrl: `https://github.com/${turn.pr.repo}/pull/${turn.pr.number}`, prRepository: turn.pr.repo });
+  if (turn.ask) {
+    const { always, ...input } = turn.ask;
+    askTool = turn.ask;
+    wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input }]);
+    hook("Notification", { message: "Claude needs your permission to use Bash" });
+    asking = 1;
+    return drawMenu();
+  }
+  if (turn.question) {
+    const { header, question, options } = turn.question;
+    choosing = {
+      head: ` ☐ ${header}\r\n\r\n${question}\r\n\r\n`,
+      options: [...options, ["Type something.", ""], ["Chat about this", ""]],
+      free: options.length + 1, rule: options.length + 2, indent: "", footer: "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    };
+    wrote([{ type: "tool_use", id: `question-${lines}`, name: "AskUserQuestion", input: { questions: [{ question, header, options: options.map(([label, description]) => ({ label, description })) }] } }]);
+    hook("Notification", { message: "Claude needs your input" });
+    questioning = 1;
+    return drawQuestion();
+  }
+  if (turn.running) wrote([{ type: "tool_use", id: `tool-${lines}`, name: turn.running[0], input: turn.running[1] }]);
+  out(`${turn.say ?? "working"}\r\n`);
+  if (!turn.running && !turn.hold) hook("Stop");
+  prompt();
+}
 function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
@@ -248,26 +306,25 @@ function submit() {
     return prompt();
   }
   hook("UserPromptSubmit", { prompt: line });
+  // /modes and /traits stand for a claude that always draws its mode line and effort marks, so they
+  // leave nothing in the transcript.
+  if (line === "/modes" || line === "/traits") {
+    if (line === "/modes") mode = "manual";
+    else traits = { effort: "medium", ultracode: false, fast: false };
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
   // "pictures" stands for a prompt with images, which claude writes as one message below.
   if (line !== "pictures") said(line);
+  const scripted = scriptedTurns().find((t) => line.includes(t.prompt));
+  if (scripted && !fs.existsSync(DELEGATE_CALLS)) return scriptedTurn(scripted);
   // A usage limit stops the turn as claude's does: the error goes to the transcript, then StopFailure.
   if (line === "/limit") {
     record({ type: "assistant", apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 } }, message: { role: "assistant", content: [{ type: "text", text: "You've hit your limit" }] } });
     out("You've hit your limit\r\n");
     hook("StopFailure", { transcript_path: transcript });
     line = "";
-    return prompt();
-  }
-  if (line === "/modes") {
-    mode = "manual";
-    line = "";
-    hook("Stop");
-    return prompt();
-  }
-  if (line === "/traits") {
-    traits = { effort: "medium", ultracode: false, fast: false };
-    line = "";
-    hook("Stop");
     return prompt();
   }
   if (line === "/effort" && traits) {
@@ -556,7 +613,7 @@ function submit() {
       used("mcp__pinned__delegate_task", input, answer);
       return { ...JSON.parse(answer), title: input.title };
     });
-    wrote([{ type: "text", text: `Started ${started.length} workers:\n\n${started.map((s) => `- ${s.title}: ${s.tabId} (${s.taskId})`).join("\n")}` }]);
+    wrote([{ type: "text", text: scripted?.say ?? `Started ${started.length} workers:\n\n${started.map((s) => `- ${s.title}: ${s.tabId} (${s.taskId})`).join("\n")}` }]);
     out(`delegated ${started.length}\r\n`);
   } else if (line === "options") {
     wrote([{ type: "text", text: "Li os relatórios dos dois Capitães.\n\nOpções: Sim | Ainda não" }]);
@@ -775,11 +832,12 @@ const TODOS_SAVED = "Todos have been modified successfully. Ensure that you cont
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
 let asking = 0;
 let amending = null;
+let askTool = { command: "rm -rf build", description: "Remove the build folder" };
 function drawMenu() {
   const box = "╌".repeat(40);
-  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n Remove the build folder\r\n${box}\r\n rm -rf build\r\n${box}\r\n Do you want to proceed?\r\n`);
+  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n ${askTool.description}\r\n${box}\r\n ${askTool.command}\r\n${box}\r\n Do you want to proceed?\r\n`);
   const no = amending === null ? "No" : amending ? `No, ${amending}` : "No, and tell Claude what to do differently";
-  [...CHOICES.slice(0, -1), no].forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
+  [CHOICES[0], askTool.always ?? CHOICES[1], no].forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
   out(amending === null ? " Esc to cancel · Tab to amend\r\n" : " Esc to cancel\r\n");
 }
 function answerMenu(key) {
@@ -868,6 +926,7 @@ process.stdin.on("data", (chunk) => {
   for (const c of text) {
     if (c === "\r") submit();
     else if (c === "\x7f") line = line.slice(0, -1);
+    else if (c === "\x15") line = "";
     else if (KEYS[c]) out(KEYS[c]);
     else {
       line += c;

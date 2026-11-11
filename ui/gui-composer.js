@@ -160,19 +160,23 @@ function menuKind(menu) {
 const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.findLast((o) => /^No\b/.test(o.head));
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
-/** The collapsed phone row still says what its Send does while claude waits on an approval or a plan. */
+/** The prompt says what its Send does while claude waits on an approval or a plan. */
 function placeholderFor(tab, t) {
   const menu = tab.menu;
+  const desk = matchMedia("(min-width: 769px)").matches;
   if (menu && menuKind(menu) === "approval") {
     if (!declineOption(menu)) return "Choose an option above";
+    if (desk) return "Or type what it should do instead. Sending declines the command.";
     return menu.amend ? "Send feedback to decline this request" : "Send a message to decline and redirect the agent";
   }
   if (menu && menuKind(menu) === "plan") return "Add feedback to refine the plan, or leave this blank to implement it";
   if (menu) return freeOption(menu) ? "Type your own answer, or leave this blank to use the selected option" : "Choose an option above";
-  if (composer.dataset.collapsed === "true") return "Ask anything...";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
   if (!tab.view.running) return touchComposer() ? "claude isn't running. Use the send button to start it." : "claude isn't running. Press Enter to start it.";
-  return "Ask anything, @tag files/folders, $use skills, or / for commands";
+  const captain = tab.view.role === "orchestrator" && !tab.view.orchestrator_global;
+  if (!desk) return captain ? "Message the Captain" : "Ask anything, @tag files/folders, $use skills, or / for commands";
+  if (captain) return "Message the Captain. It keeps working while you type.";
+  return "Ask anything, @ files, $ skills, / commands";
 }
 
 function renderComposer(tab) {
@@ -199,6 +203,8 @@ function renderComposer(tab) {
   prompt.enterKeyHint = touch ? "enter" : "send";
   send.setAttribute("aria-label", send.title);
   renderApproval(tab);
+  composer.dataset.asking = !approval.hidden && approval.dataset.kind === "approval";
+  if (typeof renderWorkerBanner === "function") renderWorkerBanner();
   renderBanners(tab);
   renderTasks(tab);
   renderLimitNote(tab);
@@ -215,6 +221,8 @@ function renderComposer(tab) {
   renderDetails(tab);
   renderDrawer();
   if (tab) drainIdle(tab);
+  if (typeof renderComposerChip === "function") renderComposerChip(tab);
+  if (typeof syncPhoneAsk === "function") syncPhoneAsk();
   const footer = document.getElementById("composer-footer");
   if (!tab) return setHtml(footer, "");
   const pr = prOf(tab);
@@ -225,7 +233,15 @@ function renderComposer(tab) {
     ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${middle(ws.branch, 24)}</span>${icon("chevron-down", "chev")}</button>` : ""}`);
   hostControls();
   renderHero(tab);
-  prompt.placeholder = placeholderFor(tab, t);
+  const placeholder = placeholderFor(tab, t);
+  if (prompt.placeholder === placeholder) return;
+  prompt.placeholder = placeholder;
+  // A phone's one-line prompt grows to the lines its placeholder wraps to.
+  if (narrow(768) && !prompt.value) fitPrompt();
+}
+function fitPrompt() {
+  prompt.style.height = "auto";
+  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
 }
 
 /** A turn a usage limit stopped continues by itself when it lifts, or now under another signed-in account. */
@@ -251,8 +267,7 @@ function switchDraft(tab) {
   if (tab) threadOf(tab).recall = null;
   if (tab?.view.running) fetchList(tab, "commands");
   composerMenu.hidden = true;
-  prompt.style.height = "auto";
-  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
+  fitPrompt();
 }
 
 function watchMenu(tab) {
@@ -316,16 +331,72 @@ async function until(test, ms = 1500) {
   return true;
 }
 
+/** Redraws what shows `tab`'s ask once it changed: the composer only when `tab` is the open thread,
+ * since an ask answered from elsewhere must leave the open thread's draft and card alone. */
+function redrawAsk(tab) {
+  if (tab === active) renderComposer(tab);
+  renderSidebar();
+}
+
+/** Whether two menus read off a screen are the same ask: its question, command and options. */
+const sameMenu = (a, b) => !!a && !!b && JSON.stringify([a.question, a.box, a.options.map((o) => o.label)]) === JSON.stringify([b.question, b.box, b.options.map((o) => o.label)]);
+const answeredKey = (menu) => (menu ? JSON.stringify([menu.question, menu.box]) : "");
+/** A redraw that never comes frees an answered menu after this long, so it cannot lock the thread. */
+const ANSWERED_MS = 15000;
+
+/** Keeps `tab` answering from now until `menu`, which it answered, leaves its screen. Until then no
+ * surface draws that menu and no tap sends it a second key, which would land on whatever claude
+ * draws next. */
+function holdAnswered(tab, menu) {
+  const key = answeredKey(menu);
+  tab.answered?.release(false);
+  tab.answering = true;
+  tab.menu = null;
+  let timer = null;
+  let parsed = null;
+  const hold = {
+    key,
+    release(redraw = true) {
+      if (tab.answered !== hold) return;
+      tab.answered = null;
+      clearTimeout(timer);
+      parsed?.dispose();
+      tab.answering = false;
+      if (!redraw) return;
+      tab.menu = terminalMenu(tab);
+      redrawAsk(tab);
+    },
+  };
+  tab.answered = hold;
+  timer = setTimeout(() => hold.release(), ANSWERED_MS);
+  parsed = tab.term.onWriteParsed(() => answeredKey(terminalMenu(tab)) !== key && hold.release());
+  if (answeredKey(terminalMenu(tab)) !== key) hold.release();
+  return hold;
+}
+
+/** Whether the menu the open thread drew is still the one on its screen; if not, draws the new one,
+ * so a tap on the old one's Approve never picks the new one's. */
+function drawnMenuShown(tab) {
+  const menu = terminalMenu(tab);
+  if (sameMenu(tab.menu, menu)) return true;
+  tab.menu = tab.answering ? null : menu;
+  redrawAsk(tab);
+  return false;
+}
+
 function chooseOption(tab, n, label) {
   const menu = terminalMenu(tab);
-  if (menu?.options[n - 1]?.label !== label) {
-    tab.menu = menu;
-    return renderComposer(tab);
+  if (menu?.options[n - 1]?.label !== label || tab.answered?.key === answeredKey(menu)) {
+    if (!tab.answering) tab.menu = menu;
+    redrawAsk(tab);
+    return null;
   }
-  tab.menu = null;
-  renderComposer(tab);
-  renderSidebar();
-  return writeTo(tab, arrowsTo(menu, n) + "\r");
+  const hold = holdAnswered(tab, menu);
+  redrawAsk(tab);
+  return writeTo(tab, arrowsTo(menu, n) + "\r").catch((e) => {
+    hold.release();
+    throw e;
+  });
 }
 
 /** Answers claude's menu with `text`. A question takes it as its free-text option. A permission is
@@ -334,12 +405,13 @@ function chooseOption(tab, n, label) {
 async function answerWith(tab, text) {
   const menu = terminalMenu(tab);
   const option = menu && (freeOption(menu) || declineOption(menu));
-  if (!option) return false;
+  if (!option || tab.answered?.key === answeredKey(menu)) return false;
   const line = text.replace(/\s*\n\s*/g, " ");
   const shown = () => terminalMenu(tab)?.options[option.n - 1]?.head.includes(line.slice(0, 20));
   tab.answering = true;
   tab.menu = null;
-  renderComposer(tab);
+  redrawAsk(tab);
+  let sent = false;
   try {
     await writeTo(tab, arrowsTo(menu, option.n));
     await until(() => terminalMenu(tab)?.options.find((o) => o.chosen)?.n === option.n);
@@ -355,13 +427,15 @@ async function answerWith(tab, text) {
       await writeTo(tab, "\r");
       // Keys typed into a menu that stayed up could pick one of its options.
       if (!(await until(() => !terminalMenu(tab), 4000))) {
-        showComposerNote("Claude's menu didn't close. Your message is still here.", true);
+        if (tab === active) showComposerNote("Claude's menu didn't close. Your message is still here.", true);
         return false;
       }
       await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
     }
+    sent = true;
   } finally {
-    tab.answering = false;
+    if (sent) holdAnswered(tab, menu);
+    else tab.answering = false;
   }
   return true;
 }
@@ -374,9 +448,11 @@ function questionTabsOf(text) {
   const items = row ? [...row[1].matchAll(/([☐☒✔])\s(.+?)(?=\s{2,}[☐☒✔]|$)/g)].filter((m) => m[1] !== "✔") : [];
   return items.length ? { headers: items.map((m) => m[2].trim()), answered: items.map((m) => m[1] === "☒") } : null;
 }
-/** The tabs on the tab's screen, and the one shown, which claude draws on a background; one past
- * the last question is its review of the answers. */
+/** The tabs over the tab's menu, and the one shown, which claude draws on a background; one past
+ * the last question is its review of the answers. An earlier set's row can stay on the screen above
+ * a later single question, so only a menu that holds a row has tabs. */
 function questionTabs(tab) {
+  if (!tab.menu?.question.split("\n").some((l) => TAB_ROW.test(l))) return null;
   const buffer = tab.term.buffer.active;
   for (let y = buffer.baseY + tab.term.rows - 1; y >= buffer.baseY; y--) {
     const line = buffer.getLine(y);
@@ -403,7 +479,8 @@ function renderApproval(tab) {
   const kind = menuKind(menu);
   const tabs = kind === "question" ? questionTabs(tab) : null;
   const t = threadOf(tab);
-  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null]);
+  const since = waitingKindOf(tab.view) === "needs_input" && tab.view.updated ? tab.view.updated * 1000 : null;
+  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since]);
   if (approval.dataset.key === key) return;
   approval.dataset.key = key;
   const lines = menu.question.split("\n").filter((l) => !TAB_ROW.test(l));
@@ -412,7 +489,7 @@ function renderApproval(tab) {
   if (kind === "question") return renderQuestion(tab, menu, tabs, lines);
   delete approval.dataset.collapsed;
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
-  if (permission) return renderPermission(menu, lines, label);
+  if (permission) return renderPermission(menu, lines, label, since);
   const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
   approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
       <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
@@ -430,17 +507,24 @@ function approvalChoices(menu) {
 }
 /** As T3 Code's approval panel: what is asked, the command or file, and why, then Decline,
  * Approve and "…" at its right. */
-function renderPermission(menu, lines, label) {
+function renderPermission(menu, lines, label, since) {
   const question = lines.at(-1);
   const middle = lines.slice(1, -1).filter((l) => !/^Tip:/.test(l));
   const detail = menu.box || middle.join("\n");
   const about = menu.box ? middle.join("\n") : "";
-  const { accept, decline } = approvalChoices(menu);
-  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+  const { accept, decline, always } = approvalChoices(menu);
+  const waiting = since ? `<span class="waiting">Waiting <span class="ticker" data-since="${since}">${durationLabel(Math.max(0, Date.now() - since) / 1000)}</span></span>` : "";
+  // Above phone width the card is a column with Always allow and Show in terminal beside the answers.
+  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>${waiting}
       ${detail ? `<pre tabindex="0">${esc(detail)}</pre>` : ""}${about ? `<p class="about">${esc(about)}</p>` : ""}${/^Do you want to proceed\?$/.test(question) ? "" : `<p class="about">${esc(question)}</p>`}</div>
-    <div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
-      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`;
+    <div class="answer-row"><div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
+      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis", "dots")}${icon("chevron-down", "chev")}</button></div>
+    <div class="extra">${always ? `<button type="button" class="outline always" data-approval="always" title="${esc(always.label)}"><span>${esc(always.head)}</span></button>` : ""}<button type="button" class="ghost" data-show-terminal>Show in terminal</button></div></div>`;
 }
+const composerTickers = () => {
+  for (const ticker of composer.querySelectorAll(".ticker[data-since]")) ticker.textContent = durationLabel(Math.max(0, Date.now() - Number(ticker.dataset.since)) / 1000);
+};
+visibleInterval(composerTickers, 1000);
 function approvalMore(tab, anchor) {
   const menu = tab.menu;
   const { always, rest } = approvalChoices(menu);
@@ -455,7 +539,7 @@ function approvalMore(tab, anchor) {
 }
 function cancelMenu(tab) {
   tab.menu = null;
-  renderComposer(tab);
+  redrawAsk(tab);
   return writeTo(tab, "\x1b");
 }
 function renderQuestion(tab, menu, tabs, lines) {
@@ -490,9 +574,11 @@ function pickOption(tab, n) {
   const t = threadOf(tab);
   t.picking = n;
   renderComposer(tab);
+  // Every render reads the menu off the screen again as a new object, so the pick holds while the
+  // option is still there; chooseOption checks its label on the screen before it types.
   setTimeout(() => {
     t.picking = null;
-    if (tab.menu === menu) chooseOption(tab, n, option.label);
+    if (tab.menu?.options[n - 1]?.label === option.label) chooseOption(tab, n, option.label);
   }, 200);
 }
 
@@ -500,6 +586,7 @@ approval.addEventListener("click", (e) => {
   const tab = active;
   if (!tab) return;
   const answer = e.target.closest("[data-approval]");
+  if ((answer || e.target.closest("[data-option]")) && tab.menu && menuKind(tab.menu) !== "question" && !drawnMenuShown(tab)) return;
   if (answer && tab.menu) {
     const choice = approvalChoices(tab.menu)[answer.dataset.approval];
     if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
@@ -764,22 +851,19 @@ tasksTab.addEventListener("click", (e) => {
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
  * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
  * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press.
- * On a phone it collapses whenever the prompt isn't focused, to a row that opens it, as T3's does;
- * a press in the composer holds it open until the press ends. */
+ * A phone keeps the full box, as Phone-Thread draws it. */
 let composerPressed = false;
 function rest() {
   const away = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight > 40;
   const t = active && threadOf(active);
   const typing = document.activeElement === prompt || prompt.value.includes("\n");
-  const phone = narrow(640);
-  const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
-  const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
-  const resting = collapsed || (!phone && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
+  const phone = narrow(768);
+  // A lane narrowed by the side panel rests as one row with the model, the mic and Send. A press in
+  // the composer, or a menu open from it, holds the row or the full box, so what it points at stays put.
+  const slim = composerPressed || !composerMenu.hidden ? composer.dataset.slim === "true" : !phone && composer.dataset.compact === "true" && !!t && !typing && approval.hidden && !t.attachments?.length && document.getElementById("chat").dataset.hero !== "true";
+  const resting = !phone && !slim && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length;
+  if (composer.dataset.slim !== String(slim)) composer.dataset.slim = slim;
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;
-  if (composer.dataset.collapsed !== String(collapsed)) {
-    composer.dataset.collapsed = collapsed;
-    if (active) prompt.placeholder = placeholderFor(active, threadOf(active));
-  }
   hostControls();
 }
 let pressTimer;
@@ -808,8 +892,7 @@ threadView.addEventListener("scroll", rest, { passive: true });
 prompt.addEventListener("focus", rest);
 
 function autosize() {
-  prompt.style.height = "auto";
-  prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;
+  fitPrompt();
   if (active) renderComposer(active);
 }
 prompt.addEventListener("input", () => {
@@ -902,7 +985,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text || sendBlocked(tab)) return;
-  prompts++;
+  tab.prompts = (tab.prompts ?? 0) + 1;
   const draft = prompt.value;
   const chips = { ...chipsOf(tab) };
   const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
@@ -960,19 +1043,18 @@ function clearComposer(tab, revoke = true) {
 
 // Esc ends the turn but leaves background agents and workflows running, so claude's ctrl+x ctrl+k
 // stops them first. Their "stopped by the user" notices then wake claude for a turn of its own,
-// which a second Esc ends, unless a prompt went out in between.
+// which a second Esc ends, unless a prompt went out to that thread in between: `tab.prompts` counts
+// the prompts the page sent it.
 const KILL_AGENTS = "\x18\x0b";
-let prompts = 0;
-async function stop() {
-  const tab = active;
+async function stop(tab = active) {
   if (!tab) return;
-  const sent = prompts;
+  const sent = tab.prompts ?? 0;
   for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
     await writeTo(tab, keys);
     await new Promise((r) => setTimeout(r, 300));
   }
   await new Promise((r) => setTimeout(r, 1200));
-  if (prompts === sent) writeTo(tab, "\x1b");
+  if ((tab.prompts ?? 0) === sent) writeTo(tab, "\x1b");
 }
 
 const escapePath = (p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&");
@@ -1081,7 +1163,7 @@ function placeMenu(anchor) {
   else composerMenu.style.left = `${Math.max(0, left)}px`;
 }
 window.addEventListener("mousedown", (e) => {
-  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
+  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #composer-chip, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
   if (!composerMenu.hidden && !e.target.closest(keeps)) composerMenu.hidden = true;
 }, true);
 window.addEventListener("keydown", (e) => {
@@ -1473,9 +1555,17 @@ onGuiKey("e", () => {
 
 const modeButton = document.getElementById("mode-button");
 const planToggle = document.getElementById("plan-toggle");
+/** The model the composer names: the thread's own, else the one its parent's delegate_task started it on. */
+function chipModel(tab) {
+  const own = modelName(tab);
+  const parent = own === "Default" && parentOf(tab);
+  return (parent && modelLabel(delegatedModels(parent).get(tab.view.id))) || own;
+}
+const tagHint = document.getElementById("tag-hint");
 function renderControls(tab) {
+  tagHint.hidden = !tab || !isGlobalOrchestratorTab(tab);
   const t = tab && threadOf(tab);
-  const name = tab ? modelName(tab) : "Default";
+  const name = tab ? chipModel(tab) : "Default";
   const modelButton = document.getElementById("model-button");
   // An unchanged label is left alone: rewriting it swaps the node a press landed on, and WebKit then drops the click.
   const nameEl = modelButton.querySelector(".name");
@@ -1487,8 +1577,10 @@ function renderControls(tab) {
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
-  if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`);
-  traitsButton.setAttribute("aria-label", label || "Reasoning");
+  // A plain effort level reads "High effort" above phone width; the word is drawn by the stylesheet.
+  const level = label && label === REASONING[tab.traits.effort];
+  if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name"${level ? ` data-unit="effort"` : ""}>${esc(label)}</span>${icon("chevron-down")}`);
+  traitsButton.setAttribute("aria-label", label ? (level ? `${label} effort` : label) : "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
   document.getElementById("mode-block").hidden = !mode;
   document.getElementById("more-button").hidden = !(tab?.view.running && (mode || label)) || composer.dataset.compact !== "true";
@@ -1500,9 +1592,12 @@ function renderControls(tab) {
   modeButton.innerHTML = `${icon(MODES[access].icon)}<span class="name">${esc(MODES[access].label)}</span>${icon("chevron-down")}`;
   modeButton.title = `${MODES[access].hint} (${bindingLabel("composer.mode") ?? ""})`;
   const plan = mode === "plan";
-  planToggle.setAttribute("aria-pressed", plan);
-  planToggle.title = plan ? "Plan mode. Click to return to normal build mode" : "Default mode. Click to enter plan mode";
-  planToggle.innerHTML = `${icon(plan ? "pencil-ruler" : "bot")}<span class="name">${plan ? "Plan" : "Build"}</span>`;
+  for (const seg of planToggle.children) {
+    const on = (seg.dataset.planSeg === "plan") === plan;
+    seg.setAttribute("aria-pressed", on);
+    seg.title = seg.dataset.planSeg === "plan" ? "Plan mode" : "Build mode";
+    if (!seg.firstChild) seg.innerHTML = seg.dataset.planSeg === "plan" ? `${icon("pencil-ruler")}<span class="name">Plan</span>` : `${icon("bot")}<span class="name">Build</span>`;
+  }
 }
 const accessEntries = (tab) => {
   const mode = tab.mode === "plan" ? threadOf(tab).access ?? "manual" : tab.mode;
@@ -1512,7 +1607,12 @@ modeButton.onclick = (e) => {
   if (!composerMenu.hidden && composerMenu.dataset.kind === "access") return (composerMenu.hidden = true);
   if (active?.mode) openMenu(e.currentTarget, accessEntries(active), "access");
 };
-planToggle.onclick = () => active && togglePlan(active);
+/** Build | Plan: the other segment switches. A phone shows only the current one, which switches. */
+planToggle.onclick = (e) => {
+  const seg = e.target.closest("[data-plan-seg]");
+  if (!seg || !active) return;
+  if ((seg.dataset.planSeg === "plan") !== (active.mode === "plan") || narrow(768)) togglePlan(active);
+};
 onGuiKey("a", () => {
   if (document.getElementById("mode-block").hidden) return;
   if (composer.dataset.compact === "true") document.getElementById("more-button").click();
@@ -1571,6 +1671,7 @@ new ResizeObserver(([entry]) => {
   composer.dataset.compact = width < 620;
   composer.dataset.narrow = width < 640;
   if (active) renderControls(active);
+  rest();
 }).observe(composer.querySelector(".box"));
 
 const formatTokens = (n) => (n < 1000 ? `${Math.round(n)}` : n < 10_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : n < 999_500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}m`);
@@ -2242,7 +2343,8 @@ function workspaceHtml(tab) {
   const open = workspaceOpen(tab);
   const { label, icon: name } = workspaceLabel(tab, open);
   const remote = tab.machine !== LOCAL;
-  const content = `${remote ? icon("monitor") : ""}<span class="ws-icon" title="${esc(label)}">${icon(name)}</span><span class="label">${esc(remote ? machineName(tab.machine) : label)}</span>`;
+  // Above phone width the strip names the machine, then the workspace, in words (.host, .ws-label).
+  const content = `${icon("monitor", remote ? "" : "desk")}<span class="ws-icon" title="${esc(label)}">${icon(name)}</span><span class="label">${esc(remote ? machineName(tab.machine) : label)}</span><span class="host">${esc(machineName(tab.machine))}</span><span class="ws-label">${esc(label)}</span>`;
   return open
     ? `<button type="button" class="where" title="${esc(tab.view.cwd)} · ${bindingLabel("composer.workspace") ?? ""}">${content}${icon("chevron-down", "chev")}</button>`
     : `<span class="where" title="${esc(tab.view.cwd)}">${content}</span>`;
@@ -2501,18 +2603,18 @@ function quickAction(git, workspace, hasPr) {
   const behind = git.behind > 0;
   if (git.dirty) {
     if (!git.upstream && !git.remote) return { label: "Commit", action: "commit" };
-    if (hasPr || isDefault) return { label: "Commit & push", action: "commit_push" };
-    return { label: "Commit, push & PR", action: "commit_push_pr" };
+    if (hasPr || isDefault) return { label: "Commit and push", action: "commit_push" };
+    return { label: "Commit, push and PR", action: "commit_push_pr" };
   }
   if (!git.upstream) {
     if (!git.remote) return { label: "Publish repository", action: "publish" };
     if (!ahead && !(git.ahead_of_default > 0)) return hasPr ? { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." } : { label: "Push", disabled: true, hint: "No local commits to push." };
     if (hasPr || isDefault) return { label: "Push", action: isDefault ? "commit_push" : "push" };
-    return { label: "Push & create PR", action: "create_pr" };
+    return { label: "Push and create PR", action: "create_pr" };
   }
   if (ahead && behind) return { label: "Sync ref", disabled: true, hint: "Branch has diverged from upstream. Rebase/merge first." };
   if (behind) return { label: "Pull", action: "pull" };
-  if (ahead) return hasPr || isDefault ? { label: "Push", action: isDefault ? "commit_push" : "push" } : { label: "Push & create PR", action: "create_pr" };
+  if (ahead) return hasPr || isDefault ? { label: "Push", action: isDefault ? "commit_push" : "push" } : { label: "Push and create PR", action: "create_pr" };
   if (hasPr) return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
   if ((git.ahead_of_default ?? 0) > 0 && !isDefault) return { label: "Create PR", action: "create_pr" };
   return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
@@ -2533,8 +2635,10 @@ let gitRun = null;
 const gitAction = document.getElementById("git-action");
 function renderGitAction(tab) {
   const t = tab && threadOf(tab);
-  gitAction.hidden = !t?.workspace;
-  if (gitAction.hidden) return;
+  renderOpenDiff(tab);
+  // A worker's header shows Open diff in its place; Thread details keeps the Git action.
+  gitAction.hidden = !t?.workspace || tab.view.role === "worker";
+  if (!t?.workspace) return;
   const key = JSON.stringify([tab.key, tab.view.cwd, t.workspace.branch, statusOf(tab)]);
   if (t.gitFor !== key && t.workspace.repo) {
     t.gitFor = key;
@@ -2820,12 +2924,13 @@ const importable = ({ scripts, file }) => file.filter((f) => !scripts.some((s) =
 
 const scriptsControl = document.getElementById("scripts-control");
 function renderScripts(tab) {
-  const known = tab && guiOn() && tab.view.running && threadOf(tab).workspace && projectScripts(tab);
+  // A worker's header keeps Open in and Open diff; its scripts stay in Thread details.
+  const known = tab && guiOn() && tab.view.running && tab.view.role !== "worker" && threadOf(tab).workspace && projectScripts(tab);
   scriptsControl.hidden = !known || known.loading;
   if (scriptsControl.hidden) return;
   const primary = primaryScript(known.scripts);
   const html = primary
-    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" data-tip="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions">${icon("chevron-down")}</button>`
+    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" data-tip="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">Run ${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions">${icon("chevron-down")}</button>`
     : known.scripts.length || importable(known).length
       ? `<button type="button" class="main outline solo" data-scripts-menu aria-label="Project actions">${icon("wrench")}<span class="label">Actions</span>${icon("chevron-down")}</button>`
       : `<button type="button" class="main outline solo" data-add-script aria-label="Add action" data-tip="Add action">${icon("plus")}<span class="label">Add action</span></button>`;
@@ -3080,7 +3185,9 @@ function renderDrawer() {
   const group = open ? (shown ? shown.group : threadOf(tab).claudeGroup) : null;
   const visible = group?.members ?? [shown];
   for (const s of scriptShells) s.el.hidden = !visible.includes(s);
-  if (tab) layoutSplit([tab.el, ...own.map((s) => s.el)], group && group.members.map((s) => s?.el ?? tab.el), group?.vertical, own.length ? 38 : 6);
+  // Above phone width the drawer always has its tab row; a phone shows it only beside a shell.
+  const phone = narrow(768);
+  if (tab) layoutSplit([tab.el, ...own.map((s) => s.el)], group && group.members.map((s) => s?.el ?? tab.el), group?.vertical, !phone ? 44 : own.length ? 38 : 6);
   if (tab && tab.el.hidden !== !visible.includes(null) && guiOn()) {
     tab.el.hidden = !visible.includes(null);
     if (!tab.el.hidden) refit(tab);
@@ -3090,8 +3197,12 @@ function renderDrawer() {
     s.fit.fit();
     if (s.id) callOn(tab.machine, { cmd: "resize_pty", tab: s.id, cols: s.term.cols, rows: s.term.rows }).catch(() => {});
   }
-  drawerTabs.hidden = !own.length;
-  drawerTabs.innerHTML = own.length ? `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}` : "";
+  setPressed(document.getElementById("toggle-terminal"), !!open);
+  drawerTabs.hidden = !own.length && phone;
+  const html = drawerTabs.hidden ? "" : `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span class="dot"></span><span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}
+    <button type="button" class="act new" data-drawer-act="new" aria-label="New terminal" title="New terminal">${icon("plus")}</button><span class="spacer"></span>
+    <button type="button" class="act" data-drawer-act="split" title="Split the terminal">Split</button><button type="button" class="act hide" data-drawer-act="hide" aria-label="Hide terminal" title="Hide terminal (⌘J)">${icon("x")}</button>`;
+  setHtml(drawerTabs, html);
 }
 /** T3 Code's split terminals: a group's terminals share the drawer side by side, or stacked when `vertical`. */
 function layoutSplit(all, members, vertical, top) {
@@ -3114,6 +3225,14 @@ drawerTabs.addEventListener("click", (e) => {
   const own = scriptShells.filter((s) => s.tab === tab);
   const close = e.target.closest("[data-close-shell]");
   if (close) return closeShell(own[close.dataset.closeShell]);
+  const act = e.target.closest("[data-drawer-act]")?.dataset.drawerAct;
+  if (act === "hide") return toggleDrawer(false);
+  if (act === "new") return runScript(tab, nextTerminal(tab)).then((shell) => shell?.term.focus());
+  if (act === "split") {
+    // A split goes beside the terminal the drawer shows, as ⌘D does beside the focused one.
+    (threadOf(tab).drawerShell?.term ?? tab.term).focus();
+    return splitDrawerTerminal(false);
+  }
   const pick = e.target.closest("[data-shell]");
   if (pick) showDrawerView(tab, pick.dataset.shell === "" ? null : own[pick.dataset.shell]);
 });
@@ -3196,6 +3315,23 @@ detailsButton.onclick = () => toggleDetails();
 onGuiKey("b", () => toggleDetails(), { shift: true });
 window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #head-more, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
+/** Where the thread runs, which the sidebar row's hover card says with a mouse and this says on any
+ * screen: its machine, an Upstash Box's age and cost, and its account with the provider behind it. */
+function detailsRunsOnHtml(tab) {
+  const account = tab.view.account ?? DEFAULT_ACCOUNT;
+  const named = accountOf(tab.machine, account);
+  const provider = named?.auth === "opencode-go" ? PROVIDERS["opencode-go"] : PROVIDERS[named?.provider] ?? PROVIDERS.claude;
+  const box = tab.machine !== LOCAL && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
+  const budget = box?.budget_usd != null ? ` of $${box.budget_usd.toFixed(2)}` : "";
+  const boxText = box ? `${boxAgeText(box.age_secs)} online · $${boxSpent(box).toFixed(2)}${budget}` : tab.machine !== LOCAL && boxDown.has(tab.machine) ? "Box cost unavailable" : "";
+  const line = (detail, glyph, label, dim = "") => `<div class="row static" data-detail="${detail}">${glyph}<span class="label">${esc(label)}</span>${dim ? `<span class="dim">${esc(dim)}</span>` : ""}</div>`;
+  return `<section aria-label="Runs on">
+      ${line("machine", icon("monitor"), machineName(tab.machine))}
+      ${boxText ? line("box", icon("server"), boxText) : ""}
+      ${line("account", icon(named?.auth === "opencode-go" ? "opencode" : "claude"), accountName(tab.machine, account), provider)}
+    </section>`;
+}
+
 function renderDetails(tab) {
   if (detailsCard.hidden || !tab) return;
   const t = threadOf(tab);
@@ -3209,7 +3345,7 @@ function renderDetails(tab) {
   const prs = [...new Map(t.items.filter((i) => i.kind === "pr").map((p) => [p.url, p])).values()];
   const row = (attrs, inner, chevron = false) => `<button type="button" class="row${/ class="more"/.test(attrs) ? " more" : ""}"${attrs.replace(' class="more"', "")}>${inner}${chevron ? icon("chevron-down", "chev") : ""}</button>`;
   const split = (main, more) => `<div class="split-row">${main}<span class="seam"></span>${more}</div>`;
-  const html = `<section aria-label="Workspace">
+  const html = `${detailsRunsOnHtml(tab)}<section aria-label="Workspace">
       ${row(` data-act="workspace"${open ? "" : " disabled"} title="${esc(tab.view.cwd)}"`, `${icon(tab.machine !== LOCAL ? "monitor" : where.icon)}<span class="label">${esc(tab.machine !== LOCAL ? `${machineName(tab.machine)} · ${where.label}` : where.label)}</span>`, open)}
       ${editor ? split(row(` data-act="open-in"`, `<span class="editor-mark">${editorIcon(editor.id) || icon("square-arrow-out-up-right")}</span><span class="label">Open in ${esc(editor.name)}</span>`), row(` data-act="editors" class="more" aria-label="Choose the editor"`, icon("chevron-down"))) : ""}
       ${known && !known.loading ? primary ? split(row(` data-act="run" title="Run ${esc(primary.name)}"`, `${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span>`), row(` data-act="scripts" class="more" aria-label="Script actions"`, icon("chevron-down")))

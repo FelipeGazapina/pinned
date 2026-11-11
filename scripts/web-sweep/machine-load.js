@@ -8,7 +8,7 @@
 //   SWEEP_DIR=... node scripts/web-sweep/machine-load.js
 //   SWEEP_DIR=... scripts/web-sweep/stack.sh stop
 //
-// The script starts sweep-mini and stops it again. SWEEP_CHANNEL=chrome drives the installed Chrome.
+// The script starts sweep-mini and stops it again. The browser is the installed Chrome (SWEEP_CHANNEL, CHROME_BIN).
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, spawn } = require("child_process");
@@ -65,7 +65,7 @@ const rows = (page) =>
 (async () => {
   fs.mkdirSync(SCREENS, { recursive: true });
   const mini = startMini();
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   let failed = 0;
   const check = (ok, what) => {
     if (!ok) failed++;

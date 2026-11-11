@@ -28,12 +28,13 @@ applyAlwaysOnTop();
 async function featuresSettingsHtml() {
   // Só o app tem janela nativa e caffeinate; no navegador não há opcional a mostrar por enquanto.
   if (!TAURI?.window) return "";
-  const awake = await invoke("get_keep_awake");
+  const [awake, background] = await Promise.all([invoke("get_keep_awake"), invoke("get_background")]);
   const row = (key, title, about, control, extra = "") => `<div class="side-setting" data-setting="${key}"><div><label for="feature-${key}">${title}</label><p class="meta">${about}</p>${extra}</div>${control}</div>`;
   const toggle = (key, on, title, about, extra = "") => row(key, title, about, `<label class="switch"><input type="checkbox" id="feature-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`, extra);
   return `<section id="features-settings"><h2 class="looks-title">Optional features</h2>
     ${toggle("keepAwake", awake, `Keep this ${COMPUTER} awake`, `While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.`, `<p class="error" id="awake-error"></p>`)}
-    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", "Keep the pinned window above other apps, even in their fullscreen spaces. When off, pinned shows in the Dock so you can bring it back.")}</section>`;
+    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", "Keep the pinned window above other apps, even in their fullscreen spaces. When off, pinned shows in the Dock so you can bring it back.")}
+    ${machineBackgroundHtml(LOCAL, { background })}</section>`;
 }
 function bindFeaturesSettings() {
   const awake = document.getElementById("feature-keepAwake");

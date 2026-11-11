@@ -178,7 +178,7 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "prs") return "Pull requests";
   if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
   if (s.kind === "memory") return isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory";
-  if (s.kind === "pr") return `#${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
+  if (s.kind === "pr") return `PR #${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
   return s.title || hostOf(s.url) || "Browser";
 };
 const hostOf = (url) => {
@@ -195,7 +195,7 @@ onGuiKey("d", () => (panelOf(active).open && shownSurface(active)?.kind === "dif
 onGuiKey("j", () => (panelOf(active).open && shownSurface(active)?.kind === "browser" ? closePanel() : openSurface("browser")), { shift: true });
 onGuiKey("k", () => {
   const s = shownSurface(active);
-  const pr = s?.kind === "pr" ? { number: surfaceTitle(active, s).slice(1) } : active && shownPr(active);
+  const pr = s?.kind === "pr" ? { number: s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?" } : active && shownPr(active);
   if (pr) copyText(`#${pr.number}`, "PR number copied");
 }, { shift: true });
 onGuiKey("o", () => openInEditor());
@@ -391,18 +391,27 @@ function animatePanel(open) {
   clearTimeout(animationTimer);
   animationTimer = setTimeout(() => document.body.classList.remove("panel-animating"), ms + 50);
 }
+let panelTurnDrawn = null;
 function renderPanel() {
   const tab = active;
   const p = panelOf(tab);
+  // The thread's card of the turn the Diff shows says so, and goes back to its files after.
+  const turnShown = turnInPanel(tab);
+  if (turnShown !== panelTurnDrawn) {
+    panelTurnDrawn = turnShown;
+    if (tab && guiOn() && !terminalOnly(tab)) renderThread();
+  }
   animatePanel(p.open);
   document.body.dataset.panel = p.open ? "open" : "closed";
   document.body.dataset.panelMax = String(p.open && p.max);
   expandButton.innerHTML = icon(p.max ? "minimize-2" : "maximize-2");
   expandButton.title = p.max ? "Restore panel size" : "Maximize panel";
   expandButton.classList.toggle("on", p.max);
-  // Open, the panel's tab row holds the layout controls, at the window's top right.
-  const home = p.open ? panelTabs : chatHead;
+  // Beside the chat the layout controls stay in its header. Where the panel covers the chat, its tab
+  // row holds them, at the window's top right.
+  const home = p.open && narrow(980) ? panelTabs : chatHead;
   if (layoutControls.parentElement !== home) home.append(layoutControls);
+  setPressed(document.getElementById("toggle-panel"), !!p.open);
   setPanelWidth(p.width || Number(load("gui-panel-width")) || 540);
   renderOpenIn(tab);
   renderPip(tab);
@@ -666,6 +675,12 @@ function diffSource(tab) {
   if (d.scope !== "turn") return { git: true, rev: t.gitDiff?.data?.tree ?? null, key: `${tab.key}:${d.scope}:${d.base ?? ""}` };
   const chosen = t.history?.find((h) => h.ended === d.turn) ?? t.history?.at(-1);
   return { git: false, rev: chosen?.tree ?? null, key: String(chosen?.ended ?? ""), chosen };
+}
+
+/** The end of the turn the open panel's Diff shows, or null. */
+function turnInPanel(tab) {
+  if (!tab || !panelOf(tab).open || shownSurface(tab)?.kind !== "diff" || diffState(tab).scope !== "turn") return null;
+  return diffSource(tab).chosen?.ended ?? null;
 }
 
 function scopeButton(tab) {
@@ -2348,8 +2363,8 @@ function renderOpenIn(tab) {
   openIn.hidden = !editor;
   if (!editor) return;
   const main = openIn.querySelector(".main");
-  main.setAttribute("aria-label", "Open");
-  main.querySelector(".label").textContent = "Open";
+  main.setAttribute("aria-label", `Open in ${editor.name}`);
+  main.querySelector(".label").textContent = `Open in ${editor.name}`;
   main.dataset.editor = editor.id;
 }
 function openInEditor() {
@@ -2370,10 +2385,12 @@ openIn.querySelector(".pick").onclick = (e) => {
 };
 for (const el of openIn.querySelectorAll("[data-ic]")) el.outerHTML = icon(el.dataset.ic);
 
-/** On a phone the header's actions fold into one menu, so the thread's title keeps the row. */
+/** A narrow header folds its actions into one menu, so the thread's title keeps the row. A phone
+ * opens the thread's actions sheet instead. */
 document.getElementById("head-more").onclick = (e) => {
   const tab = active;
   if (!tab) return;
+  if (narrow(768)) return openThreadActions(tab);
   const pr = prOf(tab);
   const chosen = !openIn.hidden && editorFor(tab.machine);
   const pick = (ed) => () => (save(`gui-editor:${tab.machine}`, ed.id), renderOpenIn(tab), openInEditor());

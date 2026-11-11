@@ -53,6 +53,32 @@ function globalSettingsWrites(view, machines) {
     }));
 }
 
+const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+
+/** How the projects page and the Captains rail name a `captainState`, and the rail a machine that is away. */
+const CAPTAIN_STATE_LABELS = { working: "Working", idle: "Idle", none: "No Captain", offline: "Offline" };
+
+/** The rail's second line for one project, out of what `captainFacts` gathers: the machine, then
+ * what its state counts (running workers, the last report, threads at work, when the machine was
+ * last seen), then how many of its threads wait on the user. `reported` and `seen` come worded. */
+function captainRailSub({ state, machine, workers = 0, working = 0, needs = [], reported = null, seen = null }) {
+  const parts = [machine.name];
+  if (state === "working" && workers) parts.push(workersLabel(workers));
+  if (state === "idle" && reported) parts.push(`reported ${reported}`);
+  if (state === "none" && working) parts.push(`${working} thread${working === 1 ? "" : "s"} working`);
+  if (state === "offline" && seen) parts.push(seen);
+  if (needs.length) parts.push(`${needs.length} needs you`);
+  return parts.join(" · ");
+}
+
+/** What a report card says about its Captain right now: counts of the project's threads at work
+ * and waiting on the user, or, with neither, the Captain's own state after its machine. */
+function reportCaptainState({ state, working = 0, needs = [] }) {
+  const chips = [working && { tone: "working", text: `${working} working` }, needs.length && { tone: "needs", text: `${needs.length} needs you` }].filter(Boolean);
+  const now = { idle: "idle now", working: "working now", offline: "offline" }[state];
+  return { chips, where: chips.length || !now ? "" : ` · ${now}` };
+}
+
 /** One line per machine the save could not reach, in the machine's own words: too old, offline, or
  * failed. Machines that took the settings stay quiet. */
 function globalSettingsNotes(machines) {

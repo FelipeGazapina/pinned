@@ -379,6 +379,10 @@ pub enum Call {
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
     SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
+    /// `on`, as saved. Whether the desktop app on this machine runs in the background, with no
+    /// window, which it applies at once: on closes the window, off opens it. A machine without the
+    /// app refuses it.
+    SetBackground { on: bool },
     /// `reading::read` of the tab's session: its state and the last `items` items of its
     /// conversation, 20 when not given, read from the end of its transcript however long it is.
     ReadSession {
@@ -977,6 +981,10 @@ pub enum MachineEvent {
     /// The machine's load and accounts, every 20 seconds. The hub keeps the latest as `MachineView::state`
     /// and passes it to no client.
     State { state: crate::load::MachineState },
+    /// Whether the desktop app runs in the background, with no window: when it connects and after
+    /// each change. A machine without the app never sends it. The hub keeps it as
+    /// `MachineView::background` and passes the event to no client.
+    Background { on: bool },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -1396,6 +1404,10 @@ pub struct MachineView {
     /// is offline, and until a machine that reports it has connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<crate::load::MachineState>,
+    /// Whether the desktop app on the machine runs in the background, as it last reported. Absent
+    /// for a machine without the app, an app older than the setting, and an offline machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -2047,7 +2059,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None, state: None };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None, state: None, background: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -2107,7 +2119,7 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None, background: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
         round_trip(
@@ -2144,6 +2156,16 @@ mod tests {
     }
 
     #[test]
+    fn run_in_the_background_round_trips_and_a_view_without_it_reads_as_none() {
+        round_trip(Call::SetBackground { on: true }, json!({ "cmd": "set_background", "on": true }));
+        round_trip(MachineEvent::Background { on: false }, json!({ "kind": "background", "on": false }));
+        let older: MachineView = serde_json::from_value(json!({ "id": "m1", "name": "vps", "os": "linux", "online": true, "last_seen": 0 })).unwrap();
+        assert_eq!(older.background, None);
+        let reported = MachineView { background: Some(true), ..older };
+        assert_eq!(serde_json::to_value(&reported).unwrap()["background"], json!(true));
+    }
+
+    #[test]
     fn an_update_status_round_trips_and_an_old_machine_view_still_reads() {
         round_trip(Call::UpdateSelf, json!({ "cmd": "update_self" }));
         assert!(Call::UpdateSelf.may_wait());
@@ -2170,7 +2192,7 @@ mod tests {
         assert_eq!(old.version, "");
         assert_eq!(old.update, None);
         round_trip(
-            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }), state: None },
+            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }), state: None, background: None },
             json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
     }

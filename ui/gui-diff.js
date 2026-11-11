@@ -1,5 +1,19 @@
 document.body.insertAdjacentHTML("afterbegin", `<div id="pierre-diffs-sprite" aria-hidden="true">${PIERRE_DIFFS.sprite}</div>`);
 
+/** Fits a diff toolbar to its panel at any width: its labelled switches turn to icons first, and only
+ * if that is not enough does it wrap to a second row, so no control ever needs a sideways scroll. */
+function fitDiffBar(bar) {
+  const overflows = () => bar.scrollWidth > bar.clientWidth + 1;
+  bar.dataset.fold = "none";
+  if (overflows()) bar.dataset.fold = "icons";
+  if (overflows()) bar.dataset.fold = "wrap";
+}
+const fitDiffBars = () => {
+  for (const bar of panelBody.querySelectorAll(".diff-bar")) fitDiffBar(bar);
+};
+new ResizeObserver(fitDiffBars).observe(panelBody);
+new MutationObserver(fitDiffBars).observe(panelBody, { childList: true });
+
 /** InteractionManager.js's line selection: pressing a line number selects it and dragging extends
  * it, pressing the one selected line clears it, and Shift extends from the nearer end. Pressing the
  * gutter's "+" and dragging picks the lines a new comment covers, starting from the selection.

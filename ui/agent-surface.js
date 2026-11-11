@@ -174,16 +174,6 @@ function agentShownHtml() {
   </div>`;
 }
 
-/** Waiting on you's agent items, above its threads: what an approval handed the user to see once,
- * then each waiting confirmation, in one block, or nothing. */
-function agentWaitingRows() {
-  if (!agentShown && !agentConfirmations.length) return [];
-  const asks = document.createElement("div");
-  asks.className = "agent-asks";
-  asks.innerHTML = `${agentShownHtml()}${agentConfirmations.map(agentConfirmationHtml).join("")}`;
-  return [asks];
-}
-
 /** The confirmation whose Approve opened `action`'s form, or null. */
 const agentAsking = (action) => (agentApproving?.action === action ? agentApproving : null);
 
@@ -379,7 +369,7 @@ function drawAgentActivity() {
   const { rows, more, loading, notice } = agentActivity;
   const trail = rows.length ? `<div class="agent-audit">${rows.map(agentAuditRowHtml).join("")}</div>` : `<p class="hint">${loading ? "Loading…" : "No agent has acted as you yet."}</p>`;
   settingsPage.innerHTML = `<h2>Agent activity</h2><section id="agent-activity">
-    <p class="hint">Every action an agent took as you, newest first. Actions that need your approval wait in Waiting on you.</p>
+    <p class="hint">Every action an agent took as you, newest first. Actions that need your approval wait in Needs you.</p>
     ${notice ? `<p class="${notice.error ? "error" : "hint"}" role="status">${esc(notice.text)}</p>` : ""}
     ${agentShownHtml()}
     ${agentConfirmations.length ? `<h3 class="agent-heading">Waiting on you</h3><div class="agent-confirms">${agentConfirmations.map(agentConfirmationHtml).join("")}</div>` : ""}

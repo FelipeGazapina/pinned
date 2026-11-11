@@ -12,7 +12,7 @@
 // on alpha with two workers (one held working), and leaves a question, a plan and a failed thread. `shoot`
 // restarts the hub on the given ui folder, so both labels run against the same threads, and writes
 // ux-polish-<item>-<label>-<desktop|phone>.png into UX_SHOTS (default scripts/web-sweep/screens/ux-polish).
-// SWEEP_CHANNEL=chrome drives the installed Chrome; PLAYWRIGHT is the path of a playwright package.
+// The browser is the installed Chrome (SWEEP_CHANNEL, CHROME_BIN); PLAYWRIGHT is the path of a playwright package.
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, spawn } = require("child_process");
@@ -120,7 +120,7 @@ async function seed() {
   if (!hubUp()) await startHub(path.join(REPO, "ui"));
   pairNode2();
   startNode2();
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const context = await browser.newContext({ viewport: SIZES[0][1], colorScheme: "dark" });
   const page = await context.newPage();
   await signIn(page);
@@ -180,7 +180,7 @@ const headState = () => {
 async function shoot(label, ui) {
   fs.mkdirSync(SHOTS, { recursive: true });
   await startHub(ui);
-  const browser = await playwright.chromium.launch({ headless: true, channel: process.env.SWEEP_CHANNEL || undefined });
+  const browser = await playwright.chromium.launch({ headless: true, ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : { channel: process.env.SWEEP_CHANNEL || "chrome" }) });
   const out = {};
   for (const [size, viewport] of SIZES) {
     const phone = size === "phone";
