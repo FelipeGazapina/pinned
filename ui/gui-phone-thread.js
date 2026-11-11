@@ -104,6 +104,8 @@ function threadActionsOf(tab) {
     actions.push({ id: "workers", label: "Workers", hint: s.needs ? `${s.needs} needs you` : `${s.done} of ${s.total} done`, run: () => openWorkersSheet(tab) });
   }
   if (worker && parentOf(tab)) actions.push({ id: "parent", label: `Open ${threadTitle(parentOf(tab))}`, hint: "Captain", run: () => activate(parentOf(tab)) });
+  const panel = panelOf(tab);
+  if (panel.surfaces.length) actions.push({ id: "panel", label: panel.open ? "Hide side panel" : "Show side panel", hint: `${panel.surfaces.length} open`, run: () => togglePanel() });
   const pin = by("pin", "pin-off");
   actions.push({ id: "pin", label: pin.label, run: pin.run });
   const settle = by("circle-check");
@@ -180,12 +182,14 @@ function renderHeadSub() {
   const text = guiOn() && onPhone() ? phoneSubLine(tab) : "";
   if (headSub.textContent !== text) headSub.textContent = text;
   const parent = tab?.view.role === "worker" && parentOf(tab);
-  chatBack.setAttribute("aria-label", parent ? `Back to ${threadTitle(parent)}` : "Back to threads");
+  chatBack.setAttribute("aria-label", subagentShown() ? `Back to ${threadTitle(tab)}` : parent ? `Back to ${threadTitle(parent)}` : "Back to threads");
 }
 new MutationObserver(renderHeadSub).observe(crumbEl, { childList: true });
 visibleInterval(renderHeadSub, 1000);
 
 chatBack.onclick = () => {
+  // The crumb that leaves a subagent's conversation is hidden on a phone, so Back does.
+  if (subagentShown()) return closeSubagent();
   const parent = active?.view.role === "worker" && parentOf(active);
   if (parent) return activate(parent);
   if (typeof phoneGo === "function") return phoneGo("threads");
@@ -371,6 +375,7 @@ function askSheetHtml(tab) {
       always ? row(`data-approval="always"`, always.head) : "",
       ...rest.map((o) => row(`data-option="${o.n}"`, o.head)),
       decline ? row(`data-ask="type"`, "Decline and say what to do instead", "mic") : row(`data-ask="cancel"`, "Cancel"),
+      decline ? row(`data-ask="cancel"`, "Cancel", "", " quiet") : "",
       terminal,
     ];
     return `<div class="ask-head">${phoneSvg("shield", 20, "lead", 1.75)}<h2>${title}</h2>${count}</div>

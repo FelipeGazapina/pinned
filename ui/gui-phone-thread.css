@@ -34,6 +34,8 @@
   /* The Workers block in the chat: a row each that opens its worker, its counts in the pill. */
   #thread { padding: 10px 16px 200px; }
   #thread .turn .bubble { max-width: min(328px, calc(100% - 30px)); padding: 10px 14px; border-radius: 18px; background: rgb(var(--g-ink-rgb) / 0.065); }
+  /* A theme names its own Message surface. */
+  html[data-theme-id]:not([data-theme-id=""]) #thread .turn .bubble { background: var(--g-message); }
   #thread .turn :is(.bubble .md, .assistant, .narration) { font-size: 16px; line-height: 1.4; }
   #thread .turn .assistant { color: rgb(var(--g-fg-rgb) / 0.92); }
   #thread .work > summary { font-size: 14px; }
@@ -69,8 +71,9 @@
   #composer > * { max-width: none; }
   #composer .box { display: flex; flex-direction: column; gap: 6px; padding: 12px 8px 8px 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 22px;
     background: var(--g-composer); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
-  #prompt { min-height: 22px; padding: 0; font-size: 16px; line-height: 1.4; }
-  #prompt-mirror { padding: 0; font-size: 16px; line-height: 1.4; }
+  /* 16px keeps iOS from zooming the page when the prompt takes focus. A larger Prompt size still applies. */
+  #prompt { min-height: 22px; padding: 0; font-size: max(16px, var(--prompt-size, 16px)); line-height: 1.4; }
+  #prompt-mirror { padding: 0; font-size: max(16px, var(--prompt-size, 16px)); line-height: 1.4; }
   #composer .tools { gap: 2px; padding: 0; }
   #composer .tools > .controls, #composer .tools > #context-meter, #composer .tools > #composer-dictate-lang { display: none; }
   #composer #composer-chip { display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; height: 36px; min-height: 36px; margin-left: -6px; padding: 0 12px;

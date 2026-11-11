@@ -21,8 +21,9 @@ const MENU = [
   { label: "Delete", icon: "trash", danger: true, run: () => "delete" },
 ];
 
-function load({ workers = [], parent = null } = {}) {
+function load({ workers = [], parent = null, panel = { surfaces: [] } } = {}) {
   const renamed = [];
+  const toggled = [];
   const context = {
     narrow: () => true,
     esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
@@ -43,7 +44,8 @@ function load({ workers = [], parent = null } = {}) {
     prCache: new Map([["t:https://github.com/example/site/pull/12", { data: { rollup: "passing" } }]]),
     hasProject: () => true,
     memoryOf: () => ({ hits: [1, 2, 3] }),
-    panelOf: () => ({ surfaces: [] }),
+    panelOf: () => panel,
+    togglePanel: () => toggled.push(panel.open ? "hide" : "show"),
     surfaceTitle: () => "",
     ui: { drawer: false },
     rowMenuItems: () => MENU,
@@ -58,7 +60,7 @@ function load({ workers = [], parent = null } = {}) {
   };
   vm.createContext(context);
   vm.runInContext(`${slice}\nObject.assign(globalThis, { phoneChipLabel, threadActionsOf, workersSheetRows, workerCardHtml });`, context);
-  return { ...context, renamed };
+  return { ...context, renamed, toggled };
 }
 
 const thread = (role = null) => ({
@@ -95,6 +97,17 @@ test("the sheet's sub-lists are the row menu's own entries, and rename edits the
   assert.deepEqual([...actions.find((a) => a.id === "archive").items()].map((i) => i.label), ["Archive thread", "Delete"]);
   assert.deepEqual([...actions.find((a) => a.id === "snooze").items()].map((i) => i.label), ["1 hour"]);
   assert.equal(actions.find((a) => a.id === "pin").run(), "pin");
+});
+
+test("a thread with pages in its side panel can hide and show the panel from the sheet, and one with none has no such row", () => {
+  assert.equal(load().threadActionsOf(thread()).actions.some((a) => a.id === "panel"), false);
+  const open = load({ panel: { open: true, surfaces: [{ id: "diff", kind: "diff" }, { id: "memory", kind: "memory" }] } });
+  const hide = open.threadActionsOf(thread()).actions.find((a) => a.id === "panel");
+  assert.deepEqual(labels([hide]), ["Hide side panel · 2 open"]);
+  hide.run();
+  assert.deepEqual(open.toggled, ["hide"]);
+  const closed = load({ panel: { open: false, surfaces: [{ id: "diff", kind: "diff" }] } });
+  assert.deepEqual(labels([closed.threadActionsOf(thread()).actions.find((a) => a.id === "panel")]), ["Show side panel · 1 open"]);
 });
 
 test("a Captain's sheet leads its actions with its workers", () => {

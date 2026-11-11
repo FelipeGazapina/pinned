@@ -458,6 +458,7 @@ body[data-hub="offline"] #chat-sidebar-toggle .running { opacity: 0.45; }
 #thread-list .thread-row .l3 .pr[data-pr-list] { display: flex; }
 #thread-list .thread-row .l3 .i { width: 12px; height: 12px; }
 #thread-list .thread-row .l3 :is(.pin, .warn) { display: flex; }
+#thread-list .thread-row .l3 .warn { color: var(--g-warning-fg); }
 #thread-list .thread-row .l3 > .phone-sub { display: none; }
 #thread-list .thread-row.line { align-items: center; min-height: 28px; padding: 4px 8px 4px 27px; }
 #thread-list .thread-row.line .l2 { font-size: 12.5px; font-weight: 400; }
