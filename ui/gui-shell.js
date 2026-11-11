@@ -271,6 +271,7 @@ function actionItems() {
     { icon: "folder-plus", title: "Add project", keep: true, terms: ["add project", "folder", "directory", "browse", "clone", "remote", "repository", "repo", "git", "github", "url", "environment"], run: () => startAddProject() },
     ...online.filter((m) => machines.get(m).view.os === "wsl").slice(0, 1).map((m) => ({ icon: "folder-plus", title: "Open WSL folder", sub: machineName(m), keep: true, terms: ["add project", "open", "wsl", "linux", "folder", "directory"], run: () => browseForProject(m) })),
     ...themeActionItems(),
+    { icon: "inbox", title: "Open Needs you", terms: ["needs you", "waiting", "inbox", "approvals", "questions", "usage limit", "review"], run: () => openPage("needs-you") },
     { icon: "git-pull-request-arrow", title: "Open pull requests", terms: ["pull requests", "prs", "pr", "github", "review", "merge", "branch"], run: () => openPage("pull-requests") },
     { icon: "folder-git-2", title: "Open the account's projects", terms: ["projects", "projetos", "global", "account", "machines", "captain", "capitão", "capitao", "orquestrador", "orchestrator", "workers"], run: () => openGlobalProjects() },
     { icon: "sparkles", title: "Open skills", terms: ["skills", "plugins", "edit skill", "skill.md", "reload skills"], run: () => openPage("skills") },

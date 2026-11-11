@@ -32,7 +32,8 @@
 //   Every thread on every machine that waits on the user, on top of `waitingKindOf`: kind
 //   "approval" | "question" | "plan" (with `ask`), "limit" (a usage limit stopped it; `limit` is
 //   { resumesAt, account, held, switchTo: [{ id, name }] }, what #limit-note offers), "failed" (any
-//   other failure), and "review" (a finished thread the user has not seen).
+//   other failure), and "review" (a finished thread the user has not seen). A snoozed thread is
+//   left out until it wakes or asks something (`snoozedNow`); an ask always shows.
 //
 // navCounts() -> { needsYou, orchestrator, reviews, usage, machinesOnline, machinesTotal }
 //   `needsYou` counts needsYouItems() without reviews. `orchestrator` counts the Captains' reports
@@ -196,7 +197,7 @@ function needsYouItem(tab) {
   return null;
 }
 
-const needsYouItems = () => tabs.map(needsYouItem).filter(Boolean).sort((a, b) => (b.since ?? 0) - (a.since ?? 0));
+const needsYouItems = () => tabs.map(needsYouItem).filter((i) => i && (i.ask || !snoozedNow(i.tab))).sort((a, b) => (b.since ?? 0) - (a.since ?? 0));
 
 /** The Captains' reports in the global orchestrator's thread since the user last saw it there. */
 function unseenReports() {
