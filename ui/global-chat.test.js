@@ -38,15 +38,15 @@ test("the words before the first header are the sender's own, and a block needs 
 });
 
 test("the fold line counts the reports and names each Captain once", () => {
-  assert.equal(reportFoldLabel(reportBlocks(pasted)), "3 updates · Captain site, Captain pinned");
-  assert.equal(reportFoldLabel(reportBlocks("[pinned] Capitão site (node) [m t]: um\n[pinned] Capitão site (node) [m t]: dois")), "2 updates · Captain site");
+  assert.equal(reportFoldLabel(reportBlocks(pasted)), "3 reports · Captain site, Captain pinned");
+  assert.equal(reportFoldLabel(reportBlocks("[pinned] Capitão site (node) [m t]: um\n[pinned] Capitão site (node) [m t]: dois")), "2 reports · Captain site");
 });
 
 test("the English forms of the report header and the quick-reply line read like the Portuguese ones", () => {
   assert.deepEqual(reportBlocks("[pinned] Captain site (node) [m t]: done"), [{ start: 0, project: "site", machineName: "node", machineId: "m", tabId: "t", text: "done" }]);
   assert.deepEqual(quickReplyOf("Merge it?\n\nOptions: Yes | Not yet\n"), { options: ["Yes", "Not yet"], text: "Merge it?" });
   assert.equal(speechTextOf("Done.\nOptions: Yes | No"), "Done.");
-  assert.equal(reportFoldLabel(reportBlocks("[pinned] Captain site (node) [m t]: one")), "1 update · Captain site");
+  assert.equal(reportFoldLabel(reportBlocks("[pinned] Captain site (node) [m t]: one")), "1 report · Captain site");
 });
 
 test("an answer offers quick replies only when its last non-empty line reads Opções", () => {

@@ -29,9 +29,24 @@ visibleInterval(() => {
   }
 }, 1000);
 
+/** The global orchestrator's header: its name, where it runs, and its Memory and Way of working.
+ * The name keeps the title's menu. */
+const ORCHESTRATOR_GLYPH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V4"></path><path d="M9 14v2"></path><path d="M15 14v2"></path></svg>`;
+function orchestratorCrumbHtml(tab) {
+  const name = projectName(tab);
+  const host = globalHostMachine();
+  const where = host ? `Runs on ${machineName(host)} · ${machines.get(host)?.view.online ? "all projects" : "offline"}` : "";
+  return `<span class="orchestrator-mark">${ORCHESTRATOR_GLYPH}</span><button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(name)}" data-tip="${esc(name)}"><h2 class="text">${esc(name)}</h2>${icon("chevron-down", "chev")}</button>${where ? `<span class="orchestrator-where">${esc(where)}</span>` : ""}${headStatsHtml(tab)}<span class="orchestrator-actions"><button type="button" data-orchestrator-memory>Memory</button><button type="button" data-orchestrator-taste>Way of working</button></span>`;
+}
+
 crumbEl.addEventListener("click", (e) => {
   const parent = tabByKey(e.target.closest("[data-parent-thread]")?.dataset.parentThread);
   if (parent) activate(parent);
+  if (e.target.closest("[data-orchestrator-memory]") && active) addSurface(active, { id: "memory", kind: "memory" });
+  if (e.target.closest("[data-orchestrator-taste]")) {
+    tasteUi.scope = { kind: "orchestrator" };
+    openPage("taste");
+  }
 });
 
 /** A worker's header opens its latest turn's diff, with that turn's line counts once its history is read. */

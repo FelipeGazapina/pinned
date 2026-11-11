@@ -964,33 +964,42 @@ function userHtml(user, t, tab, first) {
   return userBubbleHtml(user, t, tab, first, by);
 }
 
-/** The global orchestrator's own lane, drawn only in its tab: report rows, quick replies, read
- * aloud. Guarded by typeof so the plain timeline, and the sandbox that tests it without
- * composer-tags.js, keep the ordinary path. */
+/** The global orchestrator's own lane, drawn only in its tab: report cards, painted tags and the
+ * routed line under a sent message, quick replies, read aloud. Guarded by typeof so the plain
+ * timeline, and the sandbox that tests it without composer-tags.js, keep the ordinary path. */
 const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isGlobalOrchestratorTab(tab);
+/** A sent message's body, with its #project and @machine tags painted in the orchestrator's lane. */
+const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html) : html);
 
-/** A prompt that carries Captain reports: the sender's own words above, if any, then one row per
- * report, or one fold that opens to them while the settings group reports. */
+/** A prompt that carries Captain reports: the sender's own words above, if any, then a card under
+ * "N reports" with one row per report. While the settings group reports, a card of several folds
+ * to its header, which opens it. */
 function globalReportsHtml(user, t, tab, first, by, reports) {
   const mine = user.text.slice(0, reports[0].start).trim();
   const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
-  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`)).join("");
+  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`, reportCaptainHtml(report))).join("");
+  const fold = reportFoldLabel(reports);
+  const cut = fold.indexOf(" · ");
+  const label = `<span class="count">${esc(fold.slice(0, cut))}</span><span class="names">${esc(fold.slice(cut + 3))}${dateOf(user.at) ? ` · ${whenHtml(user.at, "when")}` : ""}</span>`;
   if (globalSettings.group_reports !== false && reports.length > 1) {
     const key = `reports:${user.id}`;
     const open = t.open.has(key);
-    return `${lead}<div class="reports"><button type="button" class="report-fold" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="label">${esc(reportFoldLabel(reports))}</span>${icon("chevron-down", "chev")}</button>${open ? rows : ""}</div>`;
+    return `${lead}<section class="reports" aria-label="Reports from Captains"><button type="button" class="report-fold reports-head" data-toggle="${esc(key)}" aria-expanded="${open}">${label}${icon("chevron-down", "chev")}</button>${open ? rows : ""}</section>`;
   }
-  return `${lead}<div class="reports">${rows}</div>`;
+  return `${lead}<section class="reports" aria-label="Reports from Captains"><div class="reports-head">${label}</div>${rows}</section>`;
 }
 
-/** One Captain's report: who sent it and when, over what it says, its Captain opening the thread.
- * A long report folds to a few lines under "Show more", which `key` in `t.open` opens. */
-function reportRowHtml(report, at, t, key) {
+/** One Captain's report: its project's tile, who sent it, its machine and the Captain's state now,
+ * over what it says; Review when a thread of the project waits on the user, and Open thread. The
+ * time shows on hover. A long report folds to a few lines under "Show more", which `key` in
+ * `t.open` opens. `captain` is what `reportCaptainHtml` reads; a row drawn without it still draws. */
+function reportRowHtml(report, at, t, key, captain) {
   const none = report.text.trim() === "(no reply)";
   const long = !none && isLongText(report.text);
   const clamped = long && !t?.open.has(key);
   const body = none ? "<p>Captain didn't write a reply. Open its thread.</p>" : markdown(report.text);
-  return `<div class="report-row"><div class="head"><button type="button" class="who" data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}" title="Open this thread">Captain ${esc(report.project)} · ${esc(report.machineName)}</button>${whenHtml(at, "when on")}</div><div class="body md${clamped ? " clamped" : ""}">${body}</div>${long ? `<button type="button" class="show-full" data-toggle="${esc(key)}" aria-expanded="${!clamped}">${clamped ? "Show more" : "Show less"}</button>` : ""}</div>`;
+  const opens = `data-report-machine="${esc(report.machineId)}" data-report-tab="${esc(report.tabId)}" data-report-project="${esc(report.project)}"`;
+  return `<div class="report-row">${captain?.mono ?? ""}<div class="main"><div class="head"><button type="button" class="who" ${opens} title="Open this thread">Captain ${esc(report.project)}</button><span class="where">${esc(report.machineName)}${esc(captain?.where ?? "")}</span>${captain?.chips ?? ""}${whenHtml(at, "when")}</div><div class="body md${clamped ? " clamped" : ""}">${body}</div>${long ? `<button type="button" class="show-full" data-toggle="${esc(key)}" aria-expanded="${!clamped}">${clamped ? "Show more" : "Show less"}</button>` : ""}</div>${captain?.review ?? ""}<button type="button" class="open-thread" ${opens}>Open thread</button></div>`;
 }
 
 /** Whether a message is long enough to fold: past 600 characters or 8 lines. */
@@ -1008,7 +1017,7 @@ function userBubbleHtml(user, t, tab, first, by) {
   const missing = user.images - pictures.length;
   const bubble = [
     (pictures.length || uploads.length) && `<div class="pictures">${pictures.map((src, i) => `<button type="button" class="picture" data-zoom="${esc(user.id)}:${i}"><img src="${esc(src)}" alt="Image #${i + 1}"></button>`).join("")}${uploads.map((path) => `<button type="button" class="picture" data-upload="${esc(path)}" data-machine="${esc(tab.machine)}" aria-label="${esc(path.split("/").pop())}"></button>`).join("")}</div>`,
-    user.text && `<div class="body md${clamped ? " clamped" : ""}">${citationChips(markdown(user.text, promptMarked), user.citations)}</div>`,
+    user.text && `<div class="body md${clamped ? " clamped" : ""}">${laneTagsHtml(tab, citationChips(markdown(user.text, promptMarked), user.citations))}</div>`,
     missing > 0 && `<span class="images">${missing} image${missing > 1 ? "s" : ""}</span>`,
     long && `<button type="button" class="show-full" data-toggle="${esc(key)}">${clamped ? "Show full message" : "Show less"}</button>`,
   ];
@@ -1016,7 +1025,7 @@ function userBubbleHtml(user, t, tab, first, by) {
     by === "pinned" && `<p class="sent-by">Sent by Pinned</p>`,
     user.steer && `<span class="steer" title="Steered the active turn">${icon("redo-2")}Steer</span>`,
   ];
-  return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>
+  return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>${globalLane(tab) ? orchestratorRoutedHtml(user.text) : ""}
     <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div></div>`;
 }
 
@@ -1180,7 +1189,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalSettings.group_reports : null, workersKey(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalLaneKey() : null, workersKey(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);

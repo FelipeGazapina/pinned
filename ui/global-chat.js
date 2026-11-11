@@ -27,7 +27,7 @@ function reportBlocks(text) {
 /** The one-line summary of several reports: how many came, and which Captains, each named once. */
 function reportFoldLabel(blocks) {
   const names = [...new Set(blocks.map((b) => `Captain ${b.project}`))];
-  return `${blocks.length} ${blocks.length === 1 ? "update" : "updates"} · ${names.join(", ")}`;
+  return `${blocks.length} ${blocks.length === 1 ? "report" : "reports"} · ${names.join(", ")}`;
 }
 
 /** The quick replies an answer offers: its last non-empty line must read `Opções: a | b` (`Options: a | b` reads the same). Returns
