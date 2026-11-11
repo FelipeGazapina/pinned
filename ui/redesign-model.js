@@ -22,7 +22,7 @@
 //   `tab` is set for a thread, `agent` for the others. `state` is "working" | "needs" | "done" |
 //   "failed" | "stopped". `step` is the latest step in one line (a done worker's last answer line).
 //   `ask` is pendingAsk of a worker thread. `model` is the model's name once the transcript or the
-//   task names it. `elapsedMs` is the time it ran (`view.stats.active_ms` for a thread), `since`
+//   task names it, else the model the parent's delegate_task call started the worker thread on. `elapsedMs` is the time it ran (`view.stats.active_ms` for a thread), `since`
 //   when its current run or wait began, for a `.ticker`.
 //
 // workersSummary(rows) -> { total, done, working, needs, since }
@@ -98,7 +98,26 @@ const STEP_KINDS = new Set(["tool", "thinking", "text"]);
 const stepOf = (item, cwd) => (item ? stepLine(item, cwd).label || null : null);
 const AGENT_STATES = { running: "working", done: "done", failed: "failed", cancelled: "stopped", stopped: "stopped" };
 
-function threadWorker(w) {
+/** The model each of a thread's delegate_task calls started a worker thread on, by the worker's tab
+ * id, from the calls' results. Kept on the thread until its items change. */
+function delegatedModels(tab) {
+  const t = threadOf(tab);
+  if (t.delegatedModels?.items === t.items && t.delegatedModels.length === t.items.length) return t.delegatedModels.models;
+  const calls = new Set();
+  const models = new Map();
+  for (const i of t.items) {
+    if (i.kind === "tool" && /(^|__)delegate_task$/.test(i.name)) calls.add(i.id);
+    else if (i.kind === "result" && calls.has(i.tool)) {
+      const tab = /"tabId"\s*:\s*"([^"]+)"/.exec(i.text ?? "")?.[1];
+      const model = /"model"\s*:\s*"([^"]+)"/.exec(i.text ?? "")?.[1];
+      if (tab && model) models.set(tab, model);
+    }
+  }
+  t.delegatedModels = { items: t.items, length: t.items.length, models };
+  return models;
+}
+
+function threadWorker(w, started = new Map()) {
   const t = threadOf(w);
   const thread = threadState(w);
   const phase = phaseOf(w);
@@ -121,7 +140,7 @@ function threadWorker(w) {
     state,
     step: stepOf(last, w.view.cwd),
     ask,
-    model: modelOf(w)?.name ?? t.items.findLast((i) => i.kind === "model")?.name ?? null,
+    model: modelOf(w)?.name ?? t.items.findLast((i) => i.kind === "model")?.name ?? started.get(w.view.id) ?? null,
     elapsedMs: w.view.stats?.active_ms ?? null,
     since: since || null,
   };
@@ -150,7 +169,8 @@ function agentWorker(tab, agent) {
 function workersOf(tab) {
   const own = `${tab.machine}:${tab.view.id}`;
   const threads = tabs.filter((t) => t !== tab && spawnerKey(t) === own).sort((a, b) => a.view.opened - b.view.opened);
-  return [...threads.map(threadWorker), ...agentsOf(tab).filter((a) => !a.parent).map((a) => agentWorker(tab, a))];
+  const started = threads.length ? delegatedModels(tab) : new Map();
+  return [...threads.map((w) => threadWorker(w, started)), ...agentsOf(tab).filter((a) => !a.parent).map((a) => agentWorker(tab, a))];
 }
 
 function workersSummary(rows) {

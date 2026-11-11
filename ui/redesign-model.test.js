@@ -222,6 +222,11 @@ function captainWorld() {
     items: [user("2026-11-11T17:58:00Z", "Write the changelog."), { kind: "text", text: "Wrote CHANGELOG.md with 14 entries and opened #231\n\nIt lists every merged PR." }, { kind: "pr", number: 231 }],
   });
   const stranger = tab("Elsewhere", { status: "working", spawned_by: "cap" }, { machine: "book" });
+  // The Captain's delegate_task call names the model it started the README worker on.
+  captain.thread.items.push(
+    { kind: "tool", id: "d1", name: "mcp__pinned__delegate_task", input: { title: "Tidy the README" } },
+    { kind: "result", tool: "d1", text: JSON.stringify({ taskId: "task-3", title: "Tidy the README", model: "claude-haiku-5-5", tabId: readme.view.id }) },
+  );
   return { captain, ci, readme, changelog, stranger };
 }
 
@@ -244,7 +249,7 @@ test("workersOf lists a Captain's worker threads, delegated tasks and subagents 
   };
   assert.deepEqual(JSON.parse(JSON.stringify(rows)), [
     { kind: "thread", key: w.ci.key, title: "Run the CI on main", state: "working", step: "Ran cargo test -p pinned-server", ask: null, model: "Sonnet 5.5", elapsedMs: 250000, since: Date.parse("2026-11-11T18:06:00Z"), tab: "Run the CI on main", agent: null },
-    { kind: "thread", key: w.readme.key, title: "Tidy the README", state: "needs", step: "Ran git push origin readme-tidy", ask: approval, model: null, elapsedMs: null, since: (S - 120) * 1000, tab: "Tidy the README", agent: null },
+    { kind: "thread", key: w.readme.key, title: "Tidy the README", state: "needs", step: "Ran git push origin readme-tidy", ask: approval, model: "claude-haiku-5-5", elapsedMs: null, since: (S - 120) * 1000, tab: "Tidy the README", agent: null },
     { kind: "thread", key: w.changelog.key, title: "Changelog for v0.17.21", state: "done", step: "Wrote CHANGELOG.md with 14 entries and opened #231", ask: null, model: null, elapsedMs: 160000, since: null, tab: "Changelog for v0.17.21", agent: null },
     { kind: "task", key: "mini:cap:task-9", title: "Port the updater", state: "failed", step: "Build failed: missing crate", ask: null, model: "composer-2.5", elapsedMs: 90000, since: null, tab: null, agent: "task-9" },
     { kind: "task", key: "mini:cap:task-8", title: "Bump the docs", state: "stopped", step: null, ask: null, model: null, elapsedMs: 20000, since: null, tab: null, agent: "task-8" },
