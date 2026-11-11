@@ -509,7 +509,7 @@ function actionButtonHtml(a, cls) {
   const attrs = `${a.disabled ? " disabled" : ""}${a.pressed ? ` aria-pressed="true"` : ""}${a.hint && cls === "act-primary" ? ` title="${esc(a.hint)}"` : ""}`;
   if (cls === "act-tile") return `<button type="button" class="act-tile" data-act="${a.id}"${attrs}><span class="label">${esc(a.label)}</span><span class="hint">${esc(a.hint || " ")}</span></button>`;
   if (cls === "act-primary") return `<button type="button" class="act-primary${a.tone === "primary" ? " primary" : " outline"}" data-act="${a.id}"${attrs}><span>${esc(a.label)}</span></button>`;
-  return `<button type="button" class="act-row${a.tone === "danger" ? " danger" : ""}" data-act="${a.id}"${attrs}><span class="label">${esc(a.label)}</span>${a.hint ? `<span class="hint">${esc(a.hint)}</span>` : ""}${a.items ? phoneSvg("right", 16, "end") : ""}</button>`;
+  return `<button type="button" class="act-row${a.tone === "danger" ? " danger" : ""}" data-act="${a.id}"${attrs}${a.items ? ` aria-haspopup="menu"` : ""}><span class="label">${esc(a.label)}</span>${a.hint ? `<span class="hint">${esc(a.hint)}</span>` : ""}</button>`;
 }
 
 /** A list of rowMenuItems entries, as the sheet shows one under its title with a way back. */
