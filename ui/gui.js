@@ -185,6 +185,27 @@ async function fetchThread(tab) {
   }
 }
 
+/** Threads that keep their whole transcript after they leave the screen, so going back to one is instant. */
+const WHOLE_THREADS = 6;
+let shownClock = 0;
+let lastShown = null;
+/** What is still asked of a thread off screen: the sidebar's titles, pull requests, dates and
+ * search, and the composer's model. Tool calls, their results, reasoning and pictures are four
+ * fifths of a transcript, and only the thread view draws them. */
+const KEPT_OFF_SCREEN = new Set(["user", "steer", "text", "error", "note", "pr", "model", "compaction", "fork"]);
+/** Drops the rest from every thread that was shown, is not among the last few, and has no turn
+ * or agent running. A thread never shown keeps its first read, so opening it stays instant. */
+function lightenThreads() {
+  const recent = tabs.filter((tab) => threadOf(tab).shownAt).sort((a, b) => threadOf(b).shownAt - threadOf(a).shownAt).slice(0, WHOLE_THREADS);
+  for (const tab of tabs) {
+    const t = threadOf(tab);
+    if (!t.shownAt || t.light || !t.loaded || t.fetching || followed(tab) || recent.includes(tab)) continue;
+    t.items = t.items.filter((item) => KEPT_OFF_SCREEN.has(item.kind)).map((item) => (item.pictures ? { ...item, pictures: [] } : item));
+    // The turns built for the thread view hold every item they were built from.
+    Object.assign(t, { light: true, history: null, gitDiff: null, turnCache: null });
+  }
+}
+
 function onThreadEvent(machine, event) {
   const tab = tabByKey(keyOf(machine, event.tab));
   if (tab && followed(tab) && guiOn() && !document.hidden) fetchThread(tab);
@@ -263,11 +284,18 @@ function renderGui() {
       continue;
     }
     tab.dialog = tab.menu || tab.answering ? null : screenRead(tab, terminalDialog);
+    // What a thread dropped while it was off screen is read again from its start.
+    if (tab === active && t.light) Object.assign(t, { items: [], next: 0, loaded: false, light: false });
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     if (tab === active && !t.history) fetchHistory(tab);
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
+  if (active !== lastShown) {
+    lastShown = active;
+    if (active) threadOf(active).shownAt = ++shownClock;
+    lightenThreads();
+  }
   markThreadSeen(active);
   noteVisit();
   renderSidebar();
