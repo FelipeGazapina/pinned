@@ -24,6 +24,9 @@ body[data-phone-tabs] #phone-tabs { display: flex; flex: none; align-items: flex
   font-variant-numeric: tabular-nums; }
 #phone-tabs .badge[hidden] { display: none; }
 body[data-phone-tabs] #settings { bottom: var(--phone-tabs-h); }
+/* A thread's screen has no tab bar: the safe area under its composer takes the composer's color. */
+body:is([data-phone-screen="thread"], [data-phone-screen="orchestrator"]) #expanded { background-image: linear-gradient(var(--g-bg), var(--g-bg)), var(--grain);
+  background-size: 100% env(safe-area-inset-bottom), 256px 256px; background-position: bottom, 0 0; background-repeat: no-repeat, repeat; }
 
 /* One screen at a time. The thread underneath only turns invisible, so it keeps its scroll. */
 body[data-phone-screen="threads"] #sidebar { grid-column: 1 / -1; grid-row: 1 / -1; z-index: 3; visibility: visible; border-right: 0; background: var(--g-bg);
