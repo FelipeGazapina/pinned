@@ -120,7 +120,9 @@ function threadActionsOf(tab) {
   return { primary, tools, actions };
 }
 
-const sheetTicker = (since) => `<span class="ticker" data-since="${since}">${durationLabel(Math.max(0, Date.now() - since) / 1000)}</span>`;
+/** An empty clock that sheetTickers fills, so a row's markup stays the same from one second to the
+ * next and a repaint never replaces the row under a tap. */
+const sheetTicker = (since) => `<span class="ticker" data-since="${since}"></span>`;
 /** The workers being answered from the Workers sheet, whose buttons wait meanwhile. */
 const sheetAnswering = new Set();
 
@@ -139,11 +141,14 @@ function workerCardHtml(row) {
   return `<div class="ws-card" data-ws-card="${id}"><div class="ws-card-head">${glyphHtml("needs", 12)}<span class="ws-text"><span class="ws-title">${esc(row.title)}</span><span class="ws-says">${says}</span></span>${model ? `<span class="ws-model">${esc(model)}</span>` : ""}</div>
     ${what}<div class="ws-answers">${answers}</div></div>`;
 }
-/** Any other worker: its state, its latest step and its time, opening its thread. */
+/** Any other worker: its state, its latest step and its time, opening its thread, or for an agent
+ * its row in the Workers block, where its actions are. An agent another agent started sits
+ * indented under it. */
 function workerSheetRowHtml(row) {
   const time = row.state === "done" ? "Done" : row.state === "working" && row.since ? sheetTicker(row.since) : row.elapsedMs != null ? duration(row.elapsedMs) : "";
   const opens = row.tab ? `data-ws-open="${esc(row.key)}"` : `data-ws-agent="${esc(row.key)}"`;
-  return `<button type="button" class="ws-row" data-state="${row.state}" ${opens}>${glyphHtml(row.state, 12)}<span class="ws-text"><span class="ws-title">${esc(row.title || "Agent")}</span>${row.step ? `<span class="ws-step">${esc(row.step)}</span>` : ""}</span>${time ? `<span class="ws-time">${time}</span>` : ""}${phoneSvg("right", 16, "chev")}</button>`;
+  const depth = row.depth ? ` data-depth="${row.depth}" style="--depth: ${row.depth}"` : "";
+  return `<button type="button" class="ws-row" data-state="${row.state}" ${opens}${depth}>${glyphHtml(row.state, 12)}<span class="ws-text"><span class="ws-title">${esc(row.title || "Agent")}</span>${row.step ? `<span class="ws-step">${esc(row.step)}</span>` : ""}</span>${time ? `<span class="ws-time">${time}</span>` : ""}${phoneSvg("right", 16, "chev")}</button>`;
 }
 const stoppable = (rows) => rows.filter((r) => r.state === "working" && (r.tab || r.agent?.id.startsWith("task-")));
 const stopLabel = (n) => (n === 1 ? "Stop the running one" : `Stop the ${n} running`);
@@ -193,7 +198,7 @@ const workersPill = Object.assign(document.createElement("button"), { type: "but
 document.getElementById("chat-head").after(workersPill);
 function renderWorkersPill() {
   const tab = active;
-  const rows = tab && guiOn() && onPhone() && !terminalOnly(tab) ? workersOf(tab) : [];
+  const rows = tab && guiOn() && onPhone() && !terminalOnly(tab) ? workersNow(tab) : [];
   if (workersPill.hidden !== !rows.length) {
     // The pill takes its height from the thread, which keeps to its end if it was there.
     const atEnd = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight <= 40;
@@ -235,13 +240,15 @@ function paintWorkersSheet() {
   if (!workersSheet) return;
   const tab = tabByKey(workersSheet.tab);
   if (!tab || tab !== active || !onPhone()) return workersSheet.sheet.close();
-  const rows = workersOf(tab);
+  const rows = workersNow(tab);
   if (!rows.length) return workersSheet.sheet.close();
   const s = workersSummary(rows);
   const { cards, rest } = workersSheetRows(rows, workersSheet.first);
+  workersSheet.drawn = new Map(rows.map((r) => [r.key, r]));
   const el = workersSheet.sheet.el;
   setHtml(el.querySelector(".ws-count"), `${s.done} of ${s.total} done`);
   setHtml(el.querySelector(".ws-list"), [...cards.map(workerCardHtml), ...rest.map(workerSheetRowHtml)].join(""));
+  sheetTickers();
   const stop = el.querySelector("[data-ws=stop]");
   const running = stoppable(rows).length;
   stop.hidden = !running;
@@ -259,7 +266,7 @@ function openWorkersSheet(tab, first = null) {
     off?.();
     if (workersSheet?.sheet === sheet) workersSheet = null;
   } });
-  workersSheet = { tab: tab.key, first, sheet };
+  workersSheet = { tab: tab.key, first, sheet, drawn: new Map() };
   off = onModelChange(paintWorkersSheet);
   paintWorkersSheet();
   if (first) sheet.el.querySelector(`[data-ws-card="${CSS.escape(first)}"]`)?.scrollIntoView({ block: "nearest" });
@@ -270,16 +277,32 @@ function openWorkersSheet(tab, first = null) {
   });
 }
 
-async function messageAllWorkers(tab, input) {
-  const text = input.value.trim();
-  const targets = workersOf(tab).filter((r) => r.tab?.view.running);
-  if (!text || !targets.length) return;
-  input.value = "";
-  input.closest("form").hidden = true;
-  await Promise.all(targets.map((r) => sayToWorker(r.key, text)));
+/** What "Message all" did: how many workers got the message and how many it skipped, each waiting on
+ * the user (a message would answer its ask). */
+function messageAllSaid(sent, skipped, failed) {
+  const workers = (n) => `${n} ${n === 1 ? "worker" : "workers"}`;
+  const waiting = skipped ? `Skipped ${workers(skipped)} waiting on you.` : "";
+  if (!sent && !failed) return `Nothing sent. ${waiting}`;
+  return [sent ? `Sent to ${workers(sent)}.` : "", failed ? `Couldn't reach ${workers(failed)}; your message is still here.` : "", waiting].filter(Boolean).join(" ");
 }
 
-async function onWorkersSheetClick(e, tab) {
+/** Sends the sheet's message to every running worker that is not waiting on the user. The text stays
+ * in its field unless every send went out. */
+async function messageAllWorkers(tab, input) {
+  const text = input.value.trim();
+  const running = workersOf(tab).filter((r) => r.tab?.view.running);
+  if (!text || !running.length) return;
+  const targets = running.filter((r) => !waitsOnUser(r.tab));
+  const sent = await Promise.all(targets.map((r) => sayToWorker(r.key, text, true)));
+  const ok = sent.filter(Boolean).length;
+  if (ok && ok === targets.length) {
+    input.value = "";
+    input.closest("form").hidden = true;
+  }
+  tell(esc(messageAllSaid(ok, running.length - targets.length, targets.length - ok)), 5000);
+}
+
+function onWorkersSheetClick(e, tab) {
   if (e.target.closest(".ws-close")) return workersSheet?.sheet.close();
   const open = e.target.closest("[data-ws-open]");
   if (open) {
@@ -295,21 +318,7 @@ async function onWorkersSheetClick(e, tab) {
     return threadView.querySelector(`.worker-row[data-worker="${CSS.escape(agent.dataset.wsAgent)}"]`)?.scrollIntoView({ block: "center" });
   }
   const answer = e.target.closest("[data-ws-answer]");
-  if (answer) {
-    const row = workersOf(tab).find((r) => r.key === answer.dataset.wsRow);
-    if (!row?.tab || sheetAnswering.has(row.key)) return;
-    sheetAnswering.add(row.key);
-    paintWorkersSheet();
-    try {
-      if (!(await answerAsk(row.tab, answer.dataset.wsAnswer))) showComposerNote(`${row.title} changed its question. Open it to answer.`, true);
-    } catch (err) {
-      showComposerNote(String(err), true);
-    } finally {
-      sheetAnswering.delete(row.key);
-      paintWorkersSheet();
-    }
-    return;
-  }
+  if (answer) return answerWorker(workersSheet?.drawn.get(answer.dataset.wsRow), answer.dataset.wsAnswer, sheetAnswering, paintWorkersSheet);
   const act = e.target.closest("[data-ws]")?.dataset.ws;
   if (act === "message") {
     const form = workersSheet?.sheet.el.querySelector(".ws-say");
@@ -465,6 +474,7 @@ function onAskClick(e) {
   const menu = tab?.menu;
   if (!menu) return;
   const answer = e.target.closest("[data-approval]");
+  if ((answer || e.target.closest("[data-option]")) && menuKind(menu) !== "question" && !drawnMenuShown(tab)) return;
   if (answer) {
     const choice = approvalChoices(menu)[answer.dataset.approval];
     if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
@@ -496,12 +506,16 @@ askCard.addEventListener("click", (e) => {
   askDismissed = "";
   syncPhoneAsk();
 });
-matchMedia("(max-width: 768px)").addEventListener("change", () => {
+/** Past phone width the sheets, which are phone screens, close rather than stay up as modals over
+ * the desktop. */
+function phoneWidthChanged() {
+  if (!onPhone()) openedSheet?.close();
   if (!guiOn()) return;
   renderHeadSub();
   renderWorkersPill();
   if (active) renderComposer(active);
-});
+}
+matchMedia("(max-width: 768px)").addEventListener("change", phoneWidthChanged);
 
 // -- The thread actions sheet ----------------------------------------------------------------
 

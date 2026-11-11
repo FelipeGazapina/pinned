@@ -211,7 +211,7 @@ async function needsYouAnswer(card, choice) {
   const sig = needsYouSig(card);
   needsYouAnswers.set(card.key, { sig, state: "sending" });
   drawNeedsYou();
-  const sent = await answerAsk(card.tab, choice).catch(() => false);
+  const sent = await answerAsk(card.tab, choice, card.ask).catch(() => false);
   if (needsYouAnswers.get(card.key)?.sig === sig) needsYouAnswers.set(card.key, { sig, state: sent ? "sent" : "missed" });
   if (sent) needsYouTyped.delete(card.key);
   drawNeedsYou();

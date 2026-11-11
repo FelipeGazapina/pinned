@@ -27,8 +27,22 @@ const decl = (src, start) => {
 const NOW = Date.parse("2026-11-11T18:10:00Z");
 const S = NOW / 1000;
 
-/** A terminal holding `lines` as its screen, as xterm's buffer reads. */
-const term = (lines) => ({ rows: lines.length, buffer: { active: { baseY: 0, getLine: (i) => ({ translateToString: () => lines[i] ?? "", isWrapped: false, getCell: () => ({ isBgDefault: () => true }) }) } } });
+/** A terminal holding `lines` as its screen, as xterm's buffer reads. `show(next)` writes a new
+ * screen and tells the onWriteParsed listeners, as xterm does after it parses a write. */
+function term(lines) {
+  const parsed = new Set();
+  const t = {
+    rows: lines.length,
+    buffer: { active: { baseY: 0, getLine: (i) => ({ translateToString: () => lines[i] ?? "", isWrapped: false, getCell: () => ({ isBgDefault: () => true }) }) } },
+    onWriteParsed: (fn) => (parsed.add(fn), { dispose: () => parsed.delete(fn) }),
+    show(next) {
+      lines = next;
+      t.rows = next.length;
+      for (const fn of [...parsed]) fn();
+    },
+  };
+  return t;
+}
 const PUSH_MENU = [
   "> ",
   "────────────────────────────────────────",
@@ -61,9 +75,14 @@ const QUESTION_SET = [
 
 /** The page's real rules for phases, asks and answers, around `world`, with the page's I/O stubbed. */
 function page(world) {
-  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [] };
+  const calls = { composer: [], sidebar: 0, thread: 0, writes: [], asked: [], told: [], patched: [] };
+  const timers = new Map();
+  let timerIds = 0;
   const context = {
     console,
+    setTimeout: (fn, ms) => (timers.set(++timerIds, { fn, ms }), timerIds),
+    clearTimeout: (id) => timers.delete(id),
+    timers,
     Date: class extends Date {
       constructor(...a) {
         super(...(a.length ? a : [NOW]));
@@ -101,7 +120,13 @@ function page(world) {
     renderComposer: (tab) => calls.composer.push(tab.key),
     renderSidebar: () => calls.sidebar++,
     renderThread: () => calls.thread++,
-    showComposerNote: () => calls.composer.push("note"),
+    showComposerNote: (text) => calls.composer.push(text ? `note: ${text}` : "note"),
+    tabByKey: (key) => world.tabs.find((t) => t.key === key) ?? null,
+    esc: (text) => String(text),
+    tell: (html) => calls.told.push(html),
+    rerender: () => {},
+    patchWorkerSteps: (tab, rows) => calls.patched.push(rows.map((r) => [r.key, r.step])),
+    fetchThread: () => {},
     visibleInterval: () => {},
     openProjects: () => new Map([["mini", new Set(["/w/pinned"])], ["book", new Set(["/w/site"])]]),
     callOn: async (machine, call) => {
@@ -138,6 +163,10 @@ function page(world) {
       decl(composer, "const arrowsTo"),
       decl(composer, "async function until"),
       decl(composer, "function redrawAsk"),
+      line(composer, "const sameMenu"),
+      line(composer, "const answeredKey"),
+      line(composer, "const ANSWERED_MS"),
+      decl(composer, "function holdAnswered"),
       decl(composer, "function chooseOption"),
       decl(composer, "async function answerWith"),
       line(composer, "const TAB_ROW"),
@@ -146,6 +175,10 @@ function page(world) {
       line(composer, "const multiSelect"),
       decl(composer, "function approvalChoices"),
       read("redesign-model.js"),
+      line(composer, "const KILL_AGENTS"),
+      decl(composer, "async function stop("),
+      line(agents, "const workerDrafts"),
+      decl(agents, "async function sayToWorker"),
     ].join("\n"),
     context,
   );
@@ -256,14 +289,15 @@ test("workersOf lists a Captain's worker threads, delegated tasks and subagents 
     typed: true,
   };
   assert.deepEqual(JSON.parse(JSON.stringify(rows)), [
-    { kind: "thread", key: w.ci.key, title: "Run the CI on main", state: "working", step: "Ran cargo test -p pinned-server", ask: null, model: "Sonnet 5.5", elapsedMs: 250000, since: Date.parse("2026-11-11T18:06:00Z"), tab: "Run the CI on main", agent: null },
-    { kind: "thread", key: w.readme.key, title: "Tidy the README", state: "needs", step: "Ran git push origin readme-tidy", ask: approval, model: "claude-haiku-5-5", elapsedMs: null, since: (S - 120) * 1000, tab: "Tidy the README", agent: null },
-    { kind: "thread", key: w.changelog.key, title: "Changelog for v0.17.21", state: "done", step: "Wrote CHANGELOG.md with 14 entries and opened #231", ask: null, model: null, elapsedMs: 160000, since: null, tab: "Changelog for v0.17.21", agent: null },
-    { kind: "task", key: "mini:cap:task-9", title: "Port the updater", state: "failed", step: "Build failed: missing crate", ask: null, model: "composer-2.5", elapsedMs: 90000, since: null, tab: null, agent: "task-9" },
-    { kind: "task", key: "mini:cap:task-8", title: "Bump the docs", state: "stopped", step: null, ask: null, model: null, elapsedMs: 20000, since: null, tab: null, agent: "task-8" },
-    { kind: "subagent", key: "mini:cap:a1b2", title: "Explore the release scripts", state: "working", step: "Ran release", ask: null, model: "haiku", elapsedMs: null, since: Date.parse("2026-11-11T18:05:00Z"), tab: null, agent: "a1b2" },
+    { kind: "thread", key: w.ci.key, title: "Run the CI on main", state: "working", step: "Ran cargo test -p pinned-server", ask: null, model: "Sonnet 5.5", elapsedMs: 250000, since: Date.parse("2026-11-11T18:06:00Z"), tab: "Run the CI on main", agent: null, depth: 0 },
+    { kind: "thread", key: w.readme.key, title: "Tidy the README", state: "needs", step: "Ran git push origin readme-tidy", ask: approval, model: "claude-haiku-5-5", elapsedMs: null, since: (S - 120) * 1000, tab: "Tidy the README", agent: null, depth: 0 },
+    { kind: "thread", key: w.changelog.key, title: "Changelog for v0.17.21", state: "done", step: "Wrote CHANGELOG.md with 14 entries and opened #231", ask: null, model: null, elapsedMs: 160000, since: null, tab: "Changelog for v0.17.21", agent: null, depth: 0 },
+    { kind: "task", key: "mini:cap:task-9", title: "Port the updater", state: "failed", step: "Build failed: missing crate", ask: null, model: "composer-2.5", elapsedMs: 90000, since: null, tab: null, agent: "task-9", depth: 0 },
+    { kind: "task", key: "mini:cap:task-8", title: "Bump the docs", state: "stopped", step: null, ask: null, model: null, elapsedMs: 20000, since: null, tab: null, agent: "task-8", depth: 0 },
+    { kind: "subagent", key: "mini:cap:a1b2", title: "Explore the release scripts", state: "working", step: "Ran release", ask: null, model: "haiku", elapsedMs: null, since: Date.parse("2026-11-11T18:05:00Z"), tab: null, agent: "a1b2", depth: 0 },
+    { kind: "subagent", key: "mini:cap:a3", title: "Nested", state: "working", step: null, ask: null, model: null, elapsedMs: null, since: null, tab: null, agent: "a3", depth: 1 },
   ]);
-  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 6, done: 1, working: 2, needs: 1, since: Date.parse("2026-11-11T18:05:00Z") });
+  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 7, done: 1, working: 3, needs: 1, since: Date.parse("2026-11-11T18:05:00Z") }, "a nested agent counts");
   assert.equal(p.run("threadState(captain)"), "working", "a Captain whose own turn ended is working while its workers run");
 });
 
@@ -379,22 +413,141 @@ test("answerAsk answers a worker from its Captain without touching the Captain's
   const p = page({ tabs: Object.values(w), active: w.captain });
   readMenus(p);
   p.context.worker = w.readme;
-  assert.equal(await p.run("answerAsk(worker, 'decline')"), true);
+  assert.equal(await p.run("answerAsk(worker, 'decline', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.writes, [[w.readme.key, "\x1b[B\x1b[B\r"]], "arrows down to No, then Enter, into the worker's session");
   assert.deepEqual(p.calls.composer, [], "the open thread's composer is not redrawn");
   assert.equal(p.calls.sidebar, 1, "the lists that show the ask redraw");
   assert.equal(w.readme.menu, null);
 
-  readMenus(p);
-  assert.equal(await p.run("answerAsk(worker, 'always')"), true);
-  assert.equal(await p.run("answerAsk(worker, 'approve')"), true);
+  const askAgain = () => {
+    w.readme.term.show(["> "]);
+    w.readme.term.show(PUSH_MENU);
+    readMenus(p);
+  };
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, 'always', pendingAsk(worker))"), true);
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.writes.slice(1), [[w.readme.key, "\x1b[B\r"], [w.readme.key, "\r"]]);
-  assert.equal(await p.run("answerAsk(worker, { option: 7 })"), false, "a choice the ask does not offer is refused");
+  askAgain();
+  assert.equal(await p.run("answerAsk(worker, { option: 7 }, pendingAsk(worker))"), false, "a choice the ask does not offer is refused");
   assert.deepEqual(p.calls.composer, []);
 
   p.context.active = w.readme;
-  assert.equal(await p.run("answerAsk(worker, 'approve')"), true);
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
   assert.deepEqual(p.calls.composer, [w.readme.key], "answered in its own open thread, its composer redraws");
+});
+
+const RM_MENU = PUSH_MENU.map((l) => l.replace("git push origin readme-tidy", "rm -rf ~/pinned").replace("git push commands", "rm commands"));
+const COLOR_MENU = (a, b) => ["────────────────────────────────────────", "Which color?", "", `❯ 1. ${a}`, `  2. ${b}`, "", "Enter to select · Esc to cancel"];
+
+test("answerAsk sends nothing when the ask on screen is not the one the caller drew", async () => {
+  const w = captainWorld();
+  const quiz = tab("Pick a color", { ...waiting, message: "Claude needs your input" }, { screen: COLOR_MENU("Red", "Blue") });
+  const p = page({ tabs: [...Object.values(w), quiz], active: w.captain });
+  readMenus(p);
+  Object.assign(p.context, { worker: w.readme, quiz });
+  p.run("globalThis.seen = pendingAsk(worker); globalThis.seenQuiz = pendingAsk(quiz)");
+  assert.equal(p.run("seen.command"), "git push origin readme-tidy");
+
+  w.readme.term.show(RM_MENU);
+  assert.equal(await p.run("answerAsk(worker, 'approve', seen)"), false, "the worker moved on to another command between paint and tap");
+  assert.equal(await p.run("answerAsk(worker, { text: 'use a fork' }, seen)"), false, "a typed decline is held back the same way");
+  assert.equal(w.readme.menu.box, "rm -rf ~/pinned", "the new menu is read, so the caller's repaint shows it");
+  assert.ok(p.calls.sidebar >= 1, "the lists that show the ask redraw");
+
+  quiz.term.show(COLOR_MENU("Green", "Blue"));
+  assert.equal(await p.run("answerAsk(quiz, { option: 1 }, seenQuiz)"), false, "a question card's option 1 is not Green when the card drew Red");
+  assert.equal(await p.run("answerAsk(worker, 'approve')"), false, "a caller that drew no ask sends nothing");
+  assert.deepEqual(p.calls.writes, []);
+
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true, "once the caller drew the new ask, its answer goes out");
+  assert.deepEqual(p.calls.writes, [[w.readme.key, "\r"]]);
+});
+
+test("a second tap on an answered ask sends nothing while its menu is still on screen", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  p.context.worker = w.readme;
+  p.run("globalThis.seen = pendingAsk(worker)");
+  const [first, second] = await Promise.all([p.run("answerAsk(worker, 'approve', seen)"), p.run("answerAsk(worker, 'approve', seen)")]);
+  assert.deepEqual([first, second], [true, false], "a double tap answers once");
+  readMenus(p);
+  assert.equal(await p.run("answerAsk(worker, 'approve', seen)"), false, "a render that reads the old menu again offers nothing to tap");
+  assert.equal(p.run("pendingAsk(worker).choices"), null, "the answered ask draws no buttons");
+  assert.equal(await p.run("chooseOption(worker, 1, 'Yes')"), null, "nor does the open thread's own card send a second Enter");
+  assert.deepEqual(p.calls.writes, [[w.readme.key, "\r"]]);
+
+  w.readme.term.show(["> ", "⏺ Bash(git push origin readme-tidy)"]);
+  assert.equal(w.readme.answering, false, "the menu left the screen, so the worker is no longer held");
+  w.readme.term.show(RM_MENU);
+  readMenus(p);
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true, "the next ask answers as usual");
+  assert.equal(p.calls.writes.length, 2);
+});
+
+test("an answered menu that claude never redraws is freed after 15 seconds", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  p.context.worker = w.readme;
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
+  const [timer] = [...p.context.timers.values()];
+  assert.equal(timer.ms, 15000);
+  timer.fn();
+  assert.equal(w.readme.answering, false);
+  assert.equal(w.readme.menu.box, "git push origin readme-tidy", "the menu shows again");
+  assert.equal(await p.run("answerAsk(worker, 'approve', pendingAsk(worker))"), true);
+});
+
+test("a message goes only to a worker that does not wait on the user, and a refused one keeps its words", async () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain, answer: () => null });
+  readMenus(p);
+  Object.assign(p.context, { readme: w.readme, ci: w.ci });
+  p.run("workerDrafts.set(readme.key, 'Push to a fork instead'); workerDrafts.set(ci.key, 'Rerun the flaky test')");
+  assert.equal(p.run("waitsOnUser(readme)"), true);
+  assert.equal(await p.run("sayToWorker(readme.key, 'Push to a fork instead')"), false);
+  assert.deepEqual(p.calls.asked, [], "no prompt went to the worker waiting on its push");
+  assert.deepEqual(p.calls.writes, [], "and no key either");
+  assert.deepEqual(p.calls.composer, ["note: Tidy the README is waiting on you. Open it to answer."]);
+  assert.equal(p.run("workerDrafts.get(readme.key)"), "Push to a fork instead");
+
+  w.readme.view = { ...w.readme.view, status: "working", interrupted: false };
+  assert.equal(p.run("waitsOnUser(readme)"), true, "a menu still on its screen keeps it waiting though the hub says it works");
+  w.readme.term.show(["> "]);
+  readMenus(p);
+  assert.equal(p.run("waitsOnUser(readme)"), false);
+  w.readme.answering = true;
+  assert.equal(p.run("waitsOnUser(readme)"), true, "an answer on its way keeps it waiting");
+  w.readme.answering = false;
+
+  assert.equal(await p.run("sayToWorker(ci.key, '  Rerun the flaky test ')"), true);
+  assert.deepEqual(p.calls.asked.map(([m, c]) => [m, c.cmd, c.tab, c.text]), [["mini", "prompt", w.ci.view.id, "Rerun the flaky test"]]);
+  assert.equal(p.run("workerDrafts.has(ci.key)"), false);
+  assert.deepEqual(p.calls.told, ["Sent to Run the CI on main."]);
+});
+
+test("a message to a worker right after its Cancel keeps the late Esc from ending the new turn", async () => {
+  const run = async (say) => {
+    const w = captainWorld();
+    const p = page({ tabs: Object.values(w), active: w.captain, answer: () => null });
+    p.context.ci = w.ci;
+    const stopping = p.run("stop(ci)");
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setImmediate(r));
+      if (i === 1 && say) await p.run("sayToWorker(ci.key, 'Keep going on the docs only')");
+      for (const [id, timer] of [...p.context.timers]) {
+        p.context.timers.delete(id);
+        timer.fn();
+      }
+    }
+    await stopping;
+    return p.calls.writes.map(([, keys]) => keys);
+  };
+  assert.deepEqual(await run(false), ["\x18\x0b", "\x18\x0b", "\x1b", "\x1b"], "alone, a second Esc ends the turn the stopped agents' notices start");
+  assert.deepEqual(await run(true), ["\x18\x0b", "\x18\x0b", "\x1b"], "a message sent meanwhile is the new turn, which no Esc ends");
 });
 
 test("answerAsk refuses a question set and a thread with no menu, and types nothing", async () => {
@@ -426,6 +579,29 @@ test("workersKey changes when a worker's ask is answered, and modelChanged repai
   assert.equal(p.calls.thread, 2, "the worker's change repaints its parent");
   assert.equal(seen.length, 3);
   assert.notEqual(seen[1], seen[2]);
+});
+
+test("a worker's new step patches its row instead of repainting the Captain, and one change reads the workers once", () => {
+  const w = captainWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  readMenus(p);
+  Object.assign(p.context, { captain: w.captain, reads: 0 });
+  p.run("const realWorkersOf = workersOf; globalThis.workersOf = (tab) => (reads++, realWorkersOf(tab))");
+  p.run("onModelChange(() => workersNow(captain)); onModelChange(() => workersNow(captain).filter((r) => r.ask)); onModelChange(() => workersSummary(workersNow(captain)))");
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 1);
+  p.context.reads = 0;
+  w.ci.thread.items.push({ kind: "tool", name: "Bash", input: { command: "cargo clippy" } });
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 1, "the collapsed row's step does not repaint the thread");
+  assert.deepEqual(p.calls.patched.at(-1).find(([key]) => key === w.ci.key), [w.ci.key, "Ran cargo clippy"], "its words are written in place");
+  assert.equal(p.context.reads, 1, "the block, the banner, the pill and the sheet share one reading");
+  w.captain.thread.open.add(`worker:${w.ci.key}`);
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 2, "an opened row draws its latest steps, so it repaints");
+  w.ci.thread.items.push({ kind: "tool", name: "Bash", input: { command: "cargo fmt" } });
+  p.run("modelChanged()");
+  assert.equal(p.calls.thread, 3, "and repaints on its next step");
 });
 
 test("glyphHtml draws each state's dot at its size", () => {

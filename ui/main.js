@@ -285,10 +285,15 @@ async function notify(tab) {
   });
 }
 
-navigator.serviceWorker?.addEventListener("message", ({ data }) => {
+/** A notification's tap opens its thread, and on a phone leaves the thread list for it, as a row's
+ * tap does. */
+function openNotified(data) {
   const tab = data?.type === "activate-tab" && tabByKey(data.tab);
-  if (tab) activate(tab);
-});
+  if (!tab) return;
+  activate(tab);
+  if (narrow(768)) toggleSidebar(false);
+}
+navigator.serviceWorker?.addEventListener("message", ({ data }) => openNotified(data));
 document.addEventListener("visibilitychange", () => markSeen(active));
 
 async function openTab(machine, path, bypass = false) {

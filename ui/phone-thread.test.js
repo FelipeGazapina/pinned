@@ -118,14 +118,36 @@ const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
 
 test("the Workers sheet answers a one-tap ask in place and offers Open for one it can't", () => {
   const app = load();
-  const oneTap = app.workerCardHtml({ key: "w1", title: "Tidy the README", model: "Haiku 5.5", since: Date.now() - 120000, ask: approval(["approve", "decline", "always"]) });
-  assert.equal(text(oneTap), "Tidy the README Needs your approval · waiting 2m Haiku 5.5 git push origin readme-tidy Decline Approve");
+  const oneTap = app.workerCardHtml({ key: "w1", title: "Tidy the README", model: "Haiku 5.5", since: 1794420480000, ask: approval(["approve", "decline", "always"]) });
+  assert.equal(text(oneTap), "Tidy the README Needs your approval · waiting Haiku 5.5 git push origin readme-tidy Decline Approve");
+  assert.match(oneTap, /waiting <span class="ticker" data-since="1794420480000"><\/span>/, "the clock is left to the ticker");
   assert.match(oneTap, /data-ws-answer="decline" data-ws-row="w1"/);
   assert.match(oneTap, /data-ws-answer="approve" data-ws-row="w1"/);
   const openOnly = app.workerCardHtml({ key: "w2", title: "Pick a color", model: null, since: null, ask: { kind: "question", text: "Which color?", command: null, choices: null, typed: false } });
   assert.equal(text(openOnly), "Pick a color Has a question Which color? Open");
   assert.match(openOnly, /data-ws-open="w2"/);
   assert.doesNotMatch(openOnly, /data-ws-answer/);
+});
+
+test("a Workers sheet row's markup does not change as its clock runs, so a repaint keeps the row under a tap", () => {
+  const clock = { now: 1794420540000 };
+  const app = {
+    Date: { now: () => clock.now },
+    esc: (t) => String(t ?? ""),
+    glyphHtml: () => "",
+    durationLabel: (s) => `${Math.round(s / 60)}m`,
+    duration: (ms) => `${ms}ms`,
+    phoneSvg: () => "",
+  };
+  vm.createContext(app);
+  vm.runInContext(`${src.slice(src.indexOf("const sheetTicker"), src.indexOf("/** The workers being answered"))}${src.slice(src.indexOf("/** Any other worker:"), src.indexOf("const stoppable"))}\nglobalThis.workerSheetRowHtml = workerSheetRowHtml;`, app);
+  const row = { key: "ci", state: "working", since: 1794420480000, title: "Run the CI on main", step: "cargo test", tab: {} };
+  const first = app.workerSheetRowHtml(row);
+  clock.now += 60000;
+  assert.equal(app.workerSheetRowHtml(row), first);
+  assert.match(first, /<span class="ws-time"><span class="ticker" data-since="1794420480000"><\/span><\/span>/);
+  const nested = app.workerSheetRowHtml({ key: "cap:task-2", state: "working", since: null, elapsedMs: null, title: "Port the Windows half", step: null, tab: null, depth: 1 });
+  assert.match(nested, /^<button type="button" class="ws-row" data-state="working" data-ws-agent="cap:task-2" data-depth="1" style="--depth: 1">/, "a nested agent sits indented and opens its row in the block");
 });
 
 test("the Workers sheet puts the waiting workers first, the reviewed one leading", () => {
@@ -143,4 +165,65 @@ test("the Workers sheet puts the waiting workers first, the reviewed one leading
   };
   assert.deepEqual(shown(null), [["a", "b"], ["ci", "task", "log"]]);
   assert.deepEqual(shown("b"), [["b", "a"], ["ci", "task", "log"]]);
+});
+
+test("Message all skips the workers waiting on you, says how many, and keeps the text unless every send went out", async () => {
+  const rows = [
+    { key: "ci", tab: { view: { running: true } } },
+    { key: "readme", tab: { view: { running: true }, waiting: true } },
+    { key: "docs", tab: { view: { running: true }, waiting: true } },
+    { key: "old", tab: { view: { running: false } } },
+    { key: "task", tab: null },
+  ];
+  const sent = [];
+  const told = [];
+  let works = true;
+  const context = {
+    workersOf: () => rows,
+    waitsOnUser: (tab) => !!tab.waiting,
+    sayToWorker: async (key, text, quiet) => (sent.push([key, text, quiet]), works),
+    tell: (html) => told.push(html),
+    esc: (text) => text,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${src.slice(src.indexOf("function messageAllSaid"), src.indexOf("function onWorkersSheetClick"))}\nglobalThis.messageAllWorkers = messageAllWorkers;`, context);
+  const form = { hidden: false };
+  const input = { value: " Rebase on main ", closest: () => form };
+  works = false;
+  await context.messageAllWorkers({}, input);
+  assert.deepEqual(sent, [["ci", "Rebase on main", true]], "only the running worker that waits on nothing gets it");
+  assert.deepEqual([input.value, form.hidden], [" Rebase on main ", false], "a failed send keeps the text");
+  works = true;
+  await context.messageAllWorkers({}, input);
+  assert.deepEqual([input.value, form.hidden], ["", true]);
+  assert.deepEqual(told, [
+    "Couldn't reach 1 worker; your message is still here. Skipped 2 workers waiting on you.",
+    "Sent to 1 worker. Skipped 2 workers waiting on you.",
+  ]);
+  rows.splice(0, 1);
+  input.value = "Rebase on main";
+  await context.messageAllWorkers({}, input);
+  assert.equal(told.at(-1), "Nothing sent. Skipped 2 workers waiting on you.");
+  assert.equal(input.value, "Rebase on main");
+});
+
+test("a sheet closes when the window grows past phone width, and stays while it is a phone", () => {
+  let width = 390;
+  const closed = [];
+  const context = {
+    narrow: (px) => width <= px,
+    guiOn: () => true,
+    renderHeadSub: () => {},
+    renderWorkersPill: () => {},
+    renderComposer: () => {},
+    active: null,
+    openedSheet: { close: () => closed.push(width) },
+  };
+  vm.createContext(context);
+  vm.runInContext(`const onPhone = () => narrow(768);\n${src.slice(src.indexOf("function phoneWidthChanged"), src.indexOf('matchMedia("(max-width: 768px)")'))}`, context);
+  vm.runInContext("phoneWidthChanged()", context);
+  assert.deepEqual(closed, []);
+  width = 1024;
+  vm.runInContext("phoneWidthChanged()", context);
+  assert.deepEqual(closed, [1024]);
 });

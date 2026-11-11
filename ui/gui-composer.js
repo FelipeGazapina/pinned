@@ -338,16 +338,65 @@ function redrawAsk(tab) {
   renderSidebar();
 }
 
+/** Whether two menus read off a screen are the same ask: its question, command and options. */
+const sameMenu = (a, b) => !!a && !!b && JSON.stringify([a.question, a.box, a.options.map((o) => o.label)]) === JSON.stringify([b.question, b.box, b.options.map((o) => o.label)]);
+const answeredKey = (menu) => (menu ? JSON.stringify([menu.question, menu.box]) : "");
+/** A redraw that never comes frees an answered menu after this long, so it cannot lock the thread. */
+const ANSWERED_MS = 15000;
+
+/** Keeps `tab` answering from now until `menu`, which it answered, leaves its screen. Until then no
+ * surface draws that menu and no tap sends it a second key, which would land on whatever claude
+ * draws next. */
+function holdAnswered(tab, menu) {
+  const key = answeredKey(menu);
+  tab.answered?.release(false);
+  tab.answering = true;
+  tab.menu = null;
+  let timer = null;
+  let parsed = null;
+  const hold = {
+    key,
+    release(redraw = true) {
+      if (tab.answered !== hold) return;
+      tab.answered = null;
+      clearTimeout(timer);
+      parsed?.dispose();
+      tab.answering = false;
+      if (!redraw) return;
+      tab.menu = terminalMenu(tab);
+      redrawAsk(tab);
+    },
+  };
+  tab.answered = hold;
+  timer = setTimeout(() => hold.release(), ANSWERED_MS);
+  parsed = tab.term.onWriteParsed(() => answeredKey(terminalMenu(tab)) !== key && hold.release());
+  if (answeredKey(terminalMenu(tab)) !== key) hold.release();
+  return hold;
+}
+
+/** Whether the menu the open thread drew is still the one on its screen; if not, draws the new one,
+ * so a tap on the old one's Approve never picks the new one's. */
+function drawnMenuShown(tab) {
+  const menu = terminalMenu(tab);
+  if (sameMenu(tab.menu, menu)) return true;
+  tab.menu = tab.answering ? null : menu;
+  redrawAsk(tab);
+  return false;
+}
+
 function chooseOption(tab, n, label) {
   const menu = terminalMenu(tab);
-  if (menu?.options[n - 1]?.label !== label) {
-    tab.menu = menu;
+  if (menu?.options[n - 1]?.label !== label || tab.answered?.key === answeredKey(menu)) {
+    if (!tab.answering) tab.menu = menu;
     redrawAsk(tab);
     return null;
   }
-  tab.menu = null;
+  const hold = holdAnswered(tab, menu);
   redrawAsk(tab);
-  return writeTo(tab, arrowsTo(menu, n) + "\r");
+  return writeTo(tab, arrowsTo(menu, n) + "\r").catch((e) => {
+    hold.release();
+    throw e;
+  });
 }
 
 /** Answers claude's menu with `text`. A question takes it as its free-text option. A permission is
@@ -356,12 +405,13 @@ function chooseOption(tab, n, label) {
 async function answerWith(tab, text) {
   const menu = terminalMenu(tab);
   const option = menu && (freeOption(menu) || declineOption(menu));
-  if (!option) return false;
+  if (!option || tab.answered?.key === answeredKey(menu)) return false;
   const line = text.replace(/\s*\n\s*/g, " ");
   const shown = () => terminalMenu(tab)?.options[option.n - 1]?.head.includes(line.slice(0, 20));
   tab.answering = true;
   tab.menu = null;
   redrawAsk(tab);
+  let sent = false;
   try {
     await writeTo(tab, arrowsTo(menu, option.n));
     await until(() => terminalMenu(tab)?.options.find((o) => o.chosen)?.n === option.n);
@@ -382,8 +432,10 @@ async function answerWith(tab, text) {
       }
       await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
     }
+    sent = true;
   } finally {
-    tab.answering = false;
+    if (sent) holdAnswered(tab, menu);
+    else tab.answering = false;
   }
   return true;
 }
@@ -534,6 +586,7 @@ approval.addEventListener("click", (e) => {
   const tab = active;
   if (!tab) return;
   const answer = e.target.closest("[data-approval]");
+  if ((answer || e.target.closest("[data-option]")) && tab.menu && menuKind(tab.menu) !== "question" && !drawnMenuShown(tab)) return;
   if (answer && tab.menu) {
     const choice = approvalChoices(tab.menu)[answer.dataset.approval];
     if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
@@ -932,7 +985,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text || sendBlocked(tab)) return;
-  prompts++;
+  tab.prompts = (tab.prompts ?? 0) + 1;
   const draft = prompt.value;
   const chips = { ...chipsOf(tab) };
   const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
@@ -990,18 +1043,18 @@ function clearComposer(tab, revoke = true) {
 
 // Esc ends the turn but leaves background agents and workflows running, so claude's ctrl+x ctrl+k
 // stops them first. Their "stopped by the user" notices then wake claude for a turn of its own,
-// which a second Esc ends, unless a prompt went out in between.
+// which a second Esc ends, unless a prompt went out to that thread in between: `tab.prompts` counts
+// the prompts the page sent it.
 const KILL_AGENTS = "\x18\x0b";
-let prompts = 0;
 async function stop(tab = active) {
   if (!tab) return;
-  const sent = prompts;
+  const sent = tab.prompts ?? 0;
   for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
     await writeTo(tab, keys);
     await new Promise((r) => setTimeout(r, 300));
   }
   await new Promise((r) => setTimeout(r, 1200));
-  if (prompts === sent) writeTo(tab, "\x1b");
+  if ((tab.prompts ?? 0) === sent) writeTo(tab, "\x1b");
 }
 
 const escapePath = (p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&");
@@ -3262,6 +3315,23 @@ detailsButton.onclick = () => toggleDetails();
 onGuiKey("b", () => toggleDetails(), { shift: true });
 window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #head-more, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
+/** Where the thread runs, which the sidebar row's hover card says with a mouse and this says on any
+ * screen: its machine, an Upstash Box's age and cost, and its account with the provider behind it. */
+function detailsRunsOnHtml(tab) {
+  const account = tab.view.account ?? DEFAULT_ACCOUNT;
+  const named = accountOf(tab.machine, account);
+  const provider = named?.auth === "opencode-go" ? PROVIDERS["opencode-go"] : PROVIDERS[named?.provider] ?? PROVIDERS.claude;
+  const box = tab.machine !== LOCAL && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
+  const budget = box?.budget_usd != null ? ` of $${box.budget_usd.toFixed(2)}` : "";
+  const boxText = box ? `${boxAgeText(box.age_secs)} online · $${boxSpent(box).toFixed(2)}${budget}` : tab.machine !== LOCAL && boxDown.has(tab.machine) ? "Box cost unavailable" : "";
+  const line = (detail, glyph, label, dim = "") => `<div class="row static" data-detail="${detail}">${glyph}<span class="label">${esc(label)}</span>${dim ? `<span class="dim">${esc(dim)}</span>` : ""}</div>`;
+  return `<section aria-label="Runs on">
+      ${line("machine", icon("monitor"), machineName(tab.machine))}
+      ${boxText ? line("box", icon("server"), boxText) : ""}
+      ${line("account", icon(named?.auth === "opencode-go" ? "opencode" : "claude"), accountName(tab.machine, account), provider)}
+    </section>`;
+}
+
 function renderDetails(tab) {
   if (detailsCard.hidden || !tab) return;
   const t = threadOf(tab);
@@ -3275,7 +3345,7 @@ function renderDetails(tab) {
   const prs = [...new Map(t.items.filter((i) => i.kind === "pr").map((p) => [p.url, p])).values()];
   const row = (attrs, inner, chevron = false) => `<button type="button" class="row${/ class="more"/.test(attrs) ? " more" : ""}"${attrs.replace(' class="more"', "")}>${inner}${chevron ? icon("chevron-down", "chev") : ""}</button>`;
   const split = (main, more) => `<div class="split-row">${main}<span class="seam"></span>${more}</div>`;
-  const html = `<section aria-label="Workspace">
+  const html = `${detailsRunsOnHtml(tab)}<section aria-label="Workspace">
       ${row(` data-act="workspace"${open ? "" : " disabled"} title="${esc(tab.view.cwd)}"`, `${icon(tab.machine !== LOCAL ? "monitor" : where.icon)}<span class="label">${esc(tab.machine !== LOCAL ? `${machineName(tab.machine)} · ${where.label}` : where.label)}</span>`, open)}
       ${editor ? split(row(` data-act="open-in"`, `<span class="editor-mark">${editorIcon(editor.id) || icon("square-arrow-out-up-right")}</span><span class="label">Open in ${esc(editor.name)}</span>`), row(` data-act="editors" class="more" aria-label="Choose the editor"`, icon("chevron-down"))) : ""}
       ${known && !known.loading ? primary ? split(row(` data-act="run" title="Run ${esc(primary.name)}"`, `${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span>`), row(` data-act="scripts" class="more" aria-label="Script actions"`, icon("chevron-down")))

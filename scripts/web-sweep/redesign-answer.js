@@ -8,6 +8,11 @@
 // Approve and Decline answer the worker while the prompt keeps the focus and the draft, and its
 // Open opens the worker on its own approval card.
 //
+// Then nothing reaches the worker that the user did not see: a double tap on the banner's Approve
+// sends one Enter; a message typed into the README row while it waits sends nothing and leaves its
+// push waiting; and, in a page of its own, a menu that changes on the worker's screen between the
+// banner's paint and the tap sends no key and the banner repaints with the new command.
+//
 //   export SWEEP_DIR=... SWEEP_HUB_PORT=... SWEEP_PG_PORT=... SWEEP_GO_PORT=...
 //   export CARGO=true CARGO_TARGET_DIR=<a checkout's target>
 //   scripts/web-sweep/stack.sh start
@@ -82,7 +87,7 @@ async function rearm(page, keys) {
 async function answer(page, keys, choice, before) {
   const workersBefore = await page.evaluate((k) => workersKey(tabByKey(k)), keys.captain);
   const t0 = Date.now();
-  const sent = await page.evaluate(({ worker, choice }) => answerAsk(tabByKey(worker), choice), { worker: keys.worker, choice });
+  const sent = await page.evaluate(({ worker, choice }) => answerAsk(tabByKey(worker), choice, pendingAsk(tabByKey(worker))), { worker: keys.worker, choice });
   check(sent === true, `answerAsk(${JSON.stringify(choice)}) sent the answer`);
   const after = await page.evaluate(snapshot, keys);
   for (const field of ["active", "composerTab", "prompt", "draft", "approvalHidden", "approvalKey", "threadPlace"]) {
@@ -125,6 +130,103 @@ async function proveAnswered(page, keys, { workersBefore, t0 }, seen, what) {
   check(state.row?.state === "done" && state.row.ask === null, `the Captain's worker row reads done with no ask`);
   check(state.key !== workersBefore && state.content.includes(JSON.stringify(state.key)), "the Captain's thread repainted with the new workers key");
   check(state.listened > 0, `onModelChange listeners ran (${state.listened} times so far)`);
+}
+
+/** From now on, records every call the page sends the worker's machine. */
+const watchCalls = (page, keys) =>
+  page.evaluate(({ worker }) => {
+    const transport = machines.get(tabByKey(worker).machine).transport;
+    if (!transport.counted) {
+      const call = transport.call.bind(transport);
+      transport.call = (c) => (window.__calls.push(c), call(c));
+      transport.counted = true;
+    }
+    window.__calls = [];
+  }, keys);
+/** What the recorded `cmd` calls sent the worker: the keys of a write_input, the text of a prompt. */
+const callsTo = (page, keys, cmd) =>
+  page.evaluate(({ worker, cmd }) => window.__calls.filter((c) => c.cmd === cmd && c.tab === tabByKey(worker).view.id).map((c) => c.data ?? c.text), { ...keys, cmd });
+
+/** The worker's screen as if claude had moved on to ask about another command. */
+const RM_SCREEN = `\x1b[2J\x1b[H${[
+  "────────────────────────────────────────",
+  " Bash command",
+  " Removes the build folder.",
+  "╌".repeat(40),
+  " rm -rf build",
+  "╌".repeat(40),
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. Yes, and don't ask again for rm commands",
+  "   3. No",
+  " Esc to cancel · Tab to amend",
+].join("\r\n")}`;
+
+async function doubleTap(page, keys) {
+  await page.evaluate(() => prompt.focus());
+  await waitFor("the banner's Approve", () => page.isVisible('#worker-banner [data-worker-answer="approve"]:not([disabled])'), 15000);
+  await watchCalls(page, keys);
+  const workersBefore = await page.evaluate((k) => workersKey(tabByKey(k)), keys.captain);
+  const t0 = Date.now();
+  await page.dblclick('#worker-banner [data-worker-answer="approve"]');
+  await page.waitForTimeout(250);
+  const third = await page.click('#worker-banner [data-worker-answer="approve"]:not([disabled])', { timeout: 500 }).then(() => "clicked", () => "no enabled Approve left");
+  console.log(`  a third tap 250 ms later: ${third}`);
+  await proveAnswered(page, keys, { workersBefore, t0 }, "chose 1", "a double tap on the banner's Approve");
+  const writes = await callsTo(page, keys, "write_input");
+  check(writes.length === 1 && writes[0] === "\r", `one Enter reached the worker for three taps (${JSON.stringify(writes)})`);
+}
+
+async function messageWaiting(page, keys) {
+  await watchCalls(page, keys);
+  await page.evaluate(({ captain, worker }) => {
+    const t = threadOf(tabByKey(captain));
+    t.open.add(`worker:${worker}`);
+    t.open.add(`say:${worker}`);
+    rerender();
+  }, keys);
+  const row = (k) => `.worker-row[data-worker="${k}"]`;
+  const line = await waitFor("the README row's message line", () => page.evaluate((sel) => threadView.querySelector(`${sel} .worker-say-waiting`)?.innerText.replace(/\s+/g, " ").trim(), row(keys.worker)), 10000);
+  check(/^Tidy the README is waiting on you\. A message would answer its ask, so answer it in its thread\. ?Open$/.test(line), `the row's message line says it waits and offers Open: "${line}"`);
+  check(!(await page.isVisible(`${row(keys.worker)} input.worker-say`)), "the row has no field to message it");
+  const said = await page.evaluate(({ worker }) => sayToWorker(worker, "Push to a fork instead"), keys);
+  check(said === false, "a message sent to it anyway is refused");
+  await page.waitForTimeout(2000);
+  const after = await page.evaluate((k) => ({ box: tabByKey(k).menu?.box, waiting: waitingKindOf(tabByKey(k).view), toast: document.querySelector("#toast, .toast")?.innerText ?? "" }), keys.worker);
+  check(after.box === PUSH && after.waiting === "needs_input", `its push still waits (${JSON.stringify(after)})`);
+  check(!(await callsTo(page, keys, "prompt")).length && !(await callsTo(page, keys, "write_input")).length, "no prompt and no key went to the waiting worker");
+  await page.evaluate(({ captain, worker }) => {
+    const t = threadOf(tabByKey(captain));
+    t.open.delete(`worker:${worker}`);
+    t.open.delete(`say:${worker}`);
+    rerender();
+  }, keys);
+}
+
+async function stalePaint(browser, keys) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+  try {
+    const page = await context.newPage();
+    await login(page);
+    await page.evaluate((k) => activate(tabByKey(k)), keys.captain);
+    await waitFor("the banner on the push", () => page.evaluate((cmd) => !workerBanner.hidden && workerBanner.querySelector(".cmd")?.textContent === cmd && !!workerBanner.querySelector('[data-worker-answer="approve"]'), PUSH), 30000);
+    await watchCalls(page, keys);
+    const tapped = await page.evaluate(({ worker, screen }) => new Promise((resolve) => {
+      const w = tabByKey(worker);
+      w.term.write(screen, () => {
+        const drawn = workerBanner.querySelector(".cmd").textContent;
+        workerBanner.querySelector('[data-worker-answer="approve"]').click();
+        resolve({ drawn, onScreen: terminalMenu(w)?.box });
+      });
+    }), { ...keys, screen: RM_SCREEN });
+    check(tapped.drawn === PUSH && tapped.onScreen === "rm -rf build", `Approve was tapped on the push while the screen already asked for ${tapped.onScreen}`);
+    await page.waitForTimeout(1500);
+    check(!(await callsTo(page, keys, "write_input")).length, "no key went to the worker");
+    const banner = await page.evaluate(() => workerBanner.innerText.replace(/\s+/g, " ").trim());
+    check(banner.includes("rm -rf build"), `the banner repainted with the command now asked: "${banner}"`);
+  } finally {
+    await context.close();
+  }
 }
 
 (async () => {
@@ -187,6 +289,12 @@ async function proveAnswered(page, keys, { workersBefore, t0 }, seen, what) {
     check(opened.active === keys.worker, `the banner's Open opened the worker (${opened.active})`);
     check(await page.evaluate(() => approval.dataset.kind === "approval" && !approval.hidden && approval.querySelector("pre")?.textContent === "git push origin readme-tidy"), "the worker's own card shows its push");
     await page.evaluate((k) => activate(tabByKey(k)), keys.captain);
+
+    await doubleTap(page, keys);
+    await rearm(page, keys);
+    await messageWaiting(page, keys);
+    await stalePaint(browser, keys);
+
     const title = await page.evaluate((k) => threadTitle(tabByKey(k)), keys.worker);
     check(title === world.WORLD.threads.readme.title, `the README worker waits on its push again under its title "${title}", as the boards show it`);
     check(!errors.length, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);

@@ -140,22 +140,30 @@ function focusWorkerSay(key) {
   input.setSelectionRange(input.value.length, input.value.length);
 }
 
-/** Sends a worker row's line to that worker's session: as the answer when its menu takes typed
- * words, else as its next prompt. The line closes once it went out and stays with its words if not. */
-async function sayToWorker(key, text) {
+/** Sends a worker row's line to that worker's session as its next prompt, unless it waits on the
+ * user (waitsOnUser), whose ask only its own thread answers. True once it went out; the line then
+ * closes, and keeps its words if not. `quiet` leaves the saying to the caller. */
+async function sayToWorker(key, text, quiet = false) {
   const worker = tabByKey(key);
   const words = text.trim();
-  if (!worker || !words) return;
+  if (!worker || !words) return false;
+  if (waitsOnUser(worker)) {
+    if (!quiet) showComposerNote(`${threadTitle(worker)} is waiting on you. Open it to answer.`, true);
+    rerender();
+    return false;
+  }
   try {
-    if (!pendingAsk(worker)?.typed) await callOn(worker.machine, { cmd: "prompt", tab: worker.view.id, text: words });
-    else if (!(await answerAsk(worker, { text: words }))) throw new Error("its question changed; open its thread to answer");
+    worker.prompts = (worker.prompts ?? 0) + 1;
+    await callOn(worker.machine, { cmd: "prompt", tab: worker.view.id, text: words });
     workerDrafts.delete(key);
     threadOf(active).open.delete(`say:${key}`);
-    tell(`Sent to ${esc(threadTitle(worker))}.`, 3000);
+    if (!quiet) tell(`Sent to ${esc(threadTitle(worker))}.`, 3000);
     rerender();
     setTimeout(() => fetchThread(worker), 300);
+    return true;
   } catch (e) {
     showComposerNote(`Couldn't send it to ${threadTitle(worker)}: ${e.message ?? e}`, true);
+    return false;
   }
 }
 
@@ -182,21 +190,35 @@ function workerRowHtml(tab, row, t) {
   const head = `<div class="worker-head"><button type="button" class="worker-toggle" data-toggle="${esc(key)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(row.title)}"></button>${glyphHtml(row.state, 12)}
     <span class="worker-text"><span class="worker-title">${esc(row.title || "Agent")}</span>${line.text ? `<span class="worker-step${line.tone ? ` ${line.tone}` : ""}" title="${esc(line.text)}">${esc(line.text)}</span>` : ""}</span>
     ${review}${model ? `<span class="worker-model">${esc(model)}</span>` : ""}${time ? `<span class="worker-time">${time}</span>` : ""}${icon("chevron-right", "chev")}</div>`;
-  const agentId = row.agent ? ` data-agent="${esc(row.agent.id)}"` : "";
-  if (!open) return `<div class="worker-row" data-worker="${id}" data-state="${row.state}"${agentId}>${head}</div>`;
+  const attrs = `${row.agent ? ` data-agent="${esc(row.agent.id)}"` : ""}${row.depth ? ` data-depth="${row.depth}" style="--depth: ${row.depth}"` : ""}`;
+  if (!open) return `<div class="worker-row" data-worker="${id}" data-state="${row.state}"${attrs}>${head}</div>`;
   const steps = workerSteps(row);
   const spawn = row.agent && !steps.length ? spawnOf(threadOf(tab), row.agent) : null;
   const brief = spawn?.kind === "tool" && spawn.detail ? `<div class="narration md">${markdown(spawn.detail)}</div>` : "";
-  const saying = row.tab && t.open.has(`say:${row.key}`)
-    ? `<input type="text" class="worker-say" data-worker-say="${id}" value="${esc(workerDrafts.get(row.key) ?? "")}" placeholder="Message ${esc(row.title)}. Enter sends it, Esc closes." aria-label="Message ${esc(row.title)}">` : "";
+  const saying = !row.tab || !t.open.has(`say:${row.key}`) ? ""
+    : row.state === "needs" || waitsOnUser(row.tab)
+      ? `<div class="worker-say-waiting" role="status"><span>${esc(row.title)} is waiting on you. A message would answer its ask, so answer it in its thread.</span><button type="button" class="outline" data-worker-open="${id}">Open</button></div>`
+      : `<input type="text" class="worker-say" data-worker-say="${id}" value="${esc(workerDrafts.get(row.key) ?? "")}" placeholder="Message ${esc(row.title)}. Enter sends it, Esc closes." aria-label="Message ${esc(row.title)}">`;
   const body = `<div class="worker-body">${steps.map((s, i) => workerStepLineHtml(s, row, cwd, i === steps.length - 1)).join("")}${brief}${row.agent ? sendErrorHtml(tab, row.agent) : ""}
     <div class="worker-actions">${workerActionsHtml(tab, row)}</div>${saying}</div>`;
-  return `<div class="worker-row" data-worker="${id}" data-state="${row.state}" data-open${agentId}>${head}${body}</div>`;
+  return `<div class="worker-row" data-worker="${id}" data-state="${row.state}" data-open${attrs}>${head}${body}</div>`;
+}
+
+/** Writes each drawn worker row's latest step in place, which workersKey leaves out for a collapsed
+ * row so that a step does not repaint the whole thread. */
+function patchWorkerSteps(tab, rows) {
+  for (const row of rows) {
+    const el = threadView.querySelector(`.worker-row[data-worker="${CSS.escape(row.key)}"] > .worker-head .worker-step`);
+    const { text } = workerLine(tab, row);
+    if (!el || el.textContent === text) continue;
+    el.textContent = text;
+    el.title = text;
+  }
 }
 
 /** The thread's workers in one block: how many are done, at work and waiting on the user, then a row each. */
 function workersBlockHtml(tab, t) {
-  const rows = workersOf(tab);
+  const rows = workersNow(tab);
   if (!rows.length) return "";
   const s = workersSummary(rows);
   const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since)}` : ""}</span>` : "";

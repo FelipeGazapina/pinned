@@ -477,7 +477,12 @@ body.panel-animating #panel { transition: transform var(--panel-animation, 0ms) 
   #panel .dcomment.draft .row { justify-content: flex-end; }
   #panel .dcomment.draft .row button { height: 24px; padding: 0 9px; border-radius: 6px; }
   #panel .dcomment.draft .row .primary { font-weight: 600; }
+  #panel .diff-bar:is([data-fold="icons"], [data-fold="wrap"]) .icon.text { width: 26px; padding: 0; justify-content: center; align-items: center; }
+  #panel .diff-bar:is([data-fold="icons"], [data-fold="wrap"]) .icon.text .i { display: block; }
+  #panel .diff-bar:is([data-fold="icons"], [data-fold="wrap"]) .icon.text .label { display: none; }
 }
+/* fitDiffBar (gui-diff.js): a toolbar too narrow for its controls even as icons takes a second row. */
+#panel .diff-bar[data-fold="wrap"] { flex-wrap: wrap; height: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px; row-gap: 6px; overflow-x: visible; }
 @media (pointer: coarse) and (max-width: 980px) {
   #panel .diff-bar { height: 48px; }
 }

@@ -161,7 +161,7 @@ async function approvalSheet(page, keys) {
   check(sheet.title === "Allow this command?" && sheet.command === PUSH, `the sheet asks "${sheet.title}" for ${sheet.command}`);
   check(/Pushes one commit/.test(sheet.about ?? ""), "the sheet carries the CLI's description");
   check(JSON.stringify(sheet.answers) === '["Decline","Approve"]', "the sheet answers Decline and Approve");
-  check(JSON.stringify(sheet.rows) === JSON.stringify(["Yes, and don't ask again for rm commands", "Decline and say what to do instead", "Show in terminal"]), `the sheet's rows: ${sheet.rows.join(" | ")}`);
+  check(JSON.stringify(sheet.rows) === JSON.stringify(["Yes, and don't ask again for git push commands", "Decline and say what to do instead", "Show in terminal"]), `the sheet's rows: ${sheet.rows.join(" | ")}`);
   check(sheet.approvalHidden, "the approval card gives way to the sheet");
 
   await page.tap(".ask-sheet [data-ask=terminal]");

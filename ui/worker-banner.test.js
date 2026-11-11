@@ -7,7 +7,7 @@ const src = readFileSync(new URL("./gui-worker-banner.js", import.meta.url), "ut
 const context = {
   icon: (name) => `<svg data-icon="${name}"></svg>`,
   esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
-  workersOf: () => context.rows,
+  workersNow: () => context.rows,
   rows: [],
 };
 vm.createContext(context);
@@ -53,4 +53,29 @@ test("a phone's banner names the worker and what it waits on, with Review", () =
   assert.match(html, /data-worker-review/);
   const question = context.phoneWorkerBannerHtml({ title: "Pick a color", ask: { kind: "question", text: "Which?", command: null, choices: null, typed: false } });
   assert.equal(text(question), "Pick a color has a question Review");
+});
+
+test("an answer goes out once, for the ask the surface drew, and a refused one says why", async () => {
+  const sent = [];
+  const notes = [];
+  let release;
+  context.answerAsk = (tab, choice, seen) => (sent.push([tab.key, choice, seen.command]), new Promise((r) => (release = r)));
+  context.showComposerNote = (text) => notes.push(text);
+  vm.runInContext(`${src.slice(src.indexOf("async function answerWorker"), src.indexOf("function renderWorkerBanner"))}\nglobalThis.answerWorker = answerWorker;`, context);
+  const drawn = { key: "w", title: "Tidy the README", tab: { key: "mini:w" }, ask: approval(["approve", "decline"]) };
+  const busy = new Set();
+  let paints = 0;
+  const first = context.answerWorker(drawn, "approve", busy, () => paints++);
+  const second = context.answerWorker({ ...drawn, ask: approval(["approve"]) }, "approve", busy, () => paints++);
+  assert.deepEqual(sent, [["mini:w", "approve", "git push origin readme-tidy\nsecond line"]], "a second tap while the first is on its way sends nothing");
+  assert.deepEqual([...busy], ["w"]);
+  release(true);
+  await Promise.all([first, second]);
+  assert.deepEqual([...busy], []);
+  assert.equal(paints, 2, "the buttons wait, then redraw");
+  assert.deepEqual(notes, []);
+  const refused = context.answerWorker(drawn, "decline", busy, () => {});
+  release(false);
+  await refused;
+  assert.deepEqual(notes, ["Tidy the README changed its question. Open it to answer."]);
 });
