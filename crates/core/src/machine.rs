@@ -37,6 +37,9 @@ const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// How long a session's Convex offer waits for the hub to hear of its new tab, and how often it asks.
+const CONVEX_OFFER_WAIT: Duration = Duration::from_secs(3);
+const CONVEX_OFFER_RETRY: Duration = Duration::from_millis(250);
 /// How long a session's start waits for the account's taste before it takes the one `taste.json`
 /// kept. A Capitão can start while a Machine lock is held, so a silent hub must not hold it long.
 #[cfg(not(test))]
@@ -2820,6 +2823,7 @@ impl Machine {
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
+            ProjectTool::Convex { ask } => self.convex(tab, ask),
             ProjectTool::Act { action, args, request_id, machine } => {
                 let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
                 match self.call_hub(HubCall::Act { act }) {
@@ -2827,6 +2831,32 @@ impl Machine {
                     answer => text_json(answer?),
                 }
             }
+        }
+    }
+
+    /// A Convex tool's ask, which the hub answers for the project of the tab's checkout, by its
+    /// repo key. The machine reports a tab just after it starts it, so the offer at a session's
+    /// start waits a moment for the hub to hear of it.
+    fn convex(&self, tab: &str, ask: crate::convex::Ask) -> Result<String, String> {
+        use crate::convex::{Ask, SIGNED_OUT, UNKNOWN_TAB};
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        let repo = git_remote(&history::project_of(&cwd)).and_then(|remote| repo_key(&remote));
+        let offer = ask == Ask::Offer;
+        if offer && repo.is_none() {
+            return Err("This folder has no git origin, so it cannot be connected to Convex yet.".into());
+        }
+        let started = Instant::now();
+        let answer = loop {
+            match self.call_hub(HubCall::Convex { tab: tab.to_owned(), repo: repo.clone(), ask: ask.clone() }) {
+                Err(e) if offer && (e == crate::link::OFFLINE || e == UNKNOWN_TAB) && started.elapsed() < CONVEX_OFFER_WAIT => std::thread::sleep(CONVEX_OFFER_RETRY),
+                answer => break answer,
+            }
+        };
+        match answer {
+            Ok(Value::String(text)) => Ok(text),
+            Ok(value) => text_json(value),
+            Err(e) if e == NOT_LINKED => Err(SIGNED_OUT.into()),
+            Err(e) => Err(needs_update(e)),
         }
     }
 
@@ -10663,6 +10693,50 @@ Have another model review a risky change before it goes ahead.";
         let review = m.task_review(Some(captain.clone()), None, &task, "accepted", Some("merged".into())).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&review).unwrap()["review"]["verdict"], "accepted");
         assert_eq!(m.task_review(Some(captain), None, &task, "kept", None).unwrap_err(), "verdict must be accepted or redone, not \"kept\"");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_convex_tool_asks_the_hub_with_its_tabs_repo_and_the_offer_waits_for_its_tab() {
+        use crate::convex::{Ask, SIGNED_OUT, UNKNOWN_TAB};
+        let dir = temp("convex");
+        let project = dir.join("site");
+        let loose = dir.join("loose");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&loose).unwrap();
+        git(&project, &["init", "-q"]);
+        git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
+        std::fs::write(project.join(".env.local"), "CONVEX_DEPLOYMENT=dev:quick-lemur-789 # team: acme, project: site\n").unwrap();
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        m.open_project(project.clone());
+        assert_eq!(m.list_projects().into_iter().map(|p| p.convex).collect::<Vec<_>>(), [Some("dev:quick-lemur-789".to_owned())]);
+        let thread = m.add_tab(project.join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let scratch = m.add_tab(loose, Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tool = |tab: &str, ask: Ask| m.project_tool(tab, ProjectTool::Convex { ask });
+        assert_eq!(tool(&thread, Ask::Tables { table: None }), Err(SIGNED_OUT.into()));
+
+        let asked = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = asked.clone();
+        m.set_hub(Arc::new(move |call| {
+            let HubCall::Convex { tab, repo, ask } = call else { return Err("not a Convex call".into()) };
+            let mut seen = seen.lock().unwrap();
+            seen.push(json!({ "tab": tab, "repo": repo, "ask": ask }));
+            match ask {
+                Ask::Offer if seen.len() < 3 => Err(UNKNOWN_TAB.into()),
+                Ask::Offer => Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev" })),
+                Ask::Logs { .. } => Err(UNKNOWN_TAB.into()),
+                _ => Ok(Value::String(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":[]}"#.into())),
+            }
+        }));
+        assert_eq!(tool(&thread, Ask::Offer), Ok(r#"{"deployment":"quick-lemur-789","kind":"dev"}"#.into()), "the offer asks again until the hub knows the tab");
+        let calls = asked.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2], json!({ "tab": thread, "repo": "github.com/acme/site", "ask": { "op": "offer" } }), "a worktree reads as its repo");
+        assert_eq!(tool(&thread, Ask::Tables { table: None }), Ok(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":[]}"#.into()));
+        assert_eq!(tool(&thread, Ask::Logs { function: None, errors: false, limit: None }), Err(UNKNOWN_TAB.into()), "only the offer is asked again");
+        assert_eq!(asked.lock().unwrap().len(), 5);
+        assert_eq!(tool(&scratch, Ask::Offer), Err("This folder has no git origin, so it cannot be connected to Convex yet.".into()));
+        assert_eq!(asked.lock().unwrap().len(), 5, "a folder with no origin asks the hub nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

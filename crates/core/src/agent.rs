@@ -134,6 +134,9 @@ pub enum ProjectTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search: Option<String>,
     },
+    /// A Convex tool's ask, which the hub answers for the tab's project. `offer` comes from
+    /// `pinned mcp` itself, at tools/list.
+    Convex { ask: crate::convex::Ask },
     /// Everyone's: one action of `surface::ACTIONS`, run by the hub as the user's account and audited.
     Act {
         action: String,
