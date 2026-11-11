@@ -222,6 +222,10 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .badge.convex-kind[data-kind="preview"] { color: var(--done); }
 .convex-permissions { margin: 4px 0 0; padding-left: 16px; }
 .convex-found { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.convex-scope { display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
+.convex-scope .chips, #convex-chosen { margin: 0; }
+#convex-step-tables { display: flex; flex-direction: column; gap: 6px; }
+.convex-table-list { max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }
 .logo.cursor { background: #111; }

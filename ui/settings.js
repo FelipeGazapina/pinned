@@ -966,6 +966,7 @@ function graphNodeUi(node) {
   if (type === "take-issue") return { tone: "linear", icon: "✓", app: "Linear", title: "Work an issue", about: "Works the thread on an existing Linear issue." };
   if (type === "move-column") return { tone: "linear", icon: "⇥", app: "Linear", title: "Move issue", about: "Moves the run's Linear issue to the named column." };
   if (type === "proof") return { tone: "proof", icon: "▶", app: "Playwright", title: "Proof video", about: "Requires a proof video on the pull request." };
+  if (type === "convex-data") return CONVEX_STEP;
   if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked", about: "Moves the issue to the picked column when the session opens." };
   if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow", about: "Runs another workflow's map with this run's session." };
   if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop", about: "Ends this branch on purpose." };
@@ -1008,6 +1009,7 @@ function graphNodeSummary(node, c) {
   if (type === "take-issue") return (node.issue ?? "").trim() ? `Work ${(node.issue ?? "").trim()}` : "The thread's filed issue";
   if (type === "move-column") return (node.column ?? "").trim() ? `Move to ${(node.column ?? "").trim()}` : "Name a column";
   if (type === "proof") return "Require proof video";
+  if (type === "convex-data") return convexStepSummary(node);
   if (type === "stage-picked") return c.columns.picked.trim() ? `Move to ${c.columns.picked.trim()}` : "Move to the picked column";
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
@@ -1066,6 +1068,7 @@ function graphNodeIssues(node, c) {
   if (type === "take-issue") return [!slackRun(c) && "A take-issue step needs a Slack trigger."].filter(Boolean);
   if (type === "move-column") return [!(node.column ?? "").trim() && "Name the column."].filter(Boolean);
   if (type === "proof") return [];
+  if (type === "convex-data") return convexStepIssues(node);
   if (type === "call") {
     const target = settings.connectors.find((k) => k.id === node.workflow);
     return [!node.workflow && "Choose a workflow.", node.workflow && !target && "That workflow was deleted."].filter(Boolean);
@@ -1416,7 +1419,8 @@ function graphNodePanel(c) {
       <p class="hint">Moves the run's Linear issue to the named column.</p>`;
   } else if (type === "proof") {
     body = `<p class="hint">Requires a proof video on the pull request, like the connector's proof flag. The session drives the change in a Playwright script, records a video and posts it as a comment on the pull request. The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>`;
-  } else if (type === "call") {
+  } else if (type === "convex-data") body = convexStepPanel(node);
+  else if (type === "call") {
     const i = graphNodeIndex(node.id);
     const targets = settings.connectors.filter((k) => k.id !== c.id);
     body = `<label>Workflow ${select(`graph.nodes.${i}.workflow`, ["", ...targets.map((k) => k.id)], (id) => targets.find((k) => k.id === id)?.name ?? id, node.workflow ?? "")}</label>`;
@@ -1448,6 +1452,7 @@ function applyGraphPick(type) {
     const c = view.draft;
     Object.assign(fresh, { folder: c.folder ?? "", repo: c.repo ?? "", model: c.model ?? "", effort: c.effort ?? "", permission: c.permissionMode ?? "", account: c.account ?? "", worktree: !!c.worktree, instructions: c.instructions ?? "" });
   }
+  if (fresh.type === "convex-data") fresh.connection = convexDefaultConnection(view.draft);
   if (view.graphPick.mode === "splice") {
     const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
     view.draft.graph = api.splice(view.draft.graph, edge, fresh);

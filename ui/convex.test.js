@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import * as PinnedGraph from "./graph.js";
 
 const settingsSrc = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
 const convexSrc = readFileSync(new URL("./convex.js", import.meta.url), "utf8");
@@ -67,6 +68,7 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
     agentConsentHtml: () => "",
     externalAgentsCardHtml: () => "",
     icon: (name) => `<svg data-icon="${name}"></svg>`,
+    PinnedGraph,
     document: {
       body: { dataset: {} },
       getElementById: byId,
@@ -76,11 +78,12 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${settingsSrc}\n${convexSrc}\nglobalThis.__settings = settings; globalThis.__actions = actions; globalThis.__sections = settingsSections; globalThis.__ui = convexUi;`,
+    `${settingsSrc}\n${convexSrc}\nglobalThis.__settings = settings; globalThis.__actions = actions; globalThis.__sections = settingsSections; globalThis.__ui = convexUi; globalThis.__setView = (next) => { view = next; };`,
     context,
   );
   context.__settings.convex = connections;
-  return { context, calls, byId, listeners: byId("settings-page").listeners };
+  const fire = (type, target) => byId("settings-page").listeners[type].forEach((fn) => fn({ target: { dataset: {}, ...target } }));
+  return { context, calls, byId, fire, listeners: byId("settings-page").listeners };
 }
 
 test("signed out, the Convex card asks to sign in and has no key field", () => {
@@ -190,4 +193,131 @@ test("while an agent's request to connect waits, the form keeps the project it a
   const html = context.convexCardHtml();
   assert.match(html, /<select id="convex-project" aria-label="Project" disabled><option value="">No project yet<\/option>/);
   assert.match(html, /<option value="github\.com\/acme\/billing" selected>billing · ~\/code\/billing<\/option>/);
+});
+
+/** A workflow draft whose graph is a trigger, then `step` when given, open in the editor. */
+function editing(context, { repo = "", step = null } = {}) {
+  const trigger = { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "called" } };
+  const draft = { id: "w1", name: "Support triage", repo, folder: "", model: "", effort: "", permissionMode: "", columns: {}, graph: { nodes: step ? [trigger, step] : [trigger], edges: [] } };
+  context.__setView({ name: "edit", draft, open: step?.id ?? null, graphPick: null });
+  context.redraw = () => {};
+  context.refresh = () => {};
+  return draft;
+}
+
+const step = (fields = {}) => ({ id: "convex-data-1", name: "convex-data", position: [230, 0], type: "convex-data", connection: "joyful-jaguar-123", tables: null, ...fields });
+
+test("the add-step menu offers Read Convex data with its own tile", () => {
+  const { context } = load({ connections: [SITE_CONNECTION] });
+  const draft = editing(context);
+  context.__setView({ name: "edit", draft, open: null, graphPick: { mode: "append", from: "trigger-1", port: "out", x: 0, y: 0 } });
+  const html = context.graphPickerHtml(draft, { x: 0, y: 0 }, 800);
+  assert.match(html, /data-type="convex-data"><span class="icon" data-tone="convex" data-logo="convex" title="Convex: Read Convex data"><svg viewBox="0 0 24 24">/);
+  assert.match(html, /<b>Read Convex data<\/b><small>Lets this run&#39;s session read the project&#39;s Convex data\.<\/small>/);
+});
+
+test("a new step reads the connection serving the workflow's repository, else the only one", () => {
+  const pick = (connections, repo) => {
+    const { context } = load({ connections });
+    const draft = editing(context, { repo });
+    context.__setView({ name: "edit", draft, open: null, graphPick: { mode: "append", from: "trigger-1", port: "out", x: 0, y: 0 } });
+    context.applyGraphPick("convex-data");
+    return draft.graph.nodes.find((n) => n.type === "convex-data").connection;
+  };
+  assert.equal(pick([SITE_CONNECTION, BILLING_CONNECTION], "git@github.com:Acme/billing.git"), "happy-otter-456");
+  assert.equal(pick([SITE_CONNECTION, BILLING_CONNECTION], "https://github.com/acme/site"), "joyful-jaguar-123");
+  assert.equal(pick([SITE_CONNECTION, BILLING_CONNECTION], "https://github.com/acme/other.git"), "");
+  assert.equal(pick([BILLING_CONNECTION], ""), "happy-otter-456");
+});
+
+test("the step's ! names what blocks the run, and its summary what it reads", () => {
+  const { context } = load({ connections: [SITE_CONNECTION] });
+  const issues = (node) => plain(context.graphNodeIssues(node, editing(context, { step: node })));
+  const summary = (node) => context.graphNodeSummary(node, editing(context, { step: node }));
+  assert.deepEqual(issues(step()), []);
+  assert.equal(summary(step()), "site · all tables");
+  assert.deepEqual(issues(step({ tables: ["invoices", "customers"] })), []);
+  assert.equal(summary(step({ tables: ["invoices", "customers"] })), "site · invoices, customers");
+  assert.deepEqual(issues(step({ tables: [] })), ["Pick at least one table, or read all tables."]);
+  assert.equal(summary(step({ tables: [] })), "site · pick tables");
+  assert.deepEqual(issues(step({ connection: "quick-lemur-789" })), ["quick-lemur-789 is no longer connected. Choose another connection."]);
+  assert.equal(summary(step({ connection: "quick-lemur-789" })), "Missing connection");
+  assert.deepEqual(issues(step({ connection: "" })), ["Choose the Convex connection this run reads."]);
+  context.__settings.convex = [];
+  assert.deepEqual(issues(step()), ["Connect Convex under Connectors."]);
+  assert.equal(summary(step()), "Connect Convex");
+});
+
+test("with no connection, the step's panel offers the Convex card", () => {
+  const { context } = load();
+  const draft = editing(context, { step: step({ connection: "" }) });
+  const html = context.graphNodePanel(draft);
+  assert.match(html, /<span class="app">Convex<\/span><b>convex-data<\/b>/);
+  assert.match(html, /data-action="convex-open-card">Connect Convex/);
+  assert.doesNotMatch(html, /data-convex-connection/);
+});
+
+test("the panel shows the connection, Only these, and the picked tables ticked in the list", () => {
+  const { context, calls } = load({ connections: [SITE_CONNECTION, BILLING_CONNECTION] });
+  context.__ui.tables["joyful-jaguar-123"] = ["invoices", "customers", "events"];
+  const html = context.graphNodePanel(editing(context, { step: step({ tables: ["invoices"] }) }));
+  assert.match(html, /<select data-convex-connection><option value="">Choose a connection<\/option><option value="joyful-jaguar-123" selected>site · joyful-jaguar-123<\/option><option value="happy-otter-456">billing · happy-otter-456<\/option><\/select>/);
+  assert.match(html, /class="chip" data-action="convex-all-tables">All tables<\/button><button type="button" class="chip active" data-action="convex-only-tables">Only these/);
+  assert.match(html, /<span class="chip convex-table" title="invoices">invoices<button type="button" data-action="convex-remove-table" data-table="invoices"/);
+  assert.match(html, /data-convex-table="invoices" checked> <code>invoices<\/code>/);
+  assert.match(html, /data-convex-table="customers"> <code>customers<\/code>/);
+  assert.match(html, /With a table list, queries and logs are off for this run\./);
+  assert.deepEqual(calls, [], "known names are not fetched again");
+  const all = context.graphNodePanel(editing(context, { step: step() }));
+  assert.match(all, /class="chip active" data-action="convex-all-tables"/);
+  assert.doesNotMatch(all, /convex-step-tables/);
+});
+
+test("with 128 tables the filter narrows the list and picked tables stay as chips", () => {
+  const names = Array.from({ length: 128 }, (_, i) => `table_${String(i + 1).padStart(3, "0")}`);
+  const { context, byId, fire } = load({ connections: [SITE_CONNECTION] });
+  context.__ui.tables["joyful-jaguar-123"] = names;
+  const node = step({ tables: ["table_007", "table_100"] });
+  const html = context.graphNodePanel(editing(context, { step: node }));
+  assert.equal([...html.matchAll(/data-convex-table="/g)].length, 128);
+  assert.match(html, /<input type="search" data-convex-filter value="" placeholder="Filter 128 tables"/);
+  assert.match(html, /<div class="chips" id="convex-chosen"><span class="chip convex-table" title="table_007">table_007<button[^>]*data-table="table_007"[^>]*>×<\/button><\/span><span class="chip convex-table" title="table_100">table_100<button/);
+
+  fire("input", { dataset: { convexFilter: "" }, value: "10" });
+  const listed = (html) => [...html.matchAll(/data-convex-table="([^"]+)"( checked)?/g)].map(([, name, on]) => (on ? `${name} ✓` : name));
+  assert.deepEqual(listed(byId("convex-table-list").innerHTML), ["table_010", "table_100 ✓", "table_101", "table_102", "table_103", "table_104", "table_105", "table_106", "table_107", "table_108", "table_109", "table_110"]);
+
+  fire("change", { dataset: { convexTable: "table_105" }, checked: true });
+  assert.deepEqual(plain(node.tables), ["table_007", "table_100", "table_105"]);
+  assert.match(byId("convex-chosen").innerHTML, /title="table_105">table_105/);
+
+  context.__actions["convex-remove-table"]({ dataset: { table: "table_100" } });
+  assert.deepEqual(plain(node.tables), ["table_007", "table_105"]);
+  assert.doesNotMatch(byId("convex-chosen").innerHTML, /table_100/);
+  assert.ok(listed(byId("convex-table-list").innerHTML).includes("table_100"), "the filter still shows it, now unticked");
+
+  fire("input", { dataset: { convexFilter: "" }, value: "nope" });
+  assert.equal(byId("convex-table-list").innerHTML, "<p class=\"hint\">No table matches “nope”.</p>");
+});
+
+test("the panel fetches the names once, and types them when the fetch fails", async () => {
+  const { context, calls, byId, fire } = load({
+    connections: [SITE_CONNECTION],
+    reply: () => {
+      throw "the hub is busy";
+    },
+  });
+  const node = step({ tables: ["invoices", "customers"] });
+  const html = context.graphNodePanel(editing(context, { step: node }));
+  assert.match(html, /<div id="convex-step-tables"><p class="hint">Listing the tables…<\/p><\/div>/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(plain(calls), [{ cmd: "convex_tables", id: "joyful-jaguar-123" }]);
+  const box = byId("convex-step-tables").innerHTML;
+  assert.match(box, /<input data-convex-tables-text value="invoices, customers" placeholder="invoices, customers"/);
+  assert.match(box, /Pinned could not list the tables\. Type their names, separated by commas\./);
+
+  fire("input", { dataset: { convexTablesText: "" }, value: "invoices, , events " });
+  assert.deepEqual(plain(node.tables), ["invoices", "events"]);
+  context.graphNodePanel(editing(context, { step: node }));
+  assert.equal(calls.length, 1, "a failed fetch is not retried on every draw");
 });

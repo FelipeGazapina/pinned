@@ -1,12 +1,14 @@
-/** The Convex connector's card on the Connectors page. The hub keeps each deploy key; the card only
- * sends what is typed into `#convex-key`, and every other view shows the key's hint. */
+/** The Convex connector: its card on the Connectors page and the Read Convex data workflow step. The
+ * hub keeps each deploy key; the card only sends what is typed into `#convex-key`, and every other
+ * view shows the key's hint. */
 
 const CONVEX_KEYS = "https://dashboard.convex.dev/deployment/settings";
 const CONVEX_PERMISSIONS = ["deployment:data:view", "deployment:functions:runInternalQueries", "deployment:functions:runTestQuery", "deployment:logs:view"];
 LOGOS.convex = `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="5" rx="1.6"/><rect x="3" y="9.5" width="18" height="5" rx="1.6"/><rect x="3" y="16" width="18" height="5" rx="1.6"/></svg>`;
 
-/** `prefill` is the repo the card was asked to connect. */
-const convexUi = { prefill: null };
+/** `prefill` is the repo the card was asked to connect. `tables` holds each connection's table
+ * names for the step's panel: "loading", "failed", or the names. `filter` narrows the panel's list. */
+const convexUi = { prefill: null, tables: {}, filter: "" };
 
 const convexConnections = () => settings.convex ?? [];
 const convexServing = (repo) => convexConnections().find((c) => (c.repos ?? []).includes(repo)) ?? null;
@@ -130,7 +132,7 @@ async function loadConvexProjects() {
   if (JSON.stringify(convexProjects()) !== before) redrawConvexCard();
 }
 
-/** Opens the card with `repo` picked. */
+/** Opens the card with `repo` picked, as a step's panel does. */
 async function convexOpenCard(repo) {
   convexUi.prefill = repo;
   await openSettings("integrations");
@@ -147,6 +149,7 @@ Object.assign(actions, {
     try {
       const saved = await connectorCall("connect_convex", { key, repos: repo ? [repo] : [] });
       convexUi.prefill = null;
+      delete convexUi.tables[saved.id];
       convexKeep(saved);
     } catch (e) {
       convexError(e);
@@ -170,4 +173,170 @@ Object.assign(actions, {
 settingsPage.addEventListener("change", (e) => {
   const id = e.target.dataset.convexAdd;
   if (id && e.target.value) convexSetRepos(id, (repos) => [...repos, e.target.value]);
+});
+
+const CONVEX_STEP = { tone: "convex", icon: "▤", app: "Convex", title: "Read Convex data", about: "Lets this run's session read the project's Convex data." };
+
+/** Whether a workflow's repository, as typed or as `git_remote` gives it, is the repo key `key`. */
+const convexSameRepo = (url, key) => {
+  const text = String(url ?? "").trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "").replaceAll(":", "/");
+  return text === key || text.endsWith(`/${key}`) || text.endsWith(`@${key}`);
+};
+
+/** The connection a new step reads: the one serving the workflow's repository, else the only one. */
+function convexDefaultConnection(c) {
+  const list = convexConnections();
+  const urls = [c.repo, ...(c.graph?.nodes ?? []).filter((n) => graphNodeKind(n) === "session").map((n) => n.repo)].filter((url) => url?.trim());
+  const serving = list.find((conn) => (conn.repos ?? []).some((key) => urls.some((url) => convexSameRepo(url, key))));
+  return serving?.id ?? (list.length === 1 ? list[0].id : "");
+}
+
+function convexStepSummary(node) {
+  const c = convexConnections().find((x) => x.id === node.connection);
+  if (!c) return !convexConnections().length ? "Connect Convex" : node.connection ? "Missing connection" : "Choose a connection";
+  const name = c.project || c.id;
+  if (!Array.isArray(node.tables)) return `${name} · all tables`;
+  return node.tables.length ? `${name} · ${node.tables.join(", ")}` : `${name} · pick tables`;
+}
+
+function convexStepIssues(node) {
+  const list = convexConnections();
+  if (!list.length) return ["Connect Convex under Connectors."];
+  return [
+    !node.connection && "Choose the Convex connection this run reads.",
+    node.connection && !list.some((c) => c.id === node.connection) && `${node.connection} is no longer connected. Choose another connection.`,
+    Array.isArray(node.tables) && !node.tables.length && "Pick at least one table, or read all tables.",
+  ].filter(Boolean);
+}
+
+const convexOpenNode = () => view.draft?.graph?.nodes?.find((n) => n.id === view.open && graphNodeKind(n) === "convex-data") ?? null;
+
+/** Connection `id`'s table names, fetched the first time a panel asks. The answer fills the panel's
+ * list in place, so a field being typed in keeps its focus. */
+function convexTablesOf(id) {
+  if (!(id in convexUi.tables)) {
+    convexUi.tables[id] = "loading";
+    connectorCall("convex_tables", { id })
+      .then((names) => (convexUi.tables[id] = Array.isArray(names) ? names : "failed"), () => (convexUi.tables[id] = "failed"))
+      .then(() => {
+        const node = convexOpenNode();
+        const box = document.getElementById("convex-step-tables");
+        if (box && node?.connection === id) box.innerHTML = convexTablesHtml(node);
+      });
+  }
+  return convexUi.tables[id];
+}
+
+/** The names the step's list offers: the connection's tables, then any picked table it no longer lists. */
+function convexTableNames(node) {
+  const known = convexTablesOf(node.connection);
+  return Array.isArray(known) ? [...new Set([...known, ...(node.tables ?? [])])] : [];
+}
+
+const convexChosenHtml = (node) =>
+  (node.tables ?? []).map((name) => `<span class="chip convex-table" title="${esc(name)}">${esc(name)}<button type="button" data-action="convex-remove-table" data-table="${esc(name)}" aria-label="Remove ${esc(name)}">×</button></span>`).join("") ||
+  `<span class="hint">No table picked yet.</span>`;
+
+function convexTableListHtml(node) {
+  const query = convexUi.filter.trim().toLowerCase();
+  const shown = convexTableNames(node).filter((name) => name.toLowerCase().includes(query));
+  if (!shown.length) return `<p class="hint">No table matches “${esc(convexUi.filter.trim())}”.</p>`;
+  const chosen = node.tables ?? [];
+  return shown.map((name) => `<label class="toggle"><input type="checkbox" data-convex-table="${esc(name)}"${chosen.includes(name) ? " checked" : ""}> <code>${esc(name)}</code></label>`).join("");
+}
+
+/** The picked tables as chips over a filter and a scrolling list, which a deployment of over a
+ * hundred tables needs. When the names can't be listed, the tables are typed instead. */
+function convexTablesHtml(node) {
+  const chosen = node.tables ?? [];
+  if (!convexConnections().some((c) => c.id === node.connection)) return `<p class="hint">Choose the connection first.</p>`;
+  const known = convexTablesOf(node.connection);
+  if (known === "loading") return `<p class="hint">Listing the tables…</p>`;
+  const names = convexTableNames(node);
+  if (!names.length) {
+    return `<input data-convex-tables-text value="${esc(chosen.join(", "))}" placeholder="invoices, customers" spellcheck="false" aria-label="Tables">
+      <p class="hint">${known === "failed" ? "Pinned could not list the tables." : "The deployment lists no tables yet."} Type their names, separated by commas.</p>`;
+  }
+  return `<div class="chips" id="convex-chosen">${convexChosenHtml(node)}</div>
+    <input type="search" data-convex-filter value="${esc(convexUi.filter)}" placeholder="Filter ${names.length} tables" spellcheck="false" aria-label="Filter the tables">
+    <div class="convex-table-list" id="convex-table-list">${convexTableListHtml(node)}</div>`;
+}
+
+/** Redraws the chips, and the list when asked, leaving the filter being typed in alone. */
+function convexRedrawTables(node, list) {
+  const chips = document.getElementById("convex-chosen");
+  if (chips) chips.innerHTML = convexChosenHtml(node);
+  const box = list && document.getElementById("convex-table-list");
+  if (box) box.innerHTML = convexTableListHtml(node);
+}
+
+function convexStepPanel(node) {
+  const list = convexConnections();
+  if (!list.length) {
+    return `<p class="hint">No Convex deployment is connected yet. The Convex card under Connectors connects one.</p>
+      <div class="actions start"><button class="secondary" data-action="convex-open-card">Connect Convex</button></div>`;
+  }
+  const ids = ["", ...list.map((c) => c.id)];
+  if (node.connection && !ids.includes(node.connection)) ids.push(node.connection);
+  const label = (id) => {
+    const c = list.find((x) => x.id === id);
+    return !id ? "Choose a connection" : c ? `${c.project || c.id} · ${c.id}` : `${id} (disconnected)`;
+  };
+  const only = Array.isArray(node.tables);
+  return `<label>Connection <select data-convex-connection>${options(ids, label, node.connection ?? "")}</select></label>
+    <div class="convex-scope">Tables
+      <div class="chips"><button type="button" class="chip${only ? "" : " active"}" data-action="convex-all-tables">All tables</button><button type="button" class="chip${only ? " active" : ""}" data-action="convex-only-tables">Only these</button></div>
+      ${only ? `<div id="convex-step-tables">${convexTablesHtml(node)}</div>` : ""}
+    </div>
+    <p class="hint">With a table list, queries and logs are off for this run.</p>`;
+}
+
+/** All tables (`null`) or a list. Picking Only these again keeps the list already picked. */
+function convexSetTables(tables) {
+  const node = convexOpenNode();
+  if (!node || Array.isArray(node.tables) === Array.isArray(tables)) return;
+  node.tables = tables;
+  redraw();
+}
+
+Object.assign(actions, {
+  "convex-open-card": () => convexOpenCard(null),
+  "convex-all-tables": () => convexSetTables(null),
+  "convex-only-tables": () => convexSetTables([]),
+  "convex-remove-table"(button) {
+    const node = convexOpenNode();
+    if (!node) return;
+    node.tables = (node.tables ?? []).filter((name) => name !== button.dataset.table);
+    convexRedrawTables(node, true);
+    refresh();
+  },
+});
+
+settingsPage.addEventListener("change", (e) => {
+  const node = convexOpenNode();
+  if (!node) return;
+  if ("convexConnection" in e.target.dataset) {
+    node.connection = e.target.value;
+    convexUi.filter = "";
+    return redraw();
+  }
+  const table = e.target.dataset.convexTable;
+  if (table === undefined) return;
+  const rest = (node.tables ?? []).filter((name) => name !== table);
+  node.tables = e.target.checked ? [...rest, table] : rest;
+  convexRedrawTables(node, false);
+  refresh();
+});
+
+settingsPage.addEventListener("input", (e) => {
+  const { dataset } = e.target;
+  if (!("convexTablesText" in dataset) && !("convexFilter" in dataset)) return;
+  const node = convexOpenNode();
+  if (!node) return;
+  if ("convexFilter" in dataset) {
+    convexUi.filter = e.target.value;
+    return convexRedrawTables(node, true);
+  }
+  node.tables = e.target.value.split(",").map((name) => name.trim()).filter(Boolean);
+  refresh();
 });
