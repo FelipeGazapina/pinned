@@ -876,6 +876,17 @@ function measured(tab) {
 // buffer into a few cells and claude would redraw at that size, so such a size is ignored.
 const MIN_TERM_COLS = 20;
 const MIN_TERM_ROWS = 4;
+/** Resizes a terminal that keeps no history. xterm moves the lines a narrower screen pushes off its
+ * top into the history, and with none it leaves the screen a line short of its rows: every write
+ * after that throws, and the app reads a screen that no longer changes. So the terminal has a
+ * history for the length of the resize. */
+function withHistory(term, resize) {
+  const none = !term.options.scrollback;
+  if (none) term.options.scrollback = SCROLLBACK;
+  resize();
+  if (none) term.options.scrollback = 0;
+}
+
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
@@ -886,8 +897,7 @@ function refit(tab) {
   }
   const dims = tab.term.element ? tab.fit.proposeDimensions() : measured(tab);
   if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
-  if (tab.term.element) tab.fit.fit();
-  else tab.term.resize(dims.cols, dims.rows);
+  withHistory(tab.term, () => (tab.term.element ? tab.fit.fit() : tab.term.resize(dims.cols, dims.rows)));
   if (tab.view.running) callOn(tab.machine, { cmd: "resize_pty", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
 }
 

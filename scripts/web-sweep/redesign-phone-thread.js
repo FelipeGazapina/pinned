@@ -106,7 +106,11 @@ async function workersSheet(page, keys) {
   const pill = await waitFor("the Workers pill", () => text(page, "#workers-pill"));
   check(/^3 workers 1 working 1 needs you$/.test(pill), `the pill reads "${pill}"`);
   check((await text(page, "#worker-banner")) === "Tidy the README needs approval Review", "the banner reads \"Tidy the README needs approval Review\"");
-  const rowTap = await page.evaluate(() => [...threadView.querySelectorAll(".worker-row")].map((r) => r.querySelector(".worker-title").textContent));
+  // A long thread draws a window of its turns, so the workers' turn is drawn a moment after the scroll.
+  const rowTap = await waitFor("the workers in the chat", () => page.evaluate(() => {
+    const rows = [...threadView.querySelectorAll(".worker-row")].map((r) => r.querySelector(".worker-title").textContent);
+    return rows.length ? rows : null;
+  }));
   check(rowTap.length === 3, `the chat lists ${rowTap.join(", ")}`);
 
   await page.tap("#worker-banner [data-worker-review]");
@@ -263,8 +267,20 @@ async function actionsSheet(page, keys) {
   const movable = await page.evaluate(() => switchItems(active).length > 0);
   const listed = ["Pin thread", "Settle", "Snooze", "Rename, mark unread, copy", ...(movable ? ["Move to account"] : []), "Archive or delete"];
   check(JSON.stringify(actions) === JSON.stringify(listed), `the actions: ${actions.join(" | ")}`);
-  await page.tap(".actions-sheet .act-primary[data-act=git]");
-  check(JSON.stringify(await calls()) === '[["runGitAction","commit_push"]]', "the git action runs runGitAction as the header's does");
+  // The branch's state picks the action, so the header's own button says which one the sheet runs.
+  const quick = await page.evaluate(() => {
+    const t = threadOf(active);
+    return quickAction(t.git, t.workspace, !!prOf(active));
+  });
+  check(primary[0] === quick.label, `the git action is the header's: ${quick.label}`);
+  if (quick.disabled) {
+    check(await page.evaluate(() => document.querySelector(".actions-sheet .act-primary[data-act=git]").disabled), `${quick.label} is off in the sheet as in the header: ${quick.hint}`);
+    await page.evaluate(() => openedSheet.close());
+    await sheetGone(page);
+  } else {
+    await page.tap(".actions-sheet .act-primary[data-act=git]");
+    check(JSON.stringify(await calls()) === JSON.stringify([["runGitAction", quick.action]]), `${quick.label} runs runGitAction("${quick.action}") as the header's does`);
+  }
   await tap(".actions-sheet .act-primary[data-act=script]");
   check(JSON.stringify(await calls()) === '[["runScript","dev"]]', "Run dev runs the project's dev script");
   await tap(".actions-sheet .act-primary[data-act=pr]");
