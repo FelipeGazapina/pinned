@@ -22,6 +22,7 @@ pub const API_BASE_ENV: &str = "CONVEX_API_BASE_URL";
 /// What `Reqwest` answers when Convex sends nothing within `CALL_WAIT`. The log route waits for
 /// new runs, so for it this means there were none.
 pub const TIMED_OUT: &str = "Convex did not answer within 20 seconds.";
+const UNREADABLE: &str = "Convex sent an answer pinned could not read.";
 const API: &str = "https://api.convex.dev";
 const TABLES_PAGE: u32 = 100;
 const TABLES_MAX: usize = 500;
@@ -111,7 +112,8 @@ fn api_base() -> String {
     std::env::var(API_BASE_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| API.into()).trim_end_matches('/').to_owned()
 }
 
-/// Sends with `CALL_WAIT`, the key in the `Authorization` header. Errors name the host only.
+/// Sends with `CALL_WAIT`, the key in the `Authorization` header. Errors name the host only. It
+/// follows no redirect: a 307 would resend a body that holds the key to wherever it points.
 pub struct Reqwest;
 
 impl Http for Reqwest {
@@ -119,7 +121,8 @@ impl Http for Reqwest {
         Box::pin(async move {
             let host = reqwest::Url::parse(&request.url).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_default();
             let failed = |e: reqwest::Error| if e.is_timeout() { TIMED_OUT.to_owned() } else { format!("Convex at {host} is unreachable.") };
-            let mut builder = reqwest::Client::new().request(request.method, &request.url).timeout(CALL_WAIT);
+            let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|_| format!("Convex at {host} is unreachable."))?;
+            let mut builder = client.request(request.method, &request.url).timeout(CALL_WAIT);
             if let Some(auth) = &request.auth {
                 builder = builder.header(reqwest::header::AUTHORIZATION, auth);
             }
@@ -223,12 +226,18 @@ pub async fn resolve(http: &dyn Http, key: &DeployKey) -> Result<Connection, Str
 
 async fn resolved(http: &dyn Http, key: &DeployKey) -> Result<Connection, String> {
     let url = call(http, key, "", Route::UrlForKey).await?;
-    let url = url.as_str().filter(|u| u.starts_with("https://") || u.starts_with("http://")).ok_or("Convex sent no address for this deploy key.")?;
+    let url = url.as_str().filter(|u| encrypted(u, &api_base())).ok_or("Convex sent no address for this deploy key.")?;
     let url = url.trim_end_matches('/').to_owned();
     let slugs = call(http, key, "", Route::TeamAndProject).await?;
     let slug = |field: &str| slugs[field].as_str().unwrap_or_default().to_owned();
     call(http, key, &url, Route::Tables { cursor: None }).await?;
     Ok(Connection { id: key.deployment().to_owned(), kind: key.kind(), url, team: slug("team"), project: slug("project"), key_hint: key.hint(), repos: vec![] })
+}
+
+/// Whether a key may travel to the deployment address `url`. Convex's API names https addresses;
+/// plain http is for a stub that stands in for that API.
+fn encrypted(url: &str, api: &str) -> bool {
+    url.starts_with("https://") || (api != API && url.starts_with("http://"))
 }
 
 /// Table names for the workflow step's panel, sorted. The owner asks, so no rule applies.
@@ -240,7 +249,7 @@ async fn names(http: &dyn Http, key: &DeployKey, url: &str) -> Result<Vec<String
     let mut names = vec![];
     let mut cursor: Option<String> = None;
     loop {
-        let page = value(call(http, key, url, Route::Tables { cursor: cursor.as_deref() }).await?);
+        let page = value(call(http, key, url, Route::Tables { cursor: cursor.as_deref() }).await?)?;
         names.extend(page["page"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str().map(str::to_owned)));
         cursor = page["continueCursor"].as_str().map(str::to_owned);
         if page["isDone"] != false || cursor.is_none() || names.len() >= TABLES_MAX {
@@ -252,8 +261,12 @@ async fn names(http: &dyn Http, key: &DeployKey, url: &str) -> Result<Vec<String
     Ok(names)
 }
 
-fn value(mut body: Value) -> Value {
-    body["value"].take()
+/// The `value` of a query's answer. An answer that is no object is not Convex's.
+fn value(body: Value) -> Result<Value, String> {
+    match body {
+        Value::Object(mut fields) => Ok(fields.remove("value").unwrap_or_default()),
+        _ => Err(UNREADABLE.into()),
+    }
 }
 
 /// A read for an admitted grant, as the JSON text the agent sees.
@@ -299,7 +312,7 @@ async fn table_shape(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &st
     if !names.iter().any(|name| name == table) {
         return Err(no_table(table, &names));
     }
-    let schemas = value(call(http, key, &grant.connection.url, Route::Schemas).await?);
+    let schemas = value(call(http, key, &grant.connection.url, Route::Schemas).await?)?;
     let active: Value = schemas["active"].as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or(Value::Null);
     let declared = active["tables"].as_array().into_iter().flatten().find(|t| t["tableName"] == table);
     let Some(declared) = declared.filter(|t| t["documentType"]["type"] == "object") else {
@@ -348,7 +361,7 @@ fn type_text(t: &Value) -> String {
 
 async fn data(http: &dyn Http, key: &DeployKey, grant: &Grant, table: &str, limit: Option<u32>, cursor: Option<&str>, oldest_first: bool) -> Result<String, String> {
     let limit = limit.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
-    let page = value(call(http, key, &grant.connection.url, Route::TableData { table, oldest_first, cursor, limit }).await?);
+    let page = value(call(http, key, &grant.connection.url, Route::TableData { table, oldest_first, cursor, limit }).await?)?;
     let documents: Vec<Value> = page["page"].as_array().cloned().unwrap_or_default().into_iter().map(clean).collect();
     if documents.is_empty() && cursor.is_none() {
         let names = visible(http, key, grant).await?;
@@ -400,13 +413,13 @@ async fn run(http: &dyn Http, key: &DeployKey, url: &str, function: &str, args: 
 }
 
 /// A function's value and log lines, once the value fits under `CAP_BYTES`.
-fn ran(mut body: Value) -> Result<String, String> {
-    let value = clean(body["value"].take());
+fn ran(body: Value) -> Result<String, String> {
+    let logs = body.get("logLines").cloned().unwrap_or_default();
+    let value = clean(value(body)?);
     let size = value.to_string().len();
     if size > CAP_BYTES {
         return Err(format!("The answer is {size} bytes, over the {} KB a read may return. Return less: fewer documents, fewer fields or a count.", CAP_BYTES / 1024));
     }
-    let logs = body["logLines"].take();
     Ok(json!({ "value": value, "logs": if logs.is_null() { json!([]) } else { logs } }).to_string())
 }
 
@@ -758,6 +771,58 @@ mod tests {
         assert_eq!(resolved, Connection { id: "quick-lemur-789".into(), kind: Kind::Dev, url: "https://quick-lemur-789.convex.cloud".into(), team: "acme".into(), project: "shop".into(), key_hint: "…cret".into(), repos: vec![] });
         let no_url = fake(vec![(json!({ "code": "x" }), 200)]);
         assert_eq!(block_on(resolve(&no_url, &key())), Err("Convex sent no address for this deploy key.".into()));
+    }
+
+    #[test]
+    fn a_key_travels_to_an_https_address_and_to_plain_http_only_beside_a_stub() {
+        assert!(encrypted("https://quick-lemur-789.convex.cloud", API));
+        assert!(!encrypted("http://data.example.com", API), "a custom domain must not take the key in clear text");
+        assert!(!encrypted("ftp://data.example.com", "http://127.0.0.1:3999"));
+        assert!(encrypted("http://127.0.0.1:3210", "http://127.0.0.1:3999"), "a stubbed API names a local backend");
+    }
+
+    #[test]
+    fn an_answer_that_is_no_object_is_an_error_and_never_a_panic() {
+        for body in [json!("<html>login</html>"), json!([1, 2]), json!(7)] {
+            let odd = || fake(vec![(body.clone(), 200), (body.clone(), 200)]);
+            let unreadable = Err("Convex sent an answer pinned could not read.".to_owned());
+            assert_eq!(block_on(read(&odd(), &key(), &everything(), Ask::Tables { table: None })), unreadable, "{body}");
+            assert_eq!(block_on(read(&odd(), &key(), &everything(), Ask::Data { table: "invoices".into(), limit: None, cursor: None, oldest_first: false })), unreadable, "{body}");
+            assert_eq!(block_on(read(&odd(), &key(), &everything(), Ask::Query { code: "return 1;".into() })), unreadable, "{body}");
+            assert_eq!(block_on(read(&odd(), &key(), &everything(), Ask::Run { function: "invoices:byNumber".into(), args: json!({}) })), unreadable, "{body}");
+        }
+        let nothing = fake(vec![(json!({ "status": "success", "value": null }), 200)]);
+        assert_eq!(block_on(read(&nothing, &key(), &everything(), Ask::Query { code: "return;".into() })), Ok(r#"{"value":null,"logs":[]}"#.into()));
+    }
+
+    #[test]
+    fn reqwest_follows_no_redirect_so_a_body_with_the_key_goes_nowhere_else() {
+        use std::io::{Read, Write};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let target = format!("http://{}/api/run_test_function", elsewhere.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut seen = vec![0u8; 0];
+            let mut buf = [0u8; 4096];
+            while !String::from_utf8_lossy(&seen).contains("\"format\"") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nlocation: {target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").unwrap();
+        });
+        let response = block_on(Reqwest.send(Route::Adhoc { code: "return 1;" }.request(&key(), &address))).unwrap();
+        served.join().unwrap();
+        assert_eq!(response.status, 307);
+        assert_eq!(outcome("quick-lemur-789", response), Err("Convex answered 307: ".into()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(elsewhere.accept().is_err(), "the redirect's target heard a request");
     }
 
     #[test]

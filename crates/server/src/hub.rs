@@ -440,7 +440,6 @@ impl Hub {
         format!("{name} runs an older pinned that can't mint a Claude token for boxes: update it in Settings › Machines")
     }
 
-    /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
     /// A Convex tool's ask from the session in `tab` on `machine`, decided from the tabs the
     /// account's machines reported, never from the call.
     pub async fn convex(&self, account: &Arc<Account>, machine: &str, tab: &str, repo: Option<&str>, ask: pinned_core::convex::Ask) -> Result<Value, String> {
@@ -448,6 +447,7 @@ impl Hub {
         self.connectors(account).await?.convex(&*self.convex_http, machine, tab, repo, &find, ask).await
     }
 
+    /// Answers an account-level call, from a client or (only a session's callbacks) a machine.
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
