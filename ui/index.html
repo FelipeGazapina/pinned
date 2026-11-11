@@ -38,6 +38,7 @@
 <link rel="stylesheet" href="gui-keybindings.css">
 <link rel="stylesheet" href="gui-pulls.css">
 <link rel="stylesheet" href="gui-needs-you.css">
+<link rel="stylesheet" href="gui-phone.css">
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -58,6 +59,7 @@
     <div id="workspace">
       <aside id="sidebar">
         <div class="brand" data-tauri-drag-region><button id="sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button><b data-tauri-drag-region>pinned</b></div>
+        <div id="phone-head"><h1>Threads</h1><button type="button" id="phone-search" class="phone-round" aria-label="Search threads" data-side-icon="side-search"></button><button type="button" id="phone-new" class="phone-round new" aria-label="New thread" data-side-icon="plus"></button></div>
         <div class="side-head">
           <div class="row"><label class="search"><span class="glyph" data-side-icon="side-search"></span><input id="thread-search" placeholder="Search or jump to" autocomplete="off" spellcheck="false"><kbd id="search-key" hidden></kbd><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
             <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N)" data-side-icon="side-new"></button></div>
@@ -68,6 +70,7 @@
           <button type="button" class="nav-row" data-nav="pull-requests" data-open-page="pull-requests"><span class="mark" data-side-icon="side-pr"></span><span class="label">Pull requests</span><span class="meta" hidden></span></button>
           <button type="button" class="nav-row" data-nav="usage" data-open-page="usage"><span class="mark" data-side-icon="side-usage"></span><span class="label">Usage</span><span class="meta" hidden><span class="text"></span><span class="bar"><span></span></span></span></button>
         </nav>
+        <div id="phone-chips" role="group" aria-label="Filter threads by project"></div>
         <div class="threads-head"><button id="project-filter" class="projects" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
           <button id="add-project" class="icon" aria-label="Add project" data-tip="Add project" data-side-icon="side-add-project"></button></div>
         <div id="thread-list"></div>
@@ -156,6 +159,7 @@
         <div id="actions"><button id="actions-toggle" title="Session actions">⋮</button><div id="actions-menu" hidden></div></div>
       </div>
     </div>
+    <nav id="phone-tabs" aria-label="Main"></nav>
     <div id="settings">
       <nav id="settings-nav" aria-label="Settings">
         <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)" aria-label="Back to the app"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
@@ -252,6 +256,7 @@
 <script src="gui-taste.js"></script>
 <script src="gui-delegation.js"></script>
 <script src="gui-needs-you.js"></script>
+<script src="gui-phone.js"></script>
 <script src="vendor/theme-palettes.js"></script>
 <script src="theme-colors.js"></script>
 <script src="gui-theme.js"></script>

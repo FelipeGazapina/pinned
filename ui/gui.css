@@ -392,18 +392,8 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   #panel-resize, #panel-expand { display: none !important; }
 }
 @media (max-width: 768px) {
+  /* A phone shows one screen at a time (gui-phone.css): the sidebar is the Threads screen, not a column. */
   body[data-mode="gui"] #workspace, body[data-mode="gui"][data-panel="open"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0 !important; }
-  /* The workspace's box, not 100vw: a phone's layout viewport grows around whatever overflows it, and a
-   * sidebar sized by vw then runs past the document's right edge and off the screen (same class of bug as
-   * the PR popover's). #workspace is the containing block and always matches the document's width.
-   * The 360px cap keeps the overlay a panel floating over the chat: the dimmed thread stays visible on
-   * the right, and tapping it dismisses the panel. */
-  body[data-mode="gui"] #sidebar { position: absolute; top: 0; bottom: 0; left: 0; z-index: 35; width: min(360px, calc(100% - 12px));
-    box-shadow: 16px 0 40px -8px var(--g-shadow); }
-  body[data-mode="gui"][data-sidebar="open"] #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5); }
-  /* A swipe dims the thread by how far the sidebar has come in (gui-gestures.js). */
-  body[data-mode="gui"].sidebar-dragging #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5);
-    opacity: var(--scrim, 0); transition: opacity var(--scrim-ms, 0ms) ease-out; }
   #chat-head { padding: 0 8px 0 12px; }
 }
 @media (max-width: 639px) {

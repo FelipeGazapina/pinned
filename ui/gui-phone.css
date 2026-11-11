@@ -1,0 +1,140 @@
+/* The phone shell (gui-phone.js): every rule here is keyed on body[data-phone-screen], which exists
+   only at 768px and below in the app view, so a wider window never sees them. The values are the
+   PhoneTabs, Phone-Home and Phone-More boards'. */
+#phone-head, #phone-chips, #phone-tabs { display: none; }
+
+body[data-phone-screen] {
+  /* The boards' status bar, less what the device's own safe area already keeps clear. */
+  --phone-top: max(0px, calc(54px - env(safe-area-inset-top)));
+  --phone-tabs-h: calc(54px + max(30px, env(safe-area-inset-bottom)));
+  --phone-dim: color-mix(in srgb, var(--g-fg) 54.5%, var(--g-canvas));
+}
+
+/* The tab bar: four labelled icons over the bottom safe area. */
+body[data-phone-tabs] #expanded { padding-bottom: 0; }
+body[data-phone-tabs] #phone-tabs { display: flex; flex: none; align-items: flex-start; box-sizing: border-box; height: var(--phone-tabs-h); padding: 6px 8px 0;
+  border-top: 1px solid var(--g-side-border); background: var(--g-sidebar); font-family: var(--g-sans); }
+#phone-tabs button { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; height: 48px; padding: 4px 0 0;
+  color: var(--phone-dim); font-size: 11px; font-weight: 600; line-height: normal; -webkit-user-select: none; user-select: none; }
+#phone-tabs button[aria-current="page"] { color: var(--g-fg); }
+#phone-tabs .i { width: 22px; height: 22px; stroke-width: 1.75; }
+#phone-tabs .label { white-space: nowrap; }
+#phone-tabs .badge { position: absolute; top: 0; left: 50%; margin-left: 6px; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border: 2px solid var(--g-sidebar);
+  border-radius: 9px; background: var(--g-warning); color: color-mix(in srgb, var(--g-warning) 10%, black); font-size: 11px; font-weight: 700; line-height: 14px; text-align: center;
+  font-variant-numeric: tabular-nums; }
+#phone-tabs .badge[hidden] { display: none; }
+body[data-phone-tabs] #settings { bottom: var(--phone-tabs-h); }
+
+/* One screen at a time. The thread underneath only turns invisible, so it keeps its scroll. */
+body[data-phone-screen="threads"] #sidebar { grid-column: 1 / -1; grid-row: 1 / -1; z-index: 3; visibility: visible; border-right: 0; background: var(--g-bg);
+  font-size: 16px; line-height: 1.35; color: var(--g-fg); }
+body[data-phone-screen="threads"] :is(#chat, #page-view, #panel) { visibility: hidden; }
+body[data-phone-screen]:not([data-phone-screen="threads"]) #sidebar { visibility: hidden; }
+body:is([data-phone-screen="needs-you"], [data-phone-screen="more"]) #panel { visibility: hidden; }
+
+/* An undo or a notice stays in sight off the Threads screen: over the tab bar, or under a thread's header. */
+body[data-phone-screen]:not([data-phone-screen="threads"]) #side-notice:not([hidden]) { visibility: visible; position: fixed; left: 12px; right: 12px; bottom: calc(var(--phone-tabs-h) + 8px);
+  z-index: 80; margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--g-raised); color: var(--g-fg); font-size: 14px; box-shadow: 0 12px 28px -12px var(--g-shadow); }
+body[data-phone-screen]:not([data-phone-tabs]) #side-notice:not([hidden]) { top: calc(env(safe-area-inset-top) + 60px); bottom: auto; }
+
+/* Threads: the large title with Search and New thread, the project chips, then the list. */
+body[data-phone-screen="threads"] #sidebar :is(.brand, #side-nav, .threads-head, footer, #sidebar-resize) { display: none; }
+body[data-phone-screen="threads"] #phone-head { display: flex; flex: none; align-items: center; gap: 8px; padding: calc(var(--phone-top) + 4px) 16px 10px; }
+#phone-head h1 { flex: 1; min-width: 0; margin: 0; font-size: 28px; font-weight: 700; line-height: 1.35; letter-spacing: -0.01em; }
+#phone-head .phone-round { display: flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; border-radius: 22px;
+  background: rgb(var(--g-ink-rgb) / 0.07); color: var(--g-fg); }
+#phone-head .phone-round.new { background: var(--g-primary); color: var(--g-on-primary); }
+#phone-head .phone-round .i { width: 20px; height: 20px; stroke-width: 1.75; }
+#phone-head .phone-round.new .i { stroke-width: 2; }
+body[data-phone-screen="threads"] #sidebar .side-head { display: none; padding: 0 16px 10px; }
+body[data-phone-screen="threads"] #sidebar[data-phone-search] .side-head { display: flex; }
+body[data-phone-screen="threads"] #sidebar .side-head #new-thread { display: none; }
+body[data-phone-screen="threads"] #sidebar .search { height: 44px; padding: 0 6px 0 14px; border: 0; border-radius: 22px; background: rgb(var(--g-ink-rgb) / 0.07); color: var(--phone-dim); }
+body[data-phone-screen="threads"] #sidebar .search input { font-size: 16px; color: var(--g-fg); }
+body[data-phone-screen="threads"] #sidebar .search .glyph .i { width: 18px; height: 18px; }
+body[data-phone-screen="threads"] #phone-chips { display: flex; flex: none; gap: 8px; padding: 0 16px 10px; overflow-x: auto; scrollbar-width: none; }
+#phone-chips::-webkit-scrollbar { display: none; }
+#phone-chips .phone-chip { flex: none; height: 36px; padding: 0 14px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 18px; background: transparent; color: var(--g-fg);
+  font-size: 14px; white-space: nowrap; }
+#phone-chips .phone-chip[aria-pressed="true"] { border: 0; background: var(--g-fg); color: var(--g-canvas); font-weight: 600; }
+#phone-chips .phone-chip.add { display: flex; align-items: center; justify-content: center; width: 36px; padding: 0; color: var(--phone-dim); }
+#phone-chips .phone-chip.add .i { width: 18px; height: 18px; stroke-width: 1.75; }
+
+body[data-phone-screen="threads"] #thread-list { position: relative; padding: 0 0 12px; gap: 0; mask-image: none; -webkit-mask-image: none; }
+body[data-phone-screen="threads"] #thread-list .project-head { gap: 8px; padding: 14px 16px 4px; font-size: 13px; color: var(--g-text); }
+body[data-phone-screen="threads"] #thread-list .project-head :is(.monogram, .favicon) { width: 20px; height: 20px; border-radius: 6px; }
+body[data-phone-screen="threads"] #thread-list .project-head .meta { font-size: 13px; color: var(--phone-dim); }
+body[data-phone-screen="threads"] #thread-list .project-head .head-act { width: 32px; height: 32px; margin: -6px -8px -6px 0; }
+
+body[data-phone-screen="threads"] #thread-list .thread-row { border-radius: 0; -webkit-touch-callout: none; touch-action: pan-y; }
+body[data-phone-screen="threads"] #thread-list .thread-row:is(.active, .selected, :hover) { background: none; }
+body[data-phone-screen="threads"] #thread-list .thread-row:active { background: var(--g-row-hover); }
+body[data-phone-screen="threads"] #thread-list .thread-row .l2 { color: var(--g-fg); }
+body[data-phone-screen="threads"] #thread-list .thread-row .stamp { font-size: 13px; color: var(--phone-dim); }
+body[data-phone-screen="threads"] #thread-list .thread-row .stamp.status.info { color: var(--g-blue); }
+body[data-phone-screen="threads"] #thread-list .thread-row :is(.stamp.status:is(.warning, .limited, .input), .stamp.when.unread) { color: var(--g-warning-fg); }
+body[data-phone-screen="threads"] #thread-list .thread-row .stamp.status.error { color: var(--g-error); }
+/* A thread: its dot, then the title over the second line, and its state beside both. */
+body[data-phone-screen="threads"] #thread-list .thread-row.tall { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; grid-template-areas: "glyph title slot" "glyph sub slot";
+  align-items: center; column-gap: 12px; row-gap: 2px; min-height: 60px; padding: 8px 16px; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall :is(.lines, .l1) { display: contents; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall > .status-glyph { grid-area: glyph; width: 12px; height: 12px; margin: 0; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall .l2 { grid-area: title; font-size: 16px; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall .slot { grid-area: slot; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall .l3 { grid-area: sub; gap: 6px; font-size: 13px; color: var(--phone-dim); }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall .l3:empty { display: none; }
+body[data-phone-screen="threads"] #thread-list .thread-row .l3 .role:not(.worker) { padding: 0; background: none; color: inherit; font-size: inherit; font-weight: 400; line-height: inherit; }
+body[data-phone-screen="threads"] #thread-list .thread-row .l3 .role:not(.worker):not(:last-child)::after { content: "·"; margin: 0 -2.5px 0 3.5px; }
+/* A worker on the guide line, under its Captain. */
+body[data-phone-screen="threads"] #thread-list .thread-row.line { gap: 12px; min-height: 44px; padding: 4px 16px 4px calc(40px + (var(--depth, 1) - 1) * 16px); }
+body[data-phone-screen="threads"] #thread-list .thread-row.line::before { left: calc(21px + (var(--depth, 1) - 1) * 16px); border-left-color: rgb(var(--g-ink-rgb) / 0.14); }
+body[data-phone-screen="threads"] #thread-list .thread-row.line > .status-glyph { width: 10px; height: 10px; }
+body[data-phone-screen="threads"] #thread-list .thread-row.line .l2 { font-size: 15px; color: var(--g-text); }
+body[data-phone-screen="threads"] #thread-list .thread-row.slim { gap: 12px; min-height: 44px; padding: 4px 16px; }
+body[data-phone-screen="threads"] #thread-list .thread-row.slim .l2 { font-size: 15px; color: var(--g-text); }
+body[data-phone-screen="threads"] #thread-list :is(.settled-head, .show-more) { min-height: 44px; padding: 0 16px; border-radius: 0; font-size: 13px; }
+body[data-phone-screen="threads"] #thread-list .settled-head.sink::before { left: 16px; right: 16px; }
+body[data-phone-screen="threads"] #thread-list :is(.machine-note, .agent-asks) { margin: 0 12px 4px; }
+body[data-phone-screen="threads"] #thread-list .empty { font-size: 14px; }
+body[data-phone-screen="threads"] :is(#side-notice, #sync-alert) { margin: 0 12px 8px; font-size: 14px; }
+
+/* A swipe on a row: the row follows the finger over the action's color and name. */
+body[data-phone-screen="threads"] #thread-list .thread-row.swiping { z-index: 1; background: var(--g-bg); }
+.swipe-under { position: absolute; left: 0; right: 0; z-index: 0; display: flex; align-items: center; gap: 8px; padding: 0 20px; box-sizing: border-box;
+  color: var(--g-on-primary); font-size: 15px; font-weight: 600; pointer-events: none; opacity: 0.7; }
+.swipe-under[data-act="settle"] { justify-content: flex-end; background: var(--g-success); }
+.swipe-under[data-act="snooze"] { background: var(--g-info); }
+.swipe-under.armed { opacity: 1; }
+.swipe-under .i { width: 18px; height: 18px; }
+
+/* Pages under the tab bar: the boards' status bar on top and no sidebar toggle; a page opened from
+   More has a way back to it. */
+body[data-phone-screen] #page-view .page-head .side-toggle { display: none; }
+body[data-phone-screen="more"]:not([data-page="more"]) #page-view .page-head .page-back { display: grid; }
+body:is([data-phone-screen="needs-you"], [data-phone-screen="more"][data-page="more"]) #page-view .page-head { flex-wrap: nowrap; height: var(--phone-top); min-height: 0; padding: 0; border: 0; }
+body[data-phone-screen="more"][data-page="more"] #page-view .page-head h1 { display: none; }
+
+/* More: the usage card, then the work and setup lists. */
+.more-wrap { max-width: 390px; margin: 0 auto; padding: 0 0 24px; color: var(--g-fg); font-size: 16px; line-height: 1.4; }
+.more-title { padding: 4px 16px 12px; }
+.more-title h1 { margin: 0; font-size: 28px; font-weight: 700; line-height: 1.4; letter-spacing: -0.01em; }
+.more-body { display: flex; flex-direction: column; gap: 14px; padding: 0 12px; }
+.more-usage { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid rgb(var(--g-ink-rgb) / 0.09); border-radius: 16px; background: var(--g-raised);
+  color: inherit; text-align: left; line-height: 1.4; }
+.more-usage-head { display: flex; align-items: center; gap: 8px; }
+.more-usage-head .label { flex: 1; font-weight: 600; }
+.more-usage-head .meta { font-size: 14px; color: var(--g-side-muted); }
+.more-bar { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.more-bar .name { width: 54px; flex: none; color: var(--g-side-muted); }
+.more-bar .track { flex: 1; height: 6px; border-radius: 3px; background: rgb(var(--g-ink-rgb) / 0.12); overflow: hidden; }
+.more-bar .track > span { display: block; height: 6px; background: var(--g-info); }
+.more-bar .pct { width: 36px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+.more-list { display: flex; flex-direction: column; border: 1px solid rgb(var(--g-ink-rgb) / 0.09); border-radius: 16px; overflow: hidden; }
+.more-row { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 14px; border-bottom: 1px solid var(--g-border); background: var(--g-raised);
+  color: var(--g-fg); text-align: left; line-height: 1.4; }
+.more-row .label { flex: 1; min-width: 0; }
+.more-row .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--g-side-muted); }
+.more-row .hint[data-tone="ok"] { color: var(--g-success); }
+.more-row .hint[data-tone="new"] { color: var(--g-link); }
+.more-row .chev { width: 16px; height: 16px; flex: none; color: var(--phone-dim); }
+:is(.more-row, .more-usage):active { background: color-mix(in srgb, var(--g-raised) 88%, var(--g-ink)); }

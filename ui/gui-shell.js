@@ -604,7 +604,7 @@ function setPage(html) {
   if (body) body.scrollTop = top;
 }
 const headHtml = (title, rest = "") =>
-  `<header class="page-head" data-tauri-drag-region><button type="button" class="icon side-toggle" title="Toggle sidebar (⌘B)">${icon("panel-left")}</button><h1>${title}</h1>${rest}</header>`;
+  `<header class="page-head" data-tauri-drag-region><button type="button" class="icon side-toggle" title="Toggle sidebar (⌘B)">${icon("panel-left")}</button><button type="button" class="icon page-back" aria-label="Back to More">${icon("arrow-left")}</button><h1>${title}</h1>${rest}</header>`;
 
 pageView.addEventListener("click", (e) => {
   if (e.target.closest(".side-toggle")) toggleSidebar(true);
