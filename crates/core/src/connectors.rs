@@ -416,18 +416,32 @@ pub enum RunsOn {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxStep {
-    #[serde(default)]
-    pub size: BoxSize,
+    /// The size the workflow names. None follows the project's and the account's default box size
+    /// (`Tastes::box_size`) when the box opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<BoxSize>,
 }
 
 /// Serialized names match Upstash's `size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxSize {
-    Small,
+    // The built-in default, when neither the call, the project nor the account names a size. A
+    // plain comment: a doc on one variant would turn the schema's enum into a oneOf.
     #[default]
+    Small,
     Medium,
     Large,
+}
+
+impl BoxSize {
+    pub fn name(self) -> &'static str {
+        match self {
+            BoxSize::Small => "small",
+            BoxSize::Medium => "medium",
+            BoxSize::Large => "large",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -540,8 +554,10 @@ enum StoredRunsOn {
     Machine(String),
     Box {
         kind: UpstashBoxKind,
-        #[serde(default)]
-        size: BoxSize,
+        /// Left out when the workflow names none. A workflow saved before the default box size
+        /// always has one, since the old app wrote its default, medium, out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
     },
 }
 
@@ -981,6 +997,7 @@ struct GraphStart {
 }
 
 /// Replies for a graph run's thread, typed into its session rather than today's delivery.
+#[derive(Clone)]
 struct GraphInbox {
     channel: String,
     thread: String,
@@ -1993,6 +2010,55 @@ impl Connectors {
         let TriggerInput::Slack { posts, .. } = trigger_of(run).ok()? else { return None };
         Some(posts.into_iter().map(|post| slack::Post { ts: post.ts, author: post.author, text: post.text, files: post.files }).collect())
     }
+
+    /// Stores `value` as `{{vars.<name>}}` of the live graph run whose session `connector` runs
+    /// on `subject`, for its later steps to read. Grants nothing else: a workflow with fix off
+    /// still files nothing and changes no code.
+    pub fn run_set(&self, connector: &str, subject: &Subject, name: &str, value: &str) -> Result<String, String> {
+        check_var(name, value)?;
+        {
+            let mut runs = self.runs.lock().unwrap();
+            let run = runs
+                .iter_mut()
+                .rev()
+                .find(|run| {
+                    matches!(run.status, Status::Running | Status::Waiting)
+                        && matches!(run.session, Session::Live { .. })
+                        && &run.subject == subject
+                        && run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector
+                })
+                .ok_or("this session was not started by a workflow run, so it has no run variables to set")?;
+            if !run.context["vars"].is_object() {
+                run.context["vars"] = json!({});
+            }
+            run.context["vars"][name] = value.into();
+        }
+        self.save_runs()?;
+        Ok(format!("set {{{{vars.{name}}}}} for this workflow run"))
+    }
+}
+
+/// Puts back the variables a stored run had: only `run_set` writes them, so a drive that cloned
+/// the run before the session set one does not drop it.
+fn keep_vars(run: &mut runner::Run, vars: Option<Value>) {
+    if let Some(vars) = vars {
+        run.context["vars"] = vars;
+    }
+}
+
+/// The longest value `pinned run set` stores, in bytes.
+pub const VAR_MAX_BYTES: usize = 8 * 1024;
+
+/// A run variable's name is 1 to 32 of `a-z`, `0-9`, `_` and `-`, and its value at most 8 KB.
+fn check_var(name: &str, value: &str) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+    if name.is_empty() || name.len() > 32 || !name.chars().all(allowed) {
+        return Err(format!("bad variable name {name:?}: use 1 to 32 of a-z, 0-9, _ and -"));
+    }
+    if value.len() > VAR_MAX_BYTES {
+        return Err(format!("the value of {name} is {} bytes, over the 8 KB limit", value.len()));
+    }
+    Ok(())
 }
 
 fn arg<T: Serialize>(value: T) -> String {
@@ -2263,6 +2329,33 @@ fn trigger_text(input: &TriggerInput) -> String {
     }
 }
 
+/// The text of the message that started a Slack run: the mention inside a thread that was
+/// already there, else the top-level message. Empty for an issue trigger.
+fn trigger_mention(input: &TriggerInput) -> String {
+    let TriggerInput::Slack { posts, thread, request, .. } = input else { return String::new() };
+    let ts = request.as_deref().unwrap_or(thread);
+    posts.iter().find(|post| post.ts == ts).or_else(|| posts.first()).map(|post| post.text.clone()).unwrap_or_default()
+}
+
+/// A file-issue title for when the step's own renders empty: the mention's first non-empty
+/// line without the leading mention of the bot (`@<bot>` or `<@USER>`), at most 120
+/// characters, never the whole thread.
+fn fallback_title(mention: &str, bot: Option<&str>) -> String {
+    let line = mention.lines().map(|line| without_bot(line.trim(), bot)).find(|line| !line.is_empty()).unwrap_or("");
+    line.chars().take(120).collect::<String>().trim_end().to_owned()
+}
+
+fn without_bot<'a>(line: &'a str, bot: Option<&str>) -> &'a str {
+    let raw = line.strip_prefix("<@").and_then(|rest| rest.split_once('>')).map(|(_, rest)| rest);
+    let named = bot.filter(|bot| !bot.is_empty()).and_then(|bot| line.strip_prefix('@')?.strip_prefix(bot));
+    match raw.or(named) {
+        Some(rest) if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == ',' || c == ':') => {
+            rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == ':')
+        }
+        _ => line,
+    }
+}
+
 fn post_lines(posts: &[TriggerPost]) -> String {
     posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n")
 }
@@ -2294,9 +2387,10 @@ fn join_text(left: &str, right: &str) -> String {
     }
 }
 
-/// Fills `{{path}}` spans from the run's data: the trigger's text, title and url, every
-/// classify answer by question name, and the filed issue once a file-issue step ran.
-/// Unknown spans stay literal.
+/// Fills `{{path}}` spans from the run's data: the trigger's text, mention, title and url, every
+/// classify answer by question name, the filed issue once a file-issue step ran, and the
+/// variables the session set with `pinned run set`. An unset `vars.` span is empty; other
+/// unknown spans stay literal.
 pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
     if !text.contains("{{") {
         return text.to_owned();
@@ -2304,6 +2398,7 @@ pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
     let mut trigger = serde_json::Map::new();
     if let Ok(input) = trigger_of(run) {
         trigger.insert("text".into(), trigger_text(&input).into());
+        trigger.insert("mention".into(), trigger_mention(&input).into());
         match input {
             TriggerInput::Issue { identifier, title, url, .. } => {
                 trigger.insert("identifier".into(), identifier.into());
@@ -2325,6 +2420,7 @@ pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
         "trigger": trigger,
         "answers": answers,
         "issue": run.context.get("issue").cloned().unwrap_or(Value::Null),
+        "vars": run.context.get("vars").cloned().unwrap_or(Value::Null),
     });
     let mut out = String::new();
     let mut rest = text;
@@ -2336,6 +2432,8 @@ pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
                 let path = after[..end].trim();
                 match lookup_path(&data, path) {
                     Some(value) => out.push_str(&value),
+                    // A run variable the session never set is empty, so a file-issue falls back.
+                    None if path.starts_with("vars.") => {}
                     None => out.push_str(&format!("{{{{{path}}}}}")),
                 }
                 rest = &after[end + 2..];
@@ -2575,7 +2673,7 @@ Node types, fields (? means optional) and ports:
 {workflows}
 - stop: ends a branch. No ports.
 
-Text fields may fill values from the run with {{{{trigger.text}}}}, {{{{trigger.title}}}}, {{{{trigger.url}}}}, {{{{answers.question}}}}, {{{{issue.identifier}}}} and {{{{issue.url}}}}. Prefer them over invented names: a reply posts {{{{trigger.text}}}} back, an issue title starts from it.
+Text fields may fill values from the run with {{{{trigger.text}}}}, {{{{trigger.mention}}}}, {{{{trigger.title}}}}, {{{{trigger.url}}}}, {{{{answers.question}}}}, {{{{issue.identifier}}}} and {{{{issue.url}}}}. Prefer them over invented names: a reply posts {{{{trigger.text}}}} back, an issue title starts from {{{{trigger.mention}}}}, the message that mentioned pinned, since {{{{trigger.text}}}} is the whole thread.
 
 Every node may carry a "group" name; steps of one concern share it. Answer with one JSON object only: {{"nodes":[{{"name":""?,"type":""?, ...fields}}],"edges":[{{"from":""?,"port":"out"?,"to":""?}}]}}. Node names are unique. Ports must exist on their node."#,
         workflows = workflows,
@@ -2810,7 +2908,44 @@ fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool,
     }
     let talk = talk_text(run, prompt, seeded);
     let history = seeded.then(|| runner::history(run));
-    graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe)
+    let mut opened = graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe)?;
+    let names = library.get(&run.connector).map(issue_vars).unwrap_or_default();
+    if matches!(trigger, TriggerInput::Slack { .. }) && !names.is_empty() {
+        if let Some(prompt) = opened.args.last_mut() {
+            prompt.push_str(&run_set_line(&names, exe));
+        }
+    }
+    Ok(opened)
+}
+
+/// The `{{vars.<name>}}` names a graph's file-issue steps read, in order, each once.
+fn issue_vars(graph: &Graph) -> Vec<String> {
+    let mut names = Vec::<String>::new();
+    for node in &graph.nodes {
+        let NodeKind::FileIssue { title, description, .. } = &node.kind else { continue };
+        for text in [title, description] {
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find("{{") {
+                let after = &rest[start + 2..];
+                let Some(end) = after.find("}}") else { break };
+                if let Some(name) = after[..end].trim().strip_prefix("vars.") {
+                    if !name.is_empty() && !names.iter().any(|have| have == name) {
+                        names.push(name.to_owned());
+                    }
+                }
+                rest = &after[end + 2..];
+            }
+        }
+    }
+    names
+}
+
+/// The line a Slack session gets when its workflow files an issue from what the session sets.
+fn run_set_line(names: &[String], exe: &str) -> String {
+    format!(
+        "\n\nThis workflow files its Linear issue from values you set: run `'{exe}' run set <name> \"<value>\"` once for each of {} before you end your turn.",
+        names.join(", ")
+    )
 }
 
 /// The session today's builders would open for `owner`, plus the run's direct answers, the talk, and,
@@ -3053,7 +3188,9 @@ impl Connectors {
         {
             let mut runs = self.runs.lock().unwrap();
             if let Some(slot) = runs.iter_mut().find(|have| have.id == run.id) {
+                let vars = slot.context.get("vars").cloned();
                 *slot = run.clone();
+                keep_vars(slot, vars);
             }
         }
         self.save_runs()
@@ -3075,7 +3212,9 @@ impl Connectors {
         {
             let mut runs = self.runs.lock().unwrap();
             if let Some(slot) = runs.iter_mut().find(|have| have.id == run.id) {
+                let vars = slot.context.get("vars").cloned();
                 *slot = run;
+                keep_vars(slot, vars);
             } else {
                 runs.push(run);
             }
@@ -3472,11 +3611,19 @@ impl Connectors {
         let context = post_lines(&posts);
         let answers = self.classify(&classify, &input, Some(&context)).await?;
         let port = runner::classify_port(library, &run.connector, &node, &classify, &answers);
-        if !runner::branch_without_session(library, &run.connector, &node, &port) {
+        // A branch that files an issue after a session step walks it in the thread's live
+        // session, which then gets the mention typed with the step's prompt.
+        let in_session = matches!(run.session, Session::Live { .. }) && runner::branch_files_in_session(library, &run.connector, &node, &port);
+        if !in_session && !runner::branch_without_session(library, &run.connector, &node, &port) {
             return Ok(false);
         }
         let value = serde_json::to_value(&input).map_err(|e| e.to_string())?;
-        let follow_up = runner::start_follow_up(library, &run.connector, subject, value, answers, &Utc::now().to_rfc3339());
+        let mut follow_up = runner::start_follow_up(library, &run.connector, subject, value, answers, &Utc::now().to_rfc3339());
+        if in_session {
+            follow_up.session = run.session.clone();
+            follow_up.session_owner = Some(run.session_owner.clone().unwrap_or_else(|| run.connector.clone()));
+            self.inbox.lock().unwrap().push(item.clone());
+        }
         self.runs.lock().unwrap().push(follow_up);
         self.save_runs()?;
         let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
@@ -3647,11 +3794,20 @@ impl Connectors {
         if team.trim().is_empty() {
             return Err("a file-issue step needs a Linear team".into());
         }
+        // An empty title or description falls back to the message that mentioned pinned.
+        let mention = trigger_of(run).map(|input| trigger_mention(&input)).unwrap_or_default();
+        let mut title = render_template(title, run);
+        if title.trim().is_empty() {
+            let bot = self.store.lock().unwrap().slack.as_ref().map(|account| account.name.clone());
+            title = fallback_title(&mention, bot.as_deref());
+        }
         if title.trim().is_empty() {
             return Err("a file-issue step needs a title".into());
         }
-        let title = render_template(title, run);
-        let description = render_template(description, run);
+        let mut description = render_template(description, run);
+        if description.trim().is_empty() {
+            description = mention;
+        }
         let _filing = self.filing.lock().await;
         let filed = self.file_issue(connector, channel, thread, team.trim(), label.trim(), &title, &description, assignee.trim()).await?;
         run.context["issue"] = serde_json::json!({ "id": filed.id, "identifier": filed.identifier, "url": filed.url });
@@ -6002,8 +6158,9 @@ mod tests {
         for (stored, runs_on) in [
             (serde_json::json!(""), RunsOn::Any),
             (serde_json::json!("m1"), RunsOn::Machine("m1".into())),
-            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Medium })),
-            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Large })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Medium) })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Large) })),
+            (serde_json::json!({ "kind": "upstash-box" }), RunsOn::FreshBox(BoxStep { size: None })),
         ] {
             let mut saved = base.clone();
             saved["machine"] = stored.clone();
@@ -6014,7 +6171,7 @@ mod tests {
         }
         let mut sizeless = base.clone();
         sizeless["machine"] = serde_json::json!({ "kind": "upstash-box" });
-        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: None }), "a workflow that names no size follows the default box size");
         let mut unknown = base;
         unknown["machine"] = serde_json::json!({ "kind": "lambda" });
         assert!(serde_json::from_value::<Connector>(unknown).is_err());
@@ -6044,7 +6201,7 @@ mod tests {
     fn a_box_workflows_run_goes_to_a_box_with_the_box_note_and_no_account() {
         let boxed = Connector { runs_on: RunsOn::FreshBox(BoxStep::default()), account: "work".into(), proof: true, ..linear_connector() };
         let box_run = run(&boxed, &issue(), "/bin/pinned");
-        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: None }));
         assert_eq!(box_run.account, None, "a box signs in only with the Claude token");
         let prompt = box_run.args.last().unwrap();
         assert!(prompt.contains(&format!("{PROOF}{BOX_NOTE}\n\nLinear issue ENG-7")), "{prompt}");
@@ -6104,7 +6261,7 @@ mod tests {
 
     #[test]
     fn box_permissions_round_trip_and_an_older_workflow_machine_stays() {
-        let workflow = Connector { runs_on: RunsOn::FreshBox(BoxStep { size: BoxSize::Small }), ..linear_connector() };
+        let workflow = Connector { runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), ..linear_connector() };
         let (connectors, dir) = stored("box-access", vec![workflow]);
         let before = serde_json::to_value(&connectors.get_settings().connectors[0]).unwrap()["machine"].clone();
         assert_eq!(before, json!({ "kind": "upstash-box", "size": "small" }));
@@ -7185,6 +7342,463 @@ mod tests {
         root
     }
 
+    /// Case B with the ticket router's file-issue set to `title` and `description`: a mention
+    /// `mention` in a month-old thread nothing follows. Answers the issueCreate inputs Linear got.
+    fn file_on_a_mention_in_an_old_thread(title: &str, description: &str, mention: &str) -> Vec<Value> {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(r#"{"kind":"ticket-request"}"#.into());
+        install_rustls();
+        let now = Utc::now();
+        let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
+        let old = ago(30 * 86_400);
+        let asked = [
+            slack_message(&old, &old, "U2", "the financial flow on staging is slow"),
+            slack_message(&ago(29 * 86_400), &old, "U1", "same here"),
+            slack_message(&ago(120), &old, "U1", mention),
+        ];
+        let channel = std::sync::Arc::new(Mutex::new(json!({ "history": [thread_root(&asked)], "threads": { old.clone(): asked } })));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), channel);
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = ticket_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        for node in &mut router.graph.as_mut().unwrap().nodes {
+            if let NodeKind::FileIssue { title: t, description: d, .. } = &mut node.kind {
+                (*t, *d) = (title.into(), description.into());
+            }
+        }
+        let (connectors, dir) = stored("old-thread-mention-title", vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        let (work, error) = block_on(connectors.poll());
+        assert_eq!((work.len(), error), (0, None));
+        block_on(connectors.drive(&|work: Work| placed(work))).unwrap();
+        crate::vercel::take_test_inputs();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+        let seen = seen.lock().unwrap();
+        let created = seen.iter().filter(|request| request.contains("issueCreate")).map(|request| {
+            let body: Value = serde_json::from_str(request.split_once(' ').unwrap().1).unwrap();
+            body["variables"]["input"].clone()
+        });
+        created.collect()
+    }
+
+    #[test]
+    fn a_trigger_mention_title_is_the_mention_not_the_thread() {
+        let filed = file_on_a_mention_in_an_old_thread("{{trigger.mention}}", "Asked for in Slack.", "<@UBOT> please create a ticket for this");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "@pinned please create a ticket for this");
+    }
+
+    #[test]
+    fn an_empty_issue_title_falls_back_to_the_mentions_first_line() {
+        let filed = file_on_a_mention_in_an_old_thread("", "", "<@UBOT> please create a ticket for this");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "please create a ticket for this");
+        assert_eq!(
+            filed[0]["description"],
+            "@pinned please create a ticket for this\n\nSlack thread: https://slack.example/archives/C0123ABCD/p1792400050000200"
+        );
+
+        let filed = file_on_a_mention_in_an_old_thread("  ", "", "<@UBOT> checkout drops the coupon  \nsteps: add one, pay\nexpected: 10% off");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0]["title"], "checkout drops the coupon");
+    }
+
+    #[test]
+    fn fallback_title_is_the_first_non_empty_line_capped() {
+        assert_eq!(fallback_title("\n  first line  \nsecond", None), "first line");
+        assert_eq!(fallback_title(&"x".repeat(300), None).chars().count(), 120);
+        assert_eq!(fallback_title("  \n ", None), "");
+        assert_eq!(fallback_title("@pinned please create a ticket", Some("pinned")), "please create a ticket");
+        assert_eq!(fallback_title("<@UBOT> please create a ticket", None), "please create a ticket");
+        assert_eq!(fallback_title("@pinned, file it", Some("pinned")), "file it");
+        assert_eq!(fallback_title("@pinned\nthe export 500s", Some("pinned")), "the export 500s");
+        assert_eq!(fallback_title("@pinnedbot file it", Some("pinned")), "@pinnedbot file it", "another user's handle stays");
+        assert_eq!(fallback_title("@ana please file it", Some("pinned")), "@ana please file it");
+    }
+
+    /// The ticket router whose ticket-request branch acks, lets a session triage the thread, files
+    /// the issue from what the session set with `pinned run set`, and replies with its link.
+    fn triage_router() -> Connector {
+        let mut router = ticket_router();
+        let graph = router.graph.as_mut().unwrap();
+        for node in &mut graph.nodes {
+            if let NodeKind::FileIssue { title, description, .. } = &mut node.kind {
+                (*title, *description) = ("{{vars.title}}".into(), "{{vars.summary}}".into());
+            }
+        }
+        graph.nodes.push(node("ack", "Ack", NodeKind::Reply { text: TRIAGE_ACK.into() }));
+        let triage = SessionSetup { prompt: "Triage what the thread asks for.".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("triage", "Triage", NodeKind::Session(triage)));
+        graph.edges = vec![
+            edge("t", "out", "route"),
+            edge("route", "bug", "session"),
+            edge("route", "ticket-request", "ack"),
+            edge("ack", "out", "triage"),
+            edge("triage", "out", "file-requested-issue"),
+            edge("file-requested-issue", "out", "reply"),
+        ];
+        router
+    }
+
+    const TRIAGE_ACK: &str = "On it, reading the thread to file a ticket.";
+    const TRIAGED_TITLE: &str = "Staging financial flow takes 40s to load";
+    const TRIAGED_SUMMARY: &str = "Ana and Bruno see the financial flow on staging load slowly since last month.";
+
+    fn mention_in(thread: &str, ts: &str, text: &str) -> GraphInbox {
+        GraphInbox { thread: thread.into(), ..mention_in_thread(ts, text) }
+    }
+
+    /// What Slack, Linear and the session saw in `triage_and_file`.
+    struct Triaged {
+        created: Vec<Value>,
+        posted: Vec<String>,
+        typed: Vec<String>,
+    }
+
+    /// The triage branch end to end, with fix off. A mention asks for a ticket in a followed thread
+    /// (case A, `old_thread` false) or in a month-old thread nothing follows (case B). The session,
+    /// simulated, sets `vars` through the handler `pinned run set` reaches and ends its turn. Then a
+    /// second request in the same thread goes the same way.
+    fn triage_and_file(old_thread: bool, vars: &[(&str, &str)]) -> Triaged {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(if old_thread { r#"{"kind":"ticket-request"}"# } else { r#"{"kind":"bug"}"# }.into());
+        install_rustls();
+        let now = Utc::now();
+        let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
+        let old = ago(30 * 86_400);
+        let asked = [
+            slack_message(&old, &old, "U2", "the financial flow on staging is slow"),
+            slack_message(&ago(29 * 86_400), &old, "U1", "same here"),
+            slack_message(&ago(120), &old, "U1", "<@UBOT> please create a ticket for this"),
+        ];
+        let channel = if old_thread { json!({ "history": [thread_root(&asked)], "threads": { old.clone(): asked } }) } else { json!({}) };
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(channel)));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = triage_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let (connectors, dir) = stored(if old_thread { "triage-old-thread" } else { "triage-followed-thread" }, vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        let bot = || Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.store.lock().unwrap().slack = bot();
+        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        let typed = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            match &work {
+                Work::Prompt { text, .. } => typed.lock().unwrap().push(text.clone()),
+                Work::Run(run) => typed.lock().unwrap().push(run.args.last().cloned().unwrap_or_default()),
+                _ => {}
+            }
+            placed(work)
+        };
+        let thread = if old_thread {
+            let (work, error) = block_on(connectors.poll());
+            assert_eq!((work.len(), error), (0, None));
+            block_on(connectors.drive(&open)).unwrap();
+            old.clone()
+        } else {
+            // The thread's first message was a bug, so its session is open and the thread followed.
+            let thread = "1792400050.000200".to_owned();
+            let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.clone() };
+            connectors.begin("c2".into(), subject, slack_trigger(None), "2026-11-11T10:00:00Z").unwrap();
+            block_on(connectors.drive(&open)).unwrap();
+            crate::vercel::set_test_content(Some(r#"{"kind":"ticket-request"}"#.into()));
+            connectors.enqueue(mention_in(&thread, "1792400100.000100", "@pinned please create a ticket for this"));
+            block_on(connectors.drive(&open)).unwrap();
+            thread
+        };
+        let opening = typed.lock().unwrap()[0].clone();
+        assert!(opening.contains(TRIAGE_ONLY), "{opening}");
+        assert!(opening.contains(&run_set_line(&["title".into(), "summary".into()], "/bin/pinned")), "{opening}");
+        if !old_thread {
+            assert_eq!(typed.lock().unwrap()[1], "Triage what the thread asks for.\n\n[Slack reply from ana in the thread]\n@pinned please create a ticket for this");
+        }
+
+        // A runs.json from before run variables loads, and takes them.
+        let saved = std::fs::read_to_string(dir.join("runs.json")).unwrap();
+        assert!(!saved.contains("\"vars\""), "{saved}");
+        drop(connectors);
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        connectors.store.lock().unwrap().slack = bot();
+
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.clone() };
+        let end_turn = |connectors: &Connectors| {
+            for status in [AgentStatus::Working, AgentStatus::Done] {
+                let tab = session_tab(Some(status), Some("claude-1"));
+                block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&tab), &open)).unwrap();
+            }
+        };
+        let set = |connectors: &Connectors| {
+            for (name, value) in vars {
+                assert_eq!(connectors.run_set("c2", &subject, name, value), Ok(format!("set {{{{vars.{name}}}}} for this workflow run")));
+            }
+        };
+        set(&connectors);
+        end_turn(&connectors);
+
+        // A second request in the same thread: the session triages again, and the thread's issue is answered.
+        let second = if old_thread { ago(60) } else { "1792400200.000100".into() };
+        connectors.enqueue(mention_in(&thread, &second, "@pinned please file a ticket"));
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(typed.lock().unwrap().last().unwrap(), "Triage what the thread asks for.\n\n[Slack reply from ana in the thread]\n@pinned please file a ticket");
+        set(&connectors);
+        end_turn(&connectors);
+
+        // Fix stays off: the session still may not file an issue itself.
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].fix, Fix::Off);
+        let refused = block_on(connectors.linear_create("c2", "C0123ABCD", &thread, "t", "d", "")).unwrap_err();
+        assert!(refused.contains("only analyze and reply"), "{refused}");
+        crate::vercel::take_test_inputs();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+        let seen = seen.lock().unwrap();
+        let created = seen.iter().filter(|request| request.contains("issueCreate")).map(|request| {
+            let body: Value = serde_json::from_str(request.split_once(' ').unwrap().1).unwrap();
+            body["variables"]["input"].clone()
+        });
+        let posted = seen.iter().filter(|request| request.starts_with("/chat.postMessage")).cloned().collect();
+        let typed = typed.into_inner().unwrap();
+        Triaged { created: created.collect(), posted, typed }
+    }
+
+    fn assert_filed_once_from_the_session(triaged: &Triaged) {
+        let Triaged { created, posted, typed } = triaged;
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert_eq!(created[0]["title"], TRIAGED_TITLE);
+        let description = created[0]["description"].as_str().unwrap();
+        assert!(description.contains(TRIAGED_SUMMARY), "{description}");
+        assert!(description.contains("Slack thread: https://slack.example/archives/C0123ABCD/p1792400050000200"), "{description}");
+        assert_eq!(posted.len(), 4, "an ack and the link, twice: {posted:?}");
+        for (i, post) in posted.iter().enumerate() {
+            let expected = if i % 2 == 0 { TRIAGE_ACK } else { "Ticket: https://linear.example/BLO-1" };
+            assert!(post.contains(expected), "{i}: {post}");
+        }
+        assert!(typed.len() >= 2, "{typed:?}");
+    }
+
+    #[test]
+    fn a_triage_session_titles_the_ticket_a_mention_asks_for_in_a_followed_thread() {
+        assert_filed_once_from_the_session(&triage_and_file(false, &[("title", TRIAGED_TITLE), ("summary", TRIAGED_SUMMARY)]));
+    }
+
+    #[test]
+    fn a_triage_session_titles_the_ticket_a_mention_asks_for_in_an_old_thread() {
+        assert_filed_once_from_the_session(&triage_and_file(true, &[("title", TRIAGED_TITLE), ("summary", TRIAGED_SUMMARY)]));
+    }
+
+    #[test]
+    fn a_ticket_whose_session_set_nothing_is_titled_by_the_mention_without_the_bot() {
+        let Triaged { created, posted, .. } = triage_and_file(true, &[]);
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert_eq!(created[0]["title"], "please create a ticket for this");
+        assert_eq!(
+            created[0]["description"],
+            "@pinned please create a ticket for this\n\nSlack thread: https://slack.example/archives/C0123ABCD/p1792400050000200"
+        );
+        assert_eq!(posted.len(), 4, "{posted:?}");
+    }
+
+
+    const BUG_REPLY: &str = "Here is what the investigation found.";
+
+    /// What a ticket request in a followed thread left behind, when the thread's own run walks
+    /// its bug branch through a session and then a reply.
+    struct SharedSession {
+        posted: Vec<String>,
+        created: Vec<Value>,
+        typed: Vec<String>,
+        /// The runs just before the turn the follow-up typed ends, and after.
+        before: Vec<runner::Run>,
+        runs: Vec<runner::Run>,
+    }
+
+    /// The thread's first message is a bug: its run opens a session whose branch ends in a reply.
+    /// With `original_waiting` false that session's turn ends first, so the run is Done with the
+    /// tab still live; otherwise it is still Waiting on its turn. Then a mention asks for a ticket,
+    /// the follow-up types into the same tab, the session sets the run variables and its turn ends.
+    fn ticket_request_beside_a_bug_session(original_waiting: bool) -> SharedSession {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(r#"{"kind":"bug"}"#.into());
+        install_rustls();
+        let now = Utc::now();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(json!({}))));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = triage_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let graph = router.graph.as_mut().unwrap();
+        graph.nodes.push(node("bug-reply", "Bug reply", NodeKind::Reply { text: BUG_REPLY.into() }));
+        graph.edges.push(edge("session", "out", "bug-reply"));
+        let (connectors, dir) = stored(if original_waiting { "shared-session-waiting" } else { "shared-session-done" }, vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        let typed = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            match &work {
+                Work::Prompt { text, .. } => typed.lock().unwrap().push(text.clone()),
+                Work::Run(run) => typed.lock().unwrap().push(run.args.last().cloned().unwrap_or_default()),
+                _ => {}
+            }
+            placed(work)
+        };
+        let end_turn = || {
+            for status in [AgentStatus::Working, AgentStatus::Done] {
+                let tab = session_tab(Some(status), Some("claude-1"));
+                block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&tab), &open)).unwrap();
+            }
+        };
+        let thread = "1792400050.000200".to_owned();
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.clone() };
+        connectors.begin("c2".into(), subject.clone(), slack_trigger(None), "2026-11-11T10:00:00Z").unwrap();
+        block_on(connectors.drive(&open)).unwrap();
+        if !original_waiting {
+            end_turn();
+        }
+        crate::vercel::set_test_content(Some(r#"{"kind":"ticket-request"}"#.into()));
+        connectors.enqueue(mention_in(&thread, "1792400100.000100", "@pinned please create a ticket for this"));
+        block_on(connectors.drive(&open)).unwrap();
+        for (name, value) in [("title", TRIAGED_TITLE), ("summary", TRIAGED_SUMMARY)] {
+            assert_eq!(connectors.run_set("c2", &subject, name, value), Ok(format!("set {{{{vars.{name}}}}} for this workflow run")));
+        }
+        let before = connectors.graph_runs();
+        end_turn();
+        let runs = connectors.graph_runs();
+        crate::vercel::take_test_inputs();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+        let seen = seen.lock().unwrap();
+        let created = seen
+            .iter()
+            .filter(|request| request.contains("issueCreate"))
+            .map(|request| serde_json::from_str::<Value>(request.split_once(' ').unwrap().1).unwrap()["variables"]["input"].clone())
+            .collect();
+        let posted = seen
+            .iter()
+            .filter(|request| request.starts_with("/chat.postMessage"))
+            .map(|request| {
+                let body: Value = serde_json::from_str(request.split_once(' ').unwrap().1).unwrap();
+                assert_eq!((&body["channel"], &body["thread_ts"]), (&json!("C0123ABCD"), &json!("1792400050.000200")), "{body}");
+                body["text"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        SharedSession { posted, created, typed: typed.into_inner().unwrap(), before, runs }
+    }
+
+    fn nodes_run(run: &runner::Run) -> Vec<&str> {
+        run.log.iter().map(|entry| entry.node.0.as_str()).collect()
+    }
+
+    /// The thread's own run and its follow-up, in that order, with the follow-up's vars and the
+    /// tab both are on, so the asserts below read the same in both cases.
+    fn original_and_follow_up(runs: &[runner::Run]) -> (&runner::Run, &runner::Run) {
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(!runs[0].follow_up && runs[1].follow_up, "{runs:?}");
+        for run in runs {
+            let Session::Live { machine, tab, .. } = &run.session else { panic!("{:?}", run.session) };
+            assert_eq!((machine.as_str(), tab.as_str()), ("m1", "tab-1"), "{}", run.id.0);
+            assert_eq!(run.session_owner.as_deref(), Some("c2"));
+        }
+        (&runs[0], &runs[1])
+    }
+
+    fn assert_filed_from_the_follow_up(shared: &SharedSession) {
+        let SharedSession { created, typed, runs, .. } = shared;
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert_eq!(created[0]["title"], TRIAGED_TITLE);
+        // The mention is typed once, with the follow-up's triage prompt, never again through the thread's run.
+        assert_eq!(typed.len(), 2, "{typed:?}");
+        assert!(typed[0].starts_with("Triage the thread."), "{}", typed[0]);
+        assert_eq!(typed[1], "Triage what the thread asks for.\n\n[Slack reply from ana in the thread]\n@pinned please create a ticket for this");
+        let (original, follow_up) = original_and_follow_up(runs);
+        assert_eq!(nodes_run(follow_up), ["t", "route", "ack", "triage", "file-requested-issue", "reply"]);
+        assert_eq!(follow_up.status, Status::Done);
+        assert_eq!(follow_up.context["vars"], json!({ "title": TRIAGED_TITLE, "summary": TRIAGED_SUMMARY }));
+        assert_eq!(original.context["vars"], Value::Null, "run set reaches the newest run on the tab");
+        assert_eq!(nodes_run(original), ["t", "route", "session", "bug-reply"]);
+        assert_eq!(original.status, Status::Done);
+        // Both stay on the tab, which the hook reported as claude-1.
+        for run in [original, follow_up] {
+            assert!(matches!(&run.session, Session::Live { claude: Some(claude), .. } if claude == "claude-1"), "{:?}", run.session);
+        }
+    }
+
+    #[test]
+    fn a_ticket_follow_up_on_a_finished_runs_live_session_advances_alone() {
+        let shared = ticket_request_beside_a_bug_session(false);
+        assert_filed_from_the_follow_up(&shared);
+        // The bug reply went out at the end of the thread run's own turn, before the mention.
+        assert_eq!(shared.posted, [BUG_REPLY, TRIAGE_ACK, "Ticket: https://linear.example/BLO-1"]);
+        // The turn the follow-up typed ended: only the follow-up moved. The thread's run, Done
+        // with its tab still live, is exactly as it was.
+        let (original, follow_up) = original_and_follow_up(&shared.before);
+        assert_eq!((&follow_up.status, nodes_run(follow_up)), (&Status::Waiting, vec!["t", "route", "ack", "triage"]));
+        assert_eq!(original, &shared.runs[0]);
+    }
+
+    #[test]
+    fn a_ticket_follow_up_beside_a_waiting_run_ends_both_waits_with_one_turn() {
+        let shared = ticket_request_beside_a_bug_session(true);
+        assert_filed_from_the_follow_up(&shared);
+        // Both runs waited on the one tab, and its one turn answered both prompts: each moved one
+        // step. The bug reply is the thread run's own, posted once, not a second answer.
+        let (original, follow_up) = original_and_follow_up(&shared.before);
+        assert_eq!((&original.status, nodes_run(original)), (&Status::Waiting, vec!["t", "route", "session"]));
+        assert_eq!((&follow_up.status, nodes_run(follow_up)), (&Status::Waiting, vec!["t", "route", "ack", "triage"]));
+        assert_eq!(shared.posted, [TRIAGE_ACK, BUG_REPLY, "Ticket: https://linear.example/BLO-1"]);
+    }
+
+    #[test]
+    fn run_set_refuses_bad_names_big_values_and_a_session_without_a_graph_run() {
+        let (connectors, dir) = stored("run-set-refusals", vec![triage_router()]);
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() };
+        let set = |name: &str, value: &str| connectors.run_set("c2", &subject, name, value);
+        for name in ["Title", "", "a b", "{{x}}", &"x".repeat(33)] {
+            assert_eq!(set(name, "x"), Err(format!("bad variable name {name:?}: use 1 to 32 of a-z, 0-9, _ and -")));
+        }
+        assert_eq!(set("summary", &"x".repeat(VAR_MAX_BYTES + 1)), Err("the value of summary is 8193 bytes, over the 8 KB limit".to_owned()));
+        let no_run = Err("this session was not started by a workflow run, so it has no run variables to set".to_owned());
+        assert_eq!(set("summary", &"x".repeat(VAR_MAX_BYTES)), no_run);
+        assert_eq!(set(&"x".repeat(32), "x"), no_run);
+        assert_eq!(set("ticket_title-2", "Export 500s"), no_run);
+        assert!(connectors.runs.lock().unwrap().is_empty());
+        let refused = block_on(connectors.linear_create("c2", "C0123ABCD", "1792400050.000200", "t", "d", "")).unwrap_err();
+        assert!(refused.contains("only analyze and reply"), "{refused}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unset_run_variable_renders_empty_and_other_unknown_spans_stay() {
+        let library: runner::Library = [("c2".to_owned(), triage_router().graph.unwrap())].into_iter().collect();
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() };
+        let mut run = runner::start(&library, "c2", subject, serde_json::to_value(slack_trigger(None)).unwrap(), "2026-11-11T10:00:00Z");
+        let text = "[{{vars.title}}] {{ vars.summary }} {{nope.x}} {{trigger.channel}}";
+        assert_eq!(render_template(text, &run), "[]  {{nope.x}} C0123ABCD");
+        run.context["vars"] = json!({ "title": "Export 500s", "summary": "since today" });
+        assert_eq!(render_template(text, &run), "[Export 500s] since today {{nope.x}} C0123ABCD");
+        assert_eq!(issue_vars(&library["c2"]), ["title", "summary"]);
+        assert!(issue_vars(&ticket_router().graph.unwrap()).is_empty());
+    }
+
     #[test]
     fn a_mention_in_an_old_thread_nothing_follows_is_sorted_on_the_mention() {
         let _api = slack::lock_api();
@@ -8088,4 +8702,32 @@ mod tests {
     }
 
     include!("legacy_outcome.rs");
+
+    #[test]
+    fn a_workflow_box_keeps_the_size_it_was_saved_with_and_a_sizeless_one_takes_the_default() {
+        use crate::taste::{BoxSizeSource, TastePatch, TasteScope, Tastes};
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { box_size: Some(BoxSize::Medium), ..TastePatch::default() }).unwrap();
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        tastes.set(&site, TastePatch { box_size: Some(BoxSize::Large), ..TastePatch::default() }).unwrap();
+        let step = |machine: serde_json::Value| {
+            let mut saved = serde_json::to_value(linear_connector()).unwrap();
+            saved["machine"] = machine;
+            match serde_json::from_value::<Connector>(saved).unwrap().runs_on {
+                RunsOn::FreshBox(step) => step,
+                other => panic!("{other:?}"),
+            }
+        };
+        let sized = |step: &BoxStep, repo: &str| {
+            let choice = tastes.box_size(Some(repo), step.size);
+            (choice.size(), choice.from())
+        };
+
+        let small = step(serde_json::json!({ "kind": "upstash-box", "size": "small" }));
+        assert_eq!(small.size, Some(BoxSize::Small));
+        assert_eq!(sized(&small, "https://github.com/acme/site.git"), (BoxSize::Small, BoxSizeSource::Call), "a size the workflow names wins over the project's");
+        let sizeless = step(serde_json::json!({ "kind": "upstash-box" }));
+        assert_eq!(sized(&sizeless, "https://github.com/acme/site.git"), (BoxSize::Large, BoxSizeSource::Project));
+        assert_eq!(sized(&sizeless, "https://github.com/acme/api.git"), (BoxSize::Medium, BoxSizeSource::Account));
+    }
 }

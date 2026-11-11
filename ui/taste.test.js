@@ -12,7 +12,7 @@ const taste = () => {
   const context = {};
   vm.createContext(context);
   vm.runInContext(
-    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad };`,
+    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteBoxSize, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad };`,
     context,
   );
   return context.api;
@@ -283,4 +283,20 @@ test("a rebase keeps an unsaved policy over what another device saved", () => {
   const rebased = tasteRebase(saved, draft, fresh);
   assert.deepEqual(here(rebased.placement), policy({ avoid: ["book"] }));
   assert.equal(rebased.captains.parallel, 6);
+});
+
+test("the box size is the project's, else the account's, else small; the account can clear it", () => {
+  const { tasteBoxSize, tasteSetField, tasteResetField, tasteSaveCalls } = taste();
+  const captains = { kind: "captains" };
+  let tastes = defaults({ [SITE]: { parallel: 4 } });
+  tastes = { ...tastes, captains: { ...tastes.captains, box_size: null } };
+  assert.deepEqual(here(tasteBoxSize(tastes, site)), { size: "small", from: "built_in" });
+  const account = tasteSetField(tastes, captains, "box_size", "medium");
+  assert.deepEqual(here(tasteBoxSize(account, site)), { size: "medium", from: "account" });
+  const own = tasteSetField(account, site, "box_size", "large");
+  assert.deepEqual(here(tasteBoxSize(own, site)), { size: "large", from: "project" });
+  assert.deepEqual(here(tasteBoxSize(own, captains)), { size: "medium", from: "account" });
+  assert.deepEqual(here(tasteBoxSize(tasteSetField(account, site, "box_size", "medium"), site)), { size: "medium", from: "account" }, "a project set to the account's size inherits it");
+  assert.deepEqual(here(tasteSaveCalls(tastes, account)), [{ cmd: "set_taste", scope: captains, patch: { box_size: "medium" } }]);
+  assert.deepEqual(here(tasteSaveCalls(account, tasteResetField(account, captains, "box_size"))), [{ cmd: "reset_taste_field", scope: captains, field: "box_size" }]);
 });

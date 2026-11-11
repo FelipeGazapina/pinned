@@ -1058,8 +1058,9 @@ pub enum HubCall {
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
     OpenBox {
         repo: String,
-        #[serde(default)]
-        size: BoxSize,
+        /// None follows the project's and the account's default box size (`Tastes::box_size`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget_usd: Option<f64>,
     },
@@ -1126,6 +1127,14 @@ pub enum HubCall {
         #[serde(flatten)]
         subject: Subject,
     },
+    /// From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.
+    RunSet {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+        name: String,
+        value: String,
+    },
     /// `ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.
     ExternalAgents,
     /// `AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.
@@ -1156,6 +1165,23 @@ pub enum HubCall {
     ResetTasteField { scope: TasteScope, field: TasteField },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
+    /// `taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,
+    /// or none, and which setting chose it. Without `repo`, a box of no project: the account's.
+    GetBoxSize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
+    },
+    /// `taste::Tastes`, once the default box size of `repo`'s project, or the account's without
+    /// `repo`, is `size`. No `size` clears it: the project inherits the account's again, and the
+    /// account's goes back to the built-in small.
+    SetBoxSize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
+    },
     /// From the machine that hosts the global orchestrator, for its tab `tab`: `Call::RepoLook` of
     /// `project` (a key `projects` lists) on `machine`, an id or a name, else on the checkout a
     /// Capitão runs in, the asking machine's own, or the first online one; with `machine`,
@@ -1992,6 +2018,10 @@ mod tests {
             json!({ "cmd": "slack_files", "connector": "c2", "channel": "C1", "thread": "1.2" }),
         );
         round_trip(
+            HubCall::RunSet { connector: "c2".into(), subject: Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() }, name: "title".into(), value: "Export 500s".into() },
+            json!({ "cmd": "run_set", "connector": "c2", "channel": "C1", "thread": "1.2", "name": "title", "value": "Export 500s" }),
+        );
+        round_trip(
             HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: Some("vck_1".into()) },
             json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": "vck_1" }),
         );
@@ -2205,5 +2235,18 @@ mod tests {
             MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }), state: None, background: None },
             json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
+    }
+
+    #[test]
+    fn an_open_box_from_an_older_app_keeps_its_size_and_a_newer_one_may_leave_it_out() {
+        let older = serde_json::from_value::<HubCall>(json!({ "cmd": "open_box", "repo": "acme/site", "size": "medium" })).unwrap();
+        assert!(matches!(older, HubCall::OpenBox { size: Some(BoxSize::Medium), budget_usd: None, .. }));
+        let sizeless = serde_json::from_value::<HubCall>(json!({ "cmd": "open_box", "repo": "acme/site" })).unwrap();
+        assert!(matches!(sizeless, HubCall::OpenBox { size: None, .. }));
+        assert_eq!(serde_json::to_value(sizeless).unwrap(), json!({ "cmd": "open_box", "repo": "acme/site" }));
+        let asked = serde_json::from_value::<HubCall>(json!({ "cmd": "get_box_size", "repo": "acme/site" })).unwrap();
+        assert!(matches!(asked, HubCall::GetBoxSize { repo: Some(ref repo), size: None } if repo == "acme/site"));
+        let cleared = serde_json::from_value::<HubCall>(json!({ "cmd": "set_box_size" })).unwrap();
+        assert!(matches!(cleared, HubCall::SetBoxSize { repo: None, size: None }));
     }
 }
