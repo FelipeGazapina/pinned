@@ -430,6 +430,31 @@ pub fn branch_without_session(library: &Library, connector: &str, from: &NodeId,
     acts
 }
 
+/// Whether the branch out of `port` files an issue after talking to the thread's session: it
+/// reaches a file-issue and a session or talk step, and no call, which may open a session of its
+/// own. A follow-up walks such a branch in the session the thread already has.
+pub fn branch_files_in_session(library: &Library, connector: &str, from: &NodeId, port: &PortId) -> bool {
+    let Some(graph) = library.get(connector) else {
+        return false;
+    };
+    let (mut files, mut talks, mut seen) = (false, false, BTreeSet::new());
+    let mut todo = targets_of(graph, from, port);
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(node) = graph.node(&id) else { return false };
+        match &node.kind {
+            NodeKind::Call { .. } | NodeKind::Trigger { .. } => return false,
+            NodeKind::Talk { .. } | NodeKind::Session(_) => talks = true,
+            NodeKind::FileIssue { .. } => files = true,
+            _ => {}
+        }
+        todo.extend(node.kind.ports().iter().flat_map(|port| targets_of(graph, &id, &port.id)));
+    }
+    files && talks
+}
+
 /// A follow-up run of `connector`'s graph for a later mention `input` in the thread `subject`,
 /// already past its routing classify with `answers`. The thread was claimed by its first run.
 pub fn start_follow_up(library: &Library, connector: &str, subject: Subject, input: Value, answers: Answers, at: &str) -> Run {
@@ -598,7 +623,7 @@ fn enter_call(
 }
 
 fn talk_effect(run: &mut Run, connector: &str, prompt: &str, session: &SessionSetup) -> Result<Effect, String> {
-    if run.follow_up {
+    if run.follow_up && !matches!(run.session, Session::Live { .. }) {
         return Err("a follow-up in the thread reached a step that needs a session, and the thread's session gets it instead".into());
     }
     if run.session_owner.is_none() {
@@ -1622,6 +1647,28 @@ mod tests {
         assert_eq!(render("{{issue.identifier}} is {{issue.url}}"), "ENG-8 is https://linear.app/ENG-8");
         assert_eq!(render("{{bogus}} and {{trigger.bogus}} stay"), "{{bogus}} and {{trigger.bogus}} stay");
         assert_eq!(render("unclosed {{trigger.title"), "unclosed {{trigger.title");
+    }
+
+    #[test]
+    fn trigger_mention_is_the_message_that_mentioned_pinned_not_the_thread() {
+        let lib = library(vec![("c1", chain(vec![("t", "Trigger", trigger()), ("s", "Stop", NodeKind::Stop)]))]);
+        let posts = json!([
+            { "ts": "1792400050.000200", "author": "bruno", "text": "the export is slow" },
+            { "ts": "1792400060.000000", "author": "ana", "text": "same here" },
+            { "ts": "1792400100.000100", "author": "ana", "text": "@pinned file a ticket for this\nit blocks billing" },
+        ]);
+        let input = |request: serde_json::Value| {
+            json!({ "kind": "slack", "channel": "C0123ABCD", "channelName": "support", "thread": "1792400050.000200", "posts": posts, "request": request })
+        };
+
+        // A mention inside a thread that was already there: the mention's own post.
+        let run = start(&lib, "c1", slack(), input(json!("1792400100.000100")), AT);
+        assert_eq!(crate::connectors::render_template("{{trigger.mention}}", &run), "@pinned file a ticket for this\nit blocks billing");
+        assert_eq!(crate::connectors::render_template("{{trigger.text}}", &run), "ana: @pinned file a ticket for this\nit blocks billing");
+
+        // A top-level trigger: that message.
+        let run = start(&lib, "c1", slack(), input(serde_json::Value::Null), AT);
+        assert_eq!(crate::connectors::render_template("{{trigger.mention}}", &run), "the export is slow");
     }
 
     fn error_branch_lib() -> Library {

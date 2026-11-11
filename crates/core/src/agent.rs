@@ -390,6 +390,14 @@ pub enum Message {
         thread: String,
         issue: String,
     },
+    /// `pinned run set <name> <value>`: a value the session's graph run reads as `{{vars.<name>}}`.
+    RunSet {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+        name: String,
+        value: String,
+    },
     Remind {
         message: String,
         when: When,

@@ -15,6 +15,7 @@ pub const SUBCOMMAND: &str = "hook";
 pub const STAGE_SUBCOMMAND: &str = "stage";
 pub const SLACK_SUBCOMMAND: &str = "slack";
 pub const LINEAR_SUBCOMMAND: &str = "linear";
+pub const RUN_SUBCOMMAND: &str = "run";
 pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 pub const GUARD_SUBCOMMAND: &str = "guard";
 /// The global orchestrator's own settings file, beside the one every other session loads.
@@ -427,6 +428,16 @@ pub fn linear(args: &[String]) -> Reply {
     }
 }
 
+/// Runs when a workflow session calls `pinned run set <name> <value>`: asks the harness to store
+/// the value for its graph run's later steps, as `{{vars.<name>}}`. Returns what the harness answered.
+pub fn run(args: &[String]) -> Reply {
+    let (name, value) = match args {
+        [verb, name, value @ ..] if verb == "set" && !value.is_empty() => (name.clone(), value.join(" ")),
+        _ => return Err(format!("usage: pinned {RUN_SUBCOMMAND} set <name> <value>")),
+    };
+    ask(Message::RunSet { connector: env(CONNECTOR_ENV)?, subject: subject()?, name, value })
+}
+
 fn env(k: &str) -> Result<String, String> {
     std::env::var(k).map_err(|_| format!("{k} is not set: run this inside a session a pinned workflow started"))
 }
@@ -559,6 +570,9 @@ mod tests {
                 Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread} to {assignee:?}"))
             }
             Message::LinearTake { connector, channel, thread, issue } => Ok(format!("{connector} took {issue} for {channel}:{thread}")),
+            Message::RunSet { connector, subject: Subject::SlackThread { channel, thread }, name, value } => {
+                Ok(format!("{connector} set {name}={value:?} for {channel}:{thread}"))
+            }
             other => Err(format!("unexpected {other:?}")),
         })
         .unwrap();
@@ -604,6 +618,14 @@ mod tests {
         assert_eq!(linear(&args(&["take"])), usage);
         assert_eq!(linear(&args(&["create", "--assignee", "Ana", "Export 500s"])), usage);
         assert_eq!(linear(&args(&["file", "a", "b"])), usage);
+
+        assert_eq!(
+            run(&args(&["set", "title", "Export", "500s"])),
+            Ok("c1 set title=\"Export 500s\" for C0123ABCD:1792400050.000200".to_owned())
+        );
+        let usage = Err("usage: pinned run set <name> <value>".to_owned());
+        assert_eq!(run(&args(&["set", "title"])), usage);
+        assert_eq!(run(&args(&["get", "title", "x"])), usage);
         let _ = std::fs::remove_file(sock);
     }
 
