@@ -588,7 +588,7 @@ function boxUpFor(created, now) {
   const hours = Math.floor((minutes % 1440) / 60);
   return days ? `${days} d ${hours} h` : hours ? `${hours} h ${minutes % 60} min` : `${minutes} min`;
 }
-const boxBelongs = (b) => (b.pinned ? `${b.pinned.project} · ${b.pinned.role}` : "Not opened by pinned");
+const boxBelongs = (b) => (b.pinned ? [b.pinned.project, b.pinned.role].filter(Boolean).join(" · ") || "Opened by pinned" : "Not opened by pinned");
 /** A cell that cuts a long text with an ellipsis and keeps it whole in its tooltip. */
 const boxCell = (text, cls = "") => `<td${cls ? ` class="${cls}"` : ""} title="${esc(text)}">${esc(text)}</td>`;
 function boxRowHtml(b, now) {
@@ -607,7 +607,7 @@ const boxFigureHtml = (label, figures, note) => `<div class="limit-card box-figu
     <div class="box-nums">${figures.map(([value, unit]) => `<span class="figure"><b>${value}</b><span class="muted">${unit}</span></span>`).join("")}</div></div>
     <p class="muted note">${note}</p></div>`;
 function boxFiguresHtml(u) {
-  const up = u.upstash;
+  const up = u.error ? null : u.upstash;
   const from = up ? boxFigureHtml("From Upstash", [[boxHours(up.cpu_hours), "CPU hours"], [usd(up.compute_usd), "compute cost"]],
     `Upstash's numbers for the ${up.boxes} box${up.boxes === 1 ? "" : "es"} it still lists. Deleted boxes may be missing.`) : "";
   const p = u.pinned ?? { box_hours: 0, tasks: 0 };

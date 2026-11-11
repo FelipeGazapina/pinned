@@ -94,13 +94,19 @@ test("a missing number is a dash, a long cell is cut and keeps its whole text in
   assert.match(css, /\.usage \.box-usage :is\(th, td\) \{[^}]*overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
 });
 
+test("a box pinned opened without a project or a role still says pinned opened it", () => {
+  const box = (pinned) => ({ id: "x", name: "x", size: "small", status: "running", created: NOW, cpu_hours: 0, compute_usd: 0, pinned });
+  assert.match(show({ ...A, boxes: [box({ project: null, role: "worker", machine: "m" })] }), /title="worker">worker<\/td>/);
+  assert.match(show({ ...A, boxes: [box({ project: null, role: null, machine: null })] }), /title="Opened by pinned">Opened by pinned<\/td>/);
+});
+
 test("state b: no connection says where to connect and shows no figures or tables", () => {
   const html = show({ connected: false, error: null, boxes: [], upstash: null, pinned: PINNED });
   assert.equal(text(html), "Upstash Box This month Connect Upstash in Settings › Connectors to see box usage.");
 });
 
 test("state c: an Upstash error is a warning with pinned's count only, and no tables", () => {
-  const html = show({ connected: true, error: "request timed out after 10 s", boxes: [], upstash: null, pinned: PINNED });
+  const html = show({ connected: true, error: "request timed out after 10 s", boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
   assert.match(html, /<div class="limit-notices" role="alert">\[triangle-alert\]<div><p>Upstash did not answer: request timed out after 10 s<\/p><\/div><\/div>/);
   assert.equal(
     text(html),
