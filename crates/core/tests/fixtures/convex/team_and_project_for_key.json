@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/deployment/team_and_project_for_key",
+    "auth": "bearer",
+    "body": {
+      "deployKey": "<admin-key>"
+    }
+  },
+  "status": 200,
+  "response": {
+    "team": "acme",
+    "project": "site",
+    "teamId": 1,
+    "projectId": 2,
+    "reference": null,
+    "isDefault": true
+  }
+}

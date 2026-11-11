@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/run_test_function",
+    "auth": "admin",
+    "body": {
+      "adminKey": "<admin-key>",
+      "args": {},
+      "bundle": {
+        "path": "testQuery.js",
+        "source": "export default query({ handler: async (ctx) => { return ; "
+      },
+      "format": "convex_encoded_json"
+    }
+  },
+  "status": 400,
+  "response": {
+    "code": "InvalidModules",
+    "message": "Could not analyze the given module:\nFailed to analyze testQuery.js: Uncaught SyntaxError: Unexpected end of input\n"
+  }
+}

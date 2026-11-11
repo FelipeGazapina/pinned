@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "_system/frontend/getSchemas",
+      "format": "convex_encoded_json",
+      "args": [
+        {}
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "active": "{\"tables\":[{\"tableName\":\"customers\",\"indexes\":[],\"stagedDbIndexes\":[],\"searchIndexes\":[],\"stagedSearchIndexes\":[],\"vectorIndexes\":[],\"stagedVectorIndexes\":[],\"documentType\":{\"type\":\"object\",\"value\":{\"name\":{\"fieldType\":{\"type\":\"string\"},\"optional\":false},\"plan\":{\"fieldType\":{\"type\":\"string\"},\"optional\":false}}},\"stagedDocumentType\":null},{\"tableName\":\"invoices\",\"indexes\":[{\"indexDescriptor\":\"by_number\",\"fields\":[\"number\",\"_creationTime\"]}],\"stagedDbIndexes\":[],\"searchIndexes\":[],\"stagedSearchIndexes\":[],\"vectorIndexes\":[],\"stagedVectorIndexes\":[],\"documentType\":{\"type\":\"object\",\"value\":{\"customer\":{\"fieldType\":{\"type\":\"id\",\"tableName\":\"customers\"},\"optional\":false},\"number\":{\"fieldType\":{\"type\":\"number\"},\"optional\":false},\"paidAt\":{\"fieldType\":{\"type\":\"union\",\"value\":[{\"type\":\"number\"},{\"type\":\"null\"}]},\"optional\":false},\"status\":{\"fieldType\":{\"type\":\"union\",\"value\":[{\"type\":\"literal\",\"value\":\"pending\"},{\"type\":\"literal\",\"value\":\"paid\"}]},\"optional\":false}}},\"stagedDocumentType\":null}],\"schemaValidation\":true}"
+    }
+  }
+}

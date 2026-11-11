@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/run_test_function",
+    "auth": "admin",
+    "body": {
+      "adminKey": "<admin-key>",
+      "args": {},
+      "bundle": {
+        "path": "testQuery.js",
+        "source": "import { query } from \"convex:/_system/repl/wrappers.js\";\nexport default query({ handler: async (ctx) => { throw new Error(\"boom\"); } });\n"
+      },
+      "format": "convex_encoded_json"
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: b96fb448e9d23b27] Server Error\nUncaught Error: boom\n"
+  }
+}

@@ -7,6 +7,7 @@ pub mod claude_models;
 pub mod cli;
 pub mod commands;
 pub mod connectors;
+pub mod convex;
 pub mod delegate;
 pub mod device;
 pub mod evidence;

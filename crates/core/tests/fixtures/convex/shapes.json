@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/shapes2",
+    "auth": "admin",
+    "body": null
+  },
+  "status": 200,
+  "response": {
+    "invoices": {
+      "type": "Unknown"
+    },
+    "customers": {
+      "type": "Unknown"
+    }
+  }
+}

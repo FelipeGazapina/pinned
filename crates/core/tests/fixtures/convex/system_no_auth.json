@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "none",
+    "body": {
+      "path": "_system/cli/tables",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "paginationOpts": {
+            "cursor": null,
+            "numItems": 100
+          }
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "error",
+    "errorMessage": "[Request ID: 3fcf68ccbcbabd49] Server Error\nYou don't have permission to perform this operation.\n"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "invoices:byNumber",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "number": 1042
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "_creationTime": 1794370889263.0466,
+      "_id": "j570y2r5f2rfmd6sf3ac7knawd8j021h",
+      "customer": "j97bzvs5tt8tv5xgqw8f758ve18j0r8s",
+      "number": 1042.0,
+      "paidAt": null,
+      "status": "pending"
+    }
+  }
+}

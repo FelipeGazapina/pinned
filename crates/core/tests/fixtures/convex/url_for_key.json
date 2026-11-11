@@ -1,0 +1,12 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/deployment/url_for_key",
+    "auth": "bearer",
+    "body": {
+      "deployKey": "<admin-key>"
+    }
+  },
+  "status": 200,
+  "response": "https://quick-lemur-789.convex.cloud"
+}

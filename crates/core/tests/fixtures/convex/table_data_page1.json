@@ -1,0 +1,49 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "_system/cli/tableData",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "table": "invoices",
+          "order": "desc",
+          "paginationOpts": {
+            "cursor": null,
+            "numItems": 2
+          }
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": {
+      "continueCursor": "07f2ad14a7055e10ed09dc77a90b1b6dbbc4bf45f5af6f640a230ecf6fa04cb3b7341d545d3a2b9ffd2421328715112890ebb4b45da753fd234436b528f644bf2bea74611019c649d0535df28def65ecc95505c3d7a1d84f654bd8f3e0338e44ccce76a7f433429b34b81668c1f32fff208e4c",
+      "isDone": false,
+      "page": [
+        {
+          "_creationTime": 1794370889263.0469,
+          "_id": "j570ydwjmcsgh6r0kws1fsekmh8j1sf9",
+          "customer": "j97bm6eyhz5vkhxw8bd7fcz70x8j1k4b",
+          "number": 1043.0,
+          "paidAt": null,
+          "status": "pending"
+        },
+        {
+          "_creationTime": 1794370889263.0466,
+          "_id": "j570y2r5f2rfmd6sf3ac7knawd8j021h",
+          "customer": "j97bzvs5tt8tv5xgqw8f758ve18j0r8s",
+          "number": 1042.0,
+          "paidAt": null,
+          "status": "pending"
+        }
+      ],
+      "pageStatus": null,
+      "splitCursor": null
+    }
+  }
+}
