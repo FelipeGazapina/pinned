@@ -15,6 +15,16 @@ module.exports = {
     await page.evaluate((key) => saveScripts(tabByKey(key), [{ id: "dev", name: "dev", icon: "play", command: "npm run dev" }]), ctx.threads.release);
   },
   async open(page, ctx) {
-    await page.evaluate((key) => activate(tabByKey(key)), ctx.threads.release);
+    await page.evaluate(({ release, ci }) => {
+      threadOf(tabByKey(release)).open.add(`worker:${ci}`);
+      activate(tabByKey(release));
+    }, ctx.threads);
+    await ctx.waitFor("the Workers block with the CI worker open", () => page.evaluate(() => !!document.querySelector('#thread .workers .worker-row[data-open] .worker-actions')));
+    // The board starts at the Captain's first prompt; the live thread has one more turn below.
+    await page.evaluate(() => {
+      threadView.scrollTop = 0;
+      threadView.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForTimeout(300);
   },
 };
