@@ -4,7 +4,7 @@
     "path": "/api/deployment/url_for_key",
     "auth": "bearer",
     "body": {
-      "deployKey": "<admin-key>"
+      "deployKey": "<deploy-key>"
     }
   },
   "status": 200,

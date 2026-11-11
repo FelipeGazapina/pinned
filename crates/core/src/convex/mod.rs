@@ -1,6 +1,9 @@
 //! Convex, the backend a project may keep its data in. An agent reads a connected deployment through
 //! five tools; the hub keeps each deploy key and makes every read.
 
+pub mod access;
+pub mod client;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -95,6 +98,10 @@ impl DeployKey {
         crate::upstash::hint(&self.text)
     }
 
+    fn text(&self) -> &str {
+        &self.text
+    }
+
     /// `text` with this key, and the secret after its `|`, replaced by `[hidden]`. Every error text
     /// passes through it.
     pub fn scrub(&self, text: &str) -> String {
@@ -119,7 +126,11 @@ pub fn key_name(deployment: &str) -> String {
 pub enum Ask {
     /// What this tab may read, asked by `pinned mcp` at tools/list.
     Offer,
-    Tables,
+    /// With no table: the table names. With a table: its fields and indexes.
+    Tables {
+        #[serde(default)]
+        table: Option<String>,
+    },
     Data {
         table: String,
         #[serde(default)]
@@ -152,7 +163,7 @@ impl Ask {
     pub fn tool(&self) -> &'static str {
         match self {
             Ask::Offer => "convex_offer",
-            Ask::Tables => TOOLS[0],
+            Ask::Tables { .. } => TOOLS[0],
             Ask::Data { .. } => TOOLS[1],
             Ask::Query { .. } => TOOLS[2],
             Ask::Run { .. } => TOOLS[3],
@@ -200,12 +211,14 @@ pub fn tool_definitions(offer: &Offer) -> Vec<Value> {
     if offer.kind == Kind::Prod {
         after.push_str(" This is production data. Quote only what the task needs.");
     }
-    let queries = if offer.tables.is_some() { "" } else { " and the deployed queries convex_run can run" };
     let tools = [
         json!({
             "name": TOOLS[0],
-            "description": format!("Lists the tables of {on}, which holds this project's data, with each table's fields and indexes{queries}. Start here. Read only.{after}"),
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": format!("Lists the tables of {on}, which holds this project's data. Pass table for one table's fields and indexes. Start here. Read only.{after}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": { "table": { "type": "string", "description": "One table, for its fields and indexes." } },
+            },
         }),
         json!({
             "name": TOOLS[1],
@@ -232,7 +245,7 @@ pub fn tool_definitions(offer: &Offer) -> Vec<Value> {
         }),
         json!({
             "name": TOOLS[3],
-            "description": format!("Runs a deployed query function of {on} by path, such as invoices:byNumber, with args. convex_tables lists them. A mutation or an action is refused.{after}"),
+            "description": format!("Runs a deployed query function of {on} by path, with args. The project's convex/ folder defines them: export byNumber in convex/invoices.ts is invoices:byNumber. A mutation or an action is refused.{after}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -329,7 +342,7 @@ mod tests {
     #[test]
     fn each_tool_name_parses_back_to_its_ask() {
         let asks = [
-            ("convex_tables", json!({}), Ask::Tables),
+            ("convex_tables", json!({}), Ask::Tables { table: None }),
             ("convex_data", json!({ "table": "invoices", "limit": 5 }), Ask::Data { table: "invoices".into(), limit: Some(5), cursor: None, oldest_first: false }),
             ("convex_query", json!({ "code": "return 1;" }), Ask::Query { code: "return 1;".into() }),
             ("convex_run", json!({ "function": "invoices:byNumber", "args": { "number": 1042 } }), Ask::Run { function: "invoices:byNumber".into(), args: json!({ "number": 1042 }) }),
@@ -341,7 +354,8 @@ mod tests {
             assert_eq!(expected.tool(), name);
         }
         assert_eq!(ask("convex_offer", &json!({})), Err("no Convex tool convex_offer".into()));
-        assert_eq!(ask("convex_tables", &json!({ "op": "query", "code": "x" })), Ok(Ask::Tables), "the name decides the op");
+        assert_eq!(ask("convex_tables", &json!({ "table": "invoices" })), Ok(Ask::Tables { table: Some("invoices".into()) }));
+        assert_eq!(ask("convex_tables", &json!({ "op": "query", "code": "x" })), Ok(Ask::Tables { table: None }), "the name decides the op");
         assert_eq!(ask("convex_data", &json!({})).unwrap_err(), "convex_data: missing field `table`");
     }
 
@@ -355,10 +369,10 @@ mod tests {
         assert_eq!(
             named(&tools),
             [
-                ("convex_tables", "Lists the tables of Convex deployment quick-lemur-789 (dev), which holds this project's data, with each table's fields and indexes and the deployed queries convex_run can run. Start here. Read only."),
+                ("convex_tables", "Lists the tables of Convex deployment quick-lemur-789 (dev), which holds this project's data. Pass table for one table's fields and indexes. Start here. Read only."),
                 ("convex_data", "Reads documents of one table of Convex deployment quick-lemur-789 (dev), newest first. limit is 20 by default and at most 100. Pass next_cursor as cursor to read on."),
                 ("convex_query", "Runs a read-only JavaScript query on Convex deployment quick-lemur-789 (dev). code is the body of async (ctx) => { … }, such as: return await ctx.db.query(\"invoices\").filter((q) => q.eq(q.field(\"number\"), 1042)).collect(); It cannot write."),
-                ("convex_run", "Runs a deployed query function of Convex deployment quick-lemur-789 (dev) by path, such as invoices:byNumber, with args. convex_tables lists them. A mutation or an action is refused."),
+                ("convex_run", "Runs a deployed query function of Convex deployment quick-lemur-789 (dev) by path, with args. The project's convex/ folder defines them: export byNumber in convex/invoices.ts is invoices:byNumber. A mutation or an action is refused."),
                 ("convex_logs", "Shows recent function runs of Convex deployment quick-lemur-789 (dev) with their log lines and errors, newest last."),
             ]
         );
@@ -371,7 +385,7 @@ mod tests {
         assert_eq!(
             named(&tools),
             [
-                ("convex_tables", "Lists the tables of Convex deployment happy-otter-123 (prod), which holds this project's data, with each table's fields and indexes. Start here. Read only. Only the tables invoices, customers. This is production data. Quote only what the task needs."),
+                ("convex_tables", "Lists the tables of Convex deployment happy-otter-123 (prod), which holds this project's data. Pass table for one table's fields and indexes. Start here. Read only. Only the tables invoices, customers. This is production data. Quote only what the task needs."),
                 ("convex_data", "Reads documents of one table of Convex deployment happy-otter-123 (prod), newest first. limit is 20 by default and at most 100. Pass next_cursor as cursor to read on. Only the tables invoices, customers. This is production data. Quote only what the task needs."),
             ]
         );
