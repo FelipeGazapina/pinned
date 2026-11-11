@@ -407,14 +407,14 @@ function machineBackgroundHtml(id, view) {
   const local = id === LOCAL && TAURI;
   const why = local && !account ? `Sign in under Account first. With no window, the web app is how you reach this ${COMPUTER}.` : "";
   const about = local
-    ? "pinned keeps running with no window, so it uses less memory, and you use it from the web app. Opening pinned again shows its window."
-    : "No window on this machine, so it uses less memory. Opening pinned there shows its window again.";
+    ? "While on, pinned keeps running with no window, so it uses less memory, and you use it from the web app. Opening pinned again shows its window."
+    : "While on, pinned runs there with no window, so it uses less memory. Opening pinned on that machine shows its window again.";
   const failed = machinesUi.background?.id === id ? machinesUi.background.error : "";
   // Shown only in a window opened while the setting is on, which closing puts back in the background.
   const close = local && view.background ? `<button class="secondary" data-action="machine-background-close">Close window</button>` : "";
   return `<div class="side-setting" data-setting="background" data-machine="${esc(id)}">
       <div><label>Run in the background</label><p class="meta">${about}</p>${why ? `<p class="meta" data-why>${why}</p>` : ""}${failed ? `<p class="error">${esc(failed)}</p>` : ""}${close}</div>
-      <label class="switch" data-action="machine-background"><input type="checkbox" aria-label="Run in the background"${view.background && !why ? " checked" : ""}${why ? " disabled" : ""}><span></span></label>
+      <label class="switch" data-action="machine-background" data-on="${!!view.background && !why}"><input type="checkbox" aria-label="Run in the background"${view.background && !why ? " checked" : ""}${why ? " disabled" : ""}><span></span></label>
     </div>`;
 }
 
@@ -477,9 +477,10 @@ Object.assign(actions, {
     }
     showMachinesPage();
   },
+  // The box has already flipped when the click lands on it, and not when it lands on the label
+  // around it, so the value comes from what the row was drawn with.
   "machine-background"(label) {
-    const input = label.querySelector("input");
-    if (!input.disabled) return setMachineBackground(rowMachine(label), !input.checked);
+    if (!label.querySelector("input").disabled) return setMachineBackground(rowMachine(label), label.dataset.on !== "true");
   },
   "machine-background-close": (button) => setMachineBackground(rowMachine(button), true),
   "go-account": () => showPage("account"),

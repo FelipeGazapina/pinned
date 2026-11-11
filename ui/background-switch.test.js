@@ -47,7 +47,7 @@ function page({ tauri = false, account = { machine_id: "m-book" }, fail = null }
 
 const studio = { id: "m-studio", name: "studio", os: "macos", online: true, last_seen: 1, background: false };
 const node = { id: "m-vps", name: "vps", os: "linux", online: true, last_seen: 1 };
-const switchOf = (html) => html.match(/<label class="switch" data-action="machine-background"><input type="checkbox" aria-label="Run in the background"( checked)?( disabled)?><span><\/span><\/label>/);
+const switchOf = (html) => html.match(/<label class="switch" data-action="machine-background" data-on="(?:true|false)"><input type="checkbox" aria-label="Run in the background"( checked)?( disabled)?><span><\/span><\/label>/);
 
 test("a machine running the app gets a Run in the background switch in its row, set as it reported", () => {
   const { ui } = page();
@@ -80,7 +80,7 @@ test("switching it off from the web asks that machine and redraws the row from w
   const { ui, calls, drawn } = page();
   const view = { ...studio, background: true };
   ui.machines.set("m-studio", { view });
-  await ui.actions["machine-background"]({ machine: "m-studio", querySelector: () => ({ checked: true, disabled: false }) });
+  await ui.actions["machine-background"]({ machine: "m-studio", dataset: { on: "true" }, querySelector: () => ({ checked: false, disabled: false }) });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["m-studio", { cmd: "set_background", on: false }]]);
   assert.equal(view.background, false);
   assert.deepEqual(drawn, ["machines"]);
@@ -90,7 +90,7 @@ test("a refused switch keeps the old value and shows the machine's reason under 
   const { ui } = page({ fail: "this machine runs pinned without the app, so it has no window" });
   const view = { ...studio };
   ui.machines.set("m-studio", { view });
-  await ui.actions["machine-background"]({ machine: "m-studio", querySelector: () => ({ checked: false, disabled: false }) });
+  await ui.actions["machine-background"]({ machine: "m-studio", dataset: { on: "false" }, querySelector: () => ({ checked: true, disabled: false }) });
   assert.equal(view.background, false);
   assert.match(ui.machineEntryHtml("m-studio", view), /<p class="error">Error: this machine runs pinned without the app, so it has no window<\/p>/);
 });
@@ -98,7 +98,7 @@ test("a refused switch keeps the old value and shows the machine's reason under 
 test("a disabled switch sends nothing, and Close window turns the setting back on", async () => {
   const { ui, calls } = page({ tauri: true });
   ui.page = "general";
-  await ui.actions["machine-background"]({ machine: "local", querySelector: () => ({ checked: false, disabled: true }) });
+  await ui.actions["machine-background"]({ machine: "local", dataset: { on: "false" }, querySelector: () => ({ checked: false, disabled: true }) });
   assert.equal(calls.length, 0);
   const html = ui.machineBackgroundHtml("local", { background: true });
   assert.match(html, /<button class="secondary" data-action="machine-background-close">Close window<\/button>/);
