@@ -57,6 +57,7 @@ clock.advance = (ms) => {
 clock.next = () => clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
 
 const sandbox = {
+  navigator: { userAgent: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36" },
   tasksTab,
   contextMeter,
   composerBanners,
@@ -485,6 +486,29 @@ test("a nudge during a read reads again, so the new line and its agent card show
   await net.drain();
   assert.deepEqual(painted().items, ["start", "spawning"]);
   assert.match(painted().agents, /Look around/);
+});
+
+test("a thread off screen keeps only what the sidebar reads once its first read ends, and reads all of it again on screen", async () => {
+  clearScreen();
+  const kinds = (tab) => Array.from(tab.thread.items, (item) => item.kind);
+  const [background, shown] = [tabFor("tab-1", "idle"), tabFor("tab-2", "idle")];
+  const quiet = transcript();
+  quiet.append({ item: { kind: "tool", at: "t1", id: "toolu_1", name: "Bash", summary: "cargo test", detail: "cargo test" } });
+  quiet.append({ item: text("Done.") });
+  const net = network({ "tab-1": quiet, "tab-2": transcript() });
+  sandbox.tabs = [background, shown];
+  sandbox.active = shown;
+  sandbox.fetchThread(background);
+  sandbox.fetchThread(shown);
+  await net.drain();
+  assert.deepEqual(kinds(background), ["user", "text"]);
+  assert.deepEqual(kinds(shown), ["user"]);
+  const reads = net.reads;
+  sandbox.active = background;
+  sandbox.renderGui();
+  await net.drain();
+  assert.deepEqual(kinds(background), ["user", "tool", "text"]);
+  assert.equal(net.reads, reads + 1, "one read from the start brings the thread back");
 });
 
 test("a background tab's agents arrive during its turn and keep it watched after", async () => {

@@ -186,13 +186,17 @@ test("a paste into a terminal without elements is sent as xterm sends it", () =>
   assert.deepEqual(opened.term.written, ["pasted:x"]);
 });
 
-/** gui.js's handling of the threads off screen, over threads a test fills in. */
-function threads() {
+const CHROME = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+const WEBKIT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+
+/** gui.js's handling of the threads off screen, over threads a test fills in, in a page whose engine says `userAgent`. */
+function threads(userAgent = CHROME) {
   const gui = source("gui.js");
   const state = { tabs: [], active: null, live: new Set() };
   const store = new Map();
   const sandbox = {
-    threadOf: (tab) => store.get(tab) ?? store.set(tab, { items: [], loaded: false }).get(tab),
+    navigator: { userAgent },
+    threadOf: (tab) => store.get(tab) ?? store.set(tab, { items: [], loaded: false, next: 0 }).get(tab),
     followed: (tab) => tab === state.active || state.live.has(tab),
   };
   Object.defineProperty(sandbox, "tabs", { get: () => state.tabs });
@@ -260,7 +264,7 @@ test("a thread that dropped its tool calls holds them nowhere else, and still bu
   assert.deepEqual(turnsFor(sandbox.threadOf(tabs[0])).map((turn) => [turn.user.text, turn.answer.text]), [["fix the parser", "Fixed the cursor."]]);
 });
 
-test("a thread never shown keeps its first read, and one with a turn running keeps its transcript", () => {
+test("a thread never shown keeps only what the sidebar reads too, and one with a turn running keeps its transcript", () => {
   const { sandbox, state } = threads();
   const tabs = Array.from({ length: 9 }, (_, i) => ({ key: `t${i}` }));
   state.tabs.push(...tabs);
@@ -269,7 +273,40 @@ test("a thread never shown keeps its first read, and one with a turn running kee
   state.live.add(tabs[1]);
   state.active = tabs[8];
   sandbox.lightenThreads();
-  assert.deepEqual(tabs.map((tab) => sandbox.threadOf(tab).items.length), [7, 7, 4, 7, 7, 7, 7, 7, 7]);
+  assert.deepEqual(tabs.map((tab) => sandbox.threadOf(tab).items.length), [4, 7, 4, 7, 7, 7, 7, 7, 7]);
+});
+
+test("in WebKit, which keeps the memory it would free, a thread never shown keeps its first read", () => {
+  const { sandbox, state } = threads(WEBKIT);
+  const tabs = Array.from({ length: 9 }, (_, i) => ({ key: `t${i}` }));
+  state.tabs.push(...tabs);
+  for (const tab of tabs) Object.assign(sandbox.threadOf(tab), { items: transcript(), loaded: true });
+  for (const tab of tabs.slice(2)) sandbox.show(tab);
+  state.active = tabs[8];
+  sandbox.lightenThreads();
+  assert.deepEqual(tabs.map((tab) => sandbox.threadOf(tab).items.length), [7, 7, 4, 7, 7, 7, 7, 7, 7], "the two never shown are whole, and the one shown before the last six is not");
+});
+
+test("the threads shown last stay whole only while together they hold 16 MB of transcript", () => {
+  const { sandbox, state } = threads();
+  const tabs = Array.from({ length: 5 }, (_, i) => ({ key: `t${i}` }));
+  state.tabs.push(...tabs);
+  const sizes = [1, 9, 3, 6, 20].map((mb) => mb << 20);
+  tabs.forEach((tab, i) => {
+    Object.assign(sandbox.threadOf(tab), { items: transcript(), loaded: true, next: sizes[i] });
+    sandbox.show(tab);
+  });
+  sandbox.lightenThreads();
+  assert.deepEqual(tabs.map((tab) => sandbox.threadOf(tab).items.length), [4, 4, 4, 4, 7], "the thread shown last is whole whatever its size, and nothing fits beside 20 MB");
+  const again = threads();
+  again.state.tabs.push(...tabs);
+  tabs.slice(0, 4).forEach((tab, i) => {
+    Object.assign(again.sandbox.threadOf(tab), { items: transcript(), loaded: true, next: sizes[i] });
+    again.sandbox.show(tab);
+  });
+  Object.assign(again.sandbox.threadOf(tabs[4]), { items: transcript(), loaded: true, next: sizes[4] });
+  again.sandbox.lightenThreads();
+  assert.deepEqual(tabs.map((tab) => again.sandbox.threadOf(tab).items.length), [4, 4, 7, 7, 4], "6 MB and 3 MB fit, and 9 MB more would not");
 });
 
 test("the tab on screen is named to its machine when it comes on screen and every minute it stays, and a stopped tab or a sign-in is not", () => {
