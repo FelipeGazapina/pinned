@@ -122,6 +122,7 @@
   .workers-sheet .ws-row[data-state="done"] .ws-title { font-weight: 400; color: var(--g-text); }
   .workers-sheet .ws-step { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-side-muted); }
   .workers-sheet .ws-row .chev { flex: none; color: rgb(var(--g-fg-rgb) / 0.55); }
+  .workers-sheet .ws-row[data-depth] { margin-left: calc(var(--depth) * 20px); }
   .workers-sheet .ws-foot { padding: 14px 12px 0; }
   .workers-sheet .ws-foot button { border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: transparent; color: var(--g-fg); font-size: 15px; font-weight: 400; }
   .workers-sheet .ws-foot .danger { border-color: rgb(var(--g-error-rgb) / 0.4); color: color-mix(in srgb, var(--g-error) 60%, white); }

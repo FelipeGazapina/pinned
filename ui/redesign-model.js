@@ -16,9 +16,10 @@
 //   multi-select. `typed` says answerAsk takes { text } (decline with a reason, a free answer, or
 //   a plan refinement).
 //
-// workersOf(tab) -> [{ kind, key, tab, agent, title, state, step, ask, model, elapsedMs, since }]
+// workersOf(tab) -> [{ kind, key, tab, agent, title, state, step, ask, model, elapsedMs, since, depth }]
 //   A Captain's Workers block: its worker threads (`spawned_by`, oldest first), then its delegated
-//   `task-` agents and CLI subagents (top level only). `kind` is "thread" | "task" | "subagent";
+//   `task-` agents and CLI subagents, each followed by the agents it started, at any depth; `depth`
+//   is 0 for a top-level row and one more per agent above it. `kind` is "thread" | "task" | "subagent";
 //   `tab` is set for a thread, `agent` for the others. `state` is "working" | "needs" | "done" |
 //   "failed" | "stopped". `step` is the latest step in one line (a done worker's last answer line).
 //   `ask` is pendingAsk of a worker thread. `model` is the model's name once the transcript or the
@@ -182,7 +183,14 @@ function workersOf(tab) {
   const own = `${tab.machine}:${tab.view.id}`;
   const threads = tabs.filter((t) => t !== tab && spawnerKey(t) === own).sort((a, b) => a.view.opened - b.view.opened);
   const started = threads.length ? delegatedModels(tab) : new Map();
-  return [...threads.map((w) => threadWorker(w, started)), ...agentsOf(tab).filter((a) => !a.parent).map((a) => agentWorker(tab, a))];
+  const agents = agentsOf(tab);
+  const seen = new Set();
+  const tree = (agent, depth) => {
+    if (seen.has(agent.id)) return [];
+    seen.add(agent.id);
+    return [{ ...agentWorker(tab, agent), depth }, ...agents.filter((a) => a.parent === agent.id).flatMap((a) => tree(a, depth + 1))];
+  };
+  return [...threads.map((w) => ({ ...threadWorker(w, started), depth: 0 })), ...agents.filter((a) => !a.parent).flatMap((a) => tree(a, 0))];
 }
 
 /** Whether a thread waits on the user, so a message must not go to it: a prompt ends in Enter,

@@ -141,11 +141,14 @@ function workerCardHtml(row) {
   return `<div class="ws-card" data-ws-card="${id}"><div class="ws-card-head">${glyphHtml("needs", 12)}<span class="ws-text"><span class="ws-title">${esc(row.title)}</span><span class="ws-says">${says}</span></span>${model ? `<span class="ws-model">${esc(model)}</span>` : ""}</div>
     ${what}<div class="ws-answers">${answers}</div></div>`;
 }
-/** Any other worker: its state, its latest step and its time, opening its thread. */
+/** Any other worker: its state, its latest step and its time, opening its thread, or for an agent
+ * its row in the Workers block, where its actions are. An agent another agent started sits
+ * indented under it. */
 function workerSheetRowHtml(row) {
   const time = row.state === "done" ? "Done" : row.state === "working" && row.since ? sheetTicker(row.since) : row.elapsedMs != null ? duration(row.elapsedMs) : "";
   const opens = row.tab ? `data-ws-open="${esc(row.key)}"` : `data-ws-agent="${esc(row.key)}"`;
-  return `<button type="button" class="ws-row" data-state="${row.state}" ${opens}>${glyphHtml(row.state, 12)}<span class="ws-text"><span class="ws-title">${esc(row.title || "Agent")}</span>${row.step ? `<span class="ws-step">${esc(row.step)}</span>` : ""}</span>${time ? `<span class="ws-time">${time}</span>` : ""}${phoneSvg("right", 16, "chev")}</button>`;
+  const depth = row.depth ? ` data-depth="${row.depth}" style="--depth: ${row.depth}"` : "";
+  return `<button type="button" class="ws-row" data-state="${row.state}" ${opens}${depth}>${glyphHtml(row.state, 12)}<span class="ws-text"><span class="ws-title">${esc(row.title || "Agent")}</span>${row.step ? `<span class="ws-step">${esc(row.step)}</span>` : ""}</span>${time ? `<span class="ws-time">${time}</span>` : ""}${phoneSvg("right", 16, "chev")}</button>`;
 }
 const stoppable = (rows) => rows.filter((r) => r.state === "working" && (r.tab || r.agent?.id.startsWith("task-")));
 const stopLabel = (n) => (n === 1 ? "Stop the running one" : `Stop the ${n} running`);

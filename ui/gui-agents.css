@@ -35,6 +35,8 @@
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12 5 5 9-10'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12 5 5 9-10'/%3E%3C/svg%3E") center / contain no-repeat; }
 .worker-body { display: flex; flex-direction: column; gap: 5px; padding: 4px 12px 10px 34px; }
+.worker-row[data-depth] > .worker-head { padding-left: calc(12px + var(--depth) * 22px); }
+.worker-row[data-depth] > .worker-body { padding-left: calc(34px + var(--depth) * 22px); }
 .worker-line { display: flex; gap: 8px; min-width: 0; font-size: 12px; color: var(--g-side-muted); }
 .worker-line .tag { flex: none; }
 .worker-line .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--g-mono); }

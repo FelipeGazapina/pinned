@@ -389,6 +389,28 @@ test("an agent with no steps yet shows what it was asked from the spawn brief", 
   assert.match(row(),/<div class="narration md"><p>Trace the session flow in src\/auth.ts and prove it with npm test.<\/p><\/div>/);
 });
 
+test("a task another agent started has its own row under that agent's, with its state and its actions", async () => {
+  const { tab, s, net } = await opened();
+  s.agents = [
+    { id: "task-1", name: "Port the updater", state: "running", updated: "t5", steps: [] },
+    { id: "task-2", parent: "task-1", name: "Port the Windows half", state: "running", updated: "t5", steps: [] },
+    { id: "a7", parent: "task-2", name: "Read the installer", state: "done", updated: "t6", steps: [], conversation: null },
+  ];
+  await poll(tab, net);
+  const block = painted().agents;
+  assert.match(textOf(blocks(block, '<div class="workers-head"')[0]), /^Workers\s*1 of 3 done\s*2 working$/, "the nested ones count");
+  const rows = blocks(block, '<div class="worker-row"').map((r) => /^<div class="worker-row"[^>]*>/.exec(r)[0]);
+  assert.deepEqual(rows, [
+    '<div class="worker-row" data-worker="box:tab-1:task-1" data-state="working" data-agent="task-1">',
+    '<div class="worker-row" data-worker="box:tab-1:task-2" data-state="working" data-agent="task-2" data-depth="1" style="--depth: 1">',
+    '<div class="worker-row" data-worker="box:tab-1:a7" data-state="done" data-agent="a7" data-depth="2" style="--depth: 2">',
+  ]);
+  tab.thread.open.add("worker:box:tab-1:task-2");
+  sandbox.renderThread();
+  const nested = blocks(painted().agents, '<div class="worker-row" data-worker="box:tab-1:task-2"')[0];
+  assert.match(nested, /<div class="worker-actions"><button type="button" class="outline danger" data-cancel-task="task-2">Cancel<\/button><\/div>/);
+});
+
 test("a Captain's worker threads fill one Workers block after its lead paragraph", async () => {
   const { tab, s, net } = await opened();
   s.append({ item: { kind: "tool", at: "t2", id: "toolu_d", name: "mcp__pinned__delegate_task", summary: "Run the CI" } });

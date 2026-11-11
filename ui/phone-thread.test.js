@@ -146,6 +146,8 @@ test("a Workers sheet row's markup does not change as its clock runs, so a repai
   clock.now += 60000;
   assert.equal(app.workerSheetRowHtml(row), first);
   assert.match(first, /<span class="ws-time"><span class="ticker" data-since="1794420480000"><\/span><\/span>/);
+  const nested = app.workerSheetRowHtml({ key: "cap:task-2", state: "working", since: null, elapsedMs: null, title: "Port the Windows half", step: null, tab: null, depth: 1 });
+  assert.match(nested, /^<button type="button" class="ws-row" data-state="working" data-ws-agent="cap:task-2" data-depth="1" style="--depth: 1">/, "a nested agent sits indented and opens its row in the block");
 });
 
 test("the Workers sheet puts the waiting workers first, the reviewed one leading", () => {
