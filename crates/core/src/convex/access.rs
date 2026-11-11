@@ -186,7 +186,7 @@ mod tests {
             with("global", |t| t.orchestrator_global = true),
             with("taste", |t| t.taste_chat = true),
         ];
-        let m2 = vec![with("delegate-box", |t| {
+        let m2 = [with("delegate-box", |t| {
             t.connector = Some(DELEGATE_CONNECTOR.into());
             t.spawned_by = Some("thread".into());
             t.spawned_on = Some("m1".into());
@@ -201,7 +201,8 @@ mod tests {
         let limited: Result<Scope, String> = Ok(Scope::Tables(["customers".to_string(), "invoices".to_string()].into()));
         let no_step = Err("This workflow has no Read Convex data step.".to_string());
         let tables = Ask::Tables { table: None };
-        let rows: Vec<(&str, &str, Option<&str>, Ask, Result<Scope, String>)> = vec![
+        type Row<'a> = (&'a str, &'a str, Option<&'a str>, Ask, Result<Scope, String>);
+        let rows: Vec<Row> = vec![
             ("m1", "thread", Some(SITE), tables.clone(), everything.clone()),
             ("m1", "thread", Some("github.com/acme/blog"), tables.clone(), Err("Convex is not connected for `github.com/acme/blog`. The user connects it under Settings, Connectors, Convex.".into())),
             ("m1", "thread", None, Ask::Offer, Err("This folder has no git origin, so it cannot be connected to Convex yet.".into())),

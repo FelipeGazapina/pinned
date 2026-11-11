@@ -748,7 +748,7 @@ mod tests {
     fn an_error_that_echoes_the_key_comes_out_scrubbed() {
         let echo = fake(vec![(json!({ "status": "error", "errorMessage": format!("[Request ID: 1] Server Error\nbad admin key {ADMIN}") }), 200)]);
         assert_eq!(block_on(read(&echo, &key(), &everything(), Ask::Tables { table: None })), Err("Convex: bad admin key [hidden]".into()));
-        let echo = fake(vec![(json!({ "code": "Nope", "message": format!("key eyJ2MiI6ImFkbWluIn0secret was revoked") }), 403)]);
+        let echo = fake(vec![(json!({ "code": "Nope", "message": "key eyJ2MiI6ImFkbWluIn0secret was revoked" }), 403)]);
         assert_eq!(block_on(resolve(&echo, &key())), Err("Convex answered 403: key [hidden] was revoked".into()));
     }
 
