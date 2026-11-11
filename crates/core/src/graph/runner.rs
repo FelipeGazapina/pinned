@@ -437,6 +437,14 @@ fn step(run: &mut Run, library: &Library) -> Next {
             }
             Next::Cont
         }
+        NodeKind::ConvexData { connection, .. } => {
+            let at = stamped(run);
+            record(run, &connector, &node_id, json!({ "convex": connection }), &at);
+            if let Some(frame) = run.stack.last_mut() {
+                frame.phase = Phase::Follow(out_port());
+            }
+            Next::Cont
+        }
         NodeKind::Talk { prompt } => match talk_effect(run, &connector, &prompt, &SessionSetup::default()) {
             Ok(effect) => Next::Act(effect),
             Err(why) => Next::Fail(why),
@@ -975,6 +983,7 @@ fn path_pages(
             | NodeKind::TakeIssue { .. }
             | NodeKind::MoveColumn { .. }
             | NodeKind::Proof
+            | NodeKind::ConvexData { .. }
             | NodeKind::Classify(_)
             | NodeKind::Switch(_) => node
                 .kind
@@ -1496,6 +1505,7 @@ mod tests {
                 ("k", "Take", NodeKind::TakeIssue { issue: "ENG-1".into() }),
                 ("m", "Move", NodeKind::MoveColumn { column: "Review".into() }),
                 ("p", "Proof", NodeKind::Proof),
+                ("c", "Read Convex data", NodeKind::ConvexData { connection: "quick-lemur-789".into(), tables: Some(vec!["invoices".into()]) }),
                 ("s", "Stop", NodeKind::Stop),
             ]),
         )]);
@@ -1519,6 +1529,7 @@ mod tests {
         assert!(run.log.iter().any(|entry| entry.what == json!({ "take-issue": "ENG-1" })));
         assert!(run.log.iter().any(|entry| entry.what == json!({ "move": "Review" })));
         assert!(run.log.iter().any(|entry| entry.what == json!({ "proof": true })));
+        assert!(run.log.iter().any(|entry| entry.what == json!({ "convex": "quick-lemur-789" })));
     }
 
     #[test]

@@ -75,8 +75,40 @@ pub fn install_main_window(app: &tauri::AppHandle, frames: Arc<Mutex<Option<Url>
             tauri::webview::NewWindowResponse::Deny
         })
         .build()?;
+    #[cfg(target_os = "macos")]
+    paint_scrolling_boxes_with_the_page(&built);
     *slot.lock().unwrap() = Some(built.clone());
     Ok(built)
+}
+
+/// WebKit gives every box that scrolls a layer of its own, and a layer under 2048 points a side
+/// gets one surface of its whole size, twice over for the frame being drawn. The thread view's is
+/// the window's width by the thread's height, 20 to 35 MB each, and the ones of threads shown
+/// before stay allocated. With the feature off, a box that scrolls is painted with the page, in
+/// the tiles the window already has. An older WebKit that lacks these calls keeps its layers.
+#[cfg(target_os = "macos")]
+fn paint_scrolling_boxes_with_the_page(window: &tauri::WebviewWindow) {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::{msg_send, sel};
+    use objc2_foundation::{NSArray, NSString};
+    let _ = window.with_webview(|webview| unsafe {
+        let view = &*(webview.inner() as *const AnyObject);
+        let Some(class) = AnyClass::get(c"WKPreferences") else { return };
+        let configuration: Retained<AnyObject> = msg_send![view, configuration];
+        let preferences: Retained<AnyObject> = msg_send![&*configuration, preferences];
+        let settable: bool = msg_send![&*preferences, respondsToSelector: sel!(_setEnabled:forFeature:)];
+        if class.class_method(sel!(_features)).is_none() || !settable {
+            return;
+        }
+        let features: Retained<NSArray<AnyObject>> = msg_send![class, _features];
+        for feature in features.iter() {
+            let key: Retained<NSString> = msg_send![&*feature, key];
+            if key.to_string() == "AsyncOverflowScrollingEnabled" {
+                let () = msg_send![&*preferences, _setEnabled: false, forFeature: &*feature];
+            }
+        }
+    });
 }
 
 #[tauri::command]

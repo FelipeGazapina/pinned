@@ -757,6 +757,12 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
+    // A session's Convex tool. Nothing of it is logged: an answer or a refusal may quote the
+    // account's data.
+    if let HubCall::Convex { tab, repo, ask } = call {
+        let result = hub.convex(&account, &machine, &tab, repo.as_deref(), ask).await;
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     // A machine archives only its own tabs, found finished by its own check.
     if let HubCall::AutoArchive { tab } = call {
         let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));

@@ -3,7 +3,7 @@
 // in a PTY of the size a machine gives a session nobody watches (120x32), against the stack's
 // OpenCode Go mock, until it asks the mock's AskUserQuestion; its bytes then go into xterm.js
 // terminals of several sizes, as the hub replays them into a hidden tab, and the app's own
-// terminalMenu reads each screen. The app's terminals start at UNFITTED (ui/main.js); the old
+// terminalMenu reads each screen. The app's terminals start at newTerminal's size (ui/main.js); the old
 // default was xterm's 80x24, and a terminal narrower than the PTY misreads the screen.
 //
 //   export SWEEP_DIR=... SWEEP_HUB_PORT=... SWEEP_PG_PORT=... SWEEP_GO_PORT=...
@@ -22,7 +22,7 @@ const MOCK = `http://127.0.0.1:${process.env.SWEEP_GO_PORT || 8798}`;
 const CLAUDE = process.env.SWEEP_REAL_CLAUDE;
 const UI = path.join(__dirname, "../../ui");
 const [COLS, ROWS] = (process.env.HIDDEN_MENU_PTY || "120x32").split("x").map(Number);
-const UNFITTED = fs.readFileSync(path.join(UI, "main.js"), "utf8").match(/const UNFITTED = \{ cols: (\d+), rows: (\d+) \}/).slice(1).join("x");
+const UNFITTED = fs.readFileSync(path.join(UI, "main.js"), "utf8").match(/function newTerminal\(\) \{\s+const term = new Terminal\(\{\s+cols: (\d+),\s+rows: (\d+),/).slice(1).join("x");
 
 const check = (ok, what) => {
   if (!ok) throw new Error(what);

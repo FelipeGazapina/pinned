@@ -93,6 +93,8 @@ function app({ answer, machines = [] } = {}) {
     agentConsentHtml: () => "",
     externalAgentsCardHtml: () => "",
     loadExternalAgents() {},
+    convexCardHtml: () => "",
+    loadConvexProjects() {},
     document: { body: { dataset: { page: "settings" } }, getElementById: byId, querySelector: () => element(), createElement: () => element() },
   };
   context.globalThis = context;

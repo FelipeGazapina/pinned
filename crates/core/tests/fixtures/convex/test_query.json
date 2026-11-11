@@ -1,0 +1,33 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/run_test_function",
+    "auth": "admin",
+    "body": {
+      "adminKey": "<admin-key>",
+      "args": {},
+      "bundle": {
+        "path": "testQuery.js",
+        "source": "import { query } from \"convex:/_system/repl/wrappers.js\";\nexport default query({ handler: async (ctx) => {\n  console.log(\"looking up 1042\");\n  return await ctx.db.query(\"invoices\").filter((q) => q.eq(q.field(\"number\"), 1042)).collect();\n} });\n"
+      },
+      "format": "convex_encoded_json"
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": [
+      {
+        "_creationTime": 1794370889263.0466,
+        "_id": "j570y2r5f2rfmd6sf3ac7knawd8j021h",
+        "customer": "j97bzvs5tt8tv5xgqw8f758ve18j0r8s",
+        "number": 1042.0,
+        "paidAt": null,
+        "status": "pending"
+      }
+    ],
+    "logLines": [
+      "[LOG] 'looking up 1042'"
+    ]
+  }
+}

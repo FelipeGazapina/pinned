@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "wrong-key",
+    "body": {
+      "path": "_system/cli/tables",
+      "format": "convex_encoded_json",
+      "args": [
+        {
+          "paginationOpts": {
+            "cursor": null,
+            "numItems": 100
+          }
+        }
+      ]
+    }
+  },
+  "status": 401,
+  "response": {
+    "code": "BadAdminKey",
+    "message": "The provided admin key was invalid for this instance"
+  }
+}

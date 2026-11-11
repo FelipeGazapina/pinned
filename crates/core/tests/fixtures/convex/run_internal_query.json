@@ -1,0 +1,22 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/query",
+    "auth": "admin",
+    "body": {
+      "path": "invoices:countPending",
+      "format": "convex_encoded_json",
+      "args": [
+        {}
+      ]
+    }
+  },
+  "status": 200,
+  "response": {
+    "status": "success",
+    "value": 2.0,
+    "logLines": [
+      "[LOG] 'counting pending invoices'"
+    ]
+  }
+}

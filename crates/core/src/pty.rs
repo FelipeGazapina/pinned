@@ -11,6 +11,7 @@ pub struct Session {
     writer: Box<dyn Write + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
     killed: Arc<AtomicBool>,
+    untouched: bool,
 }
 
 pub fn size(cols: u16, rows: u16) -> PtySize {
@@ -98,12 +99,18 @@ impl Session {
         let master = Arc::new(Mutex::new(Some(pair.master)));
         #[cfg(windows)]
         close_on_exit(&*child, master.clone());
-        Ok(Self { master, writer, child: Some(child), killed })
+        Ok(Self { master, writer, child: Some(child), killed, untouched: true })
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.untouched = false;
         self.writer.write_all(bytes)?;
         self.writer.flush()
+    }
+
+    /// Nothing has been written to the program since it started.
+    pub fn untouched(&self) -> bool {
+        self.untouched
     }
 
     pub fn pid(&self) -> Option<u32> {

@@ -320,7 +320,7 @@ async function startShell(entry) {
   const { tab, term } = entry;
   try {
     entry.shell = await callOn(tab.machine, { cmd: "open_shell", tab: tab.view.id, cols: term.cols, rows: term.rows });
-    await machines.get(tab.machine).transport.attach(entry.shell, { write: (bytes) => term.write(bytes), reset: () => term.reset() });
+    await machines.get(tab.machine).transport.attach(entry.shell, { write: (bytes) => feed(term, bytes), reset: () => term.reset() });
     if (entry.typed.length) callOn(tab.machine, { cmd: "write_input", tab: entry.shell, data: entry.typed.splice(0).join("") });
   } catch (e) {
     term.write(`\r\n${/unknown variant/.test(String(e)) ? `${machineName(tab.machine)} runs an older pinned, which has no terminals. Update it to open one.` : String(e)}\r\n`);

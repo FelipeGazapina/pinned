@@ -102,6 +102,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
         box_policy: pinned_server::boxes::Policy::default(),
+        convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
@@ -184,7 +185,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
     pinned_core::boot::ready();
-    for tab in machine.restore_tabs() {
+    for tab in machine.restore_working() {
         if let Err(e) = machine.start_claude(&tab, UNWATCHED.0, UNWATCHED.1) {
             eprintln!("pinned-server: could not resume {tab}: {e}");
         }
