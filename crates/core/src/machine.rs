@@ -409,6 +409,9 @@ struct Tab {
     /// `permission_mode` is the mode the running session is in: a hook reported it, or the start
     /// asked for it. A bare resume starts in the default mode whatever was recorded before.
     mode_live: bool,
+    /// The effort the running session was started at, when its start named one. A resume starts
+    /// at the default effort whatever the conversation ran at before.
+    effort: Option<String>,
     /// The session's last turn left background shells that run on under its process, such as a
     /// dev server.
     shells_left: bool,
@@ -1997,6 +2000,7 @@ impl Machine {
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
+            t.effort = args.iter().position(|a| a == "--effort").and_then(|at| args.get(at + 1).cloned());
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
@@ -2401,10 +2405,14 @@ impl Machine {
             }
             let saved = t.saved()?;
             let session = t.session.take()?;
-            t.launch = saved.reopen(unix_now(), t.account.provider).0;
-            // A resume starts in the default mode, and this session may have left it.
-            let mode = t.permission_mode.clone().filter(|mode| t.mode_live && !t.bypass && !t.permission_unknown && t.account.provider == Provider::Claude && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
+            // The session rested at its prompt, so its next start types nothing: a turn that was
+            // cut off before waits for the user, as it did while the session ran.
+            t.launch = crate::delegate::resume_args(t.account.provider, &saved.session);
+            // A resume starts in the default mode and at the default effort, and this session may have left both.
+            let claude = t.account.provider == Provider::Claude;
+            let mode = t.permission_mode.clone().filter(|mode| claude && t.mode_live && !t.bypass && !t.permission_unknown && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
             t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
+            t.launch.extend(t.effort.clone().filter(|_| claude).into_iter().flat_map(|effort| ["--effort".to_owned(), effort]));
             (t.asleep, t.mcp, t.started) = (true, None, None);
             // The screen moves on before the tab is let go: the exit of the session dropped below
             // reaches no one, and a start that follows counts from here, so its output is its own.
@@ -5891,6 +5899,7 @@ impl Machine {
             bare: false,
             waking: false,
             mode_live: false,
+            effort: None,
             shells_left: false,
             env,
             bypass,
@@ -7115,6 +7124,29 @@ pub(crate) mod tests {
         let _ = started(&claude, &looked);
         m.call(Call::Wake { tab: looked.clone(), cols: 80, rows: 24 }).unwrap();
         assert_eq!(started(&claude, &looked)[4..], ["--resume", "looked"], "it starts on its conversation again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_held_at_its_usage_limit_stays_held_when_its_session_sleeps_and_is_looked_at_again() {
+        let dir = temp("sleep-held");
+        let (app, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        // The limit reset while pinned was closed, and the user had switched auto-resume off.
+        std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "held", "env": [], "interrupted": true, "resume_at": unix_now() - 60, "held": true }]).to_string()).unwrap();
+        let claude = typed_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let tab = m.restore_working().remove(0);
+        m.start_claude(&tab, 80, 24).unwrap();
+        assert_eq!(started(&claude, &tab)[4..], ["--resume", "held"], "the turn waits for the user");
+        let pid = pid_of(&claude, &tab);
+        m.rest_sessions(m.tab(&tab, |t| t.started.unwrap()).unwrap() + REST_AFTER);
+        wait_for("the session to sleep", || !alive(pid));
+
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(started(&claude, &tab)[4..], ["--resume", "held"], "a look at the thread continues nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -12906,6 +12938,11 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain's thread child on the `work` account, with its transcript file and its folder.
     #[cfg(unix)]
     fn captain_with_thread_child(name: &str) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        captain_with_thread_child_on(name, json!({ "providerInstanceId": "work" }))
+    }
+
+    #[cfg(unix)]
+    fn captain_with_thread_child_on(name: &str, target: Value) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -12915,7 +12952,7 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
-        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": { "providerInstanceId": "work" } }));
+        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": target }));
         let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
         let transcripts = config.join("accounts/work/projects/app");
         std::fs::create_dir_all(&transcripts).unwrap();
@@ -12926,8 +12963,8 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_workers_session_ends_once_its_task_is_over_and_resumes_in_its_mode_on_the_next_prompt() {
-        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-rest");
+    fn a_workers_session_ends_once_its_task_is_over_and_resumes_in_its_mode_and_at_its_effort_on_the_next_prompt() {
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child_on("thread-rest", json!({ "providerInstanceId": "work", "options": { "effort": "high" } }));
         let claude = dir.join("claude");
         let _ = started(&claude, &child);
         let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
@@ -12948,7 +12985,7 @@ Have another model review a risky change before it goes ahead.";
 
         assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
         let args = started(&claude, &child);
-        assert!(args.windows(4).any(|flags| flags == ["--resume", "s-child", "--permission-mode", "auto"]), "{args:?}");
+        assert!(args.windows(6).any(|flags| flags == ["--resume", "s-child", "--permission-mode", "auto", "--effort", "high"]), "{args:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
