@@ -5,9 +5,13 @@ use std::collections::{BTreeMap, HashMap};
 
 const API: &str = "https://slack.com/api/";
 /// How far back a channel's history is read to find threads that got a new reply. A thread
-/// older than this that gets a new mention or reply is missed.
-const THREAD_LOOKBACK: chrono::Duration = chrono::Duration::days(7);
+/// older than this, or past the newest `HISTORY_PAGES` pages, that gets a new mention or reply
+/// is missed. Slack's history lists only top-level messages, each with its thread's latest reply,
+/// so polling has no cheaper way to see a reply in an old thread.
+const THREAD_LOOKBACK: chrono::Duration = chrono::Duration::days(90);
 const PAGE: &str = "200";
+/// The most history pages of `PAGE` messages one check reads, newest first.
+const HISTORY_PAGES: usize = 5;
 /// The error a call fails with once Slack rate limits pinned.
 pub const RATE_LIMITED: &str = "Slack: ratelimited";
 /// The reaction that tells people a session is working on their message.
@@ -325,8 +329,10 @@ fn mentioning(messages: &[Value], bot: &str) -> Vec<String> {
 }
 
 /// Mentions of `bot` in `channel` after `since`, oldest first, and new messages in the threads
-/// `cursors` follows, keyed by thread ts. Takes one history call, plus one replies call per
-/// thread that got a reply since, because Slack rate limits both.
+/// `cursors` follows, keyed by thread ts. A mention in a thread no cursor follows counts however
+/// old the thread is, within `THREAD_LOOKBACK`. Takes a history call per page of top-level
+/// messages in that window, at most `HISTORY_PAGES`, plus one replies call per thread that got a
+/// reply since, because Slack rate limits both.
 pub async fn activity(
     token: &str,
     channel: &str,
@@ -335,8 +341,7 @@ pub async fn activity(
     cursors: &BTreeMap<String, Cursor>,
 ) -> Result<Activity, String> {
     let oldest = ts(since - THREAD_LOOKBACK);
-    let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &oldest), ("limit", PAGE)]).await?;
-    let messages = &history["messages"];
+    let messages = &pages(token, "conversations.history", &[("channel", channel), ("oldest", &oldest), ("limit", PAGE)], HISTORY_PAGES).await?;
     let mut mentions = mentions_in(messages, bot, since);
     // A followed thread already has its session, so a mention in it is just another reply.
     for thread in threads_replied_after(messages, since).into_iter().filter(|t| !cursors.contains_key(t)) {
@@ -359,18 +364,24 @@ pub async fn activity(
 /// The thread's messages after `oldest`, every page of them, so a mention past the first page
 /// isn't missed.
 async fn replies_after(token: &str, channel: &str, thread: &str, oldest: &str) -> Result<Value, String> {
+    pages(token, "conversations.replies", &[("channel", channel), ("ts", thread), ("oldest", oldest), ("limit", PAGE)], usize::MAX).await
+}
+
+/// The messages of up to `most` pages of `method`.
+async fn pages(token: &str, method: &str, params: &[(&str, &str)], most: usize) -> Result<Value, String> {
     let mut messages = vec![];
     let mut page = None;
-    loop {
-        let mut params = vec![("channel", channel), ("ts", thread), ("oldest", oldest), ("limit", PAGE)];
+    for _ in 0..most {
+        let mut params = params.to_vec();
         params.extend(page.as_deref().map(|p| ("cursor", p)));
-        let body = call(token, "conversations.replies", &params).await?;
+        let body = call(token, method, &params).await?;
         messages.extend(body["messages"].as_array().into_iter().flatten().cloned());
         match body["response_metadata"]["next_cursor"].as_str() {
             Some(next) if !next.is_empty() => page = Some(next.to_owned()),
-            _ => return Ok(Value::Array(messages)),
+            _ => break,
         }
     }
+    Ok(Value::Array(messages))
 }
 
 /// Users a thread names, as authors or `<@…>` mentions.
