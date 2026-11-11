@@ -40,7 +40,8 @@
 //   in the global orchestrator's thread since the user last saw it. `reviews` is the open pull
 //   requests that ask the user's review, null until the first answer; it is fetched when tabs first
 //   arrive and then at most every 5 minutes while the page shows. `usage` is { percent, resetsAt,
-//   account } of the 5-hour window of the active thread's account, else the most used one, or null.
+//   account, provider, week } of the 5-hour window of the active thread's account, else the most
+//   used one, or null; `week` is that account's 7-day window { percent, resetsAt }, or null.
 //
 // answerAsk(tab, choice) -> Promise<boolean>
 //   Answers any thread's ask without opening it and without touching the open thread's composer.
@@ -207,15 +208,23 @@ function unseenReports() {
   return threadOf(global).items.filter((i) => i.kind === "user" && unixOf(i.at) > seen).reduce((n, i) => n + reportBlocks(i.text).length, 0);
 }
 
-/** The 5-hour window of `account` on `machine` while it still holds. */
-function fiveHourOf(machine, account) {
-  const window = machines.get(machine)?.usage?.[account]?.five_hour;
+/** The `which` window ("five_hour", "seven_day") of `account` on `machine` while it still holds. */
+function usageWindowOf(machine, account, which = "five_hour") {
+  const window = machines.get(machine)?.usage?.[account]?.[which];
   return window && window.resets_at > Date.now() / 1000 ? window : null;
 }
 function usageNow() {
   const pick = (machine, account) => {
-    const window = fiveHourOf(machine, account);
-    return window && { percent: window.used_percentage, resetsAt: window.resets_at * 1000, account: accountName(machine, account) };
+    const window = usageWindowOf(machine, account);
+    if (!window) return null;
+    const week = usageWindowOf(machine, account, "seven_day");
+    return {
+      percent: window.used_percentage,
+      resetsAt: window.resets_at * 1000,
+      account: accountName(machine, account),
+      provider: PROVIDERS[accountOf(machine, account)?.provider] ?? PROVIDERS.claude,
+      week: week && { percent: week.used_percentage, resetsAt: week.resets_at * 1000 },
+    };
   };
   const own = active && pick(active.machine, active.view.account ?? DEFAULT_ACCOUNT);
   if (own) return own;

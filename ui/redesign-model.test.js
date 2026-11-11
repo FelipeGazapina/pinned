@@ -85,6 +85,8 @@ function page(world) {
     projectName: (tab) => tab.project ?? "pinned",
     machineName: (id) => ({ mini: "mac-mini", book: "macbook" })[id] ?? id,
     accountName: (machine, id) => ({ claude: "Claude Code", work: "Work" })[id] ?? id,
+    accountOf: (machine, id) => ({ work: { provider: "claude" } })[id],
+    PROVIDERS: { claude: "Claude Code", "opencode-go": "OpenCode Go" },
     accountMachines: () => world.machineRows ?? [],
     switchTargets: (tab) => (tab.view.resume_at ? [{ id: "work", name: "Work" }] : []),
     isGlobalOrchestratorTab: (tab) => !!tab.view.orchestrator_global,
@@ -314,8 +316,8 @@ test("navCounts counts what waits, the unseen Captain reports, reviews once fetc
   const asking = tab("Asks", { ...waiting, account: "work" });
   const review = tab("Done", { status: "done", updated: S - 20 });
   const machines = new Map([
-    ["mini", { view: { online: true }, usage: { work: { five_hour: { used_percentage: 12, resets_at: S + 600 } }, claude: { five_hour: { used_percentage: 88, resets_at: S - 1 } } } }],
-    ["book", { view: { online: true }, usage: { claude: { five_hour: { used_percentage: 23.5, resets_at: S + 1200 } } } }],
+    ["mini", { view: { online: true }, usage: { work: { five_hour: { used_percentage: 12, resets_at: S + 600 }, seven_day: { used_percentage: 41, resets_at: S + 86400 } }, claude: { five_hour: { used_percentage: 88, resets_at: S - 1 } } } }],
+    ["book", { view: { online: true }, usage: { claude: { five_hour: { used_percentage: 23.5, resets_at: S + 1200 }, seven_day: { used_percentage: 60, resets_at: S - 1 } } } }],
   ]);
   const p = page({
     tabs: [global, asking, review],
@@ -329,7 +331,7 @@ test("navCounts counts what waits, the unseen Captain reports, reviews once fetc
     needsYou: 1,
     orchestrator: 2,
     reviews: null,
-    usage: { percent: 12, resetsAt: (S + 600) * 1000, account: "Work" },
+    usage: { percent: 12, resetsAt: (S + 600) * 1000, account: "Work", provider: "Claude Code", week: { percent: 41, resetsAt: (S + 86400) * 1000 } },
     machinesOnline: 1,
     machinesTotal: 2,
   });
@@ -342,7 +344,7 @@ test("navCounts counts what waits, the unseen Captain reports, reviews once fetc
   await p.run("fetchReviews()");
   assert.equal(p.calls.asked.length, 2, "a second fetch inside five minutes asks nobody");
   p.context.active = null;
-  assert.deepEqual({ ...p.run("navCounts().usage") }, { percent: 23.5, resetsAt: (S + 1200) * 1000, account: "Claude Code" }, "with no thread open, the most used window that still holds");
+  assert.deepEqual({ ...p.run("navCounts().usage") }, { percent: 23.5, resetsAt: (S + 1200) * 1000, account: "Claude Code", provider: "Claude Code", week: null }, "with no thread open, the most used window that still holds, and its 7 days only while they hold");
 });
 
 test("answerAsk answers a worker from its Captain without touching the Captain's composer", async () => {
