@@ -112,7 +112,7 @@ fn detach_tab(machine: State<Arc<Machine>>, tab: String) {
 
 #[tauri::command]
 fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
-    machine.restore_tabs()
+    machine.restore_working()
 }
 
 #[tauri::command]

@@ -1081,6 +1081,13 @@ impl Delegates {
         Some((lines.join("\n"), ids))
     }
 
+    /// Whether `claim_notice` has something for `tab`.
+    pub fn has_news(&self, tab: &str) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        let finished = tasks.iter().any(|task| !task.delivered && task.state.terminal() && announces(task) && matches!(&task.parent, Parent::Tab(parent) if parent == tab));
+        finished || self.reports.lock().unwrap().iter().any(|report| report.tab == tab && !report.claimed && !stale(report, &tasks))
+    }
+
     /// Claims one finished task's notice for the session that is its direct parent and marks it delivered.
     /// A grandchild stays with its headless parent. The root tab can read it, and does not send it.
     pub fn claim_task_notice(&self, caller: &Caller, id: &str) -> Result<String, String> {

@@ -1358,9 +1358,7 @@ impl Shells {
             crate::pty::size(cols, rows),
             move |bytes| {
                 let mut screen = out.lock().unwrap();
-                screen.kept.extend(&bytes);
-                let excess = screen.kept.len().saturating_sub(SHELL_KEEP);
-                screen.kept.drain(..excess);
+                crate::machine::keep_last(&mut screen.kept, &bytes, SHELL_KEEP);
                 for (_, sink) in &screen.viewers {
                     sink(&bytes);
                 }

@@ -131,6 +131,7 @@ pub const ACTIONS: &[Action] = &[
     n("restart_claude", Write, "Restarts a session on its conversation, so its skills, plugins and MCP servers load again.").wired(),
     n("write_input", Excluded, TERMINAL),
     n("resize_pty", Excluded, TERMINAL),
+    n("wake", Excluded, TERMINAL),
     n("close_tab", Excluded, "closing a thread loses its place in the sidebar: agents archive it with archive_session, which the user can undo, or ask to delete it with delete_session"),
     n("stop_turn", Write, "Stops the turn a session is running, as the app's stop button does. The session stays open for the next prompt.").wired(),
     n("set_folder", Write, "Moves a tab that has not started to another folder.").wired(),

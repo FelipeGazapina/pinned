@@ -184,7 +184,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
     pinned_core::boot::ready();
-    for tab in machine.restore_tabs() {
+    for tab in machine.restore_working() {
         if let Err(e) = machine.start_claude(&tab, UNWATCHED.0, UNWATCHED.1) {
             eprintln!("pinned-server: could not resume {tab}: {e}");
         }

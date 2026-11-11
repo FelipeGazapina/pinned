@@ -195,6 +195,9 @@ pub enum Call {
     AutoResume { tab: TabId, on: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
+    /// Null. The tab is on the client's screen: a session that sleeps starts at this size, and
+    /// one that runs stays awake. The client sends it again while the tab stays there.
+    Wake { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },

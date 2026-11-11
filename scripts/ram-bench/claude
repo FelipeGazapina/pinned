@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+// Stands in for `claude` in the RAM bench. A terminal session first prints what hours of work
+// leave in a terminal, enough to fill the 256 KiB a machine keeps per tab, and then behaves as
+// scripts/web-sweep/fake-claude, which run.js copies next to this file.
+const path = require("path");
+
+const args = process.argv.slice(2);
+if (!["auth", "setup-token"].includes(args[0]) && !args.includes("-p")) {
+  const words = "read edit bash grep the file src lib test passes fails updated lines parser hub node tab thread render cache".split(" ");
+  let seed = 7;
+  const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff);
+  const text = (n) => Array.from({ length: n }, () => words[next() % words.length]).join(" ");
+  let out = "";
+  for (let i = 0; out.length < 330 * 1024; i++) {
+    const kind = i % 9;
+    if (kind === 0) out += `\x1b[38;5;208m●\x1b[0m \x1b[1m${text(3)}\x1b[0m(${text(2)})\r\n`;
+    else if (kind === 1) out += `  \x1b[2m⎿  ${text(6 + (next() % 30))}\x1b[0m\r\n`;
+    else if (kind === 2) out += `\x1b[48;5;22m\x1b[38;5;120m+ ${text(8 + (next() % 12))}\x1b[0m\r\n`;
+    else if (kind === 3) out += `\x1b[48;5;52m\x1b[38;5;210m- ${text(8 + (next() % 12))}\x1b[0m\r\n`;
+    else if (kind === 4) out += `\x1b[38;5;240m${"─".repeat(60 + (next() % 60))}\x1b[0m\r\n`;
+    else out += `${text(10 + (next() % 28))}\r\n`;
+  }
+  process.stdout.write(out);
+}
+require(path.join(__dirname, "fake-claude"));
