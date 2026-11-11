@@ -2372,10 +2372,12 @@ openIn.querySelector(".pick").onclick = (e) => {
 };
 for (const el of openIn.querySelectorAll("[data-ic]")) el.outerHTML = icon(el.dataset.ic);
 
-/** On a phone the header's actions fold into one menu, so the thread's title keeps the row. */
+/** A narrow header folds its actions into one menu, so the thread's title keeps the row. A phone
+ * opens the thread's actions sheet instead. */
 document.getElementById("head-more").onclick = (e) => {
   const tab = active;
   if (!tab) return;
+  if (narrow(768)) return openThreadActions(tab);
   const pr = prOf(tab);
   const chosen = !openIn.hidden && editorFor(tab.machine);
   const pick = (ed) => () => (save(`gui-editor:${tab.machine}`, ed.id), renderOpenIn(tab), openInEditor());

@@ -11,6 +11,7 @@ const workerAnswering = new Set();
 const waitingWorkers = (tab) => workersOf(tab).filter((r) => r.ask && r.tab).sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity));
 
 const ASK_WORDS = { approval: "needs your approval", question: "has a question", plan: "has a plan to approve" };
+const PHONE_ASK_WORDS = { ...ASK_WORDS, approval: "needs approval" };
 /** The banner for `row`, the `at`th of `count` waiting workers. */
 function workerBannerHtml(row, at, count, busy) {
   const ask = row.ask;
@@ -21,13 +22,17 @@ function workerBannerHtml(row, at, count, busy) {
     ${count > 1 ? `<button type="button" class="step" data-worker-step aria-label="Show the next waiting worker">${at + 1} of ${count}</button>` : ""}${offers("decline") ? `<button type="button" class="outline" data-worker-answer="decline"${off}>Decline</button>` : ""}${offers("approve") ? `<button type="button" class="primary" data-worker-answer="approve"${off}>Approve</button>` : ""}<button type="button" class="ghost" data-worker-open>Open</button>`;
 }
 
+/** A phone's banner: who waits and on what, and Review, which opens the Workers sheet on it. */
+const phoneWorkerBannerHtml = (row) =>
+  `<span class="dot" aria-hidden="true"></span><span class="text">${esc(row.title)} ${PHONE_ASK_WORDS[row.ask.kind] ?? PHONE_ASK_WORDS.question}</span><button type="button" class="primary" data-worker-review>Review</button>`;
+
 function renderWorkerBanner() {
   const tab = active;
   const rows = tab && guiOn() && !terminalOnly(tab) ? waitingWorkers(tab) : [];
   const at = Math.max(0, rows.findIndex((r) => r.key === workerShown));
   const row = rows[at];
   workerBanner.hidden = !row;
-  const html = row ? workerBannerHtml(row, at, rows.length, workerAnswering.has(row.key)) : "";
+  const html = !row ? "" : narrow(768) ? phoneWorkerBannerHtml(row) : workerBannerHtml(row, at, rows.length, workerAnswering.has(row.key));
   workerBanner.dataset.worker = row?.key ?? "";
   setHtml(workerBanner, html);
 }
@@ -44,6 +49,7 @@ workerBanner.addEventListener("click", async (e) => {
     return renderWorkerBanner();
   }
   if (e.target.closest("[data-worker-open]")) return activate(row.tab);
+  if (e.target.closest("[data-worker-review]")) return openWorkersSheet(active, row.key);
   const answer = e.target.closest("[data-worker-answer]");
   if (!answer || workerAnswering.has(row.key)) return;
   workerAnswering.add(row.key);
