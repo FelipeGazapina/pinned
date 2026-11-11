@@ -865,8 +865,16 @@ function fileIconHtml(path, cls = "") {
 
 const stat = (added, removed) => `<span class="add">+${compact(Number(added))}</span><span class="del">−${compact(Number(removed))}</span>`;
 
+/** A turn that changed this many files or fewer lists them flat, each by its path; more fold into folders. */
+const FLAT_FILES = 8;
+
 function changesHtml(change, open) {
   const n = change.files.length;
+  if (n <= FLAT_FILES) {
+    const rows = change.files.map((f) => `<li data-ended="${change.ended}" data-file="${esc(f.path)}" title="${esc(f.path)}">${fileIconHtml(f.path, "file-icon")}<span class="path">${middle(f.path, 40)}</span>${stat(f.added, f.removed)}</li>`);
+    return `<section class="changes flat" aria-label="Changed files"><div class="head"><span class="count">${n} changed file${n === 1 ? "" : "s"}</span>${stat(sum(change.files, "added"), sum(change.files, "removed"))}<span class="spacer"></span>
+      <button type="button" class="open-diff" data-ended="${change.ended}" title="Open the full diff">Open diff</button></div><ul>${rows.join("")}</ul></section>`;
+  }
   const fold = `changes:${change.ended}`;
   const tree = fileTree(change.files);
   const hasDirs = tree.some((node) => node.children);
@@ -961,6 +969,12 @@ function userHtml(user, t, tab, first) {
     const reports = reportBlocks(user.text);
     if (reports.length) return globalReportsHtml(user, t, tab, first, by, reports);
   }
+  if (first && tab.view.role === "worker") return `<div class="user brief-turn">${briefHtml(user, t, tab)}${promptMetaHtml(user, t)}</div>`;
+  const found = noticesIn(user.text);
+  if (found) {
+    const lead = found.mine ? userBubbleHtml({ ...user, text: found.mine }, t, tab, first, by) : "";
+    return `${lead}<div class="notices">${found.notices.map((n, i) => noticeHtml(n, user.at, t, `notice:${user.id}:${i}`)).join("")}</div>`;
+  }
   return userBubbleHtml(user, t, tab, first, by);
 }
 
@@ -1017,11 +1031,15 @@ function userBubbleHtml(user, t, tab, first, by) {
     user.steer && `<span class="steer" title="Steered the active turn">${icon("redo-2")}Steer</span>`,
   ];
   return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>
-    <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div></div>`;
+    ${promptMetaHtml(user, t)}</div>`;
 }
 
-/** One turn: its prompt, the work fold, the live card while it runs, and what it answered. */
-function turnHtml(tab, turn, change, live, first, t, latest) {
+/** The row under a prompt: its time, Edit from here, Copy and Copy prompt link. */
+const promptMetaHtml = (user, t) => `<div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div>`;
+
+/** One turn: its prompt, the work fold, the live card while it runs, and what it answered, with the
+ * thread's Workers block after its lead paragraph when `workers` holds it. */
+function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
   const shown = live ? turn.shown : turn.steps.filter((s) => turn.shown.includes(s) || turn.failed.has(s));
@@ -1053,9 +1071,11 @@ function turnHtml(tab, turn, change, live, first, t, latest) {
   const quick = !live && globalLane(tab) && turn.answer ? quickReplyOf(turn.answer.text) : null;
   const answerShown = quick ? { ...turn.answer, text: quick.text } : turn.answer;
   const saidSteps = quick ? shown.map((s) => (s === turn.answer ? answerShown : s)) : shown;
-  const said = saidSteps.map((s) => shownHtml(s, cwd, t, live ? null : answerShown, t.editable === true)).join("");
+  const saidHtml = saidSteps.map((s) => shownHtml(s, cwd, t, live ? null : answerShown, t.editable === true));
+  const lead = live ? 0 : saidSteps.findIndex((s) => s.kind === "text") + 1;
+  const said = saidHtml.slice(0, lead).join("") + workers + saidHtml.slice(lead).join("");
   const replies = quick && latest ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? said : ""}${fold}${agentCardsHtml(tab, turn, latest)}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? saidHtml.join("") : ""}${fold}${live ? workers : ""}
     ${live ? "" : said}${replies}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
@@ -1180,7 +1200,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalSettings.group_reports : null, workersKey(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), globalLane(tab) ? globalSettings.group_reports : null, workersKey(tab), workerViewKey(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1197,27 +1217,30 @@ function renderThread() {
   const changes = sub ? new Map() : changesByTurn(t.history, turns);
   const opening = turns.find((x) => x.user);
   const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
-  const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : "";
-  const agentsBare = !sub && !turns.length && (t.agents ?? []).length;
+  const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : workerOfHtml(tab);
+  const workers = sub ? "" : workersBlockHtml(tab, t);
+  const spawned = workers && turns.length ? workersHome(turns) : null;
+  // A block whose turn is above the turns shown sits in the last one.
+  const home = spawned && turns.indexOf(spawned) >= first ? spawned : turns.at(-1);
   const body = turns.length
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
-        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1))
-        .join("")}<div class="spacer" style="height:${win.below}px"></div>${sub ? "" : agentsFooterHtml(tab)}`
-    : agentsBare
-      ? `${agentCardsHtml(tab, null, true)}${agentsFooterHtml(tab)}`
-      : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
+        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1, turn === home ? workers : ""))
+        .join("")}<div class="spacer" style="height:${win.below}px"></div>`
+    : workers || `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  const saying = document.activeElement?.dataset?.workerSay;
+  threadView.innerHTML =`<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
   if (card) document.getElementById("dialog-slot")?.append(card);
   if (focused && card.isConnected) card.focus({ preventScroll: true });
+  if (saying) focusWorkerSay(saying);
   threadView.dataset.key = key;
   threadView.dataset.content = content;
   threadView.dataset.tab = place;
@@ -1382,7 +1405,7 @@ threadView.after(minimap);
 const mini = { items: [], heights: [], hovered: null, current: null };
 
 function renderMinimap(shown, t) {
-  const turns = shown.filter((x) => x.user);
+  const turns = shown.filter((x) => x.user && !onlyNotices(x.user.text));
   mini.items = turns.map((x) => ({ id: x.id, user: x.user.text.split("\n")[0] || "User message", answer: (x.answer?.text ?? "").replace(/\s+/g, " ").slice(0, 400) }));
   mini.offsets = new Map();
   const estimate = turnEstimate(t);
@@ -1872,11 +1895,27 @@ threadView.addEventListener("click", (e) => {
   if (cancelTask) return cancelDelegated(cancelTask.dataset.cancelTask);
   const sendTask = e.target.closest("[data-send-task]");
   if (sendTask) return sendDelegated(sendTask.dataset.sendTask);
+  const workerOpen = e.target.closest("[data-worker-open]");
+  if (workerOpen) {
+    const worker = tabByKey(workerOpen.dataset.workerOpen);
+    return worker && activate(worker);
+  }
+  const workerCancel = e.target.closest("[data-worker-cancel]");
+  if (workerCancel) {
+    const worker = tabByKey(workerCancel.dataset.workerCancel);
+    return worker && stop(worker);
+  }
+  if (e.target.closest("[data-open-parent]")) {
+    const parent = parentOf(active);
+    return parent && activate(parent);
+  }
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle;
     if (!t.open.delete(key)) t.open.add(key);
-    return rerender();
+    rerender();
+    if (key.startsWith("say:") && t.open.has(key)) focusWorkerSay(key.slice(4));
+    return;
   }
   if (e.target.closest("[data-earlier]")) {
     t.limit = (t.limit ?? TURNS_SHOWN) + TURNS_SHOWN;
@@ -1970,6 +2009,19 @@ threadView.addEventListener("toggle", (e) => {
   const rows = e.target.open && e.target.querySelector(":scope > .rows");
   if (rows) rows.classList.toggle("scrolls", rows.scrollHeight > rows.clientHeight + 1);
 }, true);
+threadView.addEventListener("input", (e) => {
+  const key = e.target.dataset?.workerSay;
+  if (key) workerDrafts.set(key, e.target.value);
+});
+threadView.addEventListener("keydown", (e) => {
+  const key = e.target.dataset?.workerSay;
+  if (!key || e.isComposing || (e.key !== "Enter" && e.key !== "Escape")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === "Enter") return sayToWorker(key, e.target.value);
+  shownThread().open.delete(`say:${key}`);
+  rerender();
+});
 
 /** A file chip's path in the thread's folder, and as the machine names it whole. */
 function chipPaths(chip, tab) {
