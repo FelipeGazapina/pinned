@@ -1237,6 +1237,18 @@ pub enum HubCall {
     /// From a machine: `surface::ActAnswer` of an agent session's `act`, run as the account under
     /// `surface::ACTIONS`, audited, and for a `confirm` action held for the user's approval.
     Act { act: crate::surface::AgentAct },
+    /// From a machine: `null`, once the hub wrote one Agent activity row (`outcome: refused`,
+    /// action `permission:<tool>`) for a tool call the never-list hook held in session `tab`, or
+    /// would have held in a bypass session. `detail` says which.
+    ToolHeld {
+        tab: TabId,
+        tool: String,
+        #[serde(default)]
+        args: serde_json::Value,
+        detail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// `Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,
     /// then the last 20 decided, newest first.
     Confirmations,

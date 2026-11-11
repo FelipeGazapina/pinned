@@ -328,6 +328,7 @@ pub const ACTIONS: &[Action] = &[
     h("unarchive_session", Write, "Brings an archived conversation back, by Claude session id: a new tab on its machine with its name and pin back, not started, and answers {machine, tab}. Resume it with start_claude, which holds it to your limits.").wired(),
     h("delete_session", Confirm, "Closes the conversation in tab on machine and drops its marks, so pinned forgets it for good. Claude Code keeps the transcript.").wired(),
     h("act", Excluded, "the surface itself: call act"),
+    h("tool_held", Excluded, "a machine's own record of a tool call its never-list hook held for the user"),
     h("confirmations", Read, "The actions waiting on the user's approval, then the last 20 decided, with what each came to.").wired(),
     h("decide_confirmation", Excluded, "only the user decides, in the app"),
     h("unlock", Excluded, "the user's own password, which only the app sends"),

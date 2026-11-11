@@ -9,6 +9,10 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
     let (command, rest) = args.split_first()?;
     let first = rest.first().map(String::as_str);
     let answer = match command.as_str() {
+        hooks::SUBCOMMAND if first == Some(crate::preauth::hook::ARG) => {
+            crate::preauth::hook::run();
+            return Some(0);
+        }
         hooks::SUBCOMMAND => {
             hooks::forward(first);
             return Some(0);

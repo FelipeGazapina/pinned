@@ -386,6 +386,17 @@ pub enum Message {
     /// Claude Code's PreToolUse hook in the global orchestrator's session: may tool `tool` run
     /// with `input`? Ok("") lets it, Err says why not.
     Guard { tab: String, tool: String, input: serde_json::Value },
+    /// The never-list hook (`pinned hook pre-tool`) held tool `tool` of the session in `tab`, or
+    /// would have, when `log_only`: one row for Agent activity. The hook doesn't wait for an answer.
+    ToolHeld {
+        tab: String,
+        tool: String,
+        args: serde_json::Value,
+        item: crate::preauth::never::NeverItem,
+        log_only: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     Usage {
         #[serde(flatten)]
         usage: Usage,

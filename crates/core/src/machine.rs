@@ -133,6 +133,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
+        hooks::write_agent_settings(&files.join(hooks::AGENT_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -181,7 +182,14 @@ impl Launch {
                     }
                     cmd.arg("--settings");
                     // The global orchestrator's own: no Bash, and its file tools held to its folders.
-                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
+                    // An agent session's runs the never list on each tool call; a user's own tab's doesn't.
+                    cmd.arg(if global::is_global(env) {
+                        self.settings.with_file_name(hooks::GLOBAL_SETTINGS)
+                    } else if crate::agent::role_of(env).is_some() || crate::agent::session_of(env).is_some() {
+                        self.settings.with_file_name(hooks::AGENT_SETTINGS)
+                    } else {
+                        self.settings.clone()
+                    });
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -3054,6 +3062,21 @@ impl Machine {
         crate::repo_look::guard(&roots, &cwd, tool, input).map(|()| String::new())
     }
 
+    /// Sends the hub one Agent activity row for a tool call the never-list hook held, or would have.
+    /// Only for an agent session this machine runs; without a hub the row is dropped.
+    fn tool_held(&self, tab: &str, tool: String, args: Value, item: crate::preauth::never::NeverItem, log_only: bool, request_id: Option<String>) {
+        let agent = self.tab(tab, |t| global::is_global(&t.env) || role_of(&t.env).is_some() || crate::agent::session_of(&t.env).is_some());
+        if agent != Ok(true) {
+            return;
+        }
+        let detail = crate::preauth::hook::detail(item, log_only);
+        if let Err(e) = self.call_hub(HubCall::ToolHeld { tab: tab.to_owned(), tool, args, detail, request_id }) {
+            if e != NOT_LINKED {
+                eprintln!("pinned: a held tool call's row was not written: {e}");
+            }
+        }
+    }
+
     /// The global orchestrator's repo tools, always through the hub: it checks that the account
     /// allows them, holds them to the read rate and writes each to the audit trail.
     fn repo_tool(&self, tab: &str, project: &str, machine: Option<&str>, look: crate::repo_look::RepoLook) -> Result<String, String> {
@@ -4275,6 +4298,10 @@ impl Machine {
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
+                Message::ToolHeld { tab, tool, args, item, log_only, request_id } => {
+                    machine.tool_held(&tab, tool, args, item, log_only, request_id);
+                    Ok(String::new())
+                }
                 message => other(message),
             }
         })
@@ -6753,6 +6780,33 @@ pub(crate) mod tests {
 
     fn machine() -> Arc<Machine> {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
+    }
+
+    #[test]
+    fn a_held_tool_call_of_an_agent_session_reaches_the_hub_as_one_row() {
+        let m = machine();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(serde_json::to_value(&call).unwrap());
+            Ok(Value::Null)
+        }));
+        let worker = m.add_tab("/repo/.claude/worktrees/w1".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), true, None);
+        let user = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let force = || json!({ "command": "git push --force origin main", "why": "git push --force" });
+        m.tool_held(&worker, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, true, Some("toolu_1".into()));
+        m.tool_held(&worker, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        m.tool_held(&user, "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        m.tool_held("no-such-tab", "Bash".into(), force(), crate::preauth::never::NeverItem::ForcePush, false, None);
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                json!({ "cmd": "tool_held", "tab": worker, "tool": "Bash", "args": force(), "detail": "would hold (log only): force-push", "request_id": "toolu_1" }),
+                json!({ "cmd": "tool_held", "tab": worker, "tool": "Bash", "args": force(), "detail": "held for Felipe: force-push" }),
+            ],
+            "a user's own tab and an unknown tab send nothing"
+        );
     }
 
     #[test]
@@ -10433,7 +10487,7 @@ while True:
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
 
         let api = dir.join("api");
@@ -11351,7 +11405,7 @@ while True:
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
+        assert_eq!(args, [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None });
@@ -11393,7 +11447,7 @@ Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
         let cap = "pinned enforces these delegation limits on delegate_task: at most 4 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
         let kept: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
         assert_eq!(kept["projects"], account["projects"], "the hub's answer is kept for when it can't answer");
@@ -11575,7 +11629,7 @@ Have another model review a risky change before it goes ahead.";
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
+        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", hooks::AGENT_SETTINGS, "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -12890,7 +12944,7 @@ Have another model review a risky change before it goes ahead.";
                 &path,
                 &config.join("accounts/work").display().to_string(),
                 "--settings",
-                "s",
+                hooks::AGENT_SETTINGS,
                 "--plugin-dir",
                 "p",
                 "--name",

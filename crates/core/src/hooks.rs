@@ -19,6 +19,8 @@ pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 pub const GUARD_SUBCOMMAND: &str = "guard";
 /// The global orchestrator's own settings file, beside the one every other session loads.
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
+/// An agent session's (a worker, a Captain, a workflow run): every session's plus the never-list hook.
+pub const AGENT_SETTINGS: &str = "claude-settings-agent.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 
@@ -42,8 +44,30 @@ pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut settings = settings(exe);
     settings["permissions"]["deny"] = serde_json::json!(["Bash", "NotebookEdit"]);
     settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }]);
+    add_never_hook(&mut settings, exe);
     std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
 }
+
+/// An agent session's settings: every session's, with the never list run on each tool call.
+pub fn write_agent_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    let mut settings = settings(exe);
+    add_never_hook(&mut settings, exe);
+    std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
+}
+
+/// Adds the never-list PreToolUse hook beside any PreToolUse hook already there, for every tool.
+/// Unix only in slice 1: on Windows, Bash paths read `/c/...` and the never list doesn't know them yet.
+#[cfg(unix)]
+fn add_never_hook(settings: &mut serde_json::Value, exe: &Path) {
+    let entry = serde_json::json!({ "hooks": [hook_command(exe, crate::preauth::hook::ARG)] });
+    match settings["hooks"]["PreToolUse"].as_array_mut() {
+        Some(hooks) => hooks.push(entry),
+        None => settings["hooks"]["PreToolUse"] = serde_json::json!([entry]),
+    }
+}
+
+#[cfg(not(unix))]
+fn add_never_hook(_settings: &mut serde_json::Value, _exe: &Path) {}
 
 fn settings(exe: &Path) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
@@ -735,11 +759,30 @@ mod tests {
         assert_eq!(settings["permissions"]["deny"], serde_json::json!(["Bash", "NotebookEdit"]));
         assert_eq!(
             settings["hooks"]["PreToolUse"],
-            serde_json::json!([{ "matcher": "Read|Write|Edit|MultiEdit|Grep|Glob|LS", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' guard" }] }])
+            serde_json::json!([
+                { "matcher": "Read|Write|Edit|MultiEdit|Grep|Glob|LS", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' guard" }] },
+                { "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook pre-tool" }] },
+            ]),
+            "the guard and the never list both run"
         );
         assert_eq!(settings["hooks"]["Stop"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook done" }] }]), "its turns still report");
         assert_eq!(settings["permissions"]["allow"], serde_json::json!(reminders::permissions()));
         let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_agent_sessions_settings_run_the_never_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = Path::new("/Applications/pinned.app/Contents/MacOS/pinned");
+        write_settings(&dir.path().join("plain.json"), exe).unwrap();
+        write_agent_settings(&dir.path().join("agent.json"), exe).unwrap();
+        let read = |name: &str| serde_json::from_slice::<serde_json::Value>(&std::fs::read(dir.path().join(name)).unwrap()).unwrap();
+        let (plain, agent) = (read("plain.json"), read("agent.json"));
+        assert_eq!(plain["hooks"]["PreToolUse"], serde_json::Value::Null, "a user's own tab gets no PreToolUse hook");
+        assert_eq!(agent["hooks"]["PreToolUse"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook pre-tool" }] }]));
+        assert_eq!(agent["hooks"]["Stop"], plain["hooks"]["Stop"]);
+        assert_eq!(agent["permissions"], plain["permissions"], "the hook loosens nothing");
     }
 
     #[test]

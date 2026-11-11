@@ -711,6 +711,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
+                    HubCall::ToolHeld { tab, tool, args, detail, request_id } => crate::surface::tool_held(&hub, &account, &machine, &tab, &tool, &args, &detail, request_id.as_deref()).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
                     call => return forward(hub, account, machine, socket, id, call).await,

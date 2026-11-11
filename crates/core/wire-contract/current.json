@@ -6704,6 +6704,41 @@
                 ]
               },
               {
+                "description": "From a machine: `null`, once the hub wrote one Agent activity row (`outcome: refused`,\naction `permission:<tool>`) for a tool call the never-list hook held in session `tab`, or\nwould have held in a bypass session. `detail` says which.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "tool_held"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "tool",
+                  "args",
+                  "detail"
+                ]
+              },
+              {
                 "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
                 "type": "object",
                 "properties": {
@@ -16197,6 +16232,40 @@
                 ]
               },
               {
+                "description": "From a machine: `null`, once the hub wrote one Agent activity row (`outcome: refused`,\naction `permission:<tool>`) for a tool call the never-list hook held in session `tab`, or\nwould have held in a bypass session. `detail` says which.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "tool_held"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "tool",
+                  "detail"
+                ]
+              },
+              {
                 "description": "`Vec<surface::Confirmation>`: the account's confirmations waiting on the user, oldest first,\nthen the last 20 decided, newest first.",
                 "type": "object",
                 "properties": {
@@ -21890,6 +21959,41 @@
                 "required": [
                   "cmd",
                   "act"
+                ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub wrote one Agent activity row (`outcome: refused`,\naction `permission:<tool>`) for a tool call the never-list hook held in session `tab`, or\nwould have held in a bypass session. `detail` says which.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "tool_held"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "tool",
+                  "args",
+                  "detail"
                 ]
               },
               {
@@ -28184,6 +28288,40 @@
                 "required": [
                   "cmd",
                   "act"
+                ]
+              },
+              {
+                "description": "From a machine: `null`, once the hub wrote one Agent activity row (`outcome: refused`,\naction `permission:<tool>`) for a tool call the never-list hook held in session `tab`, or\nwould have held in a bypass session. `detail` says which.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "tool_held"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "default": null
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "tool",
+                  "detail"
                 ]
               },
               {
