@@ -749,6 +749,7 @@ fn trigger_input(connectors: &[Connector], subject: &Subject) -> TriggerInput {
             posts: posts().iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect(),
             note: None,
             mentioned: vec![],
+            request: None,
         },
     }
 }

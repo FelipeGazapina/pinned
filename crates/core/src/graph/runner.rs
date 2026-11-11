@@ -51,6 +51,14 @@ pub struct Run {
     /// Cleared when the effect is supplied, so a later talk with the same text still types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sent: Vec<String>,
+    /// A later mention in a thread whose run already went by, walked down one branch that needs
+    /// no session. It never opens one, and replies keep going to the thread's own run.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow_up: bool,
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// One graph the walk is inside. `queue` is the nodes still to run at this depth, front first.
@@ -265,6 +273,7 @@ pub fn start(library: &Library, connector: &str, subject: Subject, input: Value,
         ready: None,
         claimed: false,
         sent: Vec::new(),
+        follow_up: false,
     };
     let Some(graph) = library.get(connector) else {
         return failed(run, format!("workflow {connector:?} has no graph"));
@@ -371,6 +380,69 @@ pub fn port_for(classify: &Classify, answers: &Answers, pages: &dyn Fn(&PortId) 
         Err(PickStop::Branch(_)) => PortId(String::new()),
         Err(PickStop::Run(_)) => nowhere_port(),
     }
+}
+
+/// The classify a trigger leads straight to, when it branches: the step that sorts what came in.
+/// A later mention in the thread is sorted by it too.
+pub fn routing_classify(library: &Library, connector: &str) -> Option<(NodeId, Classify)> {
+    let graph = library.get(connector)?;
+    let trigger = graph.nodes.iter().find(|node| matches!(node.kind, NodeKind::Trigger { .. }))?;
+    let targets = targets_of(graph, &trigger.id, &out_port());
+    let [first] = targets.as_slice() else { return None };
+    match &graph.node(first)?.kind {
+        NodeKind::Classify(classify) if classify.branch_on.is_some() => Some((first.clone(), classify.clone())),
+        _ => None,
+    }
+}
+
+/// The port `answers` take out of the classify `node`, paging the way a run would.
+pub fn classify_port(library: &Library, connector: &str, node: &NodeId, classify: &Classify, answers: &Answers) -> PortId {
+    port_for(classify, answers, &|port| branch_pages(library, connector, node, port))
+}
+
+/// Whether the branch out of `port` acts on its own, hub-side: it reaches a reply, a file-issue or
+/// a page, and no talk, session or call, which would need the thread's session.
+pub fn branch_without_session(library: &Library, connector: &str, from: &NodeId, port: &PortId) -> bool {
+    let Some(graph) = library.get(connector) else {
+        return false;
+    };
+    let (mut acts, mut seen) = (false, BTreeSet::new());
+    let mut todo = targets_of(graph, from, port);
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(node) = graph.node(&id) else { return false };
+        match &node.kind {
+            NodeKind::Talk { .. } | NodeKind::Session(_) | NodeKind::Call { .. } | NodeKind::Trigger { .. } => return false,
+            NodeKind::Reply { .. } | NodeKind::FileIssue { .. } | NodeKind::Page { .. } => acts = true,
+            NodeKind::Stop
+            | NodeKind::StagePicked
+            | NodeKind::TakeIssue { .. }
+            | NodeKind::MoveColumn { .. }
+            | NodeKind::Proof
+            | NodeKind::ConvexData { .. }
+            | NodeKind::Classify(_)
+            | NodeKind::Switch(_) => {}
+        }
+        todo.extend(node.kind.ports().iter().flat_map(|port| targets_of(graph, &id, &port.id)));
+    }
+    acts
+}
+
+/// A follow-up run of `connector`'s graph for a later mention `input` in the thread `subject`,
+/// already past its routing classify with `answers`. The thread was claimed by its first run.
+pub fn start_follow_up(library: &Library, connector: &str, subject: Subject, input: Value, answers: Answers, at: &str) -> Run {
+    let mut run = start(library, connector, subject, input, at);
+    run.id = RunId(format!("{}:follow-up", run.id.0));
+    run.follow_up = true;
+    run.claimed = true;
+    match drive(&mut run, library) {
+        Drive::Act(Effect::Classify { .. }) => supply(&mut run, Supplied::Classified(answers), at),
+        Drive::Act(effect) => fail_status(&mut run, format!("a follow-up starts at its classify, not a {} step", effect_name(&effect))),
+        Drive::Park | Drive::Done => {}
+    }
+    run
 }
 
 enum Next {
@@ -526,6 +598,9 @@ fn enter_call(
 }
 
 fn talk_effect(run: &mut Run, connector: &str, prompt: &str, session: &SessionSetup) -> Result<Effect, String> {
+    if run.follow_up {
+        return Err("a follow-up in the thread reached a step that needs a session, and the thread's session gets it instead".into());
+    }
     if run.session_owner.is_none() {
         run.session_owner = Some(connector.to_owned());
     }
@@ -1282,8 +1357,9 @@ mod tests {
         NodeKind, PortId, Question, SessionSetup, Switch, Watch,
     };
     use super::{
-        drive, history, port_for, push, start, supply, Drive, Effect, Entry, Library, Session,
-        Status, Supplied, Wake,
+        branch_without_session, classify_port, drive, history, port_for, push, routing_classify,
+        start, start_follow_up, supply, Drive, Effect, Entry, Library, Session, Status, Supplied,
+        Wake,
     };
     use crate::agent::Subject;
     use serde_json::json;
@@ -2927,5 +3003,88 @@ mod tests {
                 ]),
             ),
         ])
+    }
+
+    /// Trigger -> classify on "kind": bug opens a session, ticket files an issue and replies,
+    /// done stops, and chat calls another workflow.
+    fn routed() -> Library {
+        let classify = Classify {
+            model: "m".into(),
+            instructions: String::new(),
+            questions: vec![Question {
+                name: "kind".into(),
+                ask: String::new(),
+                choices: vec![choice("bug", "bug"), choice("ticket", "ticket-request"), choice("done", "done"), choice("chat", "chat")],
+            }],
+            branch_on: Some("kind".into()),
+            gate: Gate::Direct,
+            fallback: Fallback::None,
+        };
+        let file = NodeKind::FileIssue {
+            team: "Bloom".into(),
+            label: String::new(),
+            assignee: String::new(),
+            title: "{{trigger.text}}".into(),
+            description: String::new(),
+        };
+        library(vec![(
+            "c1",
+            graph(
+                vec![
+                    node("t", "Trigger", trigger()),
+                    node("route", "Route", NodeKind::Classify(classify)),
+                    node("s", "Session", NodeKind::Session(SessionSetup::default())),
+                    node("file", "File", file),
+                    node("reply", "Reply", NodeKind::Reply { text: "{{issue.url}}".into() }),
+                    node("stop", "Stop", NodeKind::Stop),
+                    node("call", "Call", NodeKind::Call { workflow: "c2".into() }),
+                ],
+                vec![
+                    edge("t", "out", "route"),
+                    edge("route", "bug", "s"),
+                    edge("route", "ticket", "file"),
+                    edge("file", "out", "reply"),
+                    edge("route", "done", "stop"),
+                    edge("route", "chat", "call"),
+                ],
+            ),
+        )])
+    }
+
+    #[test]
+    fn only_a_branch_that_acts_without_a_session_runs_on_a_follow_up() {
+        let routes = routed();
+        let (route, classify) = routing_classify(&routes, "c1").expect("the trigger leads to a branching classify");
+        assert_eq!(route, nid("route"));
+        let port = |label: &str| classify_port(&routes, "c1", &route, &classify, &answers(&[("kind", label)], None));
+        assert_eq!(port("ticket-request"), pid("ticket"));
+        assert!(branch_without_session(&routes, "c1", &route, &pid("ticket")), "file-issue then reply");
+        assert!(!branch_without_session(&routes, "c1", &route, &pid("bug")), "a session step");
+        assert!(!branch_without_session(&routes, "c1", &route, &pid("chat")), "a call may open a session");
+        assert!(!branch_without_session(&routes, "c1", &route, &pid("done")), "a stop does nothing, so the session keeps the message");
+        assert!(!branch_without_session(&routes, "c1", &route, &pid("")), "an answer that is no choice");
+
+        let talks = library(vec![("c1", graph(vec![node("t", "Trigger", trigger()), node("a", "A", talk("hi"))], vec![edge("t", "out", "a")]))]);
+        assert_eq!(routing_classify(&talks, "c1"), None, "a graph that does not start by sorting");
+    }
+
+    #[test]
+    fn a_follow_up_walks_its_branch_without_claiming_or_opening_a_session() {
+        let library = routed();
+        let mut run = start_follow_up(&library, "c1", slack(), json!({ "text": "file it" }), answers(&[("kind", "ticket-request")], None), AT);
+        assert!(run.follow_up);
+        assert!(run.id.0.ends_with(":follow-up"), "{}", run.id.0);
+        let file = drive(&mut run, &library);
+        assert!(matches!(file, Drive::Act(Effect::FileIssue { ref team, .. }) if team == "Bloom"), "{file:?}");
+        supply(&mut run, Supplied::Done, AT);
+        assert_eq!(drive(&mut run, &library), Drive::Act(Effect::Reply { connector: "c1".into(), text: "{{issue.url}}".into() }));
+        supply(&mut run, Supplied::Done, AT);
+        assert_eq!(drive(&mut run, &library), Drive::Done, "no claim: the thread's first run holds it");
+        assert_eq!(run.status, Status::Done);
+        assert_eq!(run.session, Session::None);
+
+        let mut bug = start_follow_up(&library, "c1", slack(), json!({}), answers(&[("kind", "bug")], None), AT);
+        assert_eq!(drive(&mut bug, &library), Drive::Done, "a follow-up never opens a session");
+        assert!(matches!(bug.status, Status::Failed { .. }), "{:?}", bug.status);
     }
 }
