@@ -5088,6 +5088,75 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 90.0, "each box's tasks add up to its life, with no span billed twice: {stats}");
 }
 
+#[test]
+fn an_agent_cannot_add_or_widen_a_workflows_convex_step() {
+    let hub = TestHub::start("convex_widen");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "widen-mac");
+    origin(&ana.dir.join("site"), "git@github.com:acme/site.git");
+    ana.client.hub(json!({ "cmd": "connect_convex", "key": CONVEX_KEY, "repos": ["github.com/acme/site"] })).unwrap();
+    let folder = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |name: &str, id: Option<&str>, step: Option<Value>| {
+        let mut nodes = vec![
+            json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": "agent" } }),
+            json!({ "id": "s", "name": "Talk", "position": [2, 0], "type": "talk", "prompt": "Check the invoices." }),
+        ];
+        let mut edges = vec![json!({ "from": "t", "port": "out", "to": "s" })];
+        if let Some(mut step) = step {
+            step["id"] = json!("c");
+            step["name"] = json!("Read Convex data");
+            step["position"] = json!([1, 0]);
+            step["type"] = json!("convex-data");
+            nodes.push(step);
+            edges = vec![json!({ "from": "t", "port": "out", "to": "c" }), json!({ "from": "c", "port": "out", "to": "s" })];
+        }
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Check the invoices.",
+            "graph": { "nodes": nodes, "edges": edges },
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let invoices = || Some(json!({ "connection": "quick-lemur-789", "tables": ["invoices"] }));
+    let as_call = |mut args: Value| {
+        args["cmd"] = json!("save_connector");
+        args
+    };
+    let limited = ana.client.hub(as_call(workflow("Invoices", None, invoices()))).unwrap()["id"].as_str().unwrap().to_owned();
+    let plain = ana.client.hub(as_call(workflow("Plain", None, None))).unwrap()["id"].as_str().unwrap().to_owned();
+    let refused = Err("save_connector would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app.".to_owned());
+    let agent = |args: Value| act(&ana.dir, &ana.tab, "save_connector", args);
+
+    assert_eq!(agent(workflow("Invoices", Some(&limited), Some(json!({ "connection": "quick-lemur-789" })))), refused, "dropping the table list turns the query tools on");
+    assert_eq!(agent(workflow("Invoices", Some(&limited), Some(json!({ "connection": "quick-lemur-789", "tables": ["invoices", "customers"] })))), refused, "one more table");
+    assert_eq!(agent(workflow("Plain", Some(&plain), invoices())), refused, "a step where the workflow had none");
+    assert_eq!(agent(workflow("Fresh", None, invoices())), refused, "a new workflow that reads Convex");
+    let step_of = |client: &mut Client, id: &str| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let saved = settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap();
+        let step = saved["graph"]["nodes"].as_array().into_iter().flatten().find(|n| n["type"] == "convex-data").cloned();
+        (saved["name"].as_str().unwrap().to_owned(), step.map(|s| s["tables"].clone()))
+    };
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices".to_owned(), Some(json!(["invoices"]))), "a refused save changes nothing");
+    assert_eq!(step_of(&mut ana.client, &plain), ("Plain".to_owned(), None));
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"].as_array().unwrap().len(), 2, "no workflow was added");
+
+    let renamed = agent(workflow("Invoices v2", Some(&limited), invoices())).unwrap();
+    assert_eq!(renamed["outcome"], "done", "an agent's save that leaves the step alone runs: {renamed}");
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices v2".to_owned(), Some(json!(["invoices"]))));
+    let removed = agent(workflow("Invoices v2", Some(&limited), None)).unwrap();
+    assert_eq!(removed["outcome"], "done", "an agent may take the step away: {removed}");
+    assert_eq!(step_of(&mut ana.client, &limited), ("Invoices v2".to_owned(), None));
+
+    let widened = ana.client.hub(as_call(workflow("Plain", Some(&plain), Some(json!({ "connection": "quick-lemur-789" }))))).unwrap();
+    assert_eq!(widened["id"], plain.as_str(), "the owner's own save sets the step");
+    assert_eq!(step_of(&mut ana.client, &plain), ("Plain".to_owned(), Some(Value::Null)));
+}
+
 /// What a session's `act` tool answers: the hub's `ActAnswer`, or the refusal.
 fn act(dir: &Path, tab: &str, action: &str, args: Value) -> Result<Value, String> {
     session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args }))

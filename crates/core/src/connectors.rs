@@ -4297,6 +4297,24 @@ impl Connectors {
         convex::client::read(http, &key, &grant, ask).await.map(Value::String)
     }
 
+    /// Whether saving `incoming` would let its workflow read more of Convex than the stored one
+    /// does: a step where there was none, another deployment, or more tables. The step is the
+    /// workflow's grant, so an agent's save must not do this.
+    pub fn widens_convex(&self, incoming: &Connector) -> bool {
+        let Some(asked) = convex_step(incoming) else { return false };
+        let store = self.store.lock().unwrap();
+        let stored = store.connectors.iter().find(|c| !incoming.id.is_empty() && c.id == incoming.id).and_then(convex_step);
+        match stored {
+            None => true,
+            Some(had) if had.connection != asked.connection => true,
+            Some(had) => match (had.tables, asked.tables) {
+                (None, _) => false,
+                (Some(_), None) => true,
+                (Some(had), Some(asked)) => asked.iter().any(|table| !had.contains(table)),
+            },
+        }
+    }
+
     /// The opening prompt's paragraph for a run whose owner graph has the Convex step.
     fn convex_note(&self, owner: &str) -> Option<String> {
         let store = self.store.lock().unwrap();
@@ -6968,6 +6986,50 @@ mod tests {
             assert_eq!(saving("gone-deployment-1"), Err("\"Read Convex data\" reads Convex deployment gone-deployment-1, which is not connected: connect it under Connectors".into()));
             assert_eq!(saving(""), Err("\"Read Convex data\" names no Convex deployment: pick one".into()));
             assert_eq!(saving("quick-lemur-789"), Ok(true));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_save_widens_convex_when_it_adds_the_step_or_reads_more_than_the_stored_one() {
+            let stored = |id: &str, tables: Option<&[&str]>| {
+                let mut c = linear_connector();
+                c.id = id.into();
+                let mut graph = talks(&["go"]);
+                graph.nodes.push(reads("quick-lemur-789", tables));
+                c.graph = Some(graph);
+                c
+            };
+            let mut plain = linear_connector();
+            plain.id = "c3".into();
+            let (connectors, dir) = with_convex("convex-widen", vec![stored("c1", Some(&["invoices", "customers"])), stored("c2", None), plain]);
+            let saving = |id: &str, step: Option<Node>| {
+                let mut c = linear_connector();
+                c.id = id.into();
+                let mut graph = talks(&["go"]);
+                graph.nodes.extend(step);
+                c.graph = Some(graph);
+                connectors.widens_convex(&c)
+            };
+            let rows = [
+                ("c1", None, false, "removing the step reads less"),
+                ("c1", Some(reads("quick-lemur-789", Some(&["customers", "invoices"]))), false, "the same tables"),
+                ("c1", Some(reads("quick-lemur-789", Some(&["invoices"]))), false, "fewer tables"),
+                ("c1", Some(reads("quick-lemur-789", Some(&["invoices", "payouts"]))), true, "one more table"),
+                ("c1", Some(reads("quick-lemur-789", None)), true, "every table and the query tools"),
+                ("c1", Some(reads("happy-otter-123", Some(&["invoices"]))), true, "another deployment"),
+                ("c2", Some(reads("quick-lemur-789", Some(&["invoices"]))), false, "a limit where there was none"),
+                ("c2", Some(reads("quick-lemur-789", None)), false, "every table, as before"),
+                ("c3", Some(reads("quick-lemur-789", Some(&["invoices"]))), true, "a step where the workflow had none"),
+                ("", Some(reads("quick-lemur-789", Some(&["invoices"]))), true, "a new workflow with the step"),
+                ("c9", Some(reads("quick-lemur-789", None)), true, "a workflow the account does not have"),
+                ("", None, false, "a new workflow without the step"),
+            ];
+            for (id, step, widens, what) in rows {
+                assert_eq!(saving(id, step), widens, "{what}");
+            }
+            let mut legacy = linear_connector();
+            legacy.graph = None;
+            assert!(!connectors.widens_convex(&legacy), "a save with no graph adds no step");
             let _ = std::fs::remove_dir_all(dir);
         }
 

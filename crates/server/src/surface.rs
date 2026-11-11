@@ -188,6 +188,11 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if surface::skips_prompts(&call) && !caller.bypass {
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
+    if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
+        if hub.connectors(account).await?.widens_convex(connector) {
+            return Err(format!("{name} would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app."));
+        }
+    }
     let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
     let target = match asked {
         Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
