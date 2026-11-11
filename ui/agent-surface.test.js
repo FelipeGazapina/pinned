@@ -350,7 +350,7 @@ test("Agent activity lists the trail with each outcome and loads the next page f
   assert.deepEqual(here(calls), [{ cmd: "agent_audit", limit: 50 }]);
   const html = context.settingsPage.innerHTML;
   assert.match(html, /<h2>Agent activity<\/h2>/);
-  assert.match(html, /<p class="hint">Every action an agent took as you, newest first\. Actions that need your approval wait in Waiting on you\.<\/p>/);
+  assert.match(html, /<p class="hint">Every action an agent took as you, newest first\. Actions that need your approval wait in Needs you\.<\/p>/);
   assert.match(html, /<b>Rename machine iMac<\/b><span class="badge agent-outcome" data-tone="success">done<\/span>/);
   assert.match(html, /<b>Create invite<\/b><span class="badge agent-outcome" data-tone="warning">refused<\/span>/);
   assert.match(html, /<span class="meta">Worker · tab-2b-7 · MacBook<\/span>\s*<code class="args">\{&#34;id&#34;:&#34;imac-id&#34;,&#34;name&#34;:&#34;Mac mini&#34;\}<\/code>/);
