@@ -196,6 +196,7 @@ function tasteSaveCalls(saved, draft) {
   const calls = [];
   for (const kind of ["orchestrator", "captains"]) {
     const patch = tasteChanged(saved[kind], draft[kind]);
+    if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
   const repos = [...new Set([...Object.keys(saved.projects ?? {}), ...Object.keys(draft.projects ?? {})])].sort();
@@ -213,11 +214,60 @@ function tasteSaveCalls(saved, draft) {
 /** The draft's edits over `saved`, made again over `fresh`, the tastes as they are now: what a
  * reload keeps of unsaved edits while taking every change made elsewhere. */
 function tasteRebase(saved, draft, fresh) {
-  return tasteSaveCalls(saved, draft).reduce(
-    (next, call) => (call.cmd === "reset_taste_field" ? tasteResetField(next, call.scope, call.field) : tasteSetFields(next, call.scope, call.patch)),
-    fresh,
-  );
+  return tasteSaveCalls(saved, draft).reduce((next, call) => {
+    if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
+    const { placement, ...fields } = call.patch;
+    const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
+    return placement ? { ...set, placement } : set;
+  }, fresh);
 }
+
+/** The account's placement policy: where heavy delegated work runs. It lives on the tastes, not on
+ * one scope, and mirrors `Placement` in crates/core/src/placement.rs. `prefer` is the machines in
+ * order, best first, `avoid` the machines never chosen by rank, both by hub machine id. A hub that
+ * predates placement sends none, and the page then offers nothing to edit. */
+const PLACEMENT_HEAVY = [
+  { id: "worktree", label: "A worker in its own worktree" },
+  { id: "all_workers", label: "Every worker" },
+];
+
+/** The machines a policy can name: the account's machines as the hub lists them, without boxes
+ * (a box is a target of its own). Each is `{ id, name, online, workers, workers_at_once }`. */
+const placementMachines = (views) =>
+  views.filter((v) => v?.id && !v.upstash_box).map((v) => ({ id: v.id, name: v.name || v.id, online: v.online === true, workers: v.state?.workers ?? null, workers_at_once: v.state?.workers_at_once ?? null }));
+
+/** Whether the policy names a machine, in either list. */
+const placementHas = (policy, id) => policy.prefer.includes(id) || policy.avoid.includes(id);
+
+/** The policy with `id` added to the end of `list` ("prefer" or "avoid"). A machine in either list
+ * is not added again, so no machine is in both. */
+const placementAdd = (policy, list, id) => (!id || placementHas(policy, id) ? policy : { ...policy, [list]: [...policy[list], id] });
+
+const placementRemove = (policy, list, id) => ({ ...policy, [list]: policy[list].filter((m) => m !== id) });
+
+/** The policy with `id` moved `step` places in Prefer, and the same policy at an end. */
+function placementMove(policy, id, step) {
+  const prefer = [...policy.prefer];
+  const at = prefer.indexOf(id);
+  if (at < 0 || at + step < 0 || at + step >= prefer.length) return policy;
+  [prefer[at], prefer[at + step]] = [prefer[at + step], prefer[at]];
+  return { ...policy, prefer };
+}
+
+/** A list as the page shows it, by name. A machine the account no longer has is `gone`, once the
+ * machines are known: with none listed yet, it keeps its id as its name and is not struck out. */
+function placementRows(ids, machines) {
+  return ids.map((id) => {
+    const m = machines.find((x) => x.id === id);
+    return m ? { ...m, gone: false } : { id, name: id, online: false, workers: null, workers_at_once: null, gone: machines.length > 0 };
+  });
+}
+
+/** What a machine's chip says: "online", or "offline". */
+const placementState = (m) => (m.online ? "online" : "offline");
+
+/** "2 of 5 workers", or "" when the machine reports none. */
+const placementLoad = (m) => (m.workers == null ? "" : m.workers_at_once ? `${m.workers} of ${m.workers_at_once} workers` : `${m.workers} ${m.workers === 1 ? "worker" : "workers"}`);
 
 /** A model's cost tier: the `cost` its machine lists for it in `list_accounts` (the one list in
  * claude_models.rs), else, for a model it doesn't list or a node too old to send `cost`, a guess

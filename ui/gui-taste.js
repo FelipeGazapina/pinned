@@ -125,6 +125,8 @@ function tasteEdit(next) {
   tasteUi.toast = false;
   tasteRender();
 }
+/** The account's placement policy changes as a whole: it belongs to no one scope. */
+const tasteEditPlacement = (placement) => tasteEdit({ ...tasteUi.draft, placement });
 const tasteEditField = (field, value) => tasteEdit(tasteSetField(tasteUi.draft, tasteUi.scope, field, value));
 
 function tasteMoveRung(key, step) {
@@ -219,6 +221,48 @@ function tasteLimitsHtml(t) {
     ${tasteLadderHtml(t, "box_budget_cents", tasteMoney, "budget per box")}
     <p class="taste-quiet">The budget counts what a Claude Code worker's tokens cost at list prices, its subagents' included. Cursor and Codex workers are held to time and tier only.</p>
   </section>`;
+}
+
+/** The account's machines as the policy can name them, by hub id. This device's own entry carries
+ * the hub's view of it, which has the id the hub knows it by. */
+const tasteMachines = () => placementMachines([...machines].map(([id, m]) => (id === LOCAL ? m.hubView : m.view && { ...m.view, id })));
+
+function tastePlacementRowHtml(m, list, i, count) {
+  const id = esc(m.id);
+  const name = esc(m.name);
+  const load = placementLoad(m);
+  const chip = m.gone ? `<span class="taste-chip">removed</span>` : `<span class="taste-chip" data-state="${placementState(m)}">${placementState(m)}</span>`;
+  const move = (dir, step) => `<button type="button" class="taste-icon" data-act="pmove" data-id="${id}" data-step="${step}" aria-label="Move ${name} ${dir}"${(step < 0 ? i === 0 : i === count - 1) ? " disabled" : ""}>${icon(`chevron-${dir}`)}</button>`;
+  return `<li${m.gone ? ` class="gone"` : ""}>${list === "prefer" ? `<span class="pos">${i + 1}</span>` : ""}<span class="name" title="${id}">${m.gone ? `<s>${name}</s>` : name}</span>${chip}${!m.gone && load ? `<span class="taste-quiet mach-meta">${esc(load)}</span>` : ""}<span class="spacer"></span>${list === "prefer" ? move("up", -1) + move("down", 1) : ""}<button type="button" class="taste-icon" data-act="pdrop" data-list="${list}" data-id="${id}" aria-label="Remove ${name} from ${list === "prefer" ? "Prefer" : "Avoid"}">${icon("trash-2")}</button></li>`;
+}
+
+function tastePlacementListHtml(list, label, hint, policy, all) {
+  const rows = placementRows(policy[list], all);
+  const other = list === "prefer" ? "avoid" : "prefer";
+  const free = all.filter((m) => !placementHas(policy, m.id));
+  const locked = all.filter((m) => policy[other].includes(m.id));
+  const options = `<option value="" selected disabled>${all.length ? "Choose a machine" : "No machine to choose"}</option>${free.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}${locked.map((m) => `<option value="${esc(m.id)}" disabled>${esc(m.name)} (in ${other === "prefer" ? "Prefer" : "Avoid"})</option>`).join("")}`;
+  return `<div class="taste-field"><div class="taste-label"><span>${label}</span><span class="taste-quiet">${hint}</span></div>
+    <${list === "prefer" ? "ol" : "ul"} class="taste-ladder taste-machines" aria-label="${label}">${rows.map((m, i) => tastePlacementRowHtml(m, list, i, rows.length)).join("")}</${list === "prefer" ? "ol" : "ul"}>
+    <div class="taste-inline"><label class="taste-label">Add to ${label} <select data-place-add="${list}">${options}</select></label></div></div>`;
+}
+
+/** Where heavy workers run, for the whole account: Prefer, Avoid, and which work is heavy. A hub
+ * that predates placement sends no policy, and a project tab points to the account's. */
+function tastePlacementHtml() {
+  const section = (body) => `<section class="taste-section taste-placement"><div class="taste-heading"><h2>Placement</h2><p>Where heavy workers run. A task that names a machine always runs there.</p></div>${body}</section>`;
+  if (tasteUi.scope.kind === "project") return section(`<p class="taste-quiet">This is set for the whole account, under <button type="button" class="taste-link" data-act="scope" data-kind="captains">Captains (all)</button>.</p>`);
+  const policy = tasteUi.draft.placement;
+  if (policy == null) return section(`<p class="taste-quiet">Update pinned on the hub to choose where heavy work runs.</p>`);
+  const all = tasteMachines();
+  const heavy = PLACEMENT_HEAVY.map((h) => `<button type="button" data-act="pheavy" data-value="${h.id}" aria-pressed="${h.id === (policy.heavy ?? "worktree")}">${h.label}</button>`).join("");
+  const active = policy.prefer.length || policy.avoid.length;
+  return section(`${tastePlacementListHtml("prefer", "Prefer", "First that fits wins", policy, all)}${tastePlacementListHtml("avoid", "Avoid", "Never chosen by rank", policy, all)}
+    <div class="taste-field"><div class="taste-label"><span>Heavy work</span></div><div class="taste-seg" role="group" aria-label="Heavy work">${heavy}</div></div>
+    <div class="taste-policy"><p class="taste-quiet">${active ? "A heavy worker goes to the first preferred machine that fits, then to the least busy one. An avoided machine runs a worker only when it is the one that asked and nothing else fits." : "Nothing is preferred or avoided, so every worker runs on the machine it was asked on."}</p>
+      <p class="taste-quiet">If no machine fits, the worker runs on the machine that asked, and the reason is shown.</p>
+      <p class="taste-quiet">A machine counts as busy while its CPU is over 90% for 1 minute or it has under 2 GB of memory free.</p>
+      <p class="taste-quiet">A machine with under 10 GB of disk free takes no heavy worker.</p></div>`);
 }
 
 function tastePaceHtml(t) {
@@ -316,7 +360,7 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
@@ -348,6 +392,9 @@ const TASTE_ACTS = {
     tasteUi.adding = false;
     tasteRender();
   },
+  pmove: (b) => tasteEditPlacement(placementMove(tasteUi.draft.placement, b.dataset.id, Number(b.dataset.step))),
+  pdrop: (b) => tasteEditPlacement(placementRemove(tasteUi.draft.placement, b.dataset.list, b.dataset.id)),
+  pheavy: (b) => tasteEditPlacement({ ...tasteUi.draft.placement, heavy: b.dataset.value }),
   chat: () => tasteChat(),
   discard: () => {
     tasteUi.draft = tasteUi.saved;
@@ -374,7 +421,8 @@ pageView.addEventListener("change", (e) => {
   if (document.body.dataset.page !== "taste") return;
   if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
   if (!e.target.value) return;
-  if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);
+  if (e.target.matches("[data-place-add]")) tasteEditPlacement(placementAdd(tasteUi.draft.placement, e.target.dataset.placeAdd, e.target.value));
+  else if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);
   else if (e.target.matches("[data-hard-model]")) tasteEditField("hard_model", tasteRefOf(e.target.value));
 });
 pageView.addEventListener("input", (e) => {

@@ -107,7 +107,7 @@ function setHtml(el, html) {
   el.innerHTML = html;
 }
 const middle = (text, over = 14) => (text.length > over ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
-const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
+const prOf = (tab) => threadOf(tab).items.findLast((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
 function hookPhase(tab) {
@@ -142,7 +142,13 @@ async function fetchThread(tab) {
       t.again = false;
       t.readAt = performance.now();
       const before = drawnOf(t);
-      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
+      const from = t.next;
+      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from });
+      // The thread started over while this read was out: what came back follows a place it left.
+      if (t.next !== from) {
+        t.again = true;
+        continue;
+      }
       t.error = null;
       if (!page.session && t.session) return;
       if (page.reset) Object.assign(t, { items: [], todos: null, branch: null, context: null, resets: (t.resets ?? 0) + 1 });
@@ -182,6 +188,37 @@ async function fetchThread(tab) {
     }
   } finally {
     t.fetching = false;
+    if (tab !== active) lightenThreads();
+  }
+}
+
+/** Threads that keep their whole transcript after they leave the screen, so going back to one is
+ * instant: the few shown last, while together they hold no more than this much of transcript. */
+const WHOLE_THREADS = 6;
+const WHOLE_BYTES = 16 << 20;
+/** WebKit keeps the memory a dropped transcript held, where Chromium gives it back. There a
+ * thread never shown keeps its first read: dropping it frees nothing, and showing the thread
+ * would read it a second time, which leaves more behind. */
+const KEEPS_FREED_MEMORY = /AppleWebKit/.test(navigator.userAgent) && !/Chrom(e|ium)\//.test(navigator.userAgent);
+let shownClock = 0;
+let lastShown = null;
+/** What is still asked of a thread off screen: the sidebar's titles, pull requests, dates and
+ * search, and the composer's model. Tool calls, their results, reasoning and pictures are four
+ * fifths of a transcript, and only the thread view draws them. */
+const KEPT_OFF_SCREEN = new Set(["user", "steer", "text", "error", "note", "pr", "model", "compaction", "fork"]);
+/** Drops the rest from every thread off screen that is not among those and has no turn or agent
+ * running. A thread never shown is one of them once its first read gave the sidebar its lines,
+ * where that frees memory. */
+function lightenThreads() {
+  const shown = tabs.filter((tab) => threadOf(tab).shownAt && !threadOf(tab).light).sort((a, b) => threadOf(b).shownAt - threadOf(a).shownAt).slice(0, WHOLE_THREADS);
+  let bytes = 0;
+  const whole = shown.filter((tab, i) => (bytes += threadOf(tab).next) <= WHOLE_BYTES || i === 0);
+  for (const tab of tabs) {
+    const t = threadOf(tab);
+    if (t.light || !t.loaded || t.fetching || followed(tab) || whole.includes(tab) || (KEEPS_FREED_MEMORY && !t.shownAt)) continue;
+    t.items = t.items.filter((item) => KEPT_OFF_SCREEN.has(item.kind)).map((item) => (item.pictures ? { ...item, pictures: [] } : item));
+    // The turns built for the thread view hold every item they were built from.
+    Object.assign(t, { light: true, history: null, gitDiff: null, turnCache: null });
   }
 }
 
@@ -263,11 +300,21 @@ function renderGui() {
       continue;
     }
     tab.dialog = tab.menu || tab.answering ? null : screenRead(tab, terminalDialog);
+    // What a thread dropped while it was off screen is read again from its start.
+    if (tab === active && t.light) Object.assign(t, { items: [], next: 0, loaded: false, light: false });
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     if (tab === active && !t.history) fetchHistory(tab);
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
+  if (active !== lastShown) {
+    lastShown = active;
+    if (active) threadOf(active).shownAt = ++shownClock;
+    lightenThreads();
+    // What was drawn for the thread that left is not drawn again, and was most of what these held.
+    rendered.clear();
+    highlighted.clear();
+  }
   markThreadSeen(active);
   noteVisit();
   renderSidebar();
@@ -313,13 +360,13 @@ function forgetThreadWatch() {
   watchGeneration++;
 }
 
-setInterval(() => {
+visibleInterval(() => {
   publishThreadWatch();
-  if (!guiOn() || document.hidden) return;
+  if (!guiOn()) return;
   for (const tab of tabs) if (followed(tab)) fetchThread(tab);
 }, POLL_MS);
-setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
-setInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
+visibleInterval(() => guiOn() && renderSidebar(), 60 * 1000);
+visibleInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   markThreadSeen(active);
   publishThreadWatch();

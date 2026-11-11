@@ -20,6 +20,27 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 pub const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
+/// How long a worker box may take to boot and connect to the hub. Past it, its task fails.
+pub const BOX_CONNECT_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How long a task on another machine may run past its time limit before this machine ends it
+/// itself. The machine that runs it holds it to the limit and reports its end, unless it is gone.
+pub const REMOTE_GRACE: Duration = Duration::from_secs(5 * 60);
+/// The hub's answer about a worker box whose node has not connected yet.
+pub const BOX_BOOTING: &str = "the box is still booting";
+
+/// Whether the hub answered that the account has no such machine any more: a box that ended, or
+/// a machine someone removed.
+pub fn machine_gone(error: &str) -> bool {
+    error.starts_with("this account has no machine ")
+}
+
+/// "5 min" for a whole number of minutes, else seconds.
+pub fn wait_span(wait: Duration) -> String {
+    match wait.as_secs() {
+        secs if secs >= 60 && secs % 60 == 0 => format!("{} min", secs / 60),
+        secs => format!("{secs} s"),
+    }
+}
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const STDERR_CLOSE_WAIT: Duration = Duration::from_secs(1);
@@ -231,7 +252,7 @@ impl Origin {
 }
 
 /// How a task that runs on another machine ended, as that machine reports it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct RemoteEnd {
     /// `result_available`, `failed` or `cancelled`.
     pub state: String,
@@ -239,6 +260,25 @@ pub struct RemoteEnd {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the worker used, its box's time included: the delegating task shows it. An older
+    /// machine sends none. The machine that ran the task records the run, so this is for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::TaskUsage>,
+}
+
+/// What a task that runs on another machine waits on the user for: its thread there is blocked on
+/// an approval or a question. The machine that runs it reports it as it starts and again, as `None`,
+/// once it is answered, and the thread that delegated the task keeps it until then.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoteAsk {
+    pub kind: crate::global_orchestrator::AskKind,
+    /// The tool an approval is for, such as `Bash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What the thread asks, as its session said it.
+    pub ask: String,
+    /// Unix seconds the thread started to wait.
+    pub since: u64,
 }
 
 /// The delegation request, after the MCP arguments have been read once.
@@ -268,6 +308,9 @@ pub struct Request {
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
+    /// Whether the account's placement policy places this worker, over its rule for heavy work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heavy: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,6 +402,8 @@ pub struct Task {
     pub newest_text: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
+    /// Unix seconds `delivered` was set, when it was set since this was recorded.
+    pub delivered_at: Option<u64>,
     /// This task's folder is a worktree `new_worktree` made.
     pub isolated: bool,
     /// `tab:<id>` or `task:<id>` of the session that started it. Idempotency and ownership use it.
@@ -369,11 +414,21 @@ pub struct Task {
     pub parent_session: Option<String>,
     pub ended_by: Option<String>,
     pub run: Run,
-    /// The pinned thread that shows this child under its parent. Not saved: a restart cancels
-    /// every working task, and tab ids do not outlive the process.
+    /// The pinned thread that shows this child under its parent. Tab ids do not outlive the
+    /// process, so it is not saved: a restart ties the task to its worker's restored tab again, by
+    /// `worker_session`.
     pub thread: Option<Thread>,
-    /// The machine that runs this task for its parent here, when it runs elsewhere. Not saved.
+    /// The Claude session of the thread that runs this task, which a restart resumes.
+    pub worker_session: Option<String>,
+    /// Loaded from disk as a thread's worker that `restore_tabs` is to bring back. It ends if no
+    /// restored tab has `worker_session`.
+    pub resuming: bool,
+    /// The machine that runs this task for its parent here, when it runs elsewhere. Saved, so a
+    /// restarted origin still takes the end that machine sends.
     pub remote: Option<RemoteTarget>,
+    /// The tab the machine that runs this task knows its parent by. A restart gives that tab a new
+    /// id here, and the other machine keeps naming the old one.
+    pub remote_tab: Option<String>,
     /// The delegation limits it runs under. Its own children are held to them or tighter.
     pub limits: crate::taste::Limits,
     /// What it used so far, as its transcript reports it.
@@ -389,6 +444,8 @@ pub struct Task {
     pub thread_tab: Option<String>,
     /// The hub holds this task's record as it is now.
     pub recorded: bool,
+    /// Where it runs and who chose that, for a task this machine's caller delegated.
+    pub placement: Option<crate::placement::Placed>,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.
@@ -409,6 +466,8 @@ pub struct RemoteTarget {
     pub tab: Option<String>,
     /// When this machine last asked that machine how the task goes.
     pub looked: Option<Instant>,
+    /// What the worker there waits on the user for, while it does.
+    pub waiting: Option<RemoteAsk>,
 }
 
 /// A child's thread: a worker tab that runs it, or one that shows a headless child's steps.
@@ -430,6 +489,15 @@ pub struct Run {
     pub open_turns: u32,
     pub last_error: Option<String>,
     pub background: Vec<Background>,
+    /// Time that does not count toward the time limit: the worker waited on the user.
+    pub paused: Duration,
+    /// Since when the worker waits on the user (an approval or a question), while it does.
+    pub user_wait: Option<Instant>,
+    /// The thread's turn finished and the task is held only for work it left running: a limit
+    /// that passes now ends it with its reply as the result.
+    pub turn_done: bool,
+    /// What a held thread task still runs in its session, as `task_status` lists it.
+    pub held_on: Vec<String>,
 }
 
 impl Default for Run {
@@ -444,7 +512,20 @@ impl Default for Run {
             open_turns: 0,
             last_error: None,
             background: vec![],
+            paused: Duration::ZERO,
+            user_wait: None,
+            turn_done: false,
+            held_on: vec![],
         }
+    }
+}
+
+impl Run {
+    /// The milliseconds that count toward the time limit at `now`: since it began, less the time
+    /// the worker waited on the user. Time pinned was down never reaches `begun` (see `SavedTask`).
+    pub fn counted(&self, now: Instant) -> u64 {
+        let waiting = self.user_wait.map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        now.saturating_duration_since(self.begun).saturating_sub(self.paused).saturating_sub(waiting).as_millis() as u64
     }
 }
 
@@ -504,6 +585,7 @@ mod limited;
 mod metrics;
 mod registry;
 mod request;
+mod rollup;
 
 pub use catalog::*;
 pub use drivers::*;
@@ -511,6 +593,7 @@ pub use limited::*;
 pub use metrics::*;
 pub use registry::*;
 pub use request::*;
+pub use rollup::*;
 
 #[cfg(test)]
 pub(crate) use drivers::{driver, replay};
@@ -779,6 +862,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
@@ -838,6 +922,7 @@ mod tests {
                 role: None,
                 tools: vec![],
                 client_request_id: None,
+                heavy: None,
             }
         );
         assert_eq!(
@@ -1445,6 +1530,29 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
+    #[test]
+    fn a_resumed_task_keeps_counting_toward_its_time_limit_from_its_original_start() {
+        let dir = scratch("limit-across-restart");
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_on(&first, Provider::Claude);
+        first.link_thread(&task.id, Thread { tab: "tab-1".into(), runs: true });
+        first.backdate(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.backdate_run(&task.id, Duration::from_millis(DEFAULT_LIMIT_MS - 60_000));
+        first.set_worker_session(&task.id, "s-worker");
+        drop(first);
+
+        let after = Delegates::load(Some(file));
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a thread's worker is resumed by the restart, not ended");
+        after.enforce_limits(Instant::now(), None);
+        assert_eq!(after.get(&task.id).unwrap().state, WorkState::Working, "a minute of its limit is left");
+        after.enforce_limits(Instant::now() + Duration::from_secs(120), None);
+        let ended = after.get(&task.id).unwrap();
+        assert_eq!(ended.state, WorkState::Cancelled);
+        assert!(ended.error.unwrap().contains("its limit"), "the limit counted the time before the restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn after_each_stop(name: &str, provider: Provider, lines: &[&str]) -> Vec<Value> {
         let dir = scratch(name);
         let file = dir.join("delegates.json");
@@ -1487,8 +1595,8 @@ grok-4.7-high - Grok 4.7  High
             vec![
                 json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
                 json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
-                json!(["quit", "cancelled", "PR opened", "stopped by restart"]),
-                json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
+                json!(["quit", "cancelled", "PR opened", RESTART_ENDED]),
+                json!(["crash", "cancelled", "PR opened", RESTART_ENDED]),
             ]
         );
     }
@@ -2661,13 +2769,13 @@ exec '{real}' "$@"
             client_request_id: None,
             role: None,
         });
-        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None });
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
         assert_eq!(delegates.cards("tab-1"), vec![], "its thread on mini nests under tab-1 instead");
-        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None };
-        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-other", &end), "another machine can't end it");
-        assert!(!delegates.settle_remote(&task.id, "tab-2", "m-mini", &end), "nor can it end another tab's task");
-        assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end));
-        assert!(!delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), "an end lands once");
+        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
+        assert!(delegates.settle_remote(&task.id, "tab-1", "m-other", &end).is_none(), "another machine can't end it");
+        assert!(delegates.settle_remote(&task.id, "tab-2", "m-mini", &end).is_none(), "nor can it end another tab's task");
+        assert_eq!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), Some("tab-1".into()));
+        assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end).is_none(), "an end lands once");
         let (text, _) = delegates.claim_notice("tab-1").unwrap();
         assert_eq!(text, format!("[pinned] Delegated task {} \"Slow suite\" (Claude Code) finished: result available. It ran on mini, in thread tab-9. Call task_status with taskId \"{}\".", task.id, task.id));
         assert_eq!(delegates.records(), vec![], "mini, which ran it, keeps its record");
@@ -2721,5 +2829,137 @@ exec '{real}' "$@"
         let start = chrono::DateTime::parse_from_rfc3339(&started).unwrap();
         let end = chrono::DateTime::parse_from_rfc3339(&card.updated).unwrap();
         assert!(end > start, "a sub-second task collapsed to one stamp: {started} {end}");
+    }
+
+    fn thread_task(delegates: &Delegates, limit: Duration) -> Task {
+        let task = new_on(delegates, Provider::Claude);
+        delegates.link_thread(&task.id, Thread { tab: "tab-w".into(), runs: true });
+        delegates.set_limits(&task.id, limit.as_millis() as u64 / 2, limit.as_millis() as u64);
+        task
+    }
+
+    fn state_of(delegates: &Delegates, id: &str) -> (String, Option<String>, Option<String>) {
+        let status = delegates.status(&parent(), id).unwrap();
+        (status["workState"].as_str().unwrap().to_owned(), status["summary"].as_str().map(str::to_owned), status["stoppedByLimit"].as_str().map(str::to_owned))
+    }
+
+    #[test]
+    fn a_worker_waiting_on_an_approval_past_its_time_limit_is_not_stopped_and_counts_on_from_where_it_paused() {
+        let delegates = Delegates::default();
+        let task = thread_task(&delegates, Duration::from_secs(60));
+        let begun = delegates.get(&task.id).unwrap().run.begun;
+        let at = |secs: u64| begun + Duration::from_secs(secs);
+        delegates.note_user_waits(&[], at(10));
+        delegates.note_user_waits(&[task.id.clone()], at(10));
+        delegates.enforce_limits(at(600), None);
+        assert_eq!(state_of(&delegates, &task.id).0, "working", "ten minutes on an approval are not work");
+
+        delegates.note_user_waits(&[], at(600));
+        assert_eq!(delegates.get(&task.id).unwrap().run.counted(at(600)), 10_000, "the clock stopped at 10 s");
+        delegates.enforce_limits(at(649), None);
+        assert_eq!(state_of(&delegates, &task.id).0, "working", "59 s counted");
+        delegates.enforce_limits(at(651), None);
+        assert_eq!(state_of(&delegates, &task.id), ("cancelled".to_owned(), None, Some("time".to_owned())), "61 s counted");
+    }
+
+    #[test]
+    fn a_worker_on_another_machine_waiting_on_an_approval_pauses_the_time_limit_here() {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.set_limits(&task.id, 30_000, 60_000);
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
+        let begun = delegates.get(&task.id).unwrap().run.begun;
+        let at = |secs: u64| begun + Duration::from_secs(secs);
+        let ask = RemoteAsk { kind: crate::global_orchestrator::AskKind::Approval, tool: Some("Bash".into()), ask: "cargo publish".into(), since: 0 };
+        delegates.set_remote_waiting(&task.id, "tab-1", "m-mini", Some(ask)).unwrap();
+        delegates.note_user_waits(&[], at(20));
+        let past_grace = 60 + REMOTE_GRACE.as_secs() + 600;
+        assert_eq!(delegates.enforce_limits(at(past_grace), None), vec![], "nothing to stop while mini's worker waits on the user");
+        assert_eq!(state_of(&delegates, &task.id).0, "working");
+
+        delegates.set_remote_waiting(&task.id, "tab-1", "m-mini", None).unwrap();
+        delegates.note_user_waits(&[], at(past_grace));
+        assert_eq!(delegates.get(&task.id).unwrap().run.counted(at(past_grace)), 20_000);
+        assert_eq!(delegates.enforce_limits(at(past_grace + 40 + REMOTE_GRACE.as_secs() - 1), None), vec![], "its grace counts from the answer too");
+        assert_eq!(delegates.enforce_limits(at(past_grace + 41 + REMOTE_GRACE.as_secs()), None).len(), 1);
+        assert_eq!(state_of(&delegates, &task.id).2.as_deref(), Some("time"));
+    }
+
+    #[test]
+    fn time_while_pinned_was_down_does_not_count_after_a_restart() {
+        let dir = scratch("down-time");
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = thread_task(&first, Duration::from_secs(3600));
+        first.backdate(&task.id, Duration::from_secs(1800));
+        first.backdate_run(&task.id, Duration::from_secs(1800));
+        first.set_worker_session(&task.id, "s-worker");
+        drop(first);
+        // pinned stays down for two hours: the wall clock moves, the counted half hour does not.
+        let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let entry = saved["tasks"].as_array_mut().unwrap().iter_mut().find(|t| t["id"] == task.id.as_str()).unwrap();
+        assert_eq!(entry["counted_ms"].as_u64().map(|ms| ms / 60_000), Some(30), "{entry}");
+        entry["started"] = json!(entry["started"].as_u64().unwrap() - 2 * 3600 * 1000);
+        std::fs::write(&file, saved.to_string()).unwrap();
+
+        let after = Delegates::load(Some(file));
+        after.enforce_limits(Instant::now() + Duration::from_secs(29 * 60), None);
+        assert_eq!(state_of(&after, &task.id).0, "working", "59 of 60 minutes counted, though 2 h 59 min passed");
+        after.enforce_limits(Instant::now() + Duration::from_secs(31 * 60), None);
+        assert_eq!(state_of(&after, &task.id).2.as_deref(), Some("time"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cap_that_passes_after_the_worker_finished_its_turn_ends_the_task_with_its_reply() {
+        let delegates = Delegates::default();
+        let limits = crate::taste::Limits { budget_cents: 500, ..crate::taste::Limits::default() };
+        let spent = |cost: f64| crate::usage::TaskUsage { cost_usd: Some(cost), ..Default::default() };
+
+        let finished = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&finished.id, limits);
+        delegates.turn_finished(&finished.id, Some("PR #12 is open and green.".into()), vec!["1 background shell".into()]);
+        delegates.meter(&[(finished.id.clone(), spent(5.10))], None);
+        assert_eq!(state_of(&delegates, &finished.id), ("result_available".to_owned(), Some("PR #12 is open and green.".to_owned()), None));
+        let ended_by = delegates.status(&parent(), &finished.id).unwrap()["endedBy"].as_str().unwrap().to_owned();
+        assert_eq!(ended_by, "pinned stopped it after it spent US$ 5.10, its budget of US$ 5.00, after its turn had finished; its last reply is the result");
+
+        let mid_turn = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&mid_turn.id, limits);
+        delegates.turn_finished(&mid_turn.id, Some("Looking.".into()), vec![]);
+        delegates.turn_started(&mid_turn.id);
+        delegates.meter(&[(mid_turn.id.clone(), spent(5.10))], None);
+        assert_eq!(state_of(&delegates, &mid_turn.id).0, "cancelled", "a turn still running is stopped as before");
+    }
+
+    #[test]
+    fn task_status_says_which_tasks_and_shells_a_finished_turn_still_waits_on() {
+        let delegates = Delegates::default();
+        let task = thread_task(&delegates, Duration::from_secs(3600));
+        let child = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-w".into()),
+            tool: None,
+            title: "Rust half".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-w".into(),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.turn_finished(&task.id, Some("Waiting on the Rust half.".into()), vec!["1 background shell".into()]);
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)), vec![(child.id.clone(), "Rust half".to_owned())]);
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(status["waitsOn"], json!({ "tasks": [{ "taskId": child.id, "title": "Rust half", "workState": "working" }], "background": ["1 background shell"] }));
+        assert!(status["next"].as_str().unwrap().starts_with(&format!("its turn ended and summary holds its reply so far; it still waits on task {} \"Rust half\" (working), 1 background shell;", child.id)), "{status}");
+
+        delegates.settle_thread(&child.id, Some("Done.".into()), None, None, vec![], None);
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)).len(), 1, "its end has not reached the worker yet");
+        delegates.claim_notice("tab-w").unwrap();
+        assert_eq!(delegates.waited_children("tab-w", Some(&task.id)), vec![]);
     }
 }

@@ -10,6 +10,7 @@ function showAccount() {
         <label>Password <input name="password" type="password" autocomplete="current-password"></label>
         <label hidden>Invite code, to create an account <input name="invite" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
         <p class="error" id="account-error"></p>
+        <button type="button" class="retry" hidden>Retry</button>
         <div class="actions"><button type="button" class="secondary" data-action="create-account">Create account</button>
           <button class="primary">Sign in</button></div>
       </form>`;
@@ -35,10 +36,12 @@ function showAccount() {
       <div class="card-head"><span class="logo account">@</span>
         <div><b>${esc(account.email || "…")}</b><div class="hint">${esc(account.hub)}</div></div>
         <span class="badge" data-on="${state === "online"}">${badge}</span></div>
+      ${document.body.dataset.version ? `<p class="hint">pinned ${esc(document.body.dataset.version)}</p>` : ""}
       ${TAURI ? `<p>This ${COMPUTER} is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>
+    ${repoInsightHtml()}
     ${TAURI ? "" : notificationsHtml()}
     <form class="card new-password">
       <div class="card-head"><div><b>Password</b></div></div>
@@ -49,6 +52,7 @@ function showAccount() {
       <div class="actions"><button class="primary">Change password</button></div>
     </form>
     ${invitesHtml()}`;
+  bindRepoInsight();
   settingsPage.querySelector(".new-password").onsubmit = (e) => {
     e.preventDefault();
     changePassword(e.target);
@@ -149,6 +153,32 @@ const NOTIFICATIONS = {
 };
 
 // The browser remembers the answer, so the card reads it from there each time.
+/** The account's one switch for the global Orchestrator's read-only repo tools. Off until turned on. */
+function repoInsightHtml() {
+  const on = !!settings.repo_insight?.on;
+  return `<div class="card repo-insight">
+      <div class="card-head"><div><b><label for="repo-insight">Orchestrator repo access</label></b>
+        <div class="hint">Lets the global Orchestrator read this account's repositories to plan and check work: it sees files and searches them, never changes them. Files that may hold secrets are left out, and every read is listed in Agent activity.</div></div>
+        <label class="switch"><input type="checkbox" id="repo-insight" aria-label="Orchestrator repo access"${on ? " checked" : ""}><span></span></label></div>
+      <p class="error" id="repo-insight-error"></p>
+    </div>`;
+}
+
+function bindRepoInsight() {
+  const input = document.getElementById("repo-insight");
+  if (!input) return;
+  input.onchange = async () => {
+    const error = document.getElementById("repo-insight-error");
+    error.textContent = "";
+    try {
+      settings.repo_insight = await connectorCall("set_repo_insight", { settings: { on: input.checked } });
+    } catch (e) {
+      input.checked = !input.checked;
+      error.textContent = String(e);
+    }
+  };
+}
+
 function notificationsHtml() {
   const permission = window.Notification && navigator.serviceWorker ? Notification.permission : "unsupported";
   const [badge, hint] = NOTIFICATIONS[permission];
@@ -190,14 +220,23 @@ async function changePassword(form) {
   form.querySelector("button").disabled = false;
 }
 
+/** Words a failed sign-in: plainly when the hub can't be reached, with a Retry that sends it again. */
+function showSignInError(error, retry, e, hub, again) {
+  error.textContent = signInProblem(e, hub);
+  retry.hidden = !hubUnreachable(e);
+  retry.onclick = again;
+}
+
 async function signInApp(create) {
   const form = settingsPage.querySelector(".sign-in");
   const error = document.getElementById("account-error");
+  const retry = form.querySelector(".retry");
   const hubUrl = form.hub.value.trim().replace(/\/+$/, "");
   const email = form.email.value.trim();
   const password = form.password.value;
   if (!hubUrl || !email || !password) return (error.textContent = "Fill in the hub, your email and a password.");
   error.textContent = "";
+  retry.hidden = true;
   for (const b of form.querySelectorAll("button")) b.disabled = true;
   try {
     const signedIn = await invoke("sign_in", { hub: hubUrl, email, password, create, invite: form.invite.value.trim() || null });
@@ -205,7 +244,7 @@ async function signInApp(create) {
     connectHub(signedIn);
     showAccount();
   } catch (e) {
-    error.textContent = String(e);
+    showSignInError(error, retry, e, hubUrl, () => signInApp(create));
     for (const b of form.querySelectorAll("button")) b.disabled = false;
   }
 }
@@ -234,6 +273,7 @@ function lastSeen(unix) {
 
 function showMachinesAndRecheckSync() {
   showMachinesPage();
+  pollMachineLoad();
   for (const [id, m] of machines) if (id === LOCAL ? m.hubView : m.view.online) refreshSyncStopped(id);
 }
 
@@ -266,11 +306,69 @@ function showMachinesPage() {
   field?.select();
 }
 
+// Which machines are behind depends on the newest version, which can arrive after the page opened.
+document.addEventListener("newest-version", () => {
+  if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
+  if (settingsOpen() && page === "account") showAccount();
+});
+
+let machinesPoll = null;
+
+/** While Settings › Machines is open, asks the hub every 15 s for the machines, so the load shown keeps up:
+ * the hub pushes the list when a machine comes or goes, not when its load moves. */
+function pollMachineLoad() {
+  clearInterval(machinesPoll);
+  machinesPoll = setInterval(() => {
+    if (!settingsOpen() || page !== "machines" || !hub) return clearInterval(machinesPoll);
+    hub.hub({ cmd: "machines" }).then((list) => showMachines(list, null), console.warn);
+  }, 15000);
+}
+
+const gigabytes = (mb) => (mb >= 100 * 1024 ? `${Math.round(mb / 1024)} GB` : `${(mb / 1024).toFixed(1)} GB`);
+
+/** How busy a machine is and which accounts it can run a worker with, as it last reported them:
+ * workers against its Workers at once, CPU, free memory and free disk, then one chip per account.
+ * A stat turns amber or red where a worker sent there would struggle (the placement floors: 90% CPU,
+ * 2 GB of memory, 10 GB of disk). */
+function machineStateHtml(view, work = null) {
+  if (!view.online) return "";
+  const state = view.state;
+  // What runs and waits on the machine's threads, as the sidebar counts them, then what it reports of itself.
+  const threads = work ? `<span class="stat">Threads <b>${work.running}</b> running · <b>${work.waiting}</b> waiting</span>` : "";
+  if (!state) return `${threads ? `<div class="machine-load">${threads}</div>` : ""}<span class="hint">Load and accounts show once this machine runs a pinned that reports them.</span>`;
+  const load = state.load ?? {};
+  const full = state.workers_at_once > 0 && state.workers >= state.workers_at_once;
+  const stat = (label, value, tail = "", level = "") =>
+    `<span class="stat"${level ? ` data-level="${level}"` : ""}>${label} <b>${esc(value)}</b>${esc(tail)}</span>`;
+  const stats = [
+    stat("Workers", String(state.workers ?? 0), state.workers_at_once ? ` of ${state.workers_at_once}${full ? " · full" : ""}` : "", full ? "warn" : ""),
+    load.cpu_percent != null && stat("CPU", `${load.cpu_percent}%`, "", load.cpu_percent >= 90 ? "hot" : ""),
+    load.mem_available_mb != null && stat("Memory", gigabytes(load.mem_available_mb), " free", load.mem_available_mb < 2048 ? "warn" : ""),
+    load.disk_free_mb != null && stat("Disk", gigabytes(load.disk_free_mb), " free", load.disk_free_mb < 10 * 1024 ? "warn" : ""),
+  ].filter(Boolean);
+  const chip = (account) => {
+    const note = !account.can_run_child_task ? " · not ready" : account.limited ? " · limited" : "";
+    const stateName = !account.can_run_child_task ? "off" : account.limited ? "limited" : "ready";
+    return `<span class="acct" data-state="${stateName}" title="driver: ${esc(account.driver_kind)}">${esc(account.id + note)}</span>`;
+  };
+  const accounts = (state.accounts ?? []).map(chip).join("");
+  return `<div class="machine-load">${threads}${stats.join("")}</div>${accounts ? `<div class="machine-accounts">${accounts}</div>` : ""}`;
+}
+
+/** How many of a machine's threads are working and how many wait on you (a question, an approval or a failure). */
+function machineWork(id) {
+  const mine = tabs.filter((t) => t.machine === id);
+  return { running: mine.filter((t) => ["working", "delegating"].includes(phaseOf(t))).length, waiting: mine.filter((t) => waitingKindOf(t.view)).length };
+}
+function updateButtonHtml({ label, disabled, title, primary }) {
+  return `<button class="${primary ? "primary" : "secondary"}" data-action="update-machine"${disabled ? " disabled" : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</button>`;
+}
+
 function machineEntryHtml(id, view) {
   if (!view) return "";
   const local = id === LOCAL;
   const where = [view.os, local && (TAURI ? `this ${COMPUTER}` : null), !view.online && lastSeen(view.last_seen)].filter(Boolean).join(" · ");
-  const status = rowUpdate(view);
+  const standing = updateStanding(view);
   const updateId = local ? account?.machine_id : view.id;
   const name =
     machinesUi.renaming === id
@@ -294,8 +392,8 @@ function machineEntryHtml(id, view) {
     : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
-      <div class="who">${name}<span class="hint">${esc(where)}</span>${status ? `<span class="hint">${esc(status)}</span>` : ""}</div>
-      ${updateId && machinesUi.renaming !== id ? `<button class="secondary" data-action="update-machine">Update</button>` : ""}
+      <div class="who">${name}<span class="hint">${esc(where)}</span>${standing.text ? `<span class="hint" data-standing="${standing.standing}">${esc(standing.text)}</span>` : ""}${machineStateHtml(view, machineWork(id))}</div>
+      ${updateId && machinesUi.renaming !== id ? updateButtonHtml(standing.button) : ""}
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
     </div>${sync}${confirm}`;
@@ -400,6 +498,7 @@ const loginForm = document.getElementById("login");
 function showLogin(reason = "") {
   document.body.dataset.page = "login";
   loginForm.querySelector(".error").textContent = reason;
+  loginForm.querySelector(".retry").hidden = true;
   loginForm.email.focus();
   signupMode("").then((mode) => (loginForm.invite.hidden = mode !== "invite"));
 }
@@ -411,6 +510,7 @@ async function loginWeb(create) {
   const invite = create ? loginForm.invite.value.trim() : "";
   if (!email || !password) return (error.textContent = "Fill in your email and password.");
   error.textContent = "";
+  loginForm.querySelector(".retry").hidden = true;
   try {
     const res = await fetch(`/api/${create ? "signup" : "login"}`, {
       method: "POST",
@@ -428,7 +528,7 @@ async function loginWeb(create) {
     delete document.body.dataset.page;
     connectHub({ hub: location.origin, user_token: body.token, machine_id: null, email: body.account?.email ?? email });
   } catch (e) {
-    error.textContent = String(e);
+    showSignInError(error, loginForm.querySelector(".retry"), e, location.origin, () => loginWeb(create));
   }
 }
 

@@ -58,7 +58,7 @@ try {
 const isFolded = (tab) => foldedThreads.has(threadKey(tab));
 const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
 onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
-Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
+Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", offersOpen: load("gui-offers-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
 /** What ⌘⇧T brings back, newest last, as T3 Code's closed views: `{ thread }` for a closed thread and
@@ -156,18 +156,77 @@ function sidebarSettingsHtml() {
     ${toggle("confirmArchive", sideSettings.confirmArchive, "Archive confirmation", "Ask before archiving a thread.")}
     ${toggle("confirmDelete", sideSettings.confirmDelete, "Delete confirmation", "Ask before deleting a thread.")}</section>`;
 }
+/** The last read of the machines' auto-archive settings: `{ machines, view }`. */
+let autoArchive = null;
+/** Reads `auto_archive_settings` from every online machine that is not a box. A machine that is
+ * too old to answer is marked `update`, and one that failed carries its `error`. */
+async function readAutoArchive() {
+  const list = await Promise.all(
+    [...machines.entries()]
+      .filter(([, m]) => !m.view.upstash_box)
+      .map(async ([id, m]) => {
+        const machine = { id, name: machineName(id), online: m.view.online === true, settings: null, update: false, error: null };
+        if (!machine.online) return machine;
+        try {
+          machine.settings = await callOn(id, { cmd: "auto_archive_settings" });
+        } catch (e) {
+          if (isOlderPinned(e)) machine.update = true;
+          else machine.error = String(e?.message ?? e);
+        }
+        return machine;
+      }),
+  );
+  return { machines: list, view: mergeAutoArchive(list) };
+}
+/** The Archive page's Auto-archive section: how long a finished thread idles before it archives,
+ * for worker threads and for the threads the user opened. */
+function autoArchiveHtml() {
+  const { view } = autoArchive;
+  const row = (key, title, about) => `<div class="side-setting" data-setting="${key}"><div><label for="aa-${key}">${title}</label><p class="meta">${about}</p></div>
+    <select id="aa-${key}" aria-label="${title}">${autoArchiveOptions(view[key])}</select></div>`;
+  return `<section id="auto-archive-settings"><h2 class="looks-title">Auto-archive</h2>
+    ${row("workers", "Worker threads", "Archive a thread a delegated task ran in, this long after its work ended and its report was delivered.")}
+    ${row("sessions", "Threads you open", "The same rule for threads you started yourself.")}
+    <p class="meta aa-keeps">A thread stays when it has a pending question, a running worker, uncommitted or unpushed work, or a star. Captains never archive. Archived threads come back with Unarchive.</p>
+    <p class="error" id="aa-error"></p></section>`;
+}
+function bindAutoArchive() {
+  const section = document.getElementById("auto-archive-settings");
+  if (!section) return;
+  const error = document.getElementById("aa-error");
+  const change = async () => {
+    const view = { workers: autoArchiveMinutes(document.getElementById("aa-workers").value), sessions: autoArchiveMinutes(document.getElementById("aa-sessions").value) };
+    const live = autoArchive.machines.map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
+    const writes = autoArchiveWrites(view, live);
+    const results = await Promise.allSettled(writes.map((w) => callOn(w.machine, { cmd: "set_auto_archive_settings", settings: w.settings })));
+    const failed = results.filter((r) => r.status === "rejected");
+    error.textContent = !writes.length ? "No machine is online to take this." : failed.length ? `Couldn't save on ${failed.length} of ${writes.length} machines: ${failed[0].reason?.message ?? failed[0].reason}` : "";
+    if (writes.length > failed.length) autoArchive.view = view;
+  };
+  for (const key of ["workers", "sessions"]) document.getElementById(`aa-${key}`).onchange = change;
+}
 /** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
  * with Unarchive, or from its context menu, which also deletes. */
 function showArchive() {
+  autoArchive ??= { machines: [], view: { ...AA_DEFAULT_SETTINGS } };
   const since = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
   const machinesShown = new Set(archived.map((a) => a.machine)).size > 1;
   const order = archived.map((a, i) => [a, i]).sort(([a], [b]) => b.at - a.at);
   const projects = [...new Set(order.map(([a]) => a.project))];
-  settingsPage.innerHTML = `<h2>Archive</h2><section id="archive-settings">${!archived.length
+  settingsPage.innerHTML = `<h2>Archive</h2>${autoArchiveHtml()}<section id="archive-settings">${!archived.length
     ? `<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`
     : projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${order.filter(([a]) => a.project === project).map(([a, i]) => `
       <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${machinesShown ? `${esc(machineName(a.machine))} · ` : ""}Archived ${since(a.at)}${a.created ? ` · Created ${since(a.created)}` : ""}</p></div>
         <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`).join("")}`).join("")}</section>`;
+  bindAutoArchive();
+  // The machines answer after the page is up, and what they hold replaces the defaults it showed.
+  readAutoArchive().then((read) => {
+    autoArchive = read;
+    const section = document.getElementById("auto-archive-settings");
+    if (!section || !settingsOpen() || page !== "archive") return;
+    section.outerHTML = autoArchiveHtml();
+    bindAutoArchive();
+  }, () => {});
   const root = document.getElementById("archive-settings");
   const unarchive = (i) => resumeThread(archived[i], () => {
     archived.splice(i, 1);
@@ -247,21 +306,51 @@ function markThreadSeen(tab) {
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
 /** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
-function statsLabel(tab) {
+function statsLabel(tab, costOnly = false) {
   const stats = tab?.view.stats;
-  if (!stats) return "";
+  const work = tab?.view.work;
+  if (!stats && !work) return "";
   const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
-  const active = stats.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
-  const cost = stats.cost_usd == null ? "" : stats.cost_usd < 0.01 ? "<$0.01" : `$${stats.cost_usd.toFixed(2)}`;
-  return [active, cost].filter(Boolean).join(" · ");
+  const active = stats?.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
+  // A thread that delegated shows the cost of the whole piece of work: its own session and its workers.
+  const usd = work ? work.usd : stats?.cost_usd;
+  const cost = usd == null ? "" : costLabel(usd, work?.unknown);
+  return costOnly ? cost : [active, cost, work ? nWorkers(work.workers) : ""].filter(Boolean).join(" · ");
 }
+/** A cost as `$1.26`, with a `+` when parts of it have no known cost, so it is a floor. */
+const costLabel = (usd, unknown = 0) => `${usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`}${unknown ? "+" : ""}`;
+const nWorkers = (n) => `${n} worker${n === 1 ? "" : "s"}`;
+/** What top-level threads cost with the workers under them, as `{ usd, unknown, workers }`, or null when none has a cost.
+ * Each thread's `work` already holds the workers it delegated, so they are not added again. */
+function costOf(roots) {
+  let sum = null;
+  for (const { view } of roots) {
+    const part = view.work ?? (view.stats?.cost_usd == null ? null : { usd: view.stats.cost_usd, unknown: 0, workers: 0 });
+    if (!part) continue;
+    sum ??= { usd: 0, unknown: 0, workers: 0 };
+    for (const key of Object.keys(sum)) sum[key] += part[key];
+  }
+  return sum;
+}
+/** The project's cost as `$1.26 · 2 workers`, or "". */
+const projectCostLabel = (roots) => {
+  const sum = costOf(roots);
+  return sum ? [costLabel(sum.usd, sum.unknown), sum.workers ? nWorkers(sum.workers) : ""].filter(Boolean).join(" · ") : "";
+};
+const unknownTitle = (n) => `${n} ${n === 1 ? "part has" : "parts have"} no known cost, so the real total is higher`;
 function statsHtml(tab) {
   const label = statsLabel(tab);
-  return label ? `<span class="stats" data-stats="${esc(tab.key)}">${esc(label)}</span>` : "";
+  const work = tab.view.work;
+  const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
+  // The header on a phone has room for the cost only, so the label comes twice and the style shows one.
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${esc(label)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
 }
+/** A menu on screen is a question, not an approval, when the hooks said the session needs input
+ * rather than permission (an AskUserQuestion menu). */
+const menuIsQuestion = (tab) => tab.view.status === "needs-input" && askOf(tab.view).kind === "question";
 function statusSlot(tab) {
   const phase = phaseOf(tab);
-  if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
+  if (phase === "asking") return menuIsQuestion(tab) ? { icon: "message-circle-question", text: "Question", tone: "input" } : { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
   if (phase === "delegating") {
     // The card's slot is narrow, so it says "2 working" beside the bot icon and keeps the full count in the title.
@@ -331,13 +420,45 @@ function snoozeLimitStops() {
   }
 }
 
+/** Per machine id, whether it had a thread while it was online. An offline machine that had one is named
+ * in the sidebar, and so is one nothing is known of; one seen online with none is not. It survives a
+ * reload, so a machine that is already down when the page opens is still named. A machine that stops
+ * cleanly closes its threads before it goes, so a later 0 never takes a "had threads" back. */
+const threadsSeen = (() => {
+  try {
+    return JSON.parse(load("machine-threads")) ?? {};
+  } catch {
+    return {};
+  }
+})();
+function noteThreadsSeen(machine, count) {
+  if (machine === LOCAL || !machines.get(machine)?.view?.online) return;
+  const had = count > 0 || (threadsSeen[machine] ?? false);
+  if (threadsSeen[machine] === had) return;
+  threadsSeen[machine] = had;
+  save("machine-threads", JSON.stringify(threadsSeen));
+}
+
+/** One line for a machine that is offline: its name and when it was last seen. */
+function machineNote(machine) {
+  const note = document.createElement("div");
+  note.className = "machine-note";
+  note.setAttribute("role", "status");
+  note.dataset.machine = machine.id;
+  note.innerHTML = `<span class="dot"></span><span class="text"><b>${esc(machine.name)}</b> offline${machine.seen ? ` · ${esc(machine.seen)}` : ""}</span>`;
+  return note;
+}
+
 /** The fixed rows above the projects: the global orchestrator's own row, with how many things
  * wait on Felipe, then those things: agents' actions to approve, then threads. The row names the
  * orchestrator as its settings do and its host machine under that, and is left out while no
  * machine can hold the conversation. */
 function globalSidebarTop() {
   askGlobalSettings();
-  const host = globalHostMachine();
+  const online = globalHostMachine();
+  // With no machine online the row stays, on the machine that held it last, and says why it can't open.
+  const host = online ?? [...machines.keys()].find((id) => id !== LOCAL) ?? null;
+  const away = !!host && machines.get(host)?.view?.online !== true;
   const asks = agentWaitingRows();
   if (!host && !asks.length) return [];
   const threads = globalWaitingRows();
@@ -349,41 +470,109 @@ function globalSidebarTop() {
     row.type = "button";
     row.className = "global-row";
     row.classList.toggle("active", !!active && isGlobalOrchestratorTab(active));
+    row.classList.toggle("disabled", away);
+    if (away) {
+      row.setAttribute("aria-disabled", "true");
+      row.title = `${machineName(host)} is offline, so the orchestrator can't open`;
+    }
     row.dataset.globalOpen = "true";
     const count = n ? `<span class="count" title="${n} waiting on you">${n}</span>` : "";
-    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · all projects</span></span>${count}`;
+    row.innerHTML = `<span class="mark">${icon("bot")}</span><span class="names"><span class="name">${esc(globalSettings.name)}</span><span class="host">${esc(machineName(host))} · ${away ? "offline" : "all projects"}</span></span>${count}`;
     top.push(row);
   }
-  if (!waiting.length) return top;
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "waiting-head";
-  head.dataset.shelf = "waiting";
-  head.setAttribute("aria-expanded", ui.waitingOpen);
-  head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
-  return [...top, head, ...(ui.waitingOpen ? waiting : [])];
+  const offers = globalOfferRows();
+  if (!waiting.length && !offers.length) return top;
+  const sections = [];
+  if (waiting.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head";
+    head.dataset.shelf = "waiting";
+    head.setAttribute("aria-expanded", ui.waitingOpen);
+    head.innerHTML = `${icon("inbox")}<span>Waiting on you</span>${n ? `<span class="count">${n}</span>` : ""}${icon(ui.waitingOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.waitingOpen ? waiting : []));
+  }
+  if (offers.length) {
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "waiting-head offers-head";
+    head.dataset.shelf = "offers";
+    head.setAttribute("aria-expanded", ui.offersOpen);
+    head.innerHTML = `${icon("message-circle")}<span>Asked in its last reply</span><span class="count">${offers.length}</span>${icon(ui.offersOpen ? "chevron-down" : "chevron-right", "chevron")}`;
+    sections.push(head, ...(ui.offersOpen ? offers : []));
+  }
+  return [...top, ...sections];
 }
 
-/** What each `waitingKindOf` answer reads as, and the tone of its dot. */
-const WAITING_LOOKS = { needs_input: ["Question", "question"], failed: ["Failed", "failed"] };
+/** What each kind of blocked thread reads as on its row: the word that names it, and the dot's tone.
+ * The word is text on the row, so colour is never the only sign. */
+const WAITING_LOOKS = { approval: ["Approval", "approval"], question: ["Question", "question"], failed: ["Failed", "failed"] };
 
-/** Every thread on every machine that waits on Felipe, newest first: a question or a failure, each
- * with its title, where it is and since when. */
+/** The kind a blocked thread's row shows. `waitingKindOf` says it waits; a `needs_input` is an
+ * approval or a question by `askOf`; and a thread the hooks call failed whose card shows a
+ * permission menu is an approval, as its card says, so the card and the list never disagree. */
+function waitingLookOf(tab, kind) {
+  if (kind === "failed") return phaseOf(tab) === "asking" && !menuIsQuestion(tab) ? "approval" : "failed";
+  return askOf(tab.view).kind;
+}
+
+/** What the thread is blocked on, as the row's third line: the tool and the command an approval
+ * is for, the question, or the error that stopped it. Empty when the machine reported nothing but
+ * the generic notice. */
+function askedOf(tab, look) {
+  const view = tab.view;
+  const detail = String(view.ask_detail ?? "").trim();
+  if (look === "approval") {
+    const tool = askOf(view).tool;
+    return { tool, text: detail };
+  }
+  const message = String(view.message ?? "").trim();
+  const generic = /^claude needs your (input|attention)\.?$/i.test(message) || /waiting for your input/i.test(message);
+  return { tool: null, text: look === "question" ? detail || (generic ? "" : message) : message };
+}
+
+/** One row of the waiting area: a dot, the thread's title, under it the kind in words with where
+ * the thread is and since when, and, when there is one, what it asks. Clicking it opens the thread
+ * on its machine. */
+function waitingRow(tab, label, tone, extra = "", asked = { tool: null, text: "" }) {
+  const row = document.createElement("div");
+  row.className = `waiting-row${extra}`;
+  row.dataset.waiting = tab.key;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `${label}: ${threadTitle(tab)} on ${machineName(tab.machine)}`);
+  row.tabIndex = 0;
+  const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
+  const what = asked.tool || asked.text ? `<span class="asked">${asked.tool ? `<span class="tool">${esc(asked.tool)}</span>` : ""}${esc(asked.text)}</span>` : "";
+  if (asked.tool || asked.text) row.title = [asked.tool, asked.text].filter(Boolean).join(" ");
+  row.innerHTML = `<span class="dot ${tone}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where"><span class="kind">${esc(label)}</span> · ${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span>${what}</span>`;
+  return row;
+}
+
+/** Every thread on every machine that is blocked on Felipe, newest first: an approval or a question
+ * pending, or a failure, each with its title, the kind in words, where it is, since when and what it
+ * asks. A worker a Captain started on another machine shows here under that machine's name. */
 function globalWaitingRows() {
   return tabs
     .map((tab) => ({ tab, kind: waitingKindOf(tab.view) }))
     .filter((w) => w.kind)
     .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
     .map(({ tab, kind }) => {
-      const [label, tone] = WAITING_LOOKS[kind] ?? [kind, "other"];
-      const row = document.createElement("div");
-      row.className = "waiting-row";
-      row.dataset.waiting = tab.key;
-      row.setAttribute("role", "button");
-      row.setAttribute("aria-label", `${label}: ${threadTitle(tab)}`);
-      row.tabIndex = 0;
-      const since = tab.view.updated ? ` · ${esc(ago(tab.view.updated))}` : "";
-      row.innerHTML = `<span class="dot ${tone}" title="${esc(label)}"></span><span class="texts"><span class="l2">${esc(threadTitle(tab))}</span><span class="where">${esc(projectName(tab))} · ${esc(machineName(tab.machine))}${since}</span></span>`;
+      const look = waitingLookOf(tab, kind);
+      return waitingRow(tab, ...(WAITING_LOOKS[look] ?? [look, "other"]), "", askedOf(tab, look));
+    });
+}
+
+/** The threads whose finished turn ended asking something, newest first, greyed: they wait on
+ * nobody, and the question is the row's tooltip. */
+function globalOfferRows() {
+  const now = nowS();
+  return tabs
+    .map((tab) => ({ tab, offer: offerOf(tab.view, now) }))
+    .filter((o) => o.offer)
+    .sort((a, b) => (b.tab.view.updated ?? 0) - (a.tab.view.updated ?? 0))
+    .map(({ tab, offer }) => {
+      const row = waitingRow(tab, "Asked", "offer", " offer");
+      row.title = offer;
       return row;
     });
 }
@@ -392,7 +581,7 @@ function globalWaitingRows() {
  * tab starts when its first message is sent, as every other new tab does. */
 async function openGlobalChat() {
   const host = globalHostMachine();
-  if (!host) return tell("No machine is online to open the orchestrator on.", 4000);
+  if (!host || machines.get(host)?.view?.online !== true) return tell(host ? `${esc(machineName(host))} is offline, so the orchestrator can't open.` : "No machine is online to open the orchestrator on.", 4000);
   if (narrow(768)) toggleSidebar(false);
   try {
     const open = tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
@@ -420,13 +609,52 @@ function renderSidebar() {
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
-  threadList.replaceChildren(...globalSidebarTop(), ...list);
-  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`);
+  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  manyMachines = projectsOnManyMachines();
+  const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
+  threadList.replaceChildren(...away.map(machineNote), ...globalSidebarTop(), ...list);
+  if (list.every((el) => el.matches(".side-heading"))) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   renderSyncAlert();
+  drawSidebarToggle();
   tickDurations();
   scheduleWake();
+}
+
+/** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
+ * threads, as the Orchestrator's row counts them) and whether any thread is working. */
+function sidebarSummary() {
+  let waiting = agentConfirmations.length;
+  let running = false;
+  for (const tab of tabs) {
+    if (waitingKindOf(tab.view)) waiting++;
+    if (["working", "delegating"].includes(phaseOf(tab))) running = true;
+  }
+  return { waiting, running };
+}
+/** The chat header's sidebar toggle with a pill for what waits and a dot while something works. */
+function sidebarToggleHtml({ waiting, running }) {
+  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running" aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
+}
+const sidebarToggleLabel = ({ waiting, running }) => `Toggle sidebar (${MOD_LABEL}B)${waiting ? `, ${waiting} waiting on you` : ""}${running ? ", something is working" : ""}`;
+let sidebarTouched = false;
+let phoneDrawerUntil = 0;
+function drawSidebarToggle() {
+  const summary = sidebarSummary();
+  const toggle = document.getElementById("chat-sidebar-toggle");
+  const html = sidebarToggleHtml(summary);
+  if (toggle.innerHTML !== html) toggle.innerHTML = html;
+  toggle.title = sidebarToggleLabel(summary);
+  toggle.setAttribute("aria-label", toggle.title);
+  // On a phone the first screen is a blank composer, so what waits is shown, not hidden behind the toggle.
+  // It is offered while the machines' threads arrive, until the first few seconds pass or the user moves the sidebar.
+  if (!tabs.length || sidebarTouched) return;
+  phoneDrawerUntil ||= Date.now() + 5000;
+  if (summary.waiting && Date.now() < phoneDrawerUntil && narrow(768) && !ui.sidebarOpen && !shellPage()) {
+    sidebarTouched = true;
+    toggleSidebar(true, true);
+  }
 }
 
 /** Splits `list` into the threads that stand on their own and, by tab key, the threads each one
@@ -545,6 +773,21 @@ function projectRows(list, kids, branch) {
   const captainsFirst = (roots) => [...roots].sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
   return [heading, ...[...groups].flatMap(([key, roots]) => [projectHead(key, roots, kids), ...captainsFirst(roots).flatMap(branch)])];
 }
+/** The machines a project's threads are on, each one whole so a long list breaks between names, never inside one. */
+const projectMachinesHtml = (names) => names.map((name, i) => `<span class="m">${esc(name)}${i < names.length - 1 ? "," : ""}</span>`).join(" ");
+/** The icon that says a card's thread is on another machine. A project on more than one machine
+ * names the machine as text, since a phone has no tooltip to ask. */
+const remoteMark = (name, named) => `<span class="remote${named ? " named" : ""}" title="${esc(name)}">${icon("monitor")}${named ? `<span class="name">${esc(name)}</span>` : ""}</span>`;
+/** The projects whose threads run on more than one machine, by project key. */
+function projectsOnManyMachines() {
+  const machinesOf = new Map();
+  for (const tab of tabs) {
+    const key = projectKeyOf(tab);
+    machinesOf.set(key, (machinesOf.get(key) ?? new Set()).add(tab.machine));
+  }
+  return new Set([...machinesOf].filter(([, on]) => on.size > 1).map(([key]) => key));
+}
+let manyMachines = new Set();
 /** A project's head: its icon and name, how many messages wait for its threads and how many of its
  * workers run, and the machines its threads are on. */
 function projectHead(key, roots, kids) {
@@ -554,12 +797,14 @@ function projectHead(key, roots, kids) {
   const queued = all.reduce((n, t) => n + (t.view.queued ?? 0), 0);
   const running = all.filter((t) => t.view.role === "worker" && ["working", "delegating"].includes(phaseOf(t))).length;
   const states = [queued ? `<span class="state queued">${queued} queued</span>` : "", running ? `<span class="state running">${running} running</span>` : ""].join("");
-  const where = [...new Set(all.map((t) => machineName(t.machine)))].join(", ");
+  const names = [...new Set(all.map((t) => machineName(t.machine)))];
+  const where = names.join(", ");
+  const spent = projectCostLabel(roots);
   const name = projectName(roots[0]);
   const head = document.createElement("div");
   head.className = "project-head";
   head.dataset.project = key;
-  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}<span class="where" title="${esc(where)}">${esc(where)}</span>`;
+  head.innerHTML = `${projectIcon(name, roots[0])}<span class="name" title="${esc(name)}">${esc(name)}</span>${states}${spent ? `<span class="state cost" title="What this project's threads and workers cost">${esc(spent)}</span>` : ""}<span class="where" title="${esc(where)}">${projectMachinesHtml(names)}</span>`;
   return head;
 }
 
@@ -637,7 +882,7 @@ async function askBusyShells() {
   busyShells = busy;
   renderSidebar();
 }
-setInterval(askBusyShells, 1000);
+visibleInterval(askBusyShells, 1000);
 const busyShellsOf = (tab) => threadShells(tab).filter(({ id }) => busyShells.has(`${tab.machine}:${id}`));
 function terminalPulse(tab) {
   const n = busyShellsOf(tab).length;
@@ -697,6 +942,10 @@ const boxAgeText = (secs) => {
   return `${Math.floor(hours / 24)}d${hours % 24}h`;
 };
 const boxSpent = (st) => st.age_secs / 3600 * st.rate_usd_per_hour;
+/** Box machines whose last `box_status` failed: their chip says the cost is unavailable instead of vanishing. */
+const boxDown = new Set();
+const boxUnavailableHtml = () =>
+  `<span class="remote box unavailable" title="Upstash Box · its status could not be read, so its cost is unknown">${icon("server")}<span class="head">box cost unavailable</span></span>`;
 const boxChipHtml = (st) => {
   const spent = boxSpent(st);
   const money = st.budget_usd != null ? `$${spent.toFixed(2)} of $${st.budget_usd.toFixed(2)}` : `$${spent.toFixed(2)}`;
@@ -710,8 +959,10 @@ async function refreshBoxInfo() {
   await Promise.all(seen.map(async (m) => {
     try {
       boxInfo.set(m, await hub.hub({ cmd: "box_status", machine: m }));
+      boxDown.delete(m);
     } catch {
       boxInfo.delete(m);
+      boxDown.add(m);
     }
   }));
   if (guiOn()) {
@@ -736,7 +987,8 @@ function cardRow(tab) {
     ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const box = tab.machine !== LOCAL && !scratchMachine && isBoxMachine(tab.machine) ? boxInfo.get(tab.machine) ?? null : null;
-  const remote = box ? boxChipHtml(box) : tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const boxLost = !box && tab.machine !== LOCAL && !scratchMachine && boxDown.has(tab.machine);
+  const remote = box ? boxChipHtml(box) : boxLost ? boxUnavailableHtml() : tab.machine !== LOCAL && !scratchMachine ? remoteMark(machineName(tab.machine), manyMachines.has(projectKeyOf(tab))) : "";
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const provider = accountOf(tab.machine, tab.view.account)?.auth === "opencode-go" ? "opencode" : "claude";
   const state = slot
@@ -916,14 +1168,26 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
+/** When the app's hub link dropped, in seconds, while it is down. The timers stop there, so a "Working 7m"
+ * the app can no longer vouch for doesn't keep counting. */
+let linkDownAt = null;
+function noteHubLink(on) {
+  linkDownAt = on ? null : (linkDownAt ?? nowS());
+}
+/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
+const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
-  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, nowS() - el.dataset.since)) : "";
+  const now = linkDownAt ?? nowS();
+  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
   for (const el of document.querySelectorAll("[data-stats]")) {
-    const text = statsLabel(tabByKey(el.dataset.stats));
-    if (el.textContent !== text) el.textContent = text;
+    const tab = tabByKey(el.dataset.stats);
+    for (const [part, text] of [[".long", statsLabel(tab)], [".usd", statsLabel(tab, true)]]) {
+      const at = el.querySelector(part);
+      if (at && at.textContent !== text) at.textContent = text;
+    }
   }
 }
-setInterval(() => guiOn() && tickDurations(), 1000);
+visibleInterval(() => guiOn() && tickDurations(), 1000);
 
 /** Title, project, branch and PR matches first, then threads whose messages hold the text. */
 function searchRows(list, needle) {
@@ -1970,7 +2234,8 @@ function jumpToRow(n) {
   if (tab) activate(tab);
 }
 
-function toggleSidebar(open = !ui.sidebarOpen) {
+function toggleSidebar(open = !ui.sidebarOpen, auto = false) {
+  if (!auto) sidebarTouched = true;
   ui.sidebarOpen = open;
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
@@ -2020,13 +2285,21 @@ window.addEventListener("blur", () => showJumpHints(false));
  * installs the one found, which restarts the app. */
 const sideUpdate = document.getElementById("side-update");
 let updateBusy = null;
+/** In a browser the footer's control shows only while a machine runs an older pinned than the hub, and opens Machines. */
+const machinesToUpdate = () => (TAURI ? [] : machinesBehind());
+function updateTip(version, behind) {
+  if (version) return `Update ${version} ready to download`;
+  return `${behind.length} ${behind.length === 1 ? "machine runs" : "machines run"} an older pinned: ${behind.map((m) => m.name).join(", ")}`;
+}
 function drawUpdate() {
   const version = document.body.dataset.update;
-  const state = updateBusy ?? (version ? "available" : "idle");
+  const behind = machinesToUpdate();
+  if (!TAURI) sideUpdate.hidden = !behind.length;
+  const state = updateBusy ?? (version || behind.length ? "available" : "idle");
   const [glyph, tip] = {
     idle: ["refresh-cw", "Check for updates"],
     checking: ["refresh-cw", "Checking for updates…"],
-    available: ["download", `Update ${version} ready to download`],
+    available: ["download", updateTip(version, behind)],
     downloading: ["download", "Downloading update"],
   }[state];
   sideUpdate.dataset.state = state;
@@ -2036,6 +2309,7 @@ function drawUpdate() {
   sideUpdate.innerHTML = `<span class="glyph">${icon(glyph, state === "checking" ? "spin" : "")}</span>`;
 }
 sideUpdate.onclick = async () => {
+  if (!TAURI) return openSettings("machines");
   if (updateBusy) return;
   const install = !!document.body.dataset.update;
   updateBusy = install ? "downloading" : "checking";
@@ -2048,6 +2322,10 @@ if (TAURI) {
   sideUpdate.hidden = false;
   drawUpdate();
   new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
+} else {
+  drawUpdate();
+  viewListeners.push(drawUpdate);
+  document.addEventListener("newest-version", drawUpdate);
 }
 
 const sidebarEl = document.getElementById("sidebar");

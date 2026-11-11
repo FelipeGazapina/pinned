@@ -139,3 +139,14 @@ button.taste-card:hover { background: var(--g-hover); }
 }
 .taste-limit-pair { display: flex; flex-wrap: wrap; gap: 12px 24px; }
 .taste-limits select { text-transform: capitalize; }
+
+.taste-machines:empty { display: none; }
+.taste-machines .spacer { flex: 1; }
+.taste-machines .name { flex: 0 1 auto; }
+.taste-machines li.gone .name { color: var(--g-muted); }
+.taste-machines li.gone .name s { text-decoration-thickness: 1.5px; }
+.taste-machines .mach-meta { white-space: nowrap; }
+@container taste-page (max-width: 639px) { .taste-machines .mach-meta { display: none; } }
+.taste-chip[data-state="online"] { background: color-mix(in srgb, var(--g-success) 14%, transparent); color: var(--g-success); }
+.taste-policy { display: flex; flex-direction: column; gap: 4px; }
+.taste-policy p { margin: 0; }

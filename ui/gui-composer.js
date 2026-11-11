@@ -1147,7 +1147,7 @@ async function throughMenu(tab, command, open, steer) {
 
 function modelName(tab) {
   const t = threadOf(tab);
-  return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
+  return t.picked ?? t.items.findLast((i) => i.kind === "model")?.name ?? "Default";
 }
 const authOf = (tab) => accountOf(tab.machine, tab.view.account)?.auth ?? "login";
 /** Claude's models as the machine's catalog lists them, newest first. `menu` names the row of
@@ -2566,7 +2566,7 @@ function renderGitAction(tab) {
   more.hidden = !t.workspace.repo;
   renderDetails(tab);
 }
-setInterval(() => gitRun && active === gitRun.tab && renderGitAction(active), 1000);
+visibleInterval(() => gitRun && active === gitRun.tab && renderGitAction(active), 1000);
 function gitMenuEntries(tab) {
   const git = threadOf(tab).git;
   if (!git) return [{ note: "Reading the branch…" }];
@@ -3044,7 +3044,7 @@ async function runScript(tab, script, cwd = null, group = null) {
   fit.fit();
   try {
     shell.id = await callOn(tab.machine, { cmd: "open_shell", tab: tab.view.id, cols: term.cols, rows: term.rows });
-    await machines.get(tab.machine).transport.attach(shell.id, { write: (bytes) => term.write(bytes), reset: () => term.reset() });
+    await machines.get(tab.machine).transport.attach(shell.id, { write: (bytes) => feed(term, bytes), reset: () => term.reset() });
     term.onData((data) => callOn(tab.machine, { cmd: "write_input", tab: shell.id, data }));
     // A shell drops what is typed before its prompt is up.
     await until(() => term.buffer.active.getLine(term.buffer.active.cursorY + term.buffer.active.baseY)?.translateToString(true).trim(), 5000);

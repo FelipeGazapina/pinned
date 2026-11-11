@@ -10,7 +10,10 @@ use std::path::Path;
 
 /// How many conversation items a read returns when not told.
 pub const DEFAULT_ITEMS: usize = 20;
+/// What one item keeps when a read has many. A read has `READ_CHARS` to share among its items, so a
+/// read of the last item or two returns a long message whole.
 const ITEM_TEXT: usize = 4000;
+const READ_CHARS: usize = 80_000;
 
 /// What a tab's session is doing, in the words the tools use, and what it asks the user or why it failed.
 pub fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
@@ -46,8 +49,8 @@ pub fn next_for(state: &str) -> &'static str {
     }
 }
 
-fn truncated(text: &str) -> String {
-    match text.char_indices().nth(ITEM_TEXT) {
+fn truncated(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
         Some((at, _)) => format!("{}… [cut]", &text[..at]),
         None => text.to_owned(),
     }
@@ -56,7 +59,7 @@ fn truncated(text: &str) -> String {
 /// The conversation items worth an agent's context: what was said and which tools ran. Reasoning
 /// and tool output stay out, since tool output can hold whatever a file held.
 pub fn conversation(page: &Value, limit: usize) -> Value {
-    let items: Vec<Value> = page["items"]
+    let mut items: Vec<Value> = page["items"]
         .as_array()
         .map(|items| {
             items
@@ -65,8 +68,8 @@ pub fn conversation(page: &Value, limit: usize) -> Value {
                     let kind = item["kind"].as_str()?;
                     let at = item["at"].clone();
                     match kind {
-                        "user" | "steer" | "text" | "error" | "note" => Some(json!({ "kind": kind, "at": at, "text": truncated(item["text"].as_str().unwrap_or("")) })),
-                        "tool" => Some(json!({ "kind": "tool", "at": at, "name": item["name"], "summary": truncated(item["summary"].as_str().unwrap_or("")) })),
+                        "user" | "steer" | "text" | "error" | "note" => Some(json!({ "kind": kind, "at": at, "text": item["text"].as_str().unwrap_or("") })),
+                        "tool" => Some(json!({ "kind": "tool", "at": at, "name": item["name"], "summary": item["summary"].as_str().unwrap_or("") })),
                         "pr" => Some(json!({ "kind": "pr", "at": at, "url": item["url"] })),
                         _ => None,
                     }
@@ -75,7 +78,16 @@ pub fn conversation(page: &Value, limit: usize) -> Value {
         })
         .unwrap_or_default();
     let skip = items.len().saturating_sub(limit);
-    json!({ "items": items[skip..], "cursor": page["next"], "reset": page["reset"].as_bool().unwrap_or(false) })
+    let mut items = items.split_off(skip);
+    let each = (READ_CHARS / items.len().max(1)).max(ITEM_TEXT);
+    for item in &mut items {
+        for field in ["text", "summary"] {
+            if let Some(whole) = item[field].as_str() {
+                item[field] = json!(truncated(whole, each));
+            }
+        }
+    }
+    json!({ "items": items, "cursor": page["next"], "reset": page["reset"].as_bool().unwrap_or(false) })
 }
 
 /// The end of the transcript `file` as a `Call::Thread` page, reaching back far enough to hold its

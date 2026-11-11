@@ -107,8 +107,16 @@ fn hub(args: &[String]) -> Result<(), String> {
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let running = pinned_server::start(config).await?;
-        running.server.await.map_err(|e| e.to_string())
+        let pinned_server::Running { hub, server, .. } = pinned_server::start(config).await?;
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
+        let mut server = server;
+        tokio::select! {
+            ended = &mut server => return ended.map_err(|e| e.to_string()),
+            _ = terminate.recv() => eprintln!("pinned-server: SIGTERM, closing every socket before stopping"),
+            _ = tokio::signal::ctrl_c() => eprintln!("pinned-server: interrupted, closing every socket before stopping"),
+        }
+        hub.going_away();
+        server.await.map_err(|e| e.to_string())
     })
 }
 
@@ -177,7 +185,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
     pinned_core::boot::ready();
-    for tab in machine.restore_tabs() {
+    for tab in machine.restore_working() {
         if let Err(e) = machine.start_claude(&tab, UNWATCHED.0, UNWATCHED.1) {
             eprintln!("pinned-server: could not resume {tab}: {e}");
         }

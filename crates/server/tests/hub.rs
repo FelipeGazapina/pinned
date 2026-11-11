@@ -1697,6 +1697,39 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
 }
 
 #[test]
+fn a_stopping_hub_closes_every_socket_with_going_away_and_then_stops() {
+    let hub = TestHub::start("going_away");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, machine_token) = account::register_machine(&url, &token, "mini", "linux").unwrap();
+    let mut app = Client::app(&url, &token);
+    let (mut machine, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = machine.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    machine.send(Message::text(json!({ "type": "auth", "token": machine_token, "name": "mini", "os": "linux", "version": "test" }).to_string())).unwrap();
+    read_machine(&mut machine, |frame| frame["type"] == "hello");
+
+    let asked = Instant::now();
+    hub.hub().going_away();
+
+    wait_for("the app's socket to close", || !app.pump());
+    assert_eq!(app.closed, Some(1001), "the app gets a going away close frame");
+    let closed = loop {
+        match machine.read() {
+            Ok(Message::Close(frame)) => break frame.map(|f| u16::from(f.code)),
+            Ok(Message::Ping(payload)) => machine.send(Message::Pong(payload)).unwrap(),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => assert!(asked.elapsed() < WAIT, "the machine got no close frame"),
+            Err(e) => panic!("the machine socket ended without a close frame: {e}"),
+        }
+    };
+    assert_eq!(closed, Some(1001), "the machine gets a going away close frame");
+    wait_for("the hub to stop", || hub.running.as_ref().unwrap().server.is_finished());
+    assert!(asked.elapsed() < pinned_server::SHUTDOWN_GRACE + Duration::from_secs(2), "the hub stopped in {:?}", asked.elapsed());
+}
+
+#[test]
 fn a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder() {
     let hub = TestHub::start("upload");
     let url = hub.url.clone();
@@ -3692,7 +3725,17 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
         overview["projects"].as_array_mut().unwrap().sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
         overview
     };
-    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(by_key);
+    // The summaries move with the machine's real load, so this test compares the rest.
+    let without_load = |mut overview: Value| {
+        for machine in overview["machines"].as_array_mut().unwrap() {
+            machine.as_object_mut().unwrap().remove("state");
+        }
+        for checkout in overview["projects"].as_array_mut().unwrap().iter_mut().flat_map(|p| p["checkouts"].as_array_mut().unwrap().iter_mut()) {
+            checkout.as_object_mut().unwrap().remove("load");
+        }
+        overview
+    };
+    let projects = || session_tool(&fleet.mini_dir, &fleet.global, json!({ "name": "projects" })).map(without_load).map(by_key);
     let checkout = |machine: &str, name: &str, online: bool, version: &str, path: &str| {
         json!({ "machine": machine, "machine_name": name, "online": online, "version": version, "path": path, "captain": "nenhum", "workers": 0 })
     };
@@ -3722,7 +3765,7 @@ fn the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_
     assert_eq!((raw.calls("list_projects"), raw.calls("global_orchestrator_settings"), raw.calls("tabs")), (1, 1, 1), "the hub asked for the tabs only of the machine that never reported them");
     let mac_link = fleet.mac.link.as_ref().unwrap();
     assert_eq!(mac_link.call_hub(HubCall::Overview), Err("mac does not host the global orchestrator (mini does), so it can't list the account's projects".into()));
-    let signed_in = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let signed_in = without_load(fleet.client.hub(json!({ "cmd": "overview" })).unwrap());
     let signed_in_site = signed_in["projects"].as_array().unwrap().iter().find(|p| p["key"] == "github.com/acme/site");
     assert_eq!(signed_in_site, Some(&site(true)), "a signed-in client reads it too");
 
@@ -3912,9 +3955,17 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
         }
     };
     let ana_raw = RawMachine::start(&url, &ana_machine_token, host("/a/site"));
-    let mut asking = captain_tab("tab-9", "/b/secret-project");
-    asking["question"] = json!("Ship the unreleased pricing page?");
-    let bob_tabs = json!({ "kind": "tabs", "tabs": [asking] });
+    // A finished turn that ends on a question is an offer, which waits on nobody; a question
+    // pending mid-turn is a real ask.
+    let mut offering = captain_tab("tab-9", "/b/secret-project");
+    offering["question"] = json!("Ship the unreleased pricing page?");
+    let mut asking = captain_tab("tab-8", "/b/secret-project");
+    asking["role"] = Value::Null;
+    asking["opened"] = json!(2);
+    asking["status"] = json!("needs-input");
+    asking["interrupted"] = json!(true);
+    asking["message"] = json!("Claude needs your permission to rm the staging database");
+    let bob_tabs = json!({ "kind": "tabs", "tabs": [offering, asking] });
     let bob_raw = RawMachine::start_with(&url, &bob_machine_token, vec![bob_tabs], host("/b/secret-project"));
     ana.wait_machines(&[("ana-mini", true)]);
     bob.wait_machines(&[("bob-mac", true)]);
@@ -3922,11 +3973,14 @@ fn the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_acco
 
     let bobs = bob.hub(json!({ "cmd": "overview" })).unwrap();
     assert!(bobs.to_string().contains("/b/secret-project") && bobs.to_string().contains(&bob_m), "bob's own overview lists his project: {bobs}");
-    assert!(bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's question waits on bob: {bobs}");
+    assert!(bobs["waiting"].to_string().contains("rm the staging database"), "bob's pending permission ask waits on bob: {bobs}");
+    assert!(!bobs["waiting"].to_string().contains("unreleased pricing"), "bob's Capitão's offer waits on nobody: {bobs}");
+    let offer = bobs["sessions"].as_array().unwrap().iter().find(|s| s["id"] == "tab-9").unwrap_or_else(|| panic!("bob's Capitão is a session of his: {bobs}"));
+    assert_eq!((offer["state"].as_str(), offer["message"].as_str()), (Some("idle"), Some("Ship the unreleased pricing page?")), "bob's own overview shows the offer on his Capitão's session");
     for (from, overview) in [("ana's client", ana.hub(json!({ "cmd": "overview" }))), ("ana's host", ana_raw.ask(json!({ "cmd": "overview" })))] {
         let overview = overview.unwrap().to_string();
         assert!(overview.contains("/a/site") && overview.contains(&ana_m), "{from}: {overview}");
-        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing"), "{from} sees none of bob's: {overview}");
+        assert!(!overview.contains("secret-project") && !overview.contains(&bob_m) && !overview.contains("unreleased pricing") && !overview.contains("staging database"), "{from} sees none of bob's: {overview}");
     }
 
     let none = Err(format!("this account has no machine {bob_m}"));
@@ -4154,6 +4208,37 @@ fn an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_f
     wait_frame(&mut ana, from, "the deleted tab closing", |f| tabs_of(f).is_some_and(|tabs| !tabs.iter().any(|t| t["id"] == reopened.as_str())));
     assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "a deleted thread keeps no marks");
     assert_eq!(mentioning(&mut bob, "Fix login"), Vec::<Value>::new(), "bob heard nothing of ana's thread");
+}
+
+#[test]
+fn a_machine_archives_its_own_finished_thread_but_the_hub_keeps_a_pinned_one_and_an_orchestrator() {
+    let hub = TestHub::start("auto_archive");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
+    let worker = |id: &str, session: &str, role: &str| {
+        json!({ "id": id, "cwd": "/w/site", "bypass": false, "running": true, "status": "done", "title": "Fix login", "message": null, "resume_at": null, "opened": 1, "session": session, "role": role })
+    };
+    let tabs = json!({ "kind": "tabs", "tabs": [worker("tab-1", "conv-1", "worker"), worker("tab-2", "conv-2", "orchestrator")] });
+    let raw = RawMachine::start_with(&url, &machine_token, vec![tabs], |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mini", true)]);
+    ana.wait("the tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f.to_string().contains("conv-1"));
+
+    assert_eq!(ana.hub(json!({ "cmd": "auto_archive", "tab": "tab-1" })), Err("only a machine archives its own finished threads".into()), "the app archives with archive_session");
+
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "pin": 0 } }]))).unwrap();
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-1" })), Err("tab-1 stays open: it is pinned".into()));
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-2" })), Err("tab-2 stays open: an orchestrator is never archived on its own".into()));
+    assert_eq!(raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-9" })), Err(format!("this account has no tab tab-9 on machine {}", machine.id)));
+    assert_eq!(raw.calls("close_tab"), 0, "nothing was closed");
+
+    ana.hub(mark(json!([{ "session": "conv-1", "mark": { "pin": null } }]))).unwrap();
+    let row = raw.ask(json!({ "cmd": "auto_archive", "tab": "tab-1" })).unwrap();
+    assert_eq!(row["session"], "conv-1");
+    assert_eq!(row["archived"]["name"], "Fix login");
+    assert_eq!(row["archived"]["machine"], machine.id.as_str());
+    assert_eq!(raw.calls("close_tab"), 1, "its tab closed, as the app's Archive closes it");
+    assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([row])), "Settings › Archive lists it to bring back");
 }
 
 #[test]
@@ -4489,7 +4574,8 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     let asking = running_tab(&mut fleet.client, &mac, &apps);
     hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "working", "tab": asking, "title": slack }));
     hook(&fleet.mac_dir, json!({ "kind": "agent", "status": "needs-input", "tab": asking, "message": "Claude needs your permission to use Bash" }));
-    // A transcript past the 8 MiB a read from its start reaches.
+    // A transcript past the 8 MiB a read from its start reaches. Its last reply ends on a question,
+    // an offer once the turn is done, so the session is idle with the question as its message.
     let long = running_tab(&mut fleet.client, &mac, &apps);
     let transcripts = fleet.mac_dir.join("accounts/bloom/projects/client-apps");
     std::fs::create_dir_all(&transcripts).unwrap();
@@ -4526,7 +4612,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     wait_for("mac's tabs and the long transcript's tally on the hub", || {
         let listed = sessions(None);
         let list = listed["sessions"].as_array().unwrap();
-        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["state"] == "waiting_on_input") && list.iter().any(|s| s["id"] == worker)
+        list.len() == 7 && list.iter().any(|s| s["id"] == long && s["pr"]["number"] == 92 && s["message"] == "Should I answer them?") && list.iter().any(|s| s["id"] == worker)
     });
     let listed = sessions(Some("client-apps"));
     let list = listed["sessions"].as_array().unwrap().clone();
@@ -4548,7 +4634,7 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     };
     let mut expected = vec![
         on_mac(&asking, "thread", "waiting_on_input", json!({ "title": slack, "message": "Claude needs your permission to use Bash" })),
-        on_mac(&long, "thread", "waiting_on_input", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
+        on_mac(&long, "thread", "idle", json!({ "title": slack, "message": "Should I answer them?", "branch": "felipega/fix-and-ops", "pr": { "number": 92, "url": "https://github.com/acme/client-apps/pull/92" } })),
         on_mac(&new_thread, "thread", "idle", json!({})),
         on_mac(&captain, "captain", "running", json!({})),
         on_mac(&worker, "worker", "idle", json!({ "captain": captain, "title": "Lint the app." })),
@@ -4591,9 +4677,9 @@ fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_
     let waiting = tool(json!({ "name": "waiting" })).unwrap();
     let mut waits: Vec<(&str, &str, &str)> = waiting.as_array().unwrap().iter().map(|w| (w["tab"].as_str().unwrap(), w["kind"].as_str().unwrap(), w["message"].as_str().unwrap_or(""))).collect();
     waits.sort();
-    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (long.as_str(), "needs_input", "Should I answer them?"), (failed.as_str(), "failed", "")];
+    let mut expected_waits = vec![(asking.as_str(), "needs_input", "Claude needs your permission to use Bash"), (failed.as_str(), "failed", "")];
     expected_waits.sort();
-    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, the loose thread whose last reply asked included");
+    assert_eq!(waits, expected_waits, "waiting() is the sessions waiting on input or in error, and the loose thread whose last reply asked is an offer that waits on nobody");
     let here = tool(json!({ "name": "read_session", "id": failed })).unwrap();
     assert_eq!(here, json!({ "state": "failed", "next": "it may take a message now", "title": null, "conversation": { "items": [], "cursor": 0, "reset": false }, "id": failed, "machine": mini, "machine_name": "mini" }));
     assert_eq!(tool(json!({ "name": "read_session", "id": "tab-0-0" })), Err("no online machine of this account has a session tab-0-0".into()));
@@ -4690,6 +4776,107 @@ fn the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_a
     assert!(overview.to_string().contains(&bob_thread), "bob's overview has his own thread: {overview}");
     let own = bob_link.call_hub(HubCall::ReadSession { tab: bob_thread.clone(), machine: Some(bob_m.clone()), items: None }).unwrap();
     assert_eq!((own["id"].as_str(), own["machine_name"].as_str()), (Some(bob_thread.as_str()), Some("bob-mac")), "bob reads his own thread through the hub: {own}");
+}
+
+/// A committed checkout at `dir` whose origin is `remote`, with a source file that holds a token
+/// line and a `.env` beside it.
+fn repo_with_secrets(dir: &Path, remote: &str) {
+    origin(dir, remote);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn needle() {}\nconst KEY: &str = \"ghp_notarealtoken\";\n").unwrap();
+    std::fs::write(dir.join(".env"), "DATABASE_URL=postgres://u:p@db/x\n").unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "Run the tests before pushing.\n").unwrap();
+    let git = |args: &[&str]| assert!(pinned_core::process::command("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success());
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "first"]);
+}
+
+#[test]
+fn the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited() {
+    let mut fleet = Fleet::start("repo_look");
+    let app = fleet.mac_dir.join("app");
+    repo_with_secrets(&app, "git@github.com:acme/app.git");
+    fleet.mac.machine.open_project(app);
+    let (mini_dir, global) = (fleet.mini_dir.clone(), fleet.global.clone());
+    let tool = |t: Value| session_tool(&mini_dir, &global, t);
+    let read = json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "src/lib.rs" });
+    assert_eq!(tool(read.clone()), Err(pinned_server::relay::INSIGHT_OFF.into()), "off until the account turns it on");
+    assert_eq!(fleet.client.hub(json!({ "cmd": "get_settings" })).unwrap().get("repo_insight"), None, "off is the default, and absent on the wire");
+    assert_eq!(fleet.client.hub(json!({ "cmd": "set_repo_insight", "settings": { "on": true } })).unwrap(), json!({ "on": true }));
+    assert_eq!(fleet.client.hub(json!({ "cmd": "get_settings" })).unwrap()["repo_insight"], json!({ "on": true }));
+
+    let out = tool(read).unwrap();
+    assert_eq!((out["machine"].as_str(), out["machine_name"].as_str(), out["project"].as_str()), (Some(fleet.mac_id.as_str()), Some("mac"), Some("github.com/acme/app")), "{out}");
+    assert!(out["branch"].is_string() && out["sha"].is_string(), "the answer names what it read: {out}");
+    assert_eq!((out["text"].as_str(), out["redacted"].as_u64()), (Some("pub fn needle() {}\n[redacted]\n"), Some(1)));
+    let found = tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "query": "needle" })).unwrap();
+    assert_eq!(found["hits"], json!([{ "path": "src/lib.rs", "line": 1, "text": "pub fn needle() {}" }]));
+    assert!(tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "query": "DATABASE_URL" })).unwrap()["hits"].as_array().unwrap().is_empty(), ".env is never searched");
+    assert!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": ".env" })).unwrap_err().contains("secrets"));
+    assert!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "../../etc/passwd" })).unwrap_err().contains("not a path inside the project"));
+    let card = tool(json!({ "name": "repo_overview", "project": "github.com/acme/app" })).unwrap();
+    assert_eq!(card["docs"]["AGENTS.md"]["text"], "Run the tests before pushing.\n");
+    assert_eq!(tool(json!({ "name": "repo_read", "project": "github.com/acme/app", "path": "src/lib.rs", "machine": "mini" })), Err("mini has no project github.com/acme/app".into()));
+    assert_eq!(tool(json!({ "name": "repo_read", "project": "github.com/acme/other", "path": "a" })), Err("no online machine of this account has project github.com/acme/other".into()));
+    let mac_link = fleet.mac.link.as_ref().unwrap();
+    let asked = HubCall::RepoLook { tab: "tab-x".into(), project: "github.com/acme/app".into(), machine: None, look: pinned_core::repo_look::RepoLook::Overview };
+    assert_eq!(mac_link.call_hub(asked), Err("mac does not host the global orchestrator (mini does), so it can't read a repository".into()));
+
+    let audit = fleet.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["action"].as_str().is_some_and(|a| a.starts_with("repo_"))).collect();
+    assert_eq!(rows.len(), 9, "one row per call that reached the hub's checks: {audit}");
+    assert!(rows.iter().all(|r| r["role"] == "global_orchestrator" && r["tab"] == global.as_str()), "{rows:?}");
+    let text = serde_json::to_string(&rows).unwrap();
+    assert!(!text.contains("pub fn") && !text.contains("ghp_") && !text.contains("postgres://"), "no file text on the trail: {text}");
+    let outcomes = |action: &str, outcome: &str| rows.iter().filter(|r| r["action"] == action && r["outcome"] == outcome).count();
+    assert_eq!((outcomes("repo_read", "refused"), outcomes("repo_read", "done"), outcomes("repo_read", "failed")), (1, 1, 4));
+    let done = rows.iter().find(|r| r["action"] == "repo_read" && r["outcome"] == "done").unwrap();
+    assert!(done["args"].as_str().unwrap().contains("src/lib.rs") && done["detail"] == "mac: src/lib.rs, lines 1-2 of 2, 1 redacted", "{done}");
+
+    // 8 reads went through the rate so far; the 31st in the minute is refused and audited.
+    for n in 9..=30 {
+        tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "glob": "src/*" })).unwrap_or_else(|e| panic!("read {n}: {e}"));
+    }
+    let slow = tool(json!({ "name": "repo_search", "project": "github.com/acme/app", "glob": "src/*" }));
+    assert_eq!(slow, Err("slow down: 30 repo reads in the last minute; ask the Captain to explore instead".into()));
+    let audit = fleet.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let refused = audit.as_array().unwrap().iter().filter(|e| e["action"] == "repo_search" && e["outcome"] == "refused").count();
+    assert_eq!(refused, 1, "the refused read is on the trail");
+}
+
+#[test]
+fn the_global_orchestrator_reads_no_repo_of_another_account() {
+    let hub = TestHub::start("iso_repo");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&url, "bob@acme.dev");
+    let (ana_dir, bob_dir) = (temp("iso_repo-ana"), temp("iso_repo-bob"));
+    let (ana_node, ana_m, _) = hosting_node(&url, &mut ana, "ana-mini", &ana_dir);
+    let (bob_node, bob_m, bob_global) = hosting_node(&url, &mut bob, "bob-mac", &bob_dir);
+    repo_with_secrets(&ana_dir.join("shared"), "git@github.com:acme/shared.git");
+    std::fs::write(ana_dir.join("shared/src/lib.rs"), "pub fn anas_unreleased_pricing() {}\n").unwrap();
+    repo_with_secrets(&ana_dir.join("only-ana"), "git@github.com:acme/only-ana.git");
+    repo_with_secrets(&bob_dir.join("shared"), "git@github.com:acme/shared.git");
+    for p in ["shared", "only-ana"] {
+        ana_node.machine.open_project(ana_dir.join(p));
+    }
+    bob_node.machine.open_project(bob_dir.join("shared"));
+    for client in [&mut ana, &mut bob] {
+        client.hub(json!({ "cmd": "set_repo_insight", "settings": { "on": true } })).unwrap();
+    }
+    let bob_tool = |t: Value| session_tool(&bob_dir, &bob_global, t);
+    let unknown = |m: &str| Err(format!("this account has no machine {m}"));
+    for machine in [ana_m.as_str(), "ana-mini"] {
+        assert_eq!(bob_tool(json!({ "name": "repo_read", "project": "github.com/acme/shared", "path": "src/lib.rs", "machine": machine })), unknown(machine));
+        assert_eq!(bob_tool(json!({ "name": "repo_search", "project": "github.com/acme/shared", "query": "pricing", "machine": machine })), unknown(machine));
+    }
+    let own = bob_tool(json!({ "name": "repo_read", "project": "github.com/acme/shared", "path": "src/lib.rs" })).unwrap();
+    assert_eq!((own["machine"].as_str(), own["text"].as_str()), (Some(bob_m.as_str()), Some("pub fn needle() {}\n[redacted]\n")), "bob reads his own checkout of the same repo");
+    let searched = bob_tool(json!({ "name": "repo_search", "project": "github.com/acme/shared", "query": "pricing" })).unwrap();
+    assert_eq!(searched["total"], 0, "nothing of ana's checkout: {searched}");
+    assert_eq!(bob_tool(json!({ "name": "repo_overview", "project": "github.com/acme/only-ana" })), Err("no online machine of this account has project github.com/acme/only-ana".into()));
+    let ana_path = format!("{ana_m}:{}", ana_dir.join("only-ana").display());
+    assert_eq!(bob_tool(json!({ "name": "repo_overview", "project": ana_path })), Err(format!("no online machine of this account has project {ana_path}")));
 }
 
 // delegate_task on another machine or in an Upstash Box.
@@ -4802,6 +4989,45 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
 }
 
 #[test]
+fn a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered() {
+    let mut fleet = Fleet::start("remote_ask");
+    origin(Path::new(&fleet.site), SITE);
+    origin(&fleet.mini_dir.join("site"), SITE);
+    let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
+    let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Push the footer fix.", "title": "Push footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
+    let (task, child) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
+    wait_launch(&mini_dir, &child, "Push the footer fix.");
+
+    let transcripts = mini_dir.join("accounts/work/projects/site");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let call = r#"{"type":"assistant","uuid":"a1","timestamp":"2020-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#;
+    std::fs::write(transcripts.join("s-push.jsonl"), format!("{call}\n")).unwrap();
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child, "session": "s-push", "cwd": there }));
+    assert_eq!(task_status(&mac_dir, &captain, &task)["waiting"], Value::Null, "a worker that works waits on no one");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "needs-input", "tab": child, "message": "Claude needs your permission to use Bash" }));
+    wait_for("mac's task to say its worker waits", || !task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["workState"], "working", "it keeps its place");
+    assert_eq!(
+        (status["waiting"]["kind"].as_str(), status["waiting"]["tool"].as_str(), status["waiting"]["ask"].as_str(), status["waiting"]["machine"].as_str()),
+        (Some("approval"), Some("Bash"), Some("git push origin main"), Some("mini")),
+        "the command, the tool and the machine it waits on: {status}"
+    );
+    let overview = fleet.client.hub(json!({ "cmd": "overview" })).unwrap();
+    let rows: Vec<(&str, &str, &str, &str, &str)> = overview["waiting"].as_array().unwrap().iter().map(|w| (w["machine"].as_str().unwrap(), w["machine_name"].as_str().unwrap(), w["tab"].as_str().unwrap(), w["ask"].as_str().unwrap_or(""), w["detail"].as_str().unwrap_or(""))).collect();
+    assert_eq!(rows, vec![(mini.as_str(), "mini", child.as_str(), "approval", "git push origin main")], "waiting() lists the worker under mini's name: {overview}");
+
+    hook(&mini_dir, json!({ "kind": "agent", "status": "working", "tab": child }));
+    wait_for("mac's task to hear it was answered", || task_status(&mac_dir, &captain, &task)["waiting"].is_null());
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+}
+
+#[test]
 fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends() {
     let hub = TestHub::start_with_boxes("rbox", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
@@ -4878,6 +5104,211 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     }
 }
 
+/// mac, paired to ana's account with a Captain on the `site` checkout, which may delegate to a box.
+fn mac_with_captain(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, String, String) {
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let creds = pair(&hub.url, &mut ana.client, "mac", dir);
+    let mac_id = creds.machine_id.clone();
+    let mac = Node::start(dir, creds);
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&dir.join("site"), SITE);
+    let site = mac.machine.open_project(dir.join("site")).display().to_string();
+    let captain = ana.client.call(&mac_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    (mac, mac_id, captain)
+}
+
+#[test]
+fn a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it() {
+    let hub = TestHub::start_with_boxes("rbox_end", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-end-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let machine = ana.box_machine();
+
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: the box ended before its task did: someone removed its machine")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot() {
+    let mut hub = TestHub::start_with_boxes("rbox_boot", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-boot-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the bootstrap to start", || hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")));
+
+    // The box hangs on the restarted hub's boot too.
+    hub.boxes.state.lock().unwrap().hanging = true;
+    hub.restart();
+    wait_for("the task to fail on mac", || task_status(&mac_dir, &captain, &task)["workState"] == "failed");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["error"].as_str(), Some("Upstash Box: the box did not connect within 8 s"), "{status}");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+}
+
+/// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
+fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
+    let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let creds = account::pair(&hub.url, code["code"].as_str().unwrap(), name, "linux").unwrap();
+    let raw = RawMachine::start(&hub.url, &creds.machine_token, |_| RawReply::Ok(Value::Null));
+    client.wait_machines(machines);
+    raw
+}
+
+/// The `delegate` call a thread `tab` sends the hub for its task `task`.
+fn delegate_call(task: &str, target: Value, repo: &str) -> Value {
+    json!({ "cmd": "delegate", "tab": "tab-1", "task": task, "request": request(json!({ "task": "Run it.", "title": "Slow", "target": target })), "repo": repo, "access": "auto" })
+}
+
+#[test]
+fn a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second() {
+    let hub = TestHub::start_with_boxes("rbox_again", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-bloomtoken" })).unwrap();
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let caller = raw_caller(&hub, &mut ana.client, "caller", &[("caller", true)]);
+    let to_box = json!({ "box": { "size": "small", "repo": "acme/site" }, "providerInstanceId": "bloom" });
+
+    let first = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
+    assert_eq!((first["workState"].as_str(), first["box"].is_string()), (Some("working"), true), "{first}");
+    let again = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
+    assert_eq!(again, first, "the repeat of a start the caller gave up waiting on is answered with the box already starting");
+    assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1, "and the Box API saw one create");
+    assert_eq!(ana.rows(&hub), 1);
+
+    let other = caller.ask(delegate_call("task-2", to_box, SITE)).unwrap();
+    assert_ne!(other["box"], first["box"], "another task is another box: {other}");
+    assert_eq!((hub.boxes.state.lock().unwrap().created.len(), ana.rows(&hub)), (2, 2));
+}
+
+#[test]
+fn a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker() {
+    let mut fleet = Fleet::start("remote_again");
+    origin(&fleet.mini_dir.join("site"), SITE);
+    fleet.mini.machine.open_project(fleet.mini_dir.join("site"));
+    fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+    let caller = raw_caller(&fleet.hub, &mut fleet.client, "caller", &[("mac", true), ("mini", true), ("caller", true)]);
+    let to_mini = json!({ "machine": fleet.mini_id, "providerInstanceId": "work" });
+    let answers: Vec<Value> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..3).map(|_| scope.spawn(|| caller.ask(delegate_call("task-1", to_mini.clone(), SITE)).unwrap())).collect();
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+    assert!(answers.iter().all(|a| a["taskId"] == answers[0]["taskId"] && a["tabId"] == answers[0]["tabId"] && a["tabId"].is_string()), "{answers:?}");
+    let workers = fleet.mini.machine.tabs().iter().filter(|t| t.role == Some(Role::Worker)).count();
+    assert_eq!(workers, 1, "three asks for one task started one worker on mini");
+}
+
+#[test]
+fn a_remote_workers_usage_reaches_the_task_that_asked_and_is_recorded_once() {
+    let hub = TestHub::start_with_boxes("remote_usage", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("remote-usage-mac");
+    let (mac, mac_id, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let usage = |tokens: u64, cost: f64| json!({ "tokens_in": tokens, "tokens_out": 30, "cost_usd": cost, "wall_ms": 90_000 });
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ended = finished.clone();
+    let worker = RawMachine::start(&hub.url, &mini.machine_token, move |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" if ended.load(Ordering::SeqCst) => RawReply::Ok(json!({ "workState": "result_available", "summary": "Done.", "usage": { "tokens_in": 1200, "tokens_out": 30, "cost_usd": 0.42, "wall_ms": 90_000 } })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working", "usage": { "tokens_in": 500, "tokens_out": 10, "cost_usd": 0.1, "wall_ms": 30_000 } })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["usage"]["tokens_in"], 0, "nothing came back yet");
+    wait_for("the live usage to show", || task_status(&mac_dir, &captain, &task)["usage"]["tokens_in"] == 500);
+
+    finished.store(true, Ordering::SeqCst);
+    wait_for("the end to land", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!((status["usage"]["tokens_in"].as_u64(), status["usage"]["tokens_out"].as_u64(), status["usage"]["cost_usd"].as_f64()), (Some(1200), Some(30), Some(0.42)), "{status}");
+
+    // The machine that ran it records the run, and the delegating one records none of it.
+    let mut record = task_record("task-m", "claude-opus-5-5", "done", 2, Some(0.42), now_ms());
+    record["usage"]["tokens_in"] = json!(1200);
+    worker.ask(json!({ "cmd": "record_tasks", "records": [record] })).unwrap();
+    let again = delegate_from(&mac_dir, &captain, json!({ "task": "Run the next one.", "title": "Next", "target": { "machine": "mini" } })).unwrap();
+    let next = again["taskId"].as_str().unwrap().to_owned();
+    worker.ask(json!({ "cmd": "remote_ended", "to": mac_id, "tab": captain, "task": next, "end": { "state": "result_available", "summary": "ok", "usage": usage(900, 0.3) } })).unwrap();
+    let status = task_status(&mac_dir, &captain, &next);
+    assert_eq!((status["workState"].as_str(), status["usage"]["tokens_in"].as_u64(), status["usage"]["cost_usd"].as_f64()), (Some("result_available"), Some(900), Some(0.3)), "an end that carries usage lands it: {status}");
+    assert_eq!(mac.machine.local_delegation_stats(1).totals.runs, 0, "the delegating machine records no remote task");
+    let stats = ana.client.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["totals"]["cost_usd"].as_f64()), (Some(1), Some(0.42)), "the run counts once, from the machine that ran it: {stats}");
+}
+
+#[test]
+fn delegation_stats_counts_the_stored_records_it_cannot_read() {
+    let hub = TestHub::start("stats_unreadable");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true)]);
+    raw.ask(json!({ "cmd": "record_tasks", "records": [task_record("task-1", "claude-opus-5-5", "done", 10, Some(1.5), now_ms())] })).unwrap();
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["unreadable"].as_u64()), (Some(1), Some(0)), "{stats}");
+
+    admin_on(&hub.database, &format!(
+        "insert into delegation_tasks (account, machine, id, ended, record) values ('{ana_account}', '{}', 'odd', {}, '{{\"id\":\"odd\",\"outcome\":\"a-new-outcome\"}}'), ('{ana_account}', '{}', 'odd-2', {}, '[]')",
+        machine.id,
+        now_ms(),
+        machine.id,
+        now_ms(),
+    ));
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    assert_eq!((stats["totals"]["runs"].as_u64(), stats["unreadable"].as_u64()), (Some(1), Some(2)), "two rows the hub cannot read are counted, not dropped without a word: {stats}");
+}
+
+#[test]
+fn task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account() {
+    let hub = TestHub::start_with_boxes("remote_gone", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("remote-gone-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let _mini = RawMachine::start(&hub.url, &mini.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
+
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": mini.machine_id })).unwrap();
+    let cancel = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": task, "reason": "not now" })).unwrap();
+    assert_eq!(
+        (cancel["workState"].as_str(), cancel["note"].as_str()),
+        (Some("cancelled"), Some("mini is gone from this account, so pinned cancelled the task here")),
+        "{cancel}"
+    );
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "cancelled");
+}
+
 #[test]
 fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection() {
     let hub = TestHub::start_with_boxes("box_captain", Signup::Open, fast());
@@ -4921,7 +5352,7 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     let ana_raw = RawMachine::start(&url, &ana_creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
         "delegate" => RawReply::Ok(json!({ "taskId": "task-a", "tabId": "tab-w", "workState": "working" })),
         "remote_task" => RawReply::Ok(json!({ "workState": "working" })),
-        "remote_ended" => RawReply::Ok(json!(true)),
+        "remote_ended" | "remote_asked" => RawReply::Ok(json!(true)),
         _ => RawReply::Ok(Value::Null),
     });
     let (bob_token, _, mut bob) = signed_in(&url, "bob@acme.dev");
@@ -4939,11 +5370,35 @@ fn a_worker_reaches_no_machine_box_or_task_of_another_account() {
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a" })), none, "bob can't read ana's remote task");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_task", "machine": ana_m, "tab": "tab-1", "task": "task-a", "cancel": "mine now" })), none, "nor cancel it");
     assert_eq!(bob_raw.ask(json!({ "cmd": "remote_ended", "to": ana_m, "tab": "tab-1", "task": "task-a", "end": { "state": "failed", "error": "forged" } })), none, "nor end it");
+    assert_eq!(bob_raw.ask(json!({ "cmd": "remote_asked", "to": ana_m, "tab": "tab-1", "task": "task-a", "ask": { "kind": "approval", "ask": "forged", "since": 1 } })), none, "nor tell it what its worker waits on");
     assert_eq!(bob.hub(delegate(json!({ "machine": bob_machine.id }))), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client delegates only through a thread");
     assert_eq!(bob.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-x" })), Err("connect Upstash Box first".into()));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended")), (0, 0, 0), "ana's machine heard none of bob's");
+    assert_eq!((ana_raw.calls("delegate"), ana_raw.calls("remote_task"), ana_raw.calls("remote_ended"), ana_raw.calls("remote_asked")), (0, 0, 0, 0), "ana's machine heard none of bob's");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 0, "no box opened");
+}
+
+#[test]
+fn a_remote_workers_ask_reaches_the_machine_that_delegated_it_stamped_with_the_machine_that_sent_it() {
+    let hub = TestHub::start("remote_asked");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
+    let mac_raw = RawMachine::start(&url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_asked" => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    let mini_raw = RawMachine::start(&url, &mini_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-mac", true), ("ana-mini", true)]);
+    let ask = json!({ "kind": "approval", "tool": "Bash", "ask": "git push origin main", "since": 1794239000 });
+
+    let taken = mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a", "ask": ask }));
+    assert_eq!(taken, Ok(json!(true)), "the machine that delegated it took it");
+    assert_eq!(mac_raw.calls.lock().unwrap().clone(), vec![json!({ "cmd": "remote_asked", "from": mini.id, "tab": "tab-1", "task": "task-a", "ask": ask })], "stamped with the machine whose socket sent it");
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Ok(json!(true)), "no ask says it waits on nothing now");
+    assert_eq!(mac_raw.calls.lock().unwrap().last().unwrap().get("ask"), None);
+    assert_eq!(ana.hub(json!({ "cmd": "remote_asked", "to": mac.id, "tab": "tab-1", "task": "task-a" })), Err("only a thread's machine delegates a task, asks after it or reports its end".into()), "a client can't report for a machine");
 }
 
 fn task_record(id: &str, model: &str, outcome: &str, minutes: u64, cost: Option<f64>, ended: u64) -> Value {
@@ -6995,6 +7450,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("connect_upstash", json!({})),
         ("disconnect_upstash", json!({})),
         ("set_box_access", json!({ "access": { "worker": { "mode": "fresh" } } })),
+        ("set_repo_insight", json!({ "settings": { "on": true } })),
         ("delete_connector", json!({ "id": "c1" })),
         ("remove_machine", json!({ "id": machine })),
         ("pair_code", json!({})),
@@ -7239,4 +7695,271 @@ fn use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_
     assert_eq!(ran().lines().count(), runs, "ana's machine ran nothing for bob");
     let bobs = bob.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_claude_tokens"].clone();
     assert!(bobs.as_object().is_none_or(|kept| kept.is_empty()), "and bob keeps no token of ana's: {bobs}");
+}
+
+/// Registers a machine of the account `token` and the credentials a node for it signs in with.
+fn registered(url: &str, token: &str, email: &str, name: &str) -> (Credentials, String) {
+    let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
+    (Credentials { hub: url.to_owned(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token }, machine.id)
+}
+
+fn machine_rows(client: &mut Client) -> Vec<Value> {
+    client.hub(json!({ "cmd": "machines" })).unwrap().as_array().unwrap().clone()
+}
+
+fn state_of(client: &mut Client, id: &str) -> Option<Value> {
+    machine_rows(client).into_iter().find(|row| row["id"] == id).and_then(|row| row.get("state").cloned())
+}
+
+/// A machine socket that reports `state` and stays connected.
+fn reporting(url: &str, token: &str, state: Value) -> MachineSock {
+    let mut sock = MachineSock::connect(url, token, "0.17.24");
+    sock.send(json!({ "type": "event", "event": { "kind": "state", "state": state } }));
+    sock
+}
+
+fn the_minis_state() -> Value {
+    json!({
+        "load": { "cpus": 8, "cpu_percent": 37, "mem_total_mb": 16384, "mem_available_mb": 4096, "disk_total_mb": 471_040, "disk_free_mb": 24_576 },
+        "accounts": [
+            { "id": "claude", "driver_kind": "claude", "can_run_child_task": true, "models": ["claude-opus-5-5"] },
+            { "id": "cursor", "driver_kind": "cursor", "can_run_child_task": true, "limited": true, "models": ["grok-4.7"] }
+        ],
+        "sessions": 5, "workers": 2, "workers_at_once": 3
+    })
+}
+
+/// What `orchestrator_capabilities` answers a node's session.
+fn capabilities_of(home: &Path) -> Value {
+    let reply = ask_socket(home, &json!({ "kind": "capabilities", "search": "" }));
+    serde_json::from_str(reply["Ok"].as_str().unwrap_or_else(|| panic!("{reply}"))).unwrap()
+}
+
+/// A delegate call as the origin machine sends it for `target`.
+fn machine_delegate_call(id: u64, target: Value) -> Value {
+    let args = json!({ "task": "Fix the parser.", "title": "Parser", "target": target });
+    let request = pinned_core::delegate::parse_request(&args).unwrap();
+    json!({ "type": "call", "id": id, "call": { "cmd": "delegate", "tab": "tab-1", "task": "t-1", "request": request, "repo": "github.com/acme/app", "access": "auto" } })
+}
+
+fn reply_to(sock: &mut MachineSock, id: u64) -> Value {
+    loop {
+        let frame = sock.read_json();
+        if frame["type"] == "reply" && frame["id"] == id {
+            return frame;
+        }
+    }
+}
+
+/// The origin's reply to `id`, while the machine answers the hub's look at its state, which the hub
+/// takes before it refuses a delegation.
+fn reply_to_while_answering(origin: &mut MachineSock, machine: &mut MachineSock, id: u64) -> Value {
+    let start = Instant::now();
+    loop {
+        if let Some(frame) = origin.try_text() {
+            if frame["type"] == "reply" && frame["id"] == id {
+                return frame;
+            }
+        }
+        if let Some(frame) = machine.try_text() {
+            if frame["type"] == "call" && frame["call"]["cmd"] == "state" {
+                machine.send(json!({ "type": "reply", "id": frame["id"], "ok": the_minis_state() }));
+            }
+        }
+        assert!(start.elapsed() < WAIT, "timed out waiting for the reply to {id}");
+    }
+}
+
+#[test]
+fn a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capabilities() {
+    let hub = TestHub::start_with("machine_load", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (book_creds, book_id) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, mini_id) = registered(&url, &token, "ana@acme.dev", "mini");
+    let book_home = temp("machine-load-book");
+    let book = Node::start(&book_home, book_creds);
+    book.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true), ("mini", false)]);
+
+    assert_eq!(state_of(&mut client, &mini_id), None, "a machine that reported nothing shows none");
+    let _mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    wait_for("the hub keeps the mini's summary", || state_of(&mut client, &mini_id).is_some());
+    let kept = state_of(&mut client, &mini_id).unwrap();
+    assert!(kept["reported_at"].as_i64().unwrap() > 1_700_000_000, "the hub stamps when it heard: {kept}");
+    let mut expected = the_minis_state();
+    expected["reported_at"] = kept["reported_at"].clone();
+    expected["accounts"][0]["limited"] = json!(false);
+    assert_eq!(kept, expected);
+
+    wait_for("the book's own node reports", || state_of(&mut client, &book_id).is_some_and(|state| state["accounts"].as_array().is_some_and(|accounts| accounts.iter().any(|a| a["id"] == "claude" && a["can_run_child_task"] == true))));
+    let own = state_of(&mut client, &book_id).unwrap();
+    assert!(own["load"]["disk_free_mb"].as_u64().is_some() && own["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "{own}");
+
+    let machines = capabilities_of(&book_home)["machines"].clone();
+    let mini = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(mini_id)).unwrap_or_else(|| panic!("{machines}")).clone();
+    assert_eq!((&mini["name"], &mini["online"], &mini["isThisMachine"], &mini["workersRunning"], &mini["workersAtOnce"]), (&json!("mini"), &json!(true), &json!(false), &json!(2), &json!(3)));
+    assert_eq!(mini["load"]["disk_free_mb"], 24_576);
+    let ids: Vec<&Value> = mini["providers"].as_array().unwrap().iter().map(|p| &p["providerInstanceId"]).collect();
+    assert_eq!(ids, [&json!("claude"), &json!("cursor")], "the mini has no bloom account, and the caller can see that");
+    assert_eq!(mini["providers"][1]["limited"], true);
+    let this = machines.as_array().unwrap().iter().find(|m| m["id"] == json!(book_id)).unwrap();
+    assert_eq!(this["isThisMachine"], true);
+    let text = machines.to_string();
+    assert!(!text.contains("ana@acme.dev") && !text.contains("token"), "{text}");
+}
+
+#[test]
+fn a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_it() {
+    let hub = TestHub::start_with("machine_refuse", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (origin_creds, _) = registered(&url, &token, "ana@acme.dev", "book");
+    let (mini_creds, _) = registered(&url, &token, "ana@acme.dev", "mac-mini");
+    let mut mini = reporting(&url, &mini_creds.machine_token, the_minis_state());
+    let mut origin = MachineSock::connect(&url, &origin_creds.machine_token, "0.17.24");
+    client.wait_machines(&[("book", true), ("mac-mini", true)]);
+    wait_for("the hub keeps the mini's summary", || machine_rows(&mut client).iter().any(|row| row["name"] == "mac-mini" && row.get("state").is_some()));
+
+    origin.send(machine_delegate_call(7, json!({ "providerInstanceId": "bloom", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 7)["err"], "mac-mini has no bloom account; sign in there or pick another machine");
+    origin.send(machine_delegate_call(8, json!({ "providerInstanceId": "cursor", "model": "gpt-9", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 8)["err"], "cursor on mac-mini does not offer gpt-9; pick one of its models or another machine");
+    origin.send(machine_delegate_call(9, json!({ "driverKind": "codex", "machine": "mac-mini" })));
+    assert_eq!(reply_to_while_answering(&mut origin, &mut mini, 9)["err"], "mac-mini has no codex account; sign in there or pick another machine");
+    while let Some(frame) = mini.try_text() {
+        assert_ne!(frame["call"]["cmd"], "delegate", "a refused worker never reached the mini: {frame}");
+    }
+}
+
+#[test]
+fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
+    let hub = TestHub::start_with("machine_load_apart", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana_client = signed_in_client(&url, &ana_token);
+    let code = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let mut bruno_client = signed_in_client(&url, &bruno_token);
+    let (ana_creds, ana_id) = registered(&url, &ana_token, "ana@acme.dev", "ana-mini");
+    let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
+    let _ana = reporting(&url, &ana_creds.machine_token, the_minis_state());
+    let bruno_home = temp("machine-load-bruno");
+    let bruno = Node::start(&bruno_home, bruno_creds);
+    bruno.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana_client.wait_machines(&[("ana-mini", true)]);
+    bruno_client.wait_machines(&[("bruno-mac", true)]);
+    wait_for("Ana's summary is kept", || state_of(&mut ana_client, &ana_id).is_some());
+    wait_for("Bruno's node reports", || state_of(&mut bruno_client, &bruno_id).is_some());
+
+    let rows = machine_rows(&mut bruno_client);
+    assert_eq!(rows.iter().map(|row| row["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")]);
+    let machines = capabilities_of(&bruno_home)["machines"].clone();
+    assert_eq!(machines.as_array().unwrap().iter().map(|m| m["name"].clone()).collect::<Vec<_>>(), [json!("bruno-mac")], "{machines}");
+    assert!(!machines.to_string().contains(&ana_id) && !machines.to_string().contains("grok-4.7") && !machines.to_string().contains("ana-mini"), "{machines}");
+    let (raw_creds, _) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-raw");
+    let mut origin = MachineSock::connect(&url, &raw_creds.machine_token, "0.17.24");
+    origin.send(machine_delegate_call(3, json!({ "providerInstanceId": "claude", "machine": "ana-mini" })));
+    assert_eq!(reply_to(&mut origin, 3)["err"], "this account has no machine ana-mini");
+    bruno_client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().filter(|f| f["type"] != "reply" && f.to_string().contains(&ana_id)).collect();
+    assert!(leaked.is_empty(), "Bruno's socket carried Ana's machine: {leaked:?}");
+}
+
+#[test]
+fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
+    let hub = TestHub::start_with("machine_load_projects", Signup::Invite);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (creds, id) = registered(&url, &token, "ana@acme.dev", "book");
+    let home = temp("machine-load-projects");
+    let node = Node::start(&home, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("book", true)]);
+    let folder = home.join("site");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = node.machine.open_project(folder).display().to_string();
+    wait_for("the node reports its load", || state_of(&mut client, &id).is_some());
+
+    let overview = client.hub(json!({ "cmd": "overview" })).unwrap();
+    let checkout = overview["projects"].as_array().unwrap().iter().flat_map(|p| p["checkouts"].as_array().unwrap()).find(|c| c["path"] == json!(path)).unwrap_or_else(|| panic!("{overview}")).clone();
+    assert!(checkout["load"]["disk_free_mb"].as_u64().is_some() && checkout["load"]["cpus"].as_u64().is_some_and(|c| c > 0), "the checkout shows its machine's load: {checkout}");
+    let machine = &overview["machines"][0];
+    assert_eq!(machine["name"], "book");
+    assert!(machine["state"]["accounts"].as_array().unwrap().iter().any(|a| a["id"] == "claude"), "{machine}");
+    assert!(machine["state"]["workers_at_once"].as_u64().is_some_and(|n| n > 0), "{machine}");
+}
+
+/// A scripted machine that reports `state`, lists the `acme/app` checkout, and starts any worker.
+fn placing_machine(url: &str, token: &str, state: Value) -> RawMachine {
+    let answered = state.clone();
+    RawMachine::start_with(url, token, vec![json!({ "kind": "state", "state": state })], move |call| match call["cmd"].as_str().unwrap() {
+        "list_projects" => RawReply::Ok(json!([{ "path": "/work/app", "name": "app", "repo": "github.com/acme/app", "account": "claude" }])),
+        "tabs" => RawReply::Ok(json!([])),
+        "state" => RawReply::Ok(answered.clone()),
+        "delegate" => RawReply::Ok(json!({ "task": "t-1", "state": "running" })),
+        cmd => RawReply::Err(format!("unexpected {cmd}")),
+    })
+}
+
+fn place_call() -> Value {
+    json!({ "cmd": "place", "repo": "github.com/acme/app", "need": { "account": "claude" }, "exclude": [] })
+}
+
+#[test]
+fn placing_follows_the_accounts_policy_skips_a_machine_that_went_offline_and_never_sees_another_account() {
+    let hub = TestHub::start_with("place_policy", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = signed_in_client(&url, &ana_token);
+    let code = ana.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let (bruno_token, _) = account::signup_invited(&url, "bruno@acme.dev", "correct horse", Some(&code)).unwrap();
+    let (book_creds, book_id) = registered(&url, &ana_token, "ana@acme.dev", "book");
+    let (mini_creds, mini_id) = registered(&url, &ana_token, "ana@acme.dev", "mini");
+    let (bruno_creds, bruno_id) = registered(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
+    let book = placing_machine(&url, &book_creds.machine_token, the_minis_state());
+    let mini = placing_machine(&url, &mini_creds.machine_token, the_minis_state());
+    let bruno = placing_machine(&url, &bruno_creds.machine_token, the_minis_state());
+    ana.wait_machines(&[("book", true), ("mini", true)]);
+    wait_for("both of Ana's machines report", || state_of(&mut ana, &book_id).is_some() && state_of(&mut ana, &mini_id).is_some());
+    // The overview is how the hub learns which machine holds a checkout of the project.
+    ana.hub(json!({ "cmd": "overview" })).unwrap();
+
+    let prefer_mini = json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "placement": { "prefer": [mini_id] } } });
+    assert_eq!(ana.hub(prefer_mini).unwrap()["placement"], json!({ "prefer": [mini_id], "avoid": [], "heavy": "worktree" }));
+
+    let on_mini = book.ask(place_call()).unwrap();
+    assert_eq!(on_mini, json!({ "machine": mini_id, "machineName": "mini", "by": "policy", "reason": "first preferred machine that fits" }));
+    let target = json!({ "providerInstanceId": "claude", "machine": mini_id });
+    let started = book.ask(machine_delegate_call(7, target)["call"].clone()).unwrap();
+    assert_eq!((&started["machine"], &started["machineName"], &started["task"]), (&json!(mini_id), &json!("mini"), &json!("t-1")), "the worker starts on the preferred machine");
+    assert_eq!(mini.calls("delegate"), 1);
+
+    drop(mini);
+    ana.wait_machines(&[("book", true), ("mini", false)]);
+    let on_book = book.ask(place_call()).unwrap();
+    assert_eq!(
+        on_book,
+        json!({
+            "machine": book_id, "machineName": "book", "by": "ranked", "reason": "no preferred machine fits, so the least busy one that does",
+            "skipped": [{ "machine": mini_id, "machineName": "mini", "why": "offline", "detail": "mini is offline" }]
+        }),
+        "the worker starts on the machine that asked, and says the preferred one is offline"
+    );
+    assert!(!on_book.to_string().contains(&bruno_id), "Bruno's idle machine is never a candidate for Ana: {on_book}");
+
+    let mut exclude = place_call();
+    exclude["exclude"] = json!([book_id]);
+    let nothing = book.ask(exclude).unwrap();
+    assert_eq!(
+        (nothing["machine"].clone(), nothing["by"].clone(), nothing["skipped"].as_array().unwrap().iter().map(|skip| skip["why"].clone()).collect::<Vec<_>>()),
+        (json!(book_id), json!("fallback"), vec![json!("refused"), json!("offline")]),
+        "when nothing fits the worker runs where it was asked"
+    );
+
+    let bruno_placed = bruno.ask(place_call()).unwrap();
+    assert_eq!(bruno_placed, json!({ "machine": bruno_id, "machineName": "bruno-mac", "by": "ranked", "reason": "no preferred machine fits, so the least busy one that does" }), "Ana's policy and machines never reach Bruno");
 }

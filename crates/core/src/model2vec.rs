@@ -9,6 +9,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+use tokenizers::{DecoderWrapper, NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper, TokenizerImpl};
+
+mod unigram;
+
+/// The crate's tokenizer with its Unigram model swapped for ours, which needs 14 MB, not 540.
+type Tokenizer = TokenizerImpl<unigram::Unigram, NormalizerWrapper, PreTokenizerWrapper, PostProcessorWrapper, DecoderWrapper>;
 
 const REPO: &str = "minishlab/potion-multilingual-128M";
 const REVISION: &str = "73908c3438cf03b6a01bcb9611d62b23d0726f08";
@@ -60,7 +66,7 @@ pub fn fetch(models: &Path) -> Result<PathBuf, String> {
 }
 
 pub struct Model2Vec {
-    tokenizer: tokenizers::Tokenizer,
+    tokenizer: Tokenizer,
     rows: Mutex<File>,
     /// Where the embedding matrix starts in `model.safetensors`.
     start: u64,
@@ -72,7 +78,7 @@ pub struct Model2Vec {
 impl Model2Vec {
     /// Loads the model `fetch` put in `dir`.
     pub fn load(dir: &Path) -> Result<Model2Vec, String> {
-        let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| format!("could not read the tokenizer: {e}"))?;
+        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| format!("could not read the tokenizer: {e}"))?;
         let path = dir.join("model.safetensors");
         let mut file = File::open(&path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
         // safetensors: an 8-byte little-endian header length, a JSON header, then the tensors.
@@ -155,5 +161,111 @@ mod tests {
         assert_eq!(model.model(), "potion-multilingual-128M@73908c3");
         let unit: f32 = vectors[0].iter().map(|x| x * x).sum();
         assert!((unit - 1.0).abs() < 1e-4, "{unit}");
+    }
+
+    /// The process's resident size in MB, as `ps` reports it.
+    fn resident_mb() -> f64 {
+        let out = crate::process::command("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap() / 1024.0
+    }
+
+    /// Lines of this repository's README and core sources, hand-written lines in other scripts,
+    /// and lines of random characters from those scripts.
+    fn corpus() -> Vec<String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = vec![root.join("../../README.md")];
+        for entry in std::fs::read_dir(root.join("src")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+        let mut lines: Vec<String> = files.iter().flat_map(|f| std::fs::read_to_string(f).unwrap().lines().map(str::to_owned).collect::<Vec<_>>()).collect();
+        let written = [
+            "Não existe senha: o login usa um link mágico enviado por e-mail.",
+            "Ação, coração, pão, órgão, açúcar, avó, vovô, pôr do sol às 18h.",
+            "Qual gerenciador de pacotes devo usar neste repositório?",
+            "¿Dónde está la estación de tren? Mañana llegaré temprano, señor.",
+            "El niño comió paella y bebió horchata en Valencia.",
+            "我们在周五部署了新版本，用户反馈很好。",
+            "北京和上海的天气今天都很晴朗。",
+            "東京で新しいブランチをデプロイしました。ありがとうございます！",
+            "カタカナとひらがなと漢字を混ぜた文章です。ｶﾀｶﾅ半角もあります。",
+            "مرحبا بالعالم، كيف حالك اليوم؟",
+            "اللغة العربية تكتب من اليمين إلى اليسار ١٢٣٤٥",
+            "שלום עולם, מה שלומך?",
+            "Привет, мир! Как дела у команды сегодня?",
+            "Γειά σου κόσμε, τι κάνεις;",
+            "한국어 문장도 토큰으로 나눠야 합니다.",
+            "हिन्दी में लिखा गया वाक्य।",
+            "ภาษาไทยไม่มีช่องว่างระหว่างคำ",
+            "Deploy 🚀 no Railway via branch railway-hub ✅ ok 👍🏽",
+            "👩‍💻👨‍👩‍👧‍👦🇧🇷🇯🇵❤️‍🔥 emoji only",
+            "mixed: café 東京 مرحبا Привет 🙂 naïve résumé",
+            "Ｆｕｌｌｗｉｄｔｈ ＡＢＣ １２３ and ﬁ ligature and ① and ℌ and Å and ㍿",
+            "e\u{301} combining accent vs é precomposed",
+            "[UNK] [PAD] <unk> <pad> ▁ literal specials",
+            "a\u{a0}b non-breaking, a\u{3000}b ideographic, a\u{200b}b zero-width",
+            "tabs\tand\tnewlines\r\nmixed",
+            "\u{0}\u{1}\u{7f} control characters",
+            "",
+            " ",
+            "   ",
+            "\t",
+            "\n",
+            "  leading spaces",
+            "trailing spaces   ",
+            "double  spaces  between  words",
+            "x",
+            "ß",
+        ];
+        lines.extend(written.iter().map(|s| s.to_string()));
+        lines.push(written.join(" "));
+        lines.push("abc".repeat(5000));
+        let chars: Vec<char> = written.iter().flat_map(|s| s.chars()).collect();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut below = |n: usize| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..3000 {
+            let len = below(40);
+            lines.push((0..len).map(|_| chars[below(chars.len())]).collect());
+        }
+        lines.sort();
+        lines.dedup();
+        lines
+    }
+
+    /// Reads the model from `PINNED_MODELS` like the test above. Run it alone, so the resident
+    /// sizes it prints are this test's.
+    #[test]
+    #[ignore]
+    fn the_flat_unigram_tokenizes_as_the_crates_does_on_the_real_model() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let models = std::env::var_os("PINNED_MODELS").map_or_else(|| std::env::temp_dir().join("pinned-models"), PathBuf::from);
+        let dir = fetch(&models).unwrap();
+        let start = resident_mb();
+        let model = Model2Vec::load(&dir).unwrap();
+        let with_ours = resident_mb();
+        let theirs = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
+        let with_both = resident_mb();
+        let (ours_mb, theirs_mb) = (with_ours - start, with_both - with_ours);
+        eprintln!("resident: {start:.1} MB before, {with_ours:.1} MB after ours (+{ours_mb:.1}), {with_both:.1} MB after the crate's too (+{theirs_mb:.1})");
+        assert_eq!(model.unknown, theirs.token_to_id("<unk>"));
+        let lines = corpus();
+        let mut mismatches = 0;
+        for line in &lines {
+            let ours = model.tokenizer.encode_fast(line.as_str(), false).unwrap();
+            let expected = theirs.encode_fast(line.as_str(), false).unwrap();
+            if ours.get_ids() != expected.get_ids() || ours.get_tokens() != expected.get_tokens() {
+                if mismatches < 10 {
+                    eprintln!("{line:?}: ours {:?}, the crate's {:?}", ours.get_tokens(), expected.get_tokens());
+                }
+                mismatches += 1;
+            }
+        }
+        eprintln!("compared {} lines, {mismatches} mismatches", lines.len());
+        assert_eq!(mismatches, 0);
     }
 }

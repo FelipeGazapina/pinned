@@ -16,6 +16,11 @@ pub const STAGE_SUBCOMMAND: &str = "stage";
 pub const SLACK_SUBCOMMAND: &str = "slack";
 pub const LINEAR_SUBCOMMAND: &str = "linear";
 pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
+pub const GUARD_SUBCOMMAND: &str = "guard";
+/// The global orchestrator's own settings file, beside the one every other session loads.
+pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
+/// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
+const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
@@ -27,18 +32,72 @@ const RECALL_WAIT: Duration = Duration::from_millis(300);
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    std::fs::write(path, serde_json::to_vec_pretty(&settings(exe))?)
+}
+
+/// The global orchestrator's settings: every session's, with no Bash or NotebookEdit at all (a
+/// deny rule holds in bypass mode too), and its file tools sent first to the guard hook, which
+/// the machine answers from the folders it may reach.
+pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    let mut settings = settings(exe);
+    settings["permissions"]["deny"] = serde_json::json!(["Bash", "NotebookEdit"]);
+    settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }]);
+    std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
+}
+
+fn settings(exe: &Path) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
+    serde_json::json!({
         "hooks": hooks,
         "statusLine": { "type": "command", "command": statusline_command(exe) },
         "permissions": { "allow": reminders::permissions() },
         // A session pinned starts with bypass would otherwise wait on Claude Code's warning, in a
         // tab no one may be watching. Without the bypass flag the warning never shows.
         "skipDangerousModePermissionPrompt": true,
-    }))?)
+    })
+}
+
+#[cfg(unix)]
+fn subcommand(exe: &Path, name: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": format!("'{}' {name}", exe.display()) })
+}
+
+#[cfg(windows)]
+fn subcommand(exe: &Path, name: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": exe, "args": [name] })
+}
+
+/// Runs as the global orchestrator's PreToolUse hook: asks the machine whether the tool call
+/// on stdin may run, and refuses it when the machine says no, can't be reached or doesn't answer.
+pub fn guard() {
+    let payload: serde_json::Value = serde_json::from_str(&hook_payload()).unwrap_or_default();
+    let tool = payload["tool_name"].as_str().unwrap_or("").to_owned();
+    let asked = match (std::env::var(SOCK_ENV), std::env::var(TAB_ENV)) {
+        (Ok(sock), Ok(tab)) => ask_guard(&sock, &Message::Guard { tab, tool, input: payload["tool_input"].clone() }),
+        _ => Err("pinned is not running".into()),
+    };
+    if let Some(output) = guard_output(asked) {
+        println!("{output}");
+    }
+}
+
+/// Nothing for a call the machine lets run, so Claude Code's own permissions decide; else a deny.
+fn guard_output(asked: Reply) -> Option<String> {
+    let reason = asked.err()?;
+    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }).to_string())
+}
+
+fn ask_guard(sock: &str, message: &Message) -> Reply {
+    let mut stream = UnixStream::connect(sock).map_err(|e| format!("pinned is not running: {e}"))?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    writeln!(stream, "{}", serde_json::to_string(message).unwrap()).map_err(|e| e.to_string())?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).map_err(|e| format!("pinned did not answer: {e}"))?;
+    serde_json::from_str::<Reply>(&reply).map_err(|e| format!("pinned sent a bad answer: {e}"))?
 }
 
 /// Shell form, which every Claude Code version runs.
@@ -665,6 +724,31 @@ mod tests {
         );
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true, "a bypass session must not wait on Claude Code's warning");
         let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_global_orchestrators_settings_take_bash_away_and_guard_its_file_tools() {
+        let file = std::env::temp_dir().join(format!("pinned-global-settings-{}.json", std::process::id()));
+        write_global_settings(&file, Path::new("/Applications/pinned.app/Contents/MacOS/pinned")).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(settings["permissions"]["deny"], serde_json::json!(["Bash", "NotebookEdit"]));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"],
+            serde_json::json!([{ "matcher": "Read|Write|Edit|MultiEdit|Grep|Glob|LS", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' guard" }] }])
+        );
+        assert_eq!(settings["hooks"]["Stop"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook done" }] }]), "its turns still report");
+        assert_eq!(settings["permissions"]["allow"], serde_json::json!(reminders::permissions()));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn the_guard_denies_whatever_the_machine_does_not_allow() {
+        assert_eq!(guard_output(Ok(String::new())), None);
+        let denied: serde_json::Value = serde_json::from_str(&guard_output(Err("/x is outside".into())).unwrap()).unwrap();
+        assert_eq!(denied, serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "/x is outside" } }));
+        let unreachable = ask_guard("/nonexistent/pinned.sock", &Message::ListReminders);
+        assert!(guard_output(unreachable).is_some(), "a machine that can't be reached denies");
     }
 
     #[cfg(windows)]

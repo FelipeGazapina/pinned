@@ -32,7 +32,7 @@ function labelMarks(html) {
 
 test("the project filter label keeps the full name as its title", () => {
   const start = sidebarSrc.indexOf("function renderSidebar");
-  const end = sidebarSrc.indexOf("function shelfRows");
+  const end = sidebarSrc.indexOf("/** What the closed sidebar holds");
   const whereStart = sidebarSrc.indexOf("function projectNameMark");
   const whereEnd = sidebarSrc.indexOf("const projectFilter = document.getElementById");
   const projectFilter = { innerHTML: "", setAttribute() {} };
@@ -63,7 +63,18 @@ test("the project filter label keeps the full name as its title", () => {
     threadList: { replaceChildren() {}, querySelectorAll: () => [] },
     projectCount: () => 1,
     MOD_LABEL: "⌘",
+    machines: new Map(),
+    LOCAL: "local",
+    threadsSeen: {},
+    lastSeen: () => "",
+    machineName: () => "",
+    machineNote() {},
+    noteThreadsSeen() {},
+    offlineMachines: () => [],
+    emptyListText: () => "No threads yet",
     renderSyncAlert() {},
+    projectsOnManyMachines: () => new Set(),
+    drawSidebarToggle() {},
     tickDurations() {},
     scheduleWake() {},
     shelfRows: () => [{ matches: () => false }],
