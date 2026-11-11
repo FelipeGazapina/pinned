@@ -1631,6 +1631,154 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some("API Error: 529 overloaded")), "{status}");
     }
 
+    /// A finished task with a literal id, ended `days_ago` days before `NOW`.
+    fn finished(delegates: &Delegates, id: &str, days_ago: u64, delivered: bool) {
+        let task = new_on(delegates, Provider::Claude);
+        let mut tasks = delegates.tasks.lock().unwrap();
+        let task = tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+        task.id = id.to_owned();
+        task.state = WorkState::ResultAvailable;
+        task.started = NOW - days_ago * DAY - 1000;
+        task.ended = Some(NOW - days_ago * DAY);
+        task.delivered = delivered;
+    }
+
+    const NOW: u64 = 1_800_000_000_000;
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+
+    fn ids(delegates: &Delegates) -> Vec<String> {
+        delegates.tasks.lock().unwrap().iter().map(|t| t.id.clone()).collect()
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_finished_tasks_and_the_young_ones_whichever_keeps_more() {
+        let delegates = Delegates::default();
+        // Oldest first in the registry, as they were started.
+        for (id, days) in [("t-60d", 60), ("t-40d", 40), ("t-30d", 30), ("t-20d", 20), ("t-13d", 13), ("t-1d", 1)] {
+            finished(&delegates, id, days, true);
+        }
+        let mut tasks = delegates.tasks.lock().unwrap();
+        // Newest 2 are t-1d and t-13d, and t-13d is also within 14 days: the 20, 30, 40 and 60 day tasks go.
+        assert_eq!(registry::prune(&mut tasks, NOW, 2, 14 * DAY, 60 * DAY), 4);
+        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-13d", "t-1d"]);
+        drop(tasks);
+
+        let delegates = Delegates::default();
+        for (id, days) in [("t-60d", 60), ("t-40d", 40), ("t-30d", 30), ("t-20d", 20), ("t-13d", 13), ("t-1d", 1)] {
+            finished(&delegates, id, days, true);
+        }
+        let mut tasks = delegates.tasks.lock().unwrap();
+        // Newest 4 are kept by count, which keeps more than the 14 days do.
+        assert_eq!(registry::prune(&mut tasks, NOW, 4, 14 * DAY, 60 * DAY), 2);
+        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t-30d", "t-20d", "t-13d", "t-1d"]);
+    }
+
+    #[test]
+    fn pruning_keeps_what_works_what_a_kept_task_hangs_under_and_an_undelivered_result_for_sixty_days() {
+        let delegates = Delegates::default();
+        finished(&delegates, "t-undelivered-61d", 61, false);
+        finished(&delegates, "t-undelivered-59d", 59, false);
+        finished(&delegates, "t-old-parent", 90, true);
+        finished(&delegates, "t-old-gone", 90, true);
+        finished(&delegates, "t-old-child", 2, true);
+        finished(&delegates, "t-old-working", 90, true);
+        {
+            let mut tasks = delegates.tasks.lock().unwrap();
+            let by = |tasks: &mut Vec<Task>, id: &str| tasks.iter().position(|t| t.id == id).unwrap();
+            let at = by(&mut tasks, "t-old-child");
+            tasks[at].parent = Parent::Task("t-old-parent".into());
+            let at = by(&mut tasks, "t-old-working");
+            tasks[at].state = WorkState::Working;
+            tasks[at].ended = None;
+        }
+        let mut tasks = delegates.tasks.lock().unwrap();
+        assert_eq!(registry::prune(&mut tasks, NOW, 0, 14 * DAY, 60 * DAY), 2);
+        assert_eq!(
+            tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t-undelivered-59d", "t-old-parent", "t-old-child", "t-old-working"],
+            "the 61 day undelivered task and t-old-gone had nothing holding them"
+        );
+    }
+
+    #[test]
+    fn tasks_json_is_written_compact_pruned_and_read_back_either_way() {
+        let dir = scratch("tasks-json-prune");
+        let file = dir.join("tasks.json");
+        let delegates = Delegates::load(Some(file.clone()));
+        let now = registry::unix_millis();
+        for n in 0..3 {
+            finished(&delegates, &format!("t-recent-{n}"), 0, true);
+        }
+        finished(&delegates, "t-ancient", 0, true);
+        {
+            let mut tasks = delegates.tasks.lock().unwrap();
+            for task in tasks.iter_mut() {
+                let age = if task.id == "t-ancient" { 400 * DAY } else { DAY };
+                task.started = now - age - 1000;
+                task.ended = Some(now - age);
+            }
+            // 497 more finished tasks, newer than the ancient one but not young: with the 3 recent ones
+            // they are the newest 500, and only that count keeps them.
+            for n in 0..497 {
+                let mut task = tasks[0].clone();
+                task.id = format!("t-count-{n:03}");
+                task.started = now - 30 * DAY - n * 1000 - 1000;
+                task.ended = Some(now - 30 * DAY - n * 1000);
+                tasks.push(task);
+            }
+        }
+        delegates.set_model("t-recent-0", None);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("\n  "), "compact, not pretty");
+        assert!(!text.contains("t-ancient"), "older than 14 days and beyond the newest 500");
+        assert!(text.contains("t-count-496") && text.contains("t-recent-2"));
+
+        // A pretty file from an older pinned reads the same, and is written compact by the next change.
+        let value: Value = serde_json::from_str(&text).unwrap();
+        std::fs::write(&file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let again = Delegates::load(Some(file.clone()));
+        assert_eq!(ids(&again).len(), 500);
+        again.set_model("t-recent-0", None);
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("\n  "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "size probe: cargo test -p pinned-core tasks_json_size -- --ignored --nocapture"]
+    fn tasks_json_size() {
+        let size = |count: u64, span_days: u64| {
+            let dir = scratch("tasks-json-size");
+            let file = dir.join("tasks.json");
+            let delegates = Delegates::load(Some(file.clone()));
+            let now = registry::unix_millis();
+            for n in 0..count {
+                let task = new_on(&delegates, Provider::Claude);
+                let mut tasks = delegates.tasks.lock().unwrap();
+                let task = tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+                let age = (count - n) * span_days * DAY / count;
+                task.started = now - age - 60_000;
+                task.ended = Some(now - age);
+                task.state = if n % 9 == 0 { WorkState::Failed } else { WorkState::ResultAvailable };
+                task.delivered = true;
+                task.title = format!("Task {n}: port the parser and its tests");
+                task.summary = Some(format!("Done {n}. ").repeat(300));
+                task.cwd = PathBuf::from("/Users/someone/projetos/personal-harness/.claude/worktrees/pinned-902601c8");
+            }
+            delegates.set_model("none", None);
+            let compact = std::fs::read(&file).unwrap();
+            let value: Value = serde_json::from_slice(&compact).unwrap();
+            let kept = value["tasks"].as_array().unwrap().len();
+            let pretty = serde_json::to_vec_pretty(&value).unwrap().len();
+            let _ = std::fs::remove_dir_all(&dir);
+            (kept, compact.len(), pretty)
+        };
+        let (kept_all, compact_all, pretty_all) = size(377, 10);
+        eprintln!("377 tasks over 10 days: kept {kept_all}; before (pretty, unpruned) = {pretty_all} bytes, after (compact) = {compact_all} bytes");
+        let (kept, compact, _) = size(1500, 40);
+        let (_, compact_unpruned, pretty_unpruned) = size(1500, 10);
+        eprintln!("1500 tasks over 40 days: kept {kept}; before (pretty, nothing dropped) = {pretty_unpruned} bytes; compact alone = {compact_unpruned}; after (compact, pruned) = {compact} bytes");
+    }
+
     #[test]
     fn a_reload_keeps_how_a_task_ended_and_its_limits() {
         let dir = scratch("reload-ended");

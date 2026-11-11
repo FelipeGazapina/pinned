@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tower_http::compression::Compression;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
@@ -87,6 +88,12 @@ pub const ROUTES: &[&str] = &[
     "DELETE /mcp",
 ];
 
+/// Compresses the web app's files for a client that accepts gzip. Only these: the downloads are
+/// binaries, and the API answers are small.
+fn gzipped<S>(files: S) -> Compression<S> {
+    Compression::new(files).gzip(true)
+}
+
 fn route(spec: &str) -> &str {
     assert!(ROUTES.contains(&spec), "{spec} is missing from ROUTES");
     spec.split_once(' ').expect("METHOD /path").1
@@ -113,7 +120,7 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<d
         .route(route("GET /install.sh"), get(install))
         .route(route("GET /download/{file}"), get(download))
         // A prompt link, /new?prompt=…, is the app itself, which reads the link from its address.
-        .route_service(route("GET /new"), SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        .route_service(route("GET /new"), gzipped(SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))))
         .route(route("GET /.well-known/oauth-protected-resource"), get(oauth::resource_metadata))
         .route(route("GET /.well-known/oauth-protected-resource/mcp"), get(oauth::resource_metadata))
         .route(route("GET /.well-known/oauth-authorization-server"), get(oauth::server_metadata))
@@ -124,17 +131,17 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<d
         // The web app shows the pending authorization in its address to the signed-in account.
         .route_service(
             route("GET /connect-agent"),
-            SetResponseHeader::overriding(
+            gzipped(SetResponseHeader::overriding(
                 SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
                 header::REFERRER_POLICY,
                 HeaderValue::from_static("no-referrer"),
-            ),
+            )),
         )
         .route(route("POST /mcp"), post(mcp::post))
         .route(route("GET /mcp"), get(mcp::not_offered))
         .route(route("DELETE /mcp"), axum::routing::delete(mcp::not_offered))
         // Without it a browser guesses the files stay fresh for hours, and runs an old UI after a deploy.
-        .fallback_service(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        .fallback_service(gzipped(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))))
         .with_state(server)
 }
 

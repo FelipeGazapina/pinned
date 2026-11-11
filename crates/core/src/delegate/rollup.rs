@@ -76,8 +76,25 @@ impl WorkCost {
     }
 }
 
+/// Each task's children, in registry order, built once so a rollup does not scan the registry per task.
+type Children<'a> = HashMap<&'a str, Vec<&'a Task>>;
+
+fn children_index(tasks: &[Task]) -> Children<'_> {
+    let mut index = Children::new();
+    for task in tasks {
+        if let Parent::Task(parent) = &task.parent {
+            index.entry(parent.as_str()).or_default().push(task);
+        }
+    }
+    index
+}
+
+fn roots_of<'a>(tasks: &'a [Task], tab: &str) -> Vec<&'a Task> {
+    tasks.iter().filter(|task| matches!(&task.parent, Parent::Tab(parent) if parent == tab)).collect()
+}
+
 /// The tasks below `roots`, each with its depth, as the workers they started and theirs in turn.
-fn rollup_of(tasks: &[Task], roots: Vec<&Task>) -> WorkCost {
+fn rollup_of(children_of: &Children, roots: Vec<&Task>) -> WorkCost {
     let mut cost = WorkCost::default();
     let mut seen = HashSet::new();
     let mut stack: Vec<(&Task, u32)> = roots.into_iter().rev().map(|task| (task, 0)).collect();
@@ -110,8 +127,9 @@ fn rollup_of(tasks: &[Task], roots: Vec<&Task>) -> WorkCost {
             tokens_in: usage.tokens_in,
             tokens_out: usage.tokens_out,
         });
-        let children = tasks.iter().filter(|child| matches!(&child.parent, Parent::Task(parent) if *parent == task.id));
-        stack.extend(children.collect::<Vec<_>>().into_iter().rev().map(|child| (child, depth + 1)));
+        if let Some(children) = children_of.get(task.id.as_str()) {
+            stack.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+        }
     }
     cost.total_usd = cost.agents_usd + cost.box_usd;
     cost
@@ -122,8 +140,14 @@ impl Delegates {
     /// not here: `WorkCost::with_own` adds it.
     pub fn work_cost_of_tab(&self, tab: &str) -> WorkCost {
         let tasks = self.tasks.lock().unwrap();
-        let roots = tasks.iter().filter(|task| matches!(&task.parent, Parent::Tab(parent) if parent == tab)).collect();
-        rollup_of(&tasks, roots)
+        rollup_of(&children_index(&tasks), roots_of(&tasks, tab))
+    }
+
+    /// Like `work_cost_of_tab`, but None for a thread that delegated nothing: what `work_costs` omits.
+    pub fn work_cost_if_any(&self, tab: &str) -> Option<WorkCost> {
+        let tasks = self.tasks.lock().unwrap();
+        let roots = roots_of(&tasks, tab);
+        (!roots.is_empty()).then(|| rollup_of(&children_index(&tasks), roots))
     }
 
     /// Task `id` and everything it delegated, when `caller` owns it.
@@ -133,18 +157,119 @@ impl Delegates {
         if !allows(&tasks, id, caller) {
             return Err(format!("task {id} belongs to another session"));
         }
-        Ok(rollup_of(&tasks, vec![root]))
+        Ok(rollup_of(&children_index(&tasks), vec![root]))
     }
 
     /// The cost of each thread that delegated anything, by tab, for the tabs' views.
     pub fn work_costs(&self) -> HashMap<String, WorkCost> {
         let tasks = self.tasks.lock().unwrap();
-        let tabs: HashSet<&str> = tasks.iter().filter_map(|task| if let Parent::Tab(tab) = &task.parent { Some(tab.as_str()) } else { None }).collect();
-        tabs.into_iter()
-            .map(|tab| {
-                let roots = tasks.iter().filter(|task| matches!(&task.parent, Parent::Tab(parent) if parent == tab)).collect();
-                (tab.to_owned(), rollup_of(&tasks, roots))
-            })
-            .collect()
+        let children_of = children_index(&tasks);
+        let mut roots: HashMap<&str, Vec<&Task>> = HashMap::new();
+        for task in tasks.iter() {
+            if let Parent::Tab(tab) = &task.parent {
+                roots.entry(tab.as_str()).or_default().push(task);
+            }
+        }
+        roots.into_iter().map(|(tab, roots)| (tab.to_owned(), rollup_of(&children_of, roots))).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::TaskUsage;
+
+    fn start(d: &Delegates, parent: Parent, title: &str) -> String {
+        d.begin(NewTask {
+            parent,
+            tool: None,
+            title: title.into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: PathBuf::from("/repo"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:t".into(),
+            client_request_id: None,
+            role: None,
+        })
+        .id
+    }
+
+    /// 1 thread with 20 workers, each with 9 under it and each of those with 9 more: 1820 tasks.
+    /// Plus 200 on a second thread, so `work_costs` has two keys.
+    fn registry() -> (Delegates, Vec<String>) {
+        let d = Delegates::default();
+        let mut ids = vec![];
+        for a in 0..20 {
+            let top = start(&d, Parent::Tab("t1".into()), &format!("top {a}"));
+            ids.push(top.clone());
+            for b in 0..9 {
+                let mid = start(&d, Parent::Task(top.clone()), &format!("mid {a}.{b}"));
+                ids.push(mid.clone());
+                for c in 0..9 {
+                    ids.push(start(&d, Parent::Task(mid.clone()), &format!("leaf {a}.{b}.{c}")));
+                }
+            }
+        }
+        for n in 0..200 {
+            ids.push(start(&d, Parent::Tab("t2".into()), &format!("other {n}")));
+        }
+        let used: Vec<_> = ids.iter().enumerate().map(|(n, id)| (id.clone(), TaskUsage { tokens_in: n as u64, tokens_out: 1, cost_usd: (n % 7 != 0).then_some(0.01 * (n % 13) as f64), wall_ms: 1000, box_usd: None, box_ms: None })).collect();
+        d.meter(&used, None);
+        (d, ids)
+    }
+
+    #[test]
+    fn a_registry_of_two_thousand_tasks_rolls_up_to_the_same_workers_in_the_same_order() {
+        let (d, ids) = registry();
+        assert_eq!(ids.len(), 2020);
+        let costs = d.work_costs();
+        let mut keys: Vec<_> = costs.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["t1", "t2"]);
+
+        let t1 = &costs["t1"];
+        assert_eq!(t1.workers, 1820);
+        let titles: Vec<_> = t1.tasks.iter().take(13).map(|w| (w.title.as_str(), w.depth)).collect();
+        assert_eq!(titles, [("top 0", 0), ("mid 0.0", 1), ("leaf 0.0.0", 2), ("leaf 0.0.1", 2), ("leaf 0.0.2", 2), ("leaf 0.0.3", 2), ("leaf 0.0.4", 2), ("leaf 0.0.5", 2), ("leaf 0.0.6", 2), ("leaf 0.0.7", 2), ("leaf 0.0.8", 2), ("mid 0.1", 1), ("leaf 0.1.0", 2)], "depth first, children in registry order");
+        assert_eq!((t1.tasks.last().unwrap().title.as_str(), t1.tasks.last().unwrap().depth), ("leaf 19.8.8", 2));
+        assert_eq!(t1.tokens_in, (0..1820u64).sum::<u64>());
+        assert_eq!(t1.tokens_out, 1820);
+        let known: f64 = (0..1820usize).filter(|n| n % 7 != 0).map(|n| 0.01 * (n % 13) as f64).sum();
+        assert!((t1.agents_usd - known).abs() < 1e-6, "{} vs {known}", t1.agents_usd);
+        assert_eq!(t1.unknown as usize, (0..1820usize).filter(|n| n % 7 == 0).count());
+
+        assert_eq!(costs["t2"].workers, 200);
+        assert_eq!(costs["t2"].tasks.iter().map(|w| w.depth).max(), Some(0));
+
+        // One tab's own rollup is the one the map holds, and a tab with no workers has none.
+        assert_eq!(d.work_cost_if_any("t1").as_ref(), Some(t1));
+        assert_eq!(d.work_cost_if_any("t2").as_ref(), Some(&costs["t2"]));
+        assert_eq!(d.work_cost_if_any("t3"), None);
+        assert_eq!(d.work_cost_of_tab("t1").tasks.len(), 1820);
+        assert_eq!(d.work_cost_of_tab("t3").workers, 0);
+        let caller = Caller { tab: Some("t1".into()), task: None };
+        let mid = d.work_cost_of_task(&caller, &ids[1]).unwrap();
+        assert_eq!((mid.workers, mid.tasks[0].title.as_str()), (10, "mid 0.0"));
+    }
+
+    #[test]
+    #[ignore = "timing probe: cargo test -p pinned-core --release work_costs_time -- --ignored --nocapture"]
+    fn work_costs_time() {
+        let (d, _) = registry();
+        let start = std::time::Instant::now();
+        let runs = 20;
+        for _ in 0..runs {
+            std::hint::black_box(d.work_costs());
+        }
+        let all = start.elapsed() / runs;
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(d.work_cost_of_tab("t2"));
+        }
+        eprintln!("work_costs over 2000 tasks: {all:?} per call; one tab (t2, 200 tasks): {:?} per call", start.elapsed() / runs);
     }
 }
