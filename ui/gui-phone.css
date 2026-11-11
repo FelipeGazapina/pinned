@@ -87,6 +87,10 @@ body[data-phone-screen="threads"] #thread-list .thread-row.tall .l3 { grid-area:
 body[data-phone-screen="threads"] #thread-list .thread-row.tall .l3:empty { display: none; }
 body[data-phone-screen="threads"] #thread-list .thread-row .l3 .role:not(.worker) { padding: 0; background: none; color: inherit; font-size: inherit; font-weight: 400; line-height: inherit; }
 body[data-phone-screen="threads"] #thread-list .thread-row .l3 .role:not(.worker):not(:last-child)::after { content: "·"; margin: 0 -2.5px 0 3.5px; }
+/* A Captain with workers says how far they are, and an unread thread that it finished, in place of the branch. */
+body[data-phone-screen="threads"] #thread-list .thread-row .l3:has(> .phone-sub) > :not(.role, .pin, .warn, .term-run, .phone-sub) { display: none; }
+body[data-phone-screen="threads"] #thread-list .thread-row .l3 > .phone-sub { display: flex; gap: 6px; min-width: 0; }
+body[data-phone-screen="threads"] #thread-list .thread-row .stamp .word { display: none; }
 /* A worker on the guide line, under its Captain. */
 body[data-phone-screen="threads"] #thread-list .thread-row.line { gap: 12px; min-height: 44px; padding: 4px 16px 4px calc(40px + (var(--depth, 1) - 1) * 16px); }
 body[data-phone-screen="threads"] #thread-list .thread-row.line::before { left: calc(21px + (var(--depth, 1) - 1) * 16px); border-left-color: rgb(var(--g-ink-rgb) / 0.14); }
