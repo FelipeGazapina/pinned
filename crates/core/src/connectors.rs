@@ -7743,9 +7743,9 @@ mod tests {
         ]});
         slack::set_api_root(Some(serve_replies(replies.to_string())));
         let posts = block_on(slack::thread("xoxb-test", "C0123ABCD", "1792400050.000200")).unwrap();
-        let files: Vec<(&str, Vec<(&str, &str, &str, u64)>)> = posts
+        let files: Vec<_> = posts
             .iter()
-            .map(|p| (p.ts.as_str(), p.files.iter().map(|f| (f.id.as_str(), f.name.as_str(), f.mimetype.as_str(), f.size)).collect()))
+            .map(|p| (p.ts.as_str(), p.files.iter().map(|f| (f.id.as_str(), f.name.as_str(), f.mimetype.as_str(), f.size)).collect::<Vec<_>>()))
             .collect();
         assert_eq!(
             files,
