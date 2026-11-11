@@ -7554,6 +7554,161 @@ mod tests {
         assert_eq!(posted.len(), 4, "{posted:?}");
     }
 
+
+    const BUG_REPLY: &str = "Here is what the investigation found.";
+
+    /// What a ticket request in a followed thread left behind, when the thread's own run walks
+    /// its bug branch through a session and then a reply.
+    struct SharedSession {
+        posted: Vec<String>,
+        created: Vec<Value>,
+        typed: Vec<String>,
+        /// The runs just before the turn the follow-up typed ends, and after.
+        before: Vec<runner::Run>,
+        runs: Vec<runner::Run>,
+    }
+
+    /// The thread's first message is a bug: its run opens a session whose branch ends in a reply.
+    /// With `original_waiting` false that session's turn ends first, so the run is Done with the
+    /// tab still live; otherwise it is still Waiting on its turn. Then a mention asks for a ticket,
+    /// the follow-up types into the same tab, the session sets the run variables and its turn ends.
+    fn ticket_request_beside_a_bug_session(original_waiting: bool) -> SharedSession {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        let _model = TestReply::set(r#"{"kind":"bug"}"#.into());
+        install_rustls();
+        let now = Utc::now();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(json!({}))));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        let mut router = triage_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let graph = router.graph.as_mut().unwrap();
+        graph.nodes.push(node("bug-reply", "Bug reply", NodeKind::Reply { text: BUG_REPLY.into() }));
+        graph.edges.push(edge("session", "out", "bug-reply"));
+        let (connectors, dir) = stored(if original_waiting { "shared-session-waiting" } else { "shared-session-done" }, vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        let typed = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            match &work {
+                Work::Prompt { text, .. } => typed.lock().unwrap().push(text.clone()),
+                Work::Run(run) => typed.lock().unwrap().push(run.args.last().cloned().unwrap_or_default()),
+                _ => {}
+            }
+            placed(work)
+        };
+        let end_turn = || {
+            for status in [AgentStatus::Working, AgentStatus::Done] {
+                let tab = session_tab(Some(status), Some("claude-1"));
+                block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&tab), &open)).unwrap();
+            }
+        };
+        let thread = "1792400050.000200".to_owned();
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.clone() };
+        connectors.begin("c2".into(), subject.clone(), slack_trigger(None), "2026-11-11T10:00:00Z").unwrap();
+        block_on(connectors.drive(&open)).unwrap();
+        if !original_waiting {
+            end_turn();
+        }
+        crate::vercel::set_test_content(Some(r#"{"kind":"ticket-request"}"#.into()));
+        connectors.enqueue(mention_in(&thread, "1792400100.000100", "@pinned please create a ticket for this"));
+        block_on(connectors.drive(&open)).unwrap();
+        for (name, value) in [("title", TRIAGED_TITLE), ("summary", TRIAGED_SUMMARY)] {
+            assert_eq!(connectors.run_set("c2", &subject, name, value), Ok(format!("set {{{{vars.{name}}}}} for this workflow run")));
+        }
+        let before = connectors.graph_runs();
+        end_turn();
+        let runs = connectors.graph_runs();
+        crate::vercel::take_test_inputs();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+        let seen = seen.lock().unwrap();
+        let created = seen
+            .iter()
+            .filter(|request| request.contains("issueCreate"))
+            .map(|request| serde_json::from_str::<Value>(request.split_once(' ').unwrap().1).unwrap()["variables"]["input"].clone())
+            .collect();
+        let posted = seen
+            .iter()
+            .filter(|request| request.starts_with("/chat.postMessage"))
+            .map(|request| {
+                let body: Value = serde_json::from_str(request.split_once(' ').unwrap().1).unwrap();
+                assert_eq!((&body["channel"], &body["thread_ts"]), (&json!("C0123ABCD"), &json!("1792400050.000200")), "{body}");
+                body["text"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        SharedSession { posted, created, typed: typed.into_inner().unwrap(), before, runs }
+    }
+
+    fn nodes_run(run: &runner::Run) -> Vec<&str> {
+        run.log.iter().map(|entry| entry.node.0.as_str()).collect()
+    }
+
+    /// The thread's own run and its follow-up, in that order, with the follow-up's vars and the
+    /// tab both are on, so the asserts below read the same in both cases.
+    fn original_and_follow_up(runs: &[runner::Run]) -> (&runner::Run, &runner::Run) {
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(!runs[0].follow_up && runs[1].follow_up, "{runs:?}");
+        for run in runs {
+            let Session::Live { machine, tab, .. } = &run.session else { panic!("{:?}", run.session) };
+            assert_eq!((machine.as_str(), tab.as_str()), ("m1", "tab-1"), "{}", run.id.0);
+            assert_eq!(run.session_owner.as_deref(), Some("c2"));
+        }
+        (&runs[0], &runs[1])
+    }
+
+    fn assert_filed_from_the_follow_up(shared: &SharedSession) {
+        let SharedSession { created, typed, runs, .. } = shared;
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert_eq!(created[0]["title"], TRIAGED_TITLE);
+        // The mention is typed once, with the follow-up's triage prompt, never again through the thread's run.
+        assert_eq!(typed.len(), 2, "{typed:?}");
+        assert!(typed[0].starts_with("Triage the thread."), "{}", typed[0]);
+        assert_eq!(typed[1], "Triage what the thread asks for.\n\n[Slack reply from ana in the thread]\n@pinned please create a ticket for this");
+        let (original, follow_up) = original_and_follow_up(runs);
+        assert_eq!(nodes_run(follow_up), ["t", "route", "ack", "triage", "file-requested-issue", "reply"]);
+        assert_eq!(follow_up.status, Status::Done);
+        assert_eq!(follow_up.context["vars"], json!({ "title": TRIAGED_TITLE, "summary": TRIAGED_SUMMARY }));
+        assert_eq!(original.context["vars"], Value::Null, "run set reaches the newest run on the tab");
+        assert_eq!(nodes_run(original), ["t", "route", "session", "bug-reply"]);
+        assert_eq!(original.status, Status::Done);
+        // Both stay on the tab, which the hook reported as claude-1.
+        for run in [original, follow_up] {
+            assert!(matches!(&run.session, Session::Live { claude: Some(claude), .. } if claude == "claude-1"), "{:?}", run.session);
+        }
+    }
+
+    #[test]
+    fn a_ticket_follow_up_on_a_finished_runs_live_session_advances_alone() {
+        let shared = ticket_request_beside_a_bug_session(false);
+        assert_filed_from_the_follow_up(&shared);
+        // The bug reply went out at the end of the thread run's own turn, before the mention.
+        assert_eq!(shared.posted, [BUG_REPLY, TRIAGE_ACK, "Ticket: https://linear.example/BLO-1"]);
+        // The turn the follow-up typed ended: only the follow-up moved. The thread's run, Done
+        // with its tab still live, is exactly as it was.
+        let (original, follow_up) = original_and_follow_up(&shared.before);
+        assert_eq!((&follow_up.status, nodes_run(follow_up)), (&Status::Waiting, vec!["t", "route", "ack", "triage"]));
+        assert_eq!(original, &shared.runs[0]);
+    }
+
+    #[test]
+    fn a_ticket_follow_up_beside_a_waiting_run_ends_both_waits_with_one_turn() {
+        let shared = ticket_request_beside_a_bug_session(true);
+        assert_filed_from_the_follow_up(&shared);
+        // Both runs waited on the one tab, and its one turn answered both prompts: each moved one
+        // step. The bug reply is the thread run's own, posted once, not a second answer.
+        let (original, follow_up) = original_and_follow_up(&shared.before);
+        assert_eq!((&original.status, nodes_run(original)), (&Status::Waiting, vec!["t", "route", "session"]));
+        assert_eq!((&follow_up.status, nodes_run(follow_up)), (&Status::Waiting, vec!["t", "route", "ack", "triage"]));
+        assert_eq!(shared.posted, [TRIAGE_ACK, BUG_REPLY, "Ticket: https://linear.example/BLO-1"]);
+    }
+
     #[test]
     fn run_set_refuses_bad_names_big_values_and_a_session_without_a_graph_run() {
         let (connectors, dir) = stored("run-set-refusals", vec![triage_router()]);
