@@ -232,6 +232,34 @@ function answerSettings(key) {
 }
 
 let line = "";
+// $HOME/fake-turns.json, when a sweep writes it, scripts the turn for any prompt holding one of its
+// `prompt` strings: tools as [name, input, result] already done, `running` as a tool still at work
+// (the turn holds), `say` as the answer, `pr` as the {number, repo} it opened, and `ask` as a Bash
+// {command, description} to approve.
+const scriptedTurns = () => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(process.env.HOME, "fake-turns.json"), "utf8"));
+  } catch {
+    return [];
+  }
+};
+function scriptedTurn(turn) {
+  for (const [name, input, result] of turn.tools ?? []) used(name, input, result);
+  if (turn.say) wrote([{ type: "text", text: turn.say }]);
+  if (turn.pr) record({ type: "pr-link", prNumber: turn.pr.number, prUrl: `https://github.com/${turn.pr.repo}/pull/${turn.pr.number}`, prRepository: turn.pr.repo });
+  line = "";
+  if (turn.ask) {
+    askTool = turn.ask;
+    wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: turn.ask }]);
+    hook("Notification", { message: "Claude needs your permission to use Bash" });
+    asking = 1;
+    return drawMenu();
+  }
+  if (turn.running) wrote([{ type: "tool_use", id: `tool-${lines}`, name: turn.running[0], input: turn.running[1] }]);
+  out(`${turn.say ?? "working"}\r\n`);
+  if (!turn.running && !turn.hold) hook("Stop");
+  prompt();
+}
 function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
@@ -250,6 +278,8 @@ function submit() {
   hook("UserPromptSubmit", { prompt: line });
   // "pictures" stands for a prompt with images, which claude writes as one message below.
   if (line !== "pictures") said(line);
+  const scripted = scriptedTurns().find((t) => line.includes(t.prompt));
+  if (scripted && !fs.existsSync(DELEGATE_CALLS)) return scriptedTurn(scripted);
   // A usage limit stops the turn as claude's does: the error goes to the transcript, then StopFailure.
   if (line === "/limit") {
     record({ type: "assistant", apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 } }, message: { role: "assistant", content: [{ type: "text", text: "You've hit your limit" }] } });
@@ -556,7 +586,7 @@ function submit() {
       used("mcp__pinned__delegate_task", input, answer);
       return { ...JSON.parse(answer), title: input.title };
     });
-    wrote([{ type: "text", text: `Started ${started.length} workers:\n\n${started.map((s) => `- ${s.title}: ${s.tabId} (${s.taskId})`).join("\n")}` }]);
+    wrote([{ type: "text", text: scripted?.say ?? `Started ${started.length} workers:\n\n${started.map((s) => `- ${s.title}: ${s.tabId} (${s.taskId})`).join("\n")}` }]);
     out(`delegated ${started.length}\r\n`);
   } else if (line === "options") {
     wrote([{ type: "text", text: "Li os relatórios dos dois Capitães.\n\nOpções: Sim | Ainda não" }]);
@@ -775,9 +805,10 @@ const TODOS_SAVED = "Todos have been modified successfully. Ensure that you cont
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
 let asking = 0;
 let amending = null;
+let askTool = { command: "rm -rf build", description: "Remove the build folder" };
 function drawMenu() {
   const box = "╌".repeat(40);
-  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n Remove the build folder\r\n${box}\r\n rm -rf build\r\n${box}\r\n Do you want to proceed?\r\n`);
+  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n ${askTool.description}\r\n${box}\r\n ${askTool.command}\r\n${box}\r\n Do you want to proceed?\r\n`);
   const no = amending === null ? "No" : amending ? `No, ${amending}` : "No, and tell Claude what to do differently";
   [...CHOICES.slice(0, -1), no].forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
   out(amending === null ? " Esc to cancel · Tab to amend\r\n" : " Esc to cancel\r\n");
