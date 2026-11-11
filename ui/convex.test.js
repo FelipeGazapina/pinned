@@ -192,12 +192,23 @@ test("Disconnect takes a second click", async () => {
   assert.deepEqual(plain(context.__settings.convex), []);
 });
 
-test("while an agent's request to connect waits, the form keeps the project it asked for", () => {
+test("while an agent's request to connect waits, the card names every project it asked for", () => {
   const { context } = load();
-  context.agentAsking = (action) => (action === "connect_convex" ? { args: { repos: ["github.com/acme/billing"] } } : null);
-  const html = context.convexCardHtml();
-  assert.match(html, /<select id="convex-project" aria-label="Project" disabled><option value="">No project yet<\/option>/);
-  assert.match(html, /<option value="github\.com\/acme\/billing" selected>billing · ~\/code\/billing<\/option>/);
+  const asking = (repos) => {
+    context.agentAsking = (action) => (action === "connect_convex" ? { args: { repos } } : null);
+    return context.convexCardHtml();
+  };
+  const three = asking(["github.com/acme/billing", "github.com/acme/site", "github.com/acme/ops"]);
+  assert.match(
+    three,
+    /<p class="hint convex-asked">The agent asked to connect these 3 projects: <code title="github\.com\/acme\/billing">billing · ~\/code\/billing<\/code>, <code title="github\.com\/acme\/site">site · ~\/code\/site<\/code>, <code title="github\.com\/acme\/ops">github\.com\/acme\/ops<\/code>\. A project moves off any other deployment it reads\.<\/p>/,
+  );
+  assert.doesNotMatch(three, /id="convex-project"/, "the user picks nothing: the request's own projects are connected");
+  assert.match(three, /id="convex-key"/);
+  assert.match(asking(["github.com/acme/billing"]), /The agent asked to connect this project: <code title="github\.com\/acme\/billing">billing · ~\/code\/billing<\/code>\./);
+  assert.match(asking([]), /<p class="hint convex-asked">The agent asked to connect the deployment to no project yet\.<\/p>/);
+  context.agentAsking = () => null;
+  assert.match(context.convexCardHtml(), /<select id="convex-project" aria-label="Project">/, "with no request waiting the user picks the project");
 });
 
 /** A workflow draft whose graph is a trigger, then `step` when given, open in the editor. */

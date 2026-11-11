@@ -75,6 +75,14 @@ function convexFoundHtml() {
     .join("");
 }
 
+/** Every project an agent's waiting request connects. Typing the key approves all of them, so the
+ * card names each one, not only the first. */
+function convexAskedHtml(projects, repos) {
+  if (!repos.length) return `<p class="hint convex-asked">The agent asked to connect the deployment to no project yet.</p>`;
+  const names = repos.map((repo) => `<code title="${esc(repo)}">${esc(convexProjectLabel(projects, repo))}</code>`).join(", ");
+  return `<p class="hint convex-asked">The agent asked to connect ${repos.length === 1 ? "this project" : `these ${repos.length} projects`}: ${names}. A project moves off any other deployment it reads.</p>`;
+}
+
 function convexFormHtml() {
   const asking = agentAsking("connect_convex");
   const projects = convexProjects();
@@ -87,7 +95,7 @@ function convexFormHtml() {
         <button class="secondary" data-action="open-convex-keys">Open Convex ↗</button>
         <span class="convex-permissions">${CONVEX_PERMISSIONS.map((name) => `<code>${name}</code>`).join("")}</span></li>
       <li>Pick the project whose agents read it, and paste the key. Pinned reads the deployment from the key.
-        <div class="row"><select id="convex-project" aria-label="Project"${asking ? " disabled" : ""}>${options(repos, (repo) => (repo ? convexProjectLabel(projects, repo) : "No project yet"), chosen)}</select></div>
+        ${asking ? convexAskedHtml(projects, asking.args?.repos ?? []) : `<div class="row"><select id="convex-project" aria-label="Project">${options(repos, (repo) => (repo ? convexProjectLabel(projects, repo) : "No project yet"), chosen)}</select></div>`}
         <div class="row"><input id="convex-key" type="password" placeholder="${esc(found ?? "dev:…")}|…" autocomplete="off" spellcheck="false">
         <button class="primary" data-action="connect-convex">Connect</button></div></li>
     </ol>
