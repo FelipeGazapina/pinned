@@ -6943,6 +6943,9 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("save_mcp_server", json!({ "server": server })),
         ("remove_mcp_server", json!({ "id": "s1" })),
         ("import_mcp_server", json!({ "machine": machine, "account": "claude", "name": "linear" })),
+        ("connect_convex", json!({ "repos": ["github.com/acme/site"] })),
+        ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
+        ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
     ]
     .into_iter()
     .collect();
