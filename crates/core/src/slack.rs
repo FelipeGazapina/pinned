@@ -481,6 +481,174 @@ pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Resul
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
 }
 
+/// What `pinned slack files` prints when the Slack app may not read files.
+pub const NO_FILES_SCOPE: &str =
+    "pinned could not read this thread's files: the Slack app lacks the files:read scope; ask the workspace admin to reinstall it with files:read.";
+/// The biggest file `pinned slack files` downloads.
+pub const FILE_LIMIT: u64 = 20 << 20;
+/// The most files one `pinned slack files` downloads.
+pub const FILE_COUNT: usize = 20;
+/// The most bytes one `pinned slack files` downloads, all of which travel to the session's machine
+/// in base64 in one websocket message.
+pub const FILES_TOTAL: u64 = 40 << 20;
+const _: () = assert!((FILES_TOTAL as usize).div_ceil(3) * 4 + (1 << 20) <= crate::sync::MESSAGE_LIMIT);
+
+/// A thread file the hub downloaded for its session.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Download {
+    pub name: String,
+    pub mimetype: String,
+    pub author: String,
+    /// The ts of the message that attaches it.
+    pub ts: String,
+    pub data: crate::wire::Bytes,
+}
+
+/// The hub's answer to `pinned slack files`: the files it downloaded, and a line for each it did not.
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+pub struct Downloads {
+    pub files: Vec<Download>,
+    pub notes: Vec<String>,
+}
+
+/// Whether a Slack error means the app may not read files.
+pub fn lacks_files_scope(error: &str) -> bool {
+    matches!(error, "Slack: missing_scope" | "Slack: not_allowed_token_type") || error == NO_FILES_SCOPE
+}
+
+/// Images and PDFs first, then the rest, each in thread order. A session reads those itself.
+fn readable_first(files: &mut [(&Post, SlackFile)]) {
+    files.sort_by_key(|(_, file)| !(file.mimetype.starts_with("image/") || file.mimetype == "application/pdf"));
+}
+
+/// Downloads the files of `posts`, `FILE_COUNT` at most and `FILES_TOTAL` bytes in all, skipping
+/// any over `FILE_LIMIT`. A file that fails is noted and the rest still download, until Slack says
+/// the app may not read files.
+pub async fn download_all(token: &str, posts: &[Post]) -> Downloads {
+    let mut files: Vec<(&Post, SlackFile)> = posts.iter().flat_map(|post| post.files.iter().map(move |file| (post, file.clone()))).collect();
+    let mut downloads = Downloads::default();
+    if files.is_empty() {
+        downloads.notes.push("this thread has no attached files".into());
+        return downloads;
+    }
+    readable_first(&mut files);
+    let mut total = 0u64;
+    for (n, (post, file)) in files.into_iter().enumerate() {
+        let skip = |why: String| format!("skipped {}: {why}", file.name);
+        if n >= FILE_COUNT {
+            downloads.notes.push(skip(format!("pinned downloads at most {FILE_COUNT} files at a time")));
+            continue;
+        }
+        if file.size > FILE_LIMIT {
+            downloads.notes.push(skip(format!("{} is over the {} limit for one file", megabytes(file.size), megabytes(FILE_LIMIT))));
+            continue;
+        }
+        if total + file.size > FILES_TOTAL {
+            downloads.notes.push(skip(format!("the files before it already make up the {} pinned downloads at a time", megabytes(FILES_TOTAL))));
+            continue;
+        }
+        match download(token, &file.url_private).await {
+            Ok(data) if data.len() as u64 > FILE_LIMIT => {
+                downloads.notes.push(skip(format!("{} is over the {} limit for one file", megabytes(data.len() as u64), megabytes(FILE_LIMIT))))
+            }
+            Ok(data) if total + data.len() as u64 > FILES_TOTAL => {
+                downloads.notes.push(skip(format!("the files before it already make up the {} pinned downloads at a time", megabytes(FILES_TOTAL))))
+            }
+            Ok(data) => {
+                total += data.len() as u64;
+                let name = if file.name.is_empty() { file.id.clone() } else { file.name.clone() };
+                let download = Download { name, mimetype: file.mimetype.clone(), author: post.author.clone(), ts: post.ts.clone(), data: crate::wire::Bytes(data) };
+                downloads.files.push(download);
+            }
+            Err(e) if lacks_files_scope(&e) => {
+                downloads.notes.push(NO_FILES_SCOPE.into());
+                break;
+            }
+            Err(e) => downloads.notes.push(skip(e)),
+        }
+    }
+    downloads
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1 << 20) as f64)
+}
+
+/// Downloads a file's `url_private` with the bot token. Slack answers 403, or a 200 with its
+/// HTML sign-in page, when the app may not read files.
+pub async fn download(token: &str, url: &str) -> Result<Vec<u8>, String> {
+    let url = reqwest::Url::parse(&file_url(url)).map_err(|e| format!("Slack sent a bad file address: {e}"))?;
+    if !slack_host(&url) {
+        return Err(format!("{} is not a Slack address", url.host_str().unwrap_or_default()));
+    }
+    let response = reqwest::Client::new().get(url).bearer_auth(token).send().await.map_err(|e| format!("Slack unreachable: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(NO_FILES_SCOPE.into());
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED.into());
+    }
+    if !status.is_success() {
+        return Err(format!("Slack answered {status}"));
+    }
+    let html = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/html"));
+    if html {
+        return Err(NO_FILES_SCOPE.into());
+    }
+    if response.content_length().is_some_and(|length| length > FILE_LIMIT) {
+        return Err(format!("it is over the {} limit for one file", megabytes(FILE_LIMIT)));
+    }
+    response.bytes().await.map(|bytes| bytes.to_vec()).map_err(|e| format!("the download broke off: {e}"))
+}
+
+/// Only Slack gets the bot token.
+fn slack_host(url: &reqwest::Url) -> bool {
+    #[cfg(test)]
+    if API_ROOT.lock().unwrap().as_deref().is_some_and(|root| url.as_str().starts_with(root)) {
+        return true;
+    }
+    url.scheme() == "https" && url.host_str().is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"))
+}
+
+/// A test's stand-in for Slack serves files.slack.com's paths too.
+fn file_url(url: &str) -> String {
+    #[cfg(test)]
+    if let (Some(root), Some(path)) = (API_ROOT.lock().unwrap().clone(), url.strip_prefix("https://files.slack.com/")) {
+        return format!("{root}{path}");
+    }
+    url.to_owned()
+}
+
+/// Saves the files of the hub's `answer` to `pinned slack files` in `dir`, and returns what the
+/// command prints: one line per file saved, then one per file left behind.
+pub fn save_downloads(dir: Option<&std::path::Path>, answer: Result<String, String>) -> String {
+    let downloads = match answer.and_then(|text| serde_json::from_str::<Downloads>(&text).map_err(|e| format!("the hub sent a bad answer: {e}"))) {
+        Ok(downloads) => downloads,
+        Err(e) if lacks_files_scope(&e) => return NO_FILES_SCOPE.into(),
+        Err(e) => return format!("pinned could not download this thread's files: {e}"),
+    };
+    let mut lines = vec![];
+    for file in &downloads.files {
+        let saved = dir.ok_or_else(|| "this machine keeps no files".to_owned()).and_then(|dir| crate::uploads::save(dir, &file.name, &file.data.0));
+        lines.push(match saved {
+            Ok(path) => format!("{}  ({}, {}, from {} at {})", path.display(), file.name, file.mimetype, file.author, posted_at(&file.ts)),
+            Err(e) => format!("skipped {}: {e}", file.name),
+        });
+    }
+    lines.extend(downloads.notes);
+    lines.join("\n")
+}
+
+/// A message's ts as the time it was posted, in UTC.
+fn posted_at(ts: &str) -> String {
+    let seconds = ts.split('.').next().and_then(|s| s.parse::<i64>().ok());
+    match seconds.and_then(|s| DateTime::from_timestamp(s, 0)) {
+        Some(at) => at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        None => ts.to_owned(),
+    }
+}
+
 /// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
 /// done, so a retry after a crash converges.
 pub async fn react(token: &str, channel: &str, ts: &str, name: &str) -> Result<(), String> {

@@ -390,6 +390,12 @@ pub enum Message {
         thread: String,
         issue: String,
     },
+    /// `pinned slack files`: downloads the files the session's Slack thread attaches.
+    SlackFiles {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+    },
     Remind {
         message: String,
         when: When,

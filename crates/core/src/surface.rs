@@ -296,6 +296,7 @@ pub const ACTIONS: &[Action] = &[
     h("slack_reply", Write, "Replies in a Slack thread of one of the account's workflows, with the account's Slack connection.").wired(),
     h("linear_create", Write, "Files a Linear issue for a Slack thread of one of the account's workflows.").wired(),
     h("linear_take", Write, "Ties an existing Linear issue to a Slack thread of one of the account's workflows.").wired(),
+    h("slack_files", Excluded, "a workflow session's download of its own Slack thread's files, which only that session's machine sends"),
     h("external_agents", Read, "The hub's MCP endpoint and the external agents the account let in, with their scopes and projects.").wired(),
     h("agent_request", Excluded, "the consent page's own read: external_agents lists access"),
     h("approve_agent", Confirm, "Lets a pending external agent in with scopes on projects. The user's app gets the address that hands the agent its code.").wired().hides(&["redirect"]),

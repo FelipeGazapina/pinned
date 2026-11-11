@@ -647,6 +647,7 @@ impl Hub {
             HubCall::LinearTake { connector, channel, thread, issue } => {
                 (json(c().await?.linear_take(&connector, &channel, &thread, &issue).await?), true)
             }
+            HubCall::SlackFiles { connector, subject } => (json(c().await?.slack_files(&connector, &subject).await?), false),
             HubCall::ExternalAgents => return json(crate::oauth::agents(self, account).await?),
             HubCall::AgentRequest { request } => return json(crate::oauth::request(self, &request).await?),
             HubCall::ApproveAgent { request, scopes, projects } => return json(crate::oauth::approve(self, account, &request, scopes, projects).await?),

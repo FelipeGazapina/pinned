@@ -776,7 +776,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
     let work = match &call {
-        HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        HubCall::Stage { connector, subject, .. } | HubCall::SlackFiles { connector, subject } => Some((connector.clone(), subject.clone())),
         HubCall::SlackReply { connector, channel, thread, .. }
         | HubCall::LinearCreate { connector, channel, thread, .. }
         | HubCall::LinearTake { connector, channel, thread, .. } => {

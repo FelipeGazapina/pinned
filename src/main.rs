@@ -604,6 +604,10 @@ fn main() {
                     Err(agent::Message::LinearTake { connector, channel, thread, issue }) => tauri::async_runtime::block_on(
                         handle.state::<connectors::Connectors>().linear_take(&connector, &channel, &thread, &issue),
                     ),
+                    Err(agent::Message::SlackFiles { connector, subject }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().slack_files(&connector, &subject),
+                    )
+                    .and_then(|downloads| serde_json::to_string(&downloads).map_err(|e| e.to_string())),
                     Err(_) => unreachable!("forward hands back only the callback it was given"),
                 },
             })?;

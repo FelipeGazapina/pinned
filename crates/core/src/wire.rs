@@ -1120,6 +1120,12 @@ pub enum HubCall {
         assignee: String,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
+    /// From a workflow session's `pinned slack files`: the files its Slack thread attaches, downloaded.
+    SlackFiles {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+    },
     /// `ExternalAgents`: the hub's MCP endpoint and the external agents the account let in.
     ExternalAgents,
     /// `AgentRequest`: what the pending OAuth authorization `request` asks for, while it waits for the user.
@@ -1980,6 +1986,10 @@ mod tests {
         round_trip(
             HubCall::LinearTake { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), issue: "ENG-7".into() },
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
+        );
+        round_trip(
+            HubCall::SlackFiles { connector: "c2".into(), subject: Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() } },
+            json!({ "cmd": "slack_files", "connector": "c2", "channel": "C1", "thread": "1.2" }),
         );
         round_trip(
             HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: Some("vck_1".into()) },
