@@ -7464,7 +7464,6 @@ pub(crate) mod tests {
         assert_eq!(text(&again), "second\r\n", "a restart starts a fresh screen");
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_in_the_background_reaches_the_app_window_and_is_reported() {
         struct Window(Mutex<Vec<bool>>);
@@ -7493,6 +7492,7 @@ pub(crate) mod tests {
         assert_eq!(reported, [json!({ "kind": "background", "on": true }), json!({ "kind": "background", "on": false })]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));
