@@ -430,7 +430,7 @@ mod tests {
             ("export CONVEX_DEPLOYMENT=\"prod:happy-otter-123\"\n", Some("prod:happy-otter-123")),
             ("CONVEX_DEPLOYMENT='dev:quick-lemur-789' # team: acme\n", Some("dev:quick-lemur-789")),
             ("  CONVEX_DEPLOYMENT = quick-lemur-789\n", Some("quick-lemur-789")),
-            ("CONVEX_DEPLOYMENT=local:local-felipe-site\n", None),
+            ("CONVEX_DEPLOYMENT=local:local-acme-site\n", None),
             ("CONVEX_DEPLOYMENT=anonymous:anonymous-site\n", None),
             ("CONVEX_DEPLOYMENT=\n", None),
             ("CONVEX_URL=https://quick-lemur-789.convex.cloud\n", None),
