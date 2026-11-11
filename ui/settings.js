@@ -2284,6 +2284,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Way of working", terms: ["taste profile economical balanced aggressive custom strategy model ladder hard work parallel workers pace autonomy review diff second opinion context notes orchestrator captain capitao capitão"] },
   { title: "Global orchestrator", terms: ["global orchestrator orquestrador orchestrator admiral commander host machine busy queue refuse reports memory name"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
+  { title: "Run in the background", terms: ["no window background memory ram web app dock hidden segundo plano"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
@@ -2299,7 +2300,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
-settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer"] }] });
+settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer run in the background window"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });
 document.getElementById("settings-toggle").onclick = toggleSettings;
 document.getElementById("settings-back").onclick = toggleSettings;

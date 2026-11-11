@@ -731,12 +731,22 @@ pub struct Machine {
     hub_id: Mutex<crate::wire::MachineId>,
     /// This machine's name on the hub, which the user may have changed from its hostname.
     hub_name: Mutex<String>,
+    /// The desktop app's window. A node has none.
+    window: std::sync::OnceLock<Arc<dyn AppWindow>>,
 }
 
 pub trait SelfUpdate: Send + Sync {
     /// Check the release. When this build is behind, install it and arm a restart.
     /// Publish each phase through `machine.report` before returning it.
     fn install(&self, machine: &Machine) -> UpdateStatus;
+}
+
+/// The desktop app's window, which a machine running without the app does not have.
+pub trait AppWindow: Send + Sync {
+    /// Whether Run in the background is on.
+    fn background(&self) -> bool;
+    /// Saves Run in the background and applies it: on closes the window, off opens it.
+    fn set_background(&self, on: bool) -> Result<(), String>;
 }
 
 struct Gate {
@@ -905,6 +915,7 @@ impl Machine {
             hub: Mutex::new(None),
             hub_id: Mutex::default(),
             hub_name: Mutex::default(),
+            window: std::sync::OnceLock::new(),
         });
         machine.start_auto_archive();
         machine
@@ -936,6 +947,22 @@ impl Machine {
 
     pub fn set_flusher(&self, flush: Arc<dyn Fn(&MachineEvent) -> bool + Send + Sync>) {
         self.gate.lock().unwrap().flusher = Some(flush);
+    }
+
+    pub fn set_window(&self, window: Arc<dyn AppWindow>) {
+        let _ = self.window.set(window);
+    }
+
+    /// Whether the desktop app runs in the background. None on a machine without the app.
+    pub fn background(&self) -> Option<bool> {
+        self.window.get().map(|window| window.background())
+    }
+
+    fn set_background(&self, on: bool) -> Result<bool, String> {
+        let window = self.window.get().ok_or("this machine runs pinned without the app, so it has no window")?;
+        window.set_background(on)?;
+        self.emit(MachineEvent::Background { on });
+        Ok(on)
     }
 
     fn update_self(&self) -> UpdateStatus {
@@ -1168,6 +1195,7 @@ impl Machine {
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
+            Call::SetBackground { on } => json(self.set_background(on)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
@@ -5755,7 +5783,7 @@ impl Machine {
         let own = self.state();
         let mut views = match self.call_hub(HubCall::MachineStates).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string())) {
             Ok(views) => views,
-            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None }],
+            Err(_) => vec![crate::wire::MachineView { id: id.clone(), name, os: crate::account::os(), online: true, last_seen: 0, upstash_box: None, version: env!("CARGO_PKG_VERSION").into(), update: None, state: None, background: None }],
         };
         for view in views.iter_mut().filter(|view| view.id == id) {
             view.state = Some(own.clone());
@@ -7435,6 +7463,34 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn run_in_the_background_reaches_the_app_window_and_is_reported() {
+        struct Window(Mutex<Vec<bool>>);
+        impl AppWindow for Window {
+            fn background(&self) -> bool {
+                self.0.lock().unwrap().last().copied().unwrap_or(false)
+            }
+            fn set_background(&self, on: bool) -> Result<(), String> {
+                self.0.lock().unwrap().push(on);
+                Ok(())
+            }
+        }
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        assert_eq!(m.background(), None, "a node has no setting to report");
+        assert_eq!(m.call(Call::SetBackground { on: true }), Err("this machine runs pinned without the app, so it has no window".into()));
+
+        let window = Arc::new(Window(Mutex::new(vec![])));
+        m.set_window(window.clone());
+        assert_eq!(m.background(), Some(false));
+        assert_eq!(m.call(Call::SetBackground { on: true }), Ok(json!(true)));
+        assert_eq!(m.call(Call::SetBackground { on: false }), Ok(json!(false)));
+        assert_eq!(*window.0.lock().unwrap(), [true, false]);
+        let reported: Vec<Value> = events.lock().unwrap().iter().filter(|e| e["kind"] == "background").cloned().collect();
+        assert_eq!(reported, [json!({ "kind": "background", "on": true }), json!({ "kind": "background", "on": false })]);
+    }
+
     #[test]
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));

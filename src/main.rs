@@ -2,6 +2,7 @@
 
 mod account;
 mod awake;
+mod background;
 mod browser;
 mod commands;
 mod dictation;
@@ -9,7 +10,8 @@ mod fn_key;
 mod fonts;
 mod navigation;
 
-use pinned_core::machine::{Launch, Machine, SelfUpdate};
+use background::{Background, Moment};
+use pinned_core::machine::{AppWindow, Launch, Machine, SelfUpdate};
 use pinned_core::wire::{Call, MachineEvent, TabId, UpdateStatus};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use pinned_core::{agent, connectors, reminders, uploads};
@@ -46,14 +48,88 @@ enum View {
     Pill,
 }
 
-/// Brings the main window back: unminimize, show, and focus. The tray icon, the Dock icon
-/// and Cmd-Tab all land here, so a window buried under other apps is never lost.
-fn reveal_main(app: &AppHandle) {
+/// Gives the app the window `moment` asks for, on the main thread, where AppKit makes and closes windows.
+fn settle(app: &AppHandle, moment: Moment) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let on = handle.state::<Background>().is_on();
+        let signed_in = handle.state::<account::Account>().is_signed_in();
+        if background::has_window(moment, on, signed_in) {
+            if let Err(e) = open_main(&handle) {
+                eprintln!("pinned: could not open the window: {e}");
+            }
+        } else {
+            retire_main(&handle);
+        }
+    });
+}
+
+/// Brings the main window back, making it again when the app runs without one: unminimize, show,
+/// and focus. The tray icon, the Dock icon and Cmd-Tab all land here, so a window buried under
+/// other apps is never lost.
+fn open_main(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        return Ok(());
     }
+    let window = navigation::install_main_window(app, app.state::<navigation::FramePermit>().0.clone())?;
+    window.set_min_size(Some(EXPANDED_MIN))?;
+    #[cfg(target_os = "macos")]
+    pin_above_fullscreen(&window)?;
+    Ok(())
+}
+
+/// Destroys the main window and everything that lives only for it, so its webview's memory goes:
+/// the dictation mic, the tabs' output and transcript watches sent to it, and the browser pages.
+fn retire_main(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let dictation = app.state::<Arc<dictation::Dictation>>();
+    if dictation.running() {
+        let _ = dictation.stop();
+    }
+    let machine = app.state::<Arc<Machine>>();
+    for tab in machine.tabs() {
+        machine.detach(&tab.id, LOCAL);
+    }
+    let _ = machine.call(Call::WatchThreads { tabs: vec![] });
+    browser::close_all(app);
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        // Back to the window class tao made, which tao then closes and releases as its own.
+        if let Ok(panel) = app.get_webview_panel("main") {
+            panel.to_window();
+        }
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+    let _ = window.destroy();
+}
+
+/// The machine's way to the window, for the web app's Settings › Machines and this app's own.
+struct DesktopWindow {
+    app: AppHandle,
+}
+
+impl AppWindow for DesktopWindow {
+    fn background(&self) -> bool {
+        self.app.state::<Background>().is_on()
+    }
+
+    fn set_background(&self, on: bool) -> Result<(), String> {
+        if on && !self.app.state::<account::Account>().is_signed_in() {
+            return Err(background::NEEDS_HUB.into());
+        }
+        self.app.state::<Background>().save(on)?;
+        settle(&self.app, Moment::Settle);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn get_background(background: State<Background>) -> bool {
+    background.is_on()
 }
 
 /// Shows or hides the app in the Dock and the Cmd-Tab switcher (macOS). The window is an
@@ -355,7 +431,7 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&Menu::with_items(app, &[&opacity, &quit])?)
         .on_tray_icon_event(|tray, event| {
             if matches!(event, tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. }) {
-                reveal_main(tray.app_handle());
+                settle(tray.app_handle(), Moment::Reopen);
             }
         })
         .on_menu_event(move |app, e| {
@@ -413,6 +489,7 @@ fn main() {
             set_dock_shown,
             awake::get_keep_awake,
             awake::set_keep_awake,
+            get_background,
             fonts::font_families,
             check_update,
             install_update,
@@ -467,15 +544,15 @@ fn main() {
             navigation::permit_frame_navigation
         ])
         .setup(move |app| {
-            let frames = Arc::new(Mutex::new(None));
-            app.manage(navigation::FramePermit(frames.clone()));
-            navigation::install_main_window(app, frames)?;
+            app.manage(navigation::FramePermit(Arc::new(Mutex::new(None))));
             let config = app.path().app_config_dir().ok();
             let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
             let updater = handle.clone();
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             machine.set_installer(Arc::new(DesktopUpdate { app: updater }));
+            app.manage(Background::load(config.clone()));
+            machine.set_window(Arc::new(DesktopWindow { app: app.handle().clone() }));
             app.manage(machine.clone());
             app.manage(Panel {
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
@@ -495,8 +572,6 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
-            #[cfg(debug_assertions)]
-            run_probe(app);
             let handle = app.handle().clone();
             machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
@@ -526,10 +601,22 @@ fn main() {
                     Err(_) => unreachable!("forward hands back only the callback it was given"),
                 },
             })?;
-            let window = app.get_webview_window("main").unwrap();
-            window.set_min_size(Some(EXPANDED_MIN))?;
-            #[cfg(target_os = "macos")]
-            pin_above_fullscreen(&window)?;
+            let signed_in = app.state::<account::Account>().is_signed_in();
+            if background::has_window(Moment::Settle, app.state::<Background>().is_on(), signed_in) {
+                open_main(app.handle())?;
+            } else {
+                // The window's boot reopens the sessions still going at the last quit; with no
+                // window the app does it, as a node does, and the window later finds them open.
+                std::thread::spawn(move || {
+                    for tab in machine.restore_working() {
+                        if let Err(e) = machine.start_claude(&tab, 120, 32) {
+                            eprintln!("pinned: could not resume {tab}: {e}");
+                        }
+                    }
+                });
+            }
+            #[cfg(debug_assertions)]
+            run_probe(app);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -538,7 +625,19 @@ fn main() {
             // Reopen only exists on macOS; other targets must not name it.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
-                reveal_main(app);
+                settle(app, Moment::Reopen);
+            }
+            if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. } = &event {
+                if label == "main" {
+                    api.prevent_close();
+                    settle(app, Moment::Settle);
+                }
+            }
+            // No code: the last window went, which only happens when the app retires its own to
+            // run in the background. Quitting asks with a code.
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event {
+                api.prevent_exit();
+                return;
             }
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 app.state::<Arc<Machine>>().quit();
@@ -560,20 +659,24 @@ tauri_nspanel::tauri_panel! {
 }
 
 // An open panel, such as the one a file input shows, opens at the modal panel level, below the
-// status level the panel floats at, so it would open under the panel and out of reach.
+// status level the panel floats at, so it would open under the panel and out of reach. One
+// observer serves every window the app makes again after running in the background.
 #[cfg(target_os = "macos")]
 fn raise_open_panels() {
     use objc2_app_kit::{NSSavePanel, NSStatusWindowLevel, NSWindowDidBecomeKeyNotification};
     use objc2_foundation::{NSNotification, NSNotificationCenter};
-    let raise = block2::RcBlock::new(|note: std::ptr::NonNull<NSNotification>| {
-        if let Some(panel) = unsafe { note.as_ref() }.object().and_then(|o| o.downcast::<NSSavePanel>().ok()) {
-            panel.setLevel(NSStatusWindowLevel + 1);
-        }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let raise = block2::RcBlock::new(|note: std::ptr::NonNull<NSNotification>| {
+            if let Some(panel) = unsafe { note.as_ref() }.object().and_then(|o| o.downcast::<NSSavePanel>().ok()) {
+                panel.setLevel(NSStatusWindowLevel + 1);
+            }
+        });
+        let observer = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(Some(NSWindowDidBecomeKeyNotification), None, None, &raise)
+        };
+        std::mem::forget(observer);
     });
-    let observer = unsafe {
-        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(Some(NSWindowDidBecomeKeyNotification), None, None, &raise)
-    };
-    std::mem::forget(observer);
 }
 
 // Only a nonactivating NSPanel may enter another app's fullscreen Space; a plain NSWindow

@@ -1241,6 +1241,23 @@
                 ]
               },
               {
+                "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
                 "type": "object",
                 "properties": {
@@ -11106,6 +11123,23 @@
                 ]
               },
               {
+                "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`reading::read` of the tab's session: its state and the last `items` items of its\nconversation, 20 when not given, read from the end of its transcript however long it is.",
                 "type": "object",
                 "properties": {
@@ -20052,6 +20086,23 @@
                   "kind",
                   "state"
                 ]
+              },
+              {
+                "description": "Whether the desktop app runs in the background, with no window: when it connects and after\neach change. A machine without the app never sends it. The hub keeps it as\n`MachineView::background` and passes the event to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "on"
+                ]
               }
             ]
           },
@@ -26674,6 +26725,23 @@
                 "required": [
                   "kind",
                   "state"
+                ]
+              },
+              {
+                "description": "Whether the desktop app runs in the background, with no window: when it connects and after\neach change. A machine without the app never sends it. The hub keeps it as\n`MachineView::background` and passes the event to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "on"
                 ]
               }
             ]
@@ -37803,6 +37871,13 @@
                 "type": "null"
               }
             ]
+          },
+          "background": {
+            "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -38104,6 +38179,13 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "background": {
+            "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+            "type": [
+              "boolean",
+              "null"
             ]
           }
         },
@@ -40472,6 +40554,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -40797,6 +40886,13 @@
                   {
                     "type": "null"
                   }
+                ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
                 ]
               }
             },
@@ -41181,6 +41277,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -41497,6 +41600,13 @@
                   {
                     "type": "null"
                   }
+                ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
                 ]
               }
             },
@@ -47874,6 +47984,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -48727,6 +48844,23 @@
                 "required": [
                   "kind",
                   "state"
+                ]
+              },
+              {
+                "description": "Whether the desktop app runs in the background, with no window: when it connects and after\neach change. A machine without the app never sends it. The hub keeps it as\n`MachineView::background` and passes the event to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "on"
                 ]
               }
             ]
@@ -51066,6 +51200,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -51899,6 +52040,23 @@
                 "required": [
                   "kind",
                   "state"
+                ]
+              },
+              {
+                "description": "Whether the desktop app runs in the background, with no window: when it connects and after\neach change. A machine without the app never sends it. The hub keeps it as\n`MachineView::background` and passes the event to no client.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "on"
                 ]
               }
             ]
@@ -54107,6 +54265,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -55451,6 +55616,23 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
                 ]
               },
               {
@@ -59551,6 +59733,13 @@
                     "type": "null"
                   }
                 ]
+              },
+              "background": {
+                "description": "Whether the desktop app on the machine runs in the background, as it last reported. Absent\nfor a machine without the app, an app older than the setting, and an offline machine.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -60881,6 +61070,23 @@
                 "required": [
                   "cmd",
                   "settings"
+                ]
+              },
+              {
+                "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_background"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
                 ]
               },
               {
