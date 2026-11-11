@@ -25,6 +25,12 @@ const SILENT: Duration = Duration::from_secs(60);
 const DIAL_WAIT: Duration = Duration::from_secs(15);
 const HELLO_WAIT: Duration = Duration::from_secs(15);
 const CALL_WAIT: Duration = Duration::from_secs(60);
+/// How long the machine waits for the hub's `SlackFiles` answer: longer than the hub's own
+/// `slack::DOWNLOAD_DEADLINE`, so a download that finishes in time is never thrown away, and shorter
+/// than the `pinned slack files` CLI's wait (`hooks::FILES_WAIT`).
+pub(crate) const FILES_CALL_WAIT: Duration = Duration::from_secs(100);
+const _: () = assert!(crate::slack::DOWNLOAD_DEADLINE.as_secs() < FILES_CALL_WAIT.as_secs());
+const _: () = assert!(FILES_CALL_WAIT.as_secs() < crate::hooks::FILES_WAIT.as_secs());
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// A connection that stayed up this long was healthy, so the one that follows its end starts over
@@ -74,8 +80,15 @@ impl Shared {
         written.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
-    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    /// Asks the hub, blocking up to 60 seconds (100 for `SlackFiles`) for the answer. Fails at once
+    /// while offline.
     fn call(&self, call: HubCall) -> Result<Value, String> {
+        let wait = if matches!(call, HubCall::SlackFiles { .. }) { FILES_CALL_WAIT } else { CALL_WAIT };
+        self.call_within(call, wait)
+    }
+
+    fn call_within(&self, call: HubCall, wait: Duration) -> Result<Value, String> {
+        let timeout = if matches!(call, HubCall::SlackFiles { .. }) { FILES_HUB_TIMEOUT } else { HUB_TIMEOUT };
         let id = self.next_call.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, answer);
@@ -83,11 +96,11 @@ impl Shared {
             self.pending.lock().unwrap().remove(&id);
             return Err(OFFLINE.into());
         }
-        match answered.recv_timeout(CALL_WAIT) {
+        match answered.recv_timeout(wait) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.pending.lock().unwrap().remove(&id);
-                Err(HUB_TIMEOUT.into())
+                Err(timeout.into())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(DROPPED.into()),
         }
@@ -139,16 +152,19 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
 pub const OFFLINE: &str = "not connected to the hub";
 /// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
 pub const HUB_TIMEOUT: &str = "the hub did not answer within 60 seconds";
+/// What a `SlackFiles` call that waited out `FILES_CALL_WAIT` fails with.
+pub const FILES_HUB_TIMEOUT: &str = "the hub did not answer within 100 seconds";
 const DROPPED: &str = "the connection to the hub dropped";
 
 /// Whether a hub call failed for want of an answer, not because the hub refused it: it may have
 /// run anyway, and asking again is safe only for a call the hub answers the same way twice.
 pub fn is_unanswered(error: &str) -> bool {
-    matches!(error, HUB_TIMEOUT | OFFLINE | DROPPED)
+    matches!(error, HUB_TIMEOUT | FILES_HUB_TIMEOUT | OFFLINE | DROPPED)
 }
 
 impl Link {
-    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    /// Asks the hub, blocking up to 60 seconds (100 for `SlackFiles`) for the answer. Fails at once
+    /// while offline.
     pub fn call_hub(&self, call: HubCall) -> Result<Value, String> {
         self.shared.call(call)
     }
@@ -605,6 +621,19 @@ fn ws_url(hub: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn a_files_call_waits_100_seconds_and_its_timeout_still_counts_as_unanswered() {
+        assert_eq!(FILES_CALL_WAIT, Duration::from_secs(100));
+        assert_eq!(FILES_HUB_TIMEOUT, "the hub did not answer within 100 seconds");
+        assert!(is_unanswered(FILES_HUB_TIMEOUT) && is_unanswered(HUB_TIMEOUT));
+        let shared = Shared::default();
+        let (out, _kept) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let files = HubCall::SlackFiles { connector: "c2".into(), subject: crate::agent::Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() } };
+        assert_eq!(shared.call_within(files, Duration::from_millis(20)), Err(FILES_HUB_TIMEOUT.into()));
+        assert_eq!(shared.call_within(HubCall::Overview, Duration::from_millis(20)), Err(HUB_TIMEOUT.into()));
+    }
 
     fn waits(backoff: &mut Backoff, count: usize) -> Vec<u64> {
         (0..count).map(|_| backoff.wait(0.5).as_secs()).collect()

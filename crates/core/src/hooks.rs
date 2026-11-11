@@ -453,8 +453,9 @@ fn ask(message: Message) -> Reply {
     ask_within(message, Duration::from_secs(30))
 }
 
-/// How long `pinned slack files` waits: the hub's own wait for the download, and the save after it.
-const FILES_WAIT: Duration = Duration::from_secs(90);
+/// How long `pinned slack files` waits: the machine's wait for the hub (`link::FILES_CALL_WAIT`),
+/// which outlasts the hub's download deadline (`slack::DOWNLOAD_DEADLINE`), and the save after it.
+pub(crate) const FILES_WAIT: Duration = Duration::from_secs(120);
 
 fn ask_within(message: Message, wait: Duration) -> Reply {
     let mut stream = UnixStream::connect(env(SOCK_ENV)?).map_err(|e| format!("pinned is not running: {e}"))?;

@@ -111,7 +111,27 @@ fn api_root() -> String {
 /// Points Slack calls at `root` for a test. `None` restores the real API.
 #[cfg(test)]
 pub fn set_api_root(root: Option<String>) {
+    if root.is_none() {
+        *FILE_WAIT.lock().unwrap() = None;
+    }
     *API_ROOT.lock().unwrap() = root;
+}
+
+/// Shortens the wait for one file for a test; `set_api_root(None)` restores it.
+#[cfg(test)]
+pub fn set_file_wait(wait: std::time::Duration) {
+    *FILE_WAIT.lock().unwrap() = Some(wait);
+}
+
+#[cfg(test)]
+static FILE_WAIT: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
+
+fn file_wait() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(wait) = *FILE_WAIT.lock().unwrap() {
+        return wait;
+    }
+    FILE_REQUEST_WAIT
 }
 
 /// One test at a time may point Slack at a stand-in.
@@ -491,6 +511,11 @@ pub const FILE_COUNT: usize = 20;
 /// The most bytes one `pinned slack files` downloads, all of which travel to the session's machine
 /// in base64 in one websocket message.
 pub const FILES_TOTAL: u64 = 40 << 20;
+/// `download_all` starts no new download this long after it began. It stays under the machine's
+/// wait for the hub's answer, so what the hub downloaded still arrives.
+pub const DOWNLOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
+/// How long one file may take, from the request to its last byte.
+const FILE_REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 const _: () = assert!((FILES_TOTAL as usize).div_ceil(3) * 4 + (1 << 20) <= crate::sync::MESSAGE_LIMIT);
 
 /// A thread file the hub downloaded for its session.
@@ -525,6 +550,10 @@ fn readable_first(files: &mut [(&Post, SlackFile)]) {
 /// any over `FILE_LIMIT`. A file that fails is noted and the rest still download, until Slack says
 /// the app may not read files.
 pub async fn download_all(token: &str, posts: &[Post]) -> Downloads {
+    download_all_within(token, posts, DOWNLOAD_DEADLINE).await
+}
+
+async fn download_all_within(token: &str, posts: &[Post], deadline: std::time::Duration) -> Downloads {
     let mut files: Vec<(&Post, SlackFile)> = posts.iter().flat_map(|post| post.files.iter().map(move |file| (post, file.clone()))).collect();
     let mut downloads = Downloads::default();
     if files.is_empty() {
@@ -533,8 +562,13 @@ pub async fn download_all(token: &str, posts: &[Post]) -> Downloads {
     }
     readable_first(&mut files);
     let mut total = 0u64;
+    let began = std::time::Instant::now();
     for (n, (post, file)) in files.into_iter().enumerate() {
         let skip = |why: String| format!("skipped {}: {why}", file.name);
+        if began.elapsed() >= deadline {
+            downloads.notes.push(skip(format!("pinned stopped downloading after {} seconds", deadline.as_secs())));
+            continue;
+        }
         if n >= FILE_COUNT {
             downloads.notes.push(skip(format!("pinned downloads at most {FILE_COUNT} files at a time")));
             continue;
@@ -581,7 +615,8 @@ pub async fn download(token: &str, url: &str) -> Result<Vec<u8>, String> {
     if !slack_host(&url) {
         return Err(format!("{} is not a Slack address", url.host_str().unwrap_or_default()));
     }
-    let response = reqwest::Client::new().get(url).bearer_auth(token).send().await.map_err(|e| format!("Slack unreachable: {e}"))?;
+    let client = reqwest::Client::builder().timeout(file_wait()).build().map_err(|e| format!("pinned could not start the download: {e}"))?;
+    let mut response = client.get(url).bearer_auth(token).send().await.map_err(request_error)?;
     let status = response.status();
     if status == reqwest::StatusCode::FORBIDDEN {
         return Err(NO_FILES_SCOPE.into());
@@ -599,7 +634,25 @@ pub async fn download(token: &str, url: &str) -> Result<Vec<u8>, String> {
     if response.content_length().is_some_and(|length| length > FILE_LIMIT) {
         return Err(format!("it is over the {} limit for one file", megabytes(FILE_LIMIT)));
     }
-    response.bytes().await.map(|bytes| bytes.to_vec()).map_err(|e| format!("the download broke off: {e}"))
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+        data.extend_from_slice(&chunk);
+        if data.len() as u64 > FILE_LIMIT {
+            return Err(format!("it is over the {} limit for one file", megabytes(FILE_LIMIT)));
+        }
+    }
+    Ok(data)
+}
+
+/// What a file request that failed on the way says.
+fn request_error(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        format!("Slack did not send it within {} seconds", file_wait().as_secs())
+    } else if e.is_body() || e.is_decode() {
+        format!("the download broke off: {e}")
+    } else {
+        format!("Slack unreachable: {e}")
+    }
 }
 
 /// Only Slack gets the bot token.
@@ -790,6 +843,21 @@ mod tests {
         assert_eq!(group_with_handle(&groups, "Production engineers"), None);
         assert_eq!(group_mention("S0123ABC"), "<!subteam^S0123ABC>");
         assert_eq!(block_on(group_id("xoxb-unused", " @S0123ABC ")), Ok("S0123ABC".into()), "an id needs no lookup");
+    }
+
+    #[test]
+    fn download_all_starts_no_download_once_its_deadline_has_passed() {
+        let file = |name: &str| SlackFile { id: name.into(), name: name.into(), mimetype: "text/plain".into(), size: 1, url_private: format!("https://files.slack.com/files-pri/T1-{name}/{name}") };
+        let post = Post { ts: "1.2".into(), author: "ana".into(), text: "logs".into(), files: vec![file("a.txt"), file("b.txt")] };
+        let downloads = block_on(download_all_within("xoxb-test", &[post], std::time::Duration::ZERO));
+        assert_eq!(
+            downloads,
+            Downloads {
+                files: vec![],
+                notes: vec!["skipped a.txt: pinned stopped downloading after 0 seconds".into(), "skipped b.txt: pinned stopped downloading after 0 seconds".into()],
+            }
+        );
+        assert_eq!(DOWNLOAD_DEADLINE.as_secs(), 75);
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
