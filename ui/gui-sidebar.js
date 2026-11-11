@@ -2530,6 +2530,7 @@ sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(
  * the title, whose chevron shows on hover and whose click opens the thread's menu; a double-click
  * renames it. A subagent's own title opens nothing. */
 function crumbHtml(tab, sub = null) {
+  if (!sub && isGlobalOrchestratorTab(tab)) return orchestratorCrumbHtml(tab);
   const name = projectName(tab);
   const sep = `<span class="sep" aria-hidden="true">/</span>`;
   const parent = threadTitle(tab);

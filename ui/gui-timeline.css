@@ -449,24 +449,3 @@ body:not([data-mode="gui"]) #minimap { display: none !important; }
 .cite-chip:hover { background: rgb(var(--g-primary-rgb) / 0.17); }
 .cite-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16em; }
 .cite-chip .i { width: 1.17em; height: 1.17em; flex: none; }
-
-/* Captain reports in the global orchestrator's timeline. */
-.reports { display: flex; flex-direction: column; gap: 8px; padding-bottom: 16px; }
-.report-fold { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; border-radius: 12px; text-align: left;
-  font-size: 14px; font-weight: 500; color: var(--g-fg); background: var(--g-accent); }
-.report-fold:hover { background: var(--g-hover); }
-.report-fold .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.report-fold .chev { width: 14px; height: 14px; flex: none; color: var(--g-muted); transition: transform 0.15s; }
-.report-fold[aria-expanded="true"] .chev { transform: rotate(180deg); }
-.report-row { border-left: 2px solid rgb(var(--g-primary-rgb) / 0.5); padding: 2px 0 2px 12px; }
-.report-row .head { display: flex; align-items: center; gap: 8px; }
-.report-row .who { font-size: 13px; font-weight: 500; color: var(--g-primary); }
-.report-row .who:hover { text-decoration: underline; }
-.report-row .body { margin-top: 2px; font-size: 14px; color: var(--g-fg); }
-
-/* The quick replies the global orchestrator's latest answer offers. */
-.quick-replies { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 16px; }
-.quick-reply { padding: 6px 14px; border-radius: 999px; border: 1px solid rgb(var(--g-primary-rgb) / 0.5); font-size: 13px; font-weight: 500;
-  color: var(--g-primary); }
-.quick-reply:hover { background: rgb(var(--g-primary-rgb) / 0.14); }
-@media (pointer: coarse) { .quick-reply { min-height: 40px; } }

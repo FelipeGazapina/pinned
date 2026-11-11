@@ -84,19 +84,6 @@
 #tag-popover .state.idle { color: var(--g-success); }
 #tag-popover .none { margin: 0; padding: 8px 10px; font-size: 13px; color: var(--g-muted); }
 
-#tag-route { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
-#tag-route[hidden] { display: none; }
-#tag-route .route { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--g-border); font-size: 12px; }
-#tag-route .preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
-#tag-route .where { flex: none; color: var(--g-fg); }
-#tag-route .route.untagged .where { color: var(--g-muted); }
-#tag-route .route.ambiguous { border-color: rgb(var(--g-warning-rgb) / 0.4); }
-#tag-route .route.ambiguous .where { color: var(--g-warning); }
-#tag-route .route.unknown { border-color: rgb(var(--g-error-rgb) / 0.4); }
-#tag-route .route.unknown .where { color: var(--g-error); font-weight: 600; }
-#tag-route .choices { display: flex; gap: 4px; flex: none; }
-#tag-route .choices button { height: 22px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--g-success) 40%, transparent); border-radius: 6px;
-  background: color-mix(in srgb, var(--g-success) 12%, transparent); color: var(--g-success); font-size: 12px; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) { left: 0; right: 0; bottom: calc(100% + 6px); max-height: 288px; overflow: auto; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) button { flex-direction: row; align-items: center; gap: 8px; padding: 6px 10px; }
 #composer-menu:is([data-kind="skill"], [data-kind="pr"]) button.highlight { background: var(--g-hover); }

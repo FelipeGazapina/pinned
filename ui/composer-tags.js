@@ -74,7 +74,8 @@ function paragraphTags(text) {
 }
 
 /** Where one paragraph goes. `catalog` is what `tagCatalog` builds. Kinds: `routed`, `ambiguous`
- * (the repo is on 2+ machines and no @ decides), `untagged`, `unknown`. Advisory only. */
+ * (the repo is on 2+ machines and no @ decides), `untagged`, `unknown`. A routed row also names
+ * its `project`, its `machine` and that machine's `captain` state. Advisory only. */
 function routeParagraph(text, { projects = [], machines = [], name = "Orchestrator" } = {}) {
   const tags = paragraphTags(text);
   const flat = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -91,14 +92,41 @@ function routeParagraph(text, { projects = [], machines = [], name = "Orchestrat
       choices: hosts.map((m) => m.slug),
     };
   }
-  const named = tags.machine && (hosts.find((m) => m.slug === tags.machine) ?? machines.find((m) => m.slug === tags.machine));
+  const host = tags.machine ? hosts.find((m) => m.slug === tags.machine) : hosts[0];
+  const named = tags.machine && (host ?? machines.find((m) => m.slug === tags.machine));
   const where = tags.machine ? named?.name ?? tags.machine : hosts[0]?.name ?? "no machine";
-  return { preview, kind: "routed", text: `→ Captain ${project.name} · ${where}` };
+  const captain = host?.captain ?? "none";
+  const starts = captain === "none" ? " It has no Captain yet, so one starts." : "";
+  return { preview, kind: "routed", text: `Goes to Captain ${project.name} on ${where}.${starts}`, project: project.name, machine: where, captain };
 }
 
 /** One routing row per paragraph, each read from that paragraph's tags alone. */
 function routePreview(text, catalog) {
   return composerParagraphs(text).map((p) => ({ ...routeParagraph(p.text, catalog), index: p.index }));
+}
+
+/** The line under a sent message: each tagged paragraph's Captain, as the composer routed it,
+ * or null when nothing is tagged or a tag no longer resolves to one Captain. */
+function routedLine(text, catalog) {
+  const rows = routePreview(text, catalog).filter((row) => row.kind !== "untagged");
+  if (!rows.length || rows.some((row) => row.kind !== "routed")) return null;
+  const names = [...new Set(rows.map((row) => `Captain ${row.project} on ${row.machine}`))];
+  const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+  return `Routed to ${list}`;
+}
+
+/** Rendered message HTML with each tag outside code and links painted as `tagLineHtml` paints
+ * the composer's: the text between elements is already escaped, so it passes through as is. */
+function tagsInHtml(html, known) {
+  let skip = 0;
+  return String(html ?? "").split(/(<[^>]*>)/).map((part, i) => {
+    if (i % 2) {
+      const tag = part.match(/^<(\/?)(code|pre|a)\b/i);
+      if (tag) skip = Math.max(0, skip + (tag[1] ? -1 : 1));
+      return part;
+    }
+    return skip || !hasTags(part) ? part : tagLineHtml(part, known, (text) => text);
+  }).join("");
 }
 
 /** Writes `@slug` into paragraph `index` only: after its first `#project`, or at its start. A
@@ -154,6 +182,13 @@ function captainState(states) {
   return states.includes("idle") ? "idle" : "none";
 }
 
+/** A project's name in tags: its repo's name when a checkout's folder carries it, as the node
+ * names the project, else the group's, which is the folder of whichever thread came first. */
+function projectTagName(group, repo) {
+  const base = String(repo ?? "").split("/").pop();
+  return base && group.checkouts.some((c) => String(c.path).split(/[\\/]/).pop() === base) ? base : group.name;
+}
+
 /** The account's projects and machines as tags see them. `groups` is the sidebar's
  * `projectGroups(true)` (grouped by repo whatever the sidebar's Project grouping says), `directory` is
  * `machineDirectory()`, `phase(tab)` is `phaseOf`, and `repoAt(machine, path)` the repo a folder
@@ -175,7 +210,8 @@ function tagCatalog({ groups, directory, phase, repoAt, name = "Orchestrator", w
       hosts.push(host);
     }
     const repo = group.checkouts.map((c) => repoAt(c.machine, c.path)).find(Boolean) ?? "";
-    projects.push({ slug: tagSlug(group.name), name: group.name, repo, machines: hosts });
+    const name = projectTagName(group, repo);
+    projects.push({ slug: tagSlug(name), name, repo, machines: hosts });
   }
   return { projects, machines: Object.keys(directory.names).map(machineOf), name };
 }
@@ -207,10 +243,16 @@ function composerTagPopoverHtml(token, options, hi, esc) {
   }).join("");
 }
 
-/** The routing preview: one row per paragraph, with machine buttons on an ambiguous one. */
+/** The routing preview: one row per paragraph, with machine buttons on an ambiguous one. A row
+ * names its paragraph only when the draft has more than one. */
 function composerRoutingHtml(rows, esc) {
+  const arrow = `<svg class="arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></svg>`;
   return rows.map((row) => {
     const choices = row.kind === "ambiguous" ? `<span class="choices">${row.choices.map((slug) => `<button type="button" data-machine="${esc(slug)}">@${esc(slug)}</button>`).join("")}</span>` : "";
-    return `<div class="route ${row.kind}" data-index="${row.index}"><span class="preview">${esc(row.preview)}</span><span class="where">${esc(row.text)}</span>${choices}</div>`;
+    const where = row.kind === "routed"
+      ? `Goes to <b>Captain ${esc(row.project)}</b> on ${esc(row.machine)}.${row.captain === "none" ? " It has no Captain yet, so one starts." : ""}`
+      : esc(row.text);
+    const preview = rows.length > 1 ? `<span class="preview">${esc(row.preview)}</span>` : "";
+    return `<div class="route ${row.kind}" data-index="${row.index}">${arrow}${preview}<span class="where">${where}</span>${choices}</div>`;
   }).join("");
 }

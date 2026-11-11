@@ -147,9 +147,9 @@ const state = () => ({
   s = await read();
   console.log("four paragraphs:", JSON.stringify(s));
   check(
-    JSON.stringify(s.route) === JSON.stringify([
+    JSON.stringify(s.route.map((r) => r.replace(/ It has no Captain yet, so one starts\.$/, ""))) === JSON.stringify([
       "ambiguous: site is on 2 machines [@sweep-node] [@macbook]",
-      "routed: → Captain pinned · sweep-node",
+      "routed: Goes to Captain pinned on sweep-node.",
       "untagged: no project: Orchestrator decides",
       "unknown: unknown project #fantasma",
     ]),
@@ -160,7 +160,7 @@ const state = () => ({
   await page.click('#tag-route [data-machine="macbook"]');
   s = await read();
   check(s.text.startsWith("no #site @macbook, corrige o login.\n\nno #pinned, sobe a versão."), `button wrote ${JSON.stringify(s.text)}`);
-  check(s.route[0] === "routed: → Captain site · MacBook" && s.route[1] === "routed: → Captain pinned · sweep-node", `route after the button: ${s.route}`);
+  check(s.route[0].startsWith("routed: Goes to Captain site on MacBook.") && s.route[1].startsWith("routed: Goes to Captain pinned on sweep-node."), `route after the button: ${s.route}`);
   check(s.mirror.includes("tag machine:@macbook"), `mirror after the button: ${s.mirror}`);
   await page.screenshot({ path: path.join(DIR, "composer-tags-route-picked.png") });
 
