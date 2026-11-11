@@ -34,6 +34,7 @@ window.ramBench = (() => {
     nodes: document.getElementsByTagName("*").length,
     // A window shrunk to its pill or covered by another draws nothing, and holds less.
     shown: document.body.dataset.view === "expanded" && document.visibilityState === "visible",
+    window: `${document.body.dataset.view}, ${document.visibilityState}`,
     errors,
   });
 

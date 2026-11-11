@@ -114,6 +114,13 @@ function footprint(pids) {
   return new Map(read.processes.map((p) => [p.pid, { bytes: p.footprint, categories: p.categories }]));
 }
 /** The median of three readings a second apart, since a collection can land between two. */
+/** How many sessions hold an agent process: the bench's `claude`, which a real session runs as a
+ * process of 200 to 300 MB. */
+function agents(bin) {
+  const claude = path.join(bin, "claude");
+  return execFileSync("ps", ["-axo", "command="], { encoding: "utf8", maxBuffer: 1 << 26 }).split("\n").filter((line) => line.includes(claude)).length;
+}
+
 async function measure(groups) {
   const readings = [];
   for (let i = 0; i < 3; i++) {
@@ -244,7 +251,7 @@ async function web() {
       groups.renderer = [groups.renderer.reduce((a, b) => ((sizes.get(a)?.bytes ?? 0) >= (sizes.get(b)?.bytes ?? 0) ? a : b))];
       const { metrics } = await cdp.send("Performance.getMetrics");
       const metric = (name) => metrics.find((m) => m.name === name)?.value ?? 0;
-      return { ...(await measure(groups)), heap: mb(metric("JSHeapUsedSize")), dom_nodes: metric("Nodes"), ...(argv.includes("--ablate") ? { categories: categories(groups.renderer) } : {}) };
+      return { ...(await measure(groups)), agents: agents(bin), heap: mb(metric("JSHeapUsedSize")), dom_nodes: metric("Nodes"), ...(argv.includes("--ablate") ? { categories: categories(groups.renderer) } : {}) };
     };
     const booted = await page.evaluate((sessions) => ramBench.boot(sessions), manifest.sessions);
     const boot = await read();
@@ -432,7 +439,7 @@ ${TRY}
       }
       const helpers = helpersOf(child.pid);
       const sums = await measure({ app: [child.pid], ...helpers });
-      return { total: sums.app + sums.content + sums.gpu + sums.network, ...sums, ...(ablations.length || argv.includes("--steps") || threads.length ? { categories: categories(helpers.content) } : {}) };
+      return { total: sums.app + sums.content + sums.gpu + sums.network, ...sums, agents: agents(bin), ...(ablations.length || argv.includes("--steps") || threads.length ? { categories: categories(helpers.content) } : {}) };
     };
     const results = {};
     const readings = {};
