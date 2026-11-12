@@ -49,5 +49,7 @@ jobs:
         if: always()
         with:
           name: mic-probe
-          path: mic-probe/*.{png,txt}
+          path: |
+            mic-probe/*.png
+            mic-probe/*.txt
           if-no-files-found: warn
