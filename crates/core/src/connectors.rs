@@ -22,6 +22,9 @@ use tokio::sync::Notify;
 const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
+const SLACK_NOT_CONNECTED: &str = "Slack is not connected: connect it in pinned's Connectors settings";
+const BOT_GONE: &str = "the Slack bot this workflow uses is not connected: connect it again, or pick another bot in the workflow's settings";
+const THREAD_BOT_GONE: &str = "the Slack bot that answers this thread is not connected anymore, and no other bot posts in it";
 const GITHUB_KEY: &str = "github-key";
 const VERCEL_KEY: &str = "vercel-key";
 const UPSTASH_KEY: &str = "upstash-box-key";
@@ -318,6 +321,10 @@ pub struct Connector {
     /// The account its sessions run under; empty runs them under their project's.
     #[serde(default)]
     pub account: String,
+    /// The id of the Slack bot that watches and answers for it; empty is the default bot. A called
+    /// workflow answers with the bot of the thread it was handed instead.
+    #[serde(default)]
+    pub slack_bot: String,
     /// The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.
     /// Older apps neither send nor read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -769,6 +776,10 @@ struct Store {
     /// Every connected Slack bot, the default first. Their tokens are keys, under `slack_bot_key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     slack_bots: Vec<slack::Bot>,
+    /// The bot that claimed each Slack thread, by `<channel id>:<thread ts>`. It answers the thread
+    /// alone, whichever workflow works on it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    slack_threads: BTreeMap<String, String>,
     #[serde(default)]
     github: Option<github::Account>,
     #[serde(default)]
@@ -802,6 +813,76 @@ impl Store {
 
     fn handled(&self, key: &str) -> bool {
         self.connectors.iter().any(|c| c.handled.iter().any(|h| h == key))
+    }
+
+    /// The default Slack bot: the first of `slack_bots`, or the one account of a store from before
+    /// several bots.
+    fn default_bot(&self) -> Option<slack::Bot> {
+        self.slack_bots.first().cloned().or_else(|| self.slack.as_ref().map(|a| legacy_bot(a, None)))
+    }
+
+    fn find_bot(&self, id: &str) -> Option<slack::Bot> {
+        match self.slack_bots.is_empty() {
+            false => self.slack_bots.iter().find(|b| b.id == id).cloned(),
+            true => self.default_bot().filter(|b| b.id == id),
+        }
+    }
+
+    /// The bot a workflow watches with: the one it names, or the default when it names none or
+    /// only answers threads it is handed. Err when the bot it names is gone, so no other bot's
+    /// token reads for it; None while Slack is not connected.
+    fn workflow_bot(&self, c: &Connector) -> Result<Option<slack::Bot>, String> {
+        if c.slack_bot.is_empty() || matches!(c.trigger, Trigger::Called) {
+            return Ok(self.default_bot());
+        }
+        self.find_bot(&c.slack_bot).map(Some).ok_or_else(|| format!("workflow {:?}: {BOT_GONE}", c.name))
+    }
+
+    /// The bot that answers a Slack thread: the one that claimed it, otherwise the workflow's,
+    /// otherwise the default. A thread whose bot is gone is answered by no other bot.
+    fn thread_bot(&self, workflow: Option<&str>, channel: &str, thread: &str) -> Result<Option<slack::Bot>, String> {
+        if let Some(id) = self.slack_threads.get(&thread_key(channel, thread)) {
+            return self.find_bot(id).map(Some).ok_or_else(|| THREAD_BOT_GONE.to_owned());
+        }
+        match workflow.and_then(|w| self.connectors.iter().find(|c| c.id == w)) {
+            Some(c) => self.workflow_bot(c),
+            None => Ok(self.default_bot()),
+        }
+    }
+
+    /// The id of the bot a workflow watches with, empty when it has none.
+    fn workflow_bot_id(&self, workflow: &str) -> String {
+        let c = self.connectors.iter().find(|c| c.id == workflow);
+        c.and_then(|c| self.workflow_bot(c).ok().flatten()).map(|b| b.id).unwrap_or_default()
+    }
+
+    /// Records the bot that claimed a thread. The first claim wins.
+    fn record_thread_bot(&mut self, key: &str, bot: &str) {
+        if !bot.is_empty() {
+            self.slack_threads.entry(key.to_owned()).or_insert_with(|| bot.to_owned());
+        }
+    }
+
+    /// Drops the bots of threads no workflow handles or follows and no run works on anymore.
+    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String]) -> bool {
+        let before = self.slack_threads.len();
+        let connectors = &self.connectors;
+        self.slack_threads.retain(|key, _| {
+            connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
+                || starting.contains(key)
+        });
+        self.slack_threads.len() != before
+    }
+
+    /// The workflows, paused ones too, that watch Slack with the bot `id` today. A called workflow
+    /// answers with the bot of each thread it is handed, so it holds no bot.
+    fn workflows_on_bot(&self, id: &str) -> Vec<String> {
+        self.connectors
+            .iter()
+            .filter(|c| matches!(c.trigger, Trigger::SlackMention { .. } | Trigger::SlackMessage { .. }))
+            .filter(|c| self.workflow_bot(c).ok().flatten().is_some_and(|b| b.id == id))
+            .map(|c| c.name.clone())
+            .collect()
     }
 
     fn claim_thread(&mut self, connector: &str, key: &str) -> Option<&mut Connector> {
@@ -889,6 +970,8 @@ impl Store {
                     continue;
                 }
             }
+            // The bot that found it claims the thread, so it answers there alone.
+            let bot = self.workflow_bot_id(&id);
             let Some(connector) = self.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
             let key = found.key();
             let subject = found.subject();
@@ -898,6 +981,9 @@ impl Store {
                     continue;
                 }
                 if let Some(input) = found.trigger(now) {
+                    if matches!(subject, Subject::SlackThread { .. }) {
+                        self.record_thread_bot(&key, &bot);
+                    }
                     settled.starts.push(GraphStart { connector: id, subject, input });
                 }
                 continue;
@@ -912,14 +998,16 @@ impl Store {
                 Found::Mention { channel, channel_name, mention, posts } => {
                     let Some(connector) = self.claim_thread(&id, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
-                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    connector.followed.insert(key.clone(), Followed { cursor, seen: None, replied: false });
                     let note = mention_note(&mention, now);
                     let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
+                    self.record_thread_bot(&key, &bot);
                     settled.needs_save = true;
                 }
                 Found::Stopped { channel, thread, page } => {
                     if self.claim_thread(&id, &key).is_some() {
+                        self.record_thread_bot(&key, &bot);
                         settled.pages.extend(self.page(&id, channel, thread, page, now, true));
                         settled.needs_save = true;
                     }
@@ -928,6 +1016,7 @@ impl Store {
                     let router = connector.name.clone();
                     if let Err(e) = self.check_route(&router, &category, &workflow) {
                         if self.claim_thread(&id, &key).is_some() {
+                            self.record_thread_bot(&key, &bot);
                             settled.pages.extend(self.page(&id, channel, thread, page, now, true));
                             settled.errors.push(e);
                             settled.needs_save = true;
@@ -938,6 +1027,7 @@ impl Store {
                         let subject = Subject::SlackThread { channel: channel.clone(), thread: thread.clone() };
                         let taken = subject_taken(runs, &key) || self.handled(&key) || settled.starts.iter().any(|start| subject_key(&start.subject) == key);
                         if !taken {
+                            self.record_thread_bot(&key, &bot);
                             settled.starts.push(GraphStart {
                                 connector: workflow.clone(),
                                 subject,
@@ -958,9 +1048,10 @@ impl Store {
                     }
                     let Some(target) = self.claim_thread(&workflow, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
-                    target.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    target.followed.insert(key.clone(), Followed { cursor, seen: None, replied: false });
                     let run = slack_run(target, &channel, &channel_name, &thread, &posts, Some(&note), exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
+                    self.record_thread_bot(&key, &bot);
                     settled.pages.extend(self.page(&id, channel, thread, page, now, false));
                     settled.needs_save = true;
                 }
@@ -995,6 +1086,8 @@ impl Store {
                 }
             }
         }
+        let starting: Vec<String> = settled.starts.iter().map(|start| subject_key(&start.subject)).collect();
+        settled.needs_save |= self.prune_thread_bots(runs, &starting);
         settled
     }
 }
@@ -1472,7 +1565,7 @@ pub struct Connectors {
     checked: Mutex<Option<Check>>,
     wake: Notify,
     /// Slack channel ids by the name a connector gives, so a check doesn't list every channel.
-    channels: Mutex<HashMap<String, String>>,
+    channels: Mutex<HashMap<(String, String), String>>,
     /// Held while a session files or takes a Linear issue, and while a check hands out issues, so
     /// two calls from one thread can't both file one and a check never starts an issue a thread holds.
     filing: tokio::sync::Mutex<()>,
@@ -1486,6 +1579,14 @@ pub struct Connectors {
     runs_broken: Mutex<Option<String>>,
     /// The latest tab list each machine has sent, with the unix millis it was observed.
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
+}
+
+/// A Slack bot with its token, as a read or a post uses it.
+#[derive(Clone)]
+struct SlackBot {
+    id: String,
+    token: String,
+    user_id: String,
 }
 
 impl Connectors {
@@ -1526,12 +1627,17 @@ impl Connectors {
     /// messages on. A failing connector doesn't hold up the others, but a rate limit skips the
     /// rest of that integration until the next check instead of hammering it.
     async fn poll(&self) -> (Vec<Work>, Option<String>) {
+        self.fill_bots().await;
         let now = Utc::now();
         let watching: Vec<Connector> =
             self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).cloned().collect();
         let (mut found, mut checked, mut limited, mut errors) = (vec![], vec![], vec![], vec![]);
         for connector in watching {
-            let integration = connector.trigger.integration();
+            // Each Slack bot is its own app with its own rate limit.
+            let integration = match connector.trigger.integration() {
+                "Slack" => format!("Slack:{}", self.store.lock().unwrap().workflow_bot_id(&connector.id)),
+                other => other.to_owned(),
+            };
             if limited.contains(&integration) {
                 continue;
             }
@@ -1572,15 +1678,17 @@ impl Connectors {
         }
         errors.extend(settled.errors);
         for page in &settled.pages {
-            if let Err(e) = self.page(page).await {
+            if let Err(e) = self.page(None, page).await {
                 errors.push(e);
             }
         }
         (settled.work, (!errors.is_empty()).then(|| errors.join("; ")))
     }
 
-    async fn page(&self, page: &Page) -> Result<(), String> {
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+    /// Posts the page with the bot of the thread: the one that claimed it, which `settle` records,
+    /// otherwise `workflow`'s.
+    async fn page(&self, workflow: Option<&str>, page: &Page) -> Result<(), String> {
+        let token = self.thread_bot(workflow, &page.channel, &page.thread)?.token;
         let text = match &page.reply {
             Reply::Ping(text) => text.clone(),
             Reply::Already { handle, thread } => already_text(handle, &slack::permalink(&token, &page.channel, thread).await?),
@@ -1623,7 +1731,7 @@ impl Connectors {
                 // session files one.
                 match &subject {
                     Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
-                    Subject::SlackThread { channel, .. } => self.acknowledge(channel, &mentioned).await,
+                    Subject::SlackThread { channel, thread } => self.acknowledge(&connector, channel, thread, &mentioned).await,
                 }
             }
             Work::Delivery(d) => {
@@ -1638,7 +1746,7 @@ impl Connectors {
                     newest
                 };
                 self.follow(&d.connector, &d.channel, &d.thread, cursor)?;
-                self.acknowledge(&d.channel, &d.mentioned).await
+                self.acknowledge(&d.connector, &d.channel, &d.thread, &d.mentioned).await
             }
             Work::Prompt { env, text } => open(Work::Prompt { env, text }).await.taken().map(drop),
         }
@@ -1646,11 +1754,11 @@ impl Connectors {
 
     /// Reacts to the messages a session took, so people can tell the bot didn't ignore them.
     /// Tries every message even when one fails, and answers the first failure.
-    async fn acknowledge(&self, channel: &str, mentioned: &[String]) -> Result<(), String> {
+    async fn acknowledge(&self, workflow: &str, channel: &str, thread: &str, mentioned: &[String]) -> Result<(), String> {
         if mentioned.is_empty() {
             return Ok(());
         }
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let token = self.thread_bot(Some(workflow), channel, thread)?.token;
         let mut result = Ok(());
         for ts in mentioned {
             let reacted = slack::react(&token, channel, ts, slack::WORKING).await;
@@ -1684,6 +1792,7 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
+        store.slack_threads.remove(&subject_key(subject));
         match self.save(&store) {
             Ok(()) => error,
             Err(e) => format!("{error}; {e}"),
@@ -1699,8 +1808,9 @@ impl Connectors {
             Trigger::Called => None,
             Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => return Err("the workflow no longer answers Slack threads".into()),
         };
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
-        let own = watched.filter(|name| self.channels.lock().unwrap().get(*name) == Some(&d.channel));
+        let bot = self.thread_bot(Some(&d.connector), &d.channel, &d.thread)?;
+        let token = bot.token.clone();
+        let own = watched.filter(|name| self.channels.lock().unwrap().get(&(bot.id.clone(), (*name).to_owned())) == Some(&d.channel));
         let name = match own {
             Some(name) => channel_name(name).to_owned(),
             None => slack::channel_name(&token, &d.channel).await?,
@@ -1733,11 +1843,12 @@ impl Connectors {
                 Ok(Some(linear::labeled_issues(&key, label, &c.since).await?.into_iter().map(Found::Issue).collect()))
             }
             Trigger::SlackMention { channel: name } => {
-                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
-                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
-                let channel = self.channel_id(&token, name).await?;
+                let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
+                let token = bot.token.clone();
+                let channel = self.channel_id(&bot, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-                let activity = slack::activity(&token, &channel, &bot, since, &cursors(&c.followed, &channel)).await?;
+                let own = self.followed_by(c, &bot.id).remove(&bot.id).unwrap_or_default();
+                let activity = slack::activity(&token, &channel, &bot.user_id, since, &cursors(&own, &channel)).await?;
                 let mut found: Vec<Found> = vec![];
                 // Oldest first, so a thread's first new mention is the one its session answers.
                 for mention in activity.mentions {
@@ -1750,16 +1861,16 @@ impl Connectors {
                     found.push(Found::Mention { channel: channel.clone(), channel_name, mention, posts });
                 }
                 found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
-                found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
+                found.extend(self.follow_ups(&bot, c, Some(&channel), now).await?);
                 Ok(Some(found))
             }
             Trigger::SlackMessage { channel: name, .. } if c.graph.is_some() => self.scan_graph_channel(c, name, now).await,
             Trigger::SlackMessage { channel: name, decide } => {
-                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
-                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
-                let channel = self.channel_id(&token, name).await?;
+                let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
+                let token = bot.token.clone();
+                let channel = self.channel_id(&bot, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-                let mut messages = slack::messages(&token, &channel, &bot, since).await?;
+                let mut messages = slack::messages(&token, &channel, &bot.user_id, since).await?;
                 messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
                 if messages.is_empty() {
                     return Ok(Some(vec![]));
@@ -1795,9 +1906,8 @@ impl Connectors {
                 Ok(Some(found))
             }
             Trigger::Called => {
-                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
-                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
-                Ok(Some(self.follow_ups(&token, &bot, c, None, now).await?))
+                let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
+                Ok(Some(self.follow_ups(&bot, c, None, now).await?))
             }
         }
     }
@@ -1806,11 +1916,11 @@ impl Connectors {
     /// the bot inside a thread nothing handles starts a run too, however old the thread, once the
     /// mention is past the watermark. That run sorts the mention, with the thread as context.
     async fn scan_graph_channel(&self, c: &Connector, name: &str, now: DateTime<Utc>) -> Result<Option<Vec<Found>>, String> {
-        let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
-        let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
-        let channel = self.channel_id(&token, name).await?;
+        let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
+        let token = bot.token.clone();
+        let channel = self.channel_id(&bot, name).await?;
         let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-        let mut messages = slack::messages(&token, &channel, &bot, since).await?;
+        let mut messages = slack::messages(&token, &channel, &bot.user_id, since).await?;
         messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
         let channel_name = channel_name(name).to_owned();
         let mut found = vec![];
@@ -1823,7 +1933,8 @@ impl Connectors {
                 posts,
             });
         }
-        let activity = slack::activity(&token, &channel, &bot, since, &cursors(&c.followed, &channel)).await?;
+        let own = self.followed_by(c, &bot.id).remove(&bot.id).unwrap_or_default();
+        let activity = slack::activity(&token, &channel, &bot.user_id, since, &cursors(&own, &channel)).await?;
         // A mention that is itself a top-level message started a new thread, found above.
         for mention in activity.mentions.into_iter().filter(|mention| mention.ts != mention.thread) {
             let key = thread_key(&channel, &mention.thread);
@@ -1834,7 +1945,7 @@ impl Connectors {
             found.push(Found::Mention { channel: channel.clone(), channel_name: channel_name.clone(), mention, posts });
         }
         found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
-        found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
+        found.extend(self.follow_ups(&bot, c, Some(&channel), now).await?);
         Ok(Some(found))
     }
 
@@ -1846,11 +1957,34 @@ impl Connectors {
         self.runs.lock().unwrap().iter().any(|run| !matches!(run.status, Status::Failed { .. } | Status::Done) && subject_key(&run.subject) == key)
     }
 
-    async fn follow_ups(&self, token: &str, bot: &str, c: &Connector, own: Option<&str>, now: DateTime<Utc>) -> Result<Vec<Found>, String> {
+    /// The connector's followed threads by the bot that answers each: the one that claimed it,
+    /// otherwise `own`, the workflow's.
+    fn followed_by(&self, c: &Connector, own: &str) -> BTreeMap<String, BTreeMap<String, Followed>> {
+        let store = self.store.lock().unwrap();
+        let mut by: BTreeMap<String, BTreeMap<String, Followed>> = BTreeMap::new();
+        for (key, followed) in &c.followed {
+            let bot = store.slack_threads.get(key).map_or(own, String::as_str);
+            by.entry(bot.to_owned()).or_default().insert(key.clone(), followed.clone());
+        }
+        by
+    }
+
+    /// New replies in the connector's followed threads outside its own channel, each read by the
+    /// bot that answers the thread. Threads whose bot is gone are skipped.
+    async fn follow_ups(&self, bot: &SlackBot, c: &Connector, own: Option<&str>, now: DateTime<Utc>) -> Result<Vec<Found>, String> {
         let mut found = vec![];
-        for channel in followed_channels(&c.followed, own) {
-            let activity = slack::activity(token, &channel, bot, now, &cursors(&c.followed, &channel)).await?;
-            found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+        for (id, followed) in self.followed_by(c, &bot.id) {
+            let (reader, own) = match id == bot.id {
+                true => (bot.clone(), own),
+                false => match self.bot_by_id(&id) {
+                    Some(reader) => (reader, None),
+                    None => continue,
+                },
+            };
+            for channel in followed_channels(&followed, own) {
+                let activity = slack::activity(&reader.token, &channel, &reader.user_id, now, &cursors(&followed, &channel)).await?;
+                found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+            }
         }
         Ok(found)
     }
@@ -1878,12 +2012,14 @@ impl Connectors {
         Ok(pages)
     }
 
-    async fn channel_id(&self, token: &str, name: &str) -> Result<String, String> {
-        if let Some(id) = self.channels.lock().unwrap().get(name) {
+    /// The id of the channel `name` in the bot's workspace. Two workspaces may each have a #general.
+    async fn channel_id(&self, bot: &SlackBot, name: &str) -> Result<String, String> {
+        let cached = (bot.id.clone(), name.to_owned());
+        if let Some(id) = self.channels.lock().unwrap().get(&cached) {
             return Ok(id.clone());
         }
-        let id = slack::channel_id(token, name).await?;
-        self.channels.lock().unwrap().insert(name.to_owned(), id.clone());
+        let id = slack::channel_id(&bot.token, name).await?;
+        self.channels.lock().unwrap().insert(cached, id.clone());
         Ok(id)
     }
 
@@ -1953,7 +2089,7 @@ impl Connectors {
             return Ok(filed.clone());
         }
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let token = self.thread_bot(Some(connector), channel, thread)?.token;
         let link = slack::permalink(&token, channel, thread).await?;
         let description = format!("{}\n\nSlack thread: {link}", description.trim());
         let issue = linear::create_issue(&key, team, title.trim(), &description, label, assignee).await?;
@@ -1995,7 +2131,7 @@ impl Connectors {
         if self.runs.lock().unwrap().iter().any(|run| runner::already_sent(run, &Self::reply_key(channel, thread, text))) {
             return Ok("that reply is already posted by the workflow run".into());
         }
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let token = self.thread_bot(Some(connector), channel, thread)?.token;
         slack::post(&token, channel, thread, text).await?;
         Ok("posted the reply in the Slack thread".into())
     }
@@ -3345,13 +3481,13 @@ impl Connectors {
                 let env = agent::session_env(&owner, &run.subject);
                 open(Work::Prompt { env, text }).await.taken()?;
                 let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
-                let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+                let _ = self.acknowledge(&owner, &item.channel, &item.thread, &item.mentioned).await;
                 Ok(InboxDone::Sent)
             }
             Session::Detached { .. } if matches!(run.status, Status::Done) => {
                 self.resume_finished(&run, &owner, &text, open).await?;
                 let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
-                let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+                let _ = self.acknowledge(&owner, &item.channel, &item.thread, &item.mentioned).await;
                 Ok(InboxDone::Sent)
             }
             Session::Detached { .. } | Session::None => Ok(InboxDone::Later),
@@ -3434,6 +3570,10 @@ impl Connectors {
                 if !already && store.claim_thread(&connector, &key).is_none() {
                     return Err(format!("workflow {connector:?} was deleted"));
                 }
+                if matches!(run.subject, Subject::SlackThread { .. }) {
+                    let bot = store.workflow_bot_id(&connector);
+                    store.record_thread_bot(&key, &bot);
+                }
                 note_followed(&mut store, &connector, run);
                 self.save(&store)?;
                 Ok(Supplied::Done)
@@ -3455,7 +3595,7 @@ impl Connectors {
                     return Err("a page node needs the run's Slack thread".into());
                 };
                 let (channel, thread) = (channel.clone(), thread.clone());
-                let paging = self.paging_for(&connector, &group).await?;
+                let paging = self.paging_for(&connector, &channel, &thread, &group).await?;
                 let now = Utc::now();
                 let reply = {
                     let store = self.store.lock().unwrap();
@@ -3464,7 +3604,7 @@ impl Connectors {
                 };
                 if let Some(reply) = reply {
                     // Post first. A missed page is the failure a retry has to repair, so a crash after a successful post may page twice.
-                    self.page(&Page { channel: channel.clone(), thread: thread.clone(), reply: reply.clone(), react: true }).await?;
+                    self.page(Some(&connector), &Page { channel: channel.clone(), thread: thread.clone(), reply: reply.clone(), react: true }).await?;
                     let mut store = self.store.lock().unwrap();
                     if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
                         c.record_escalation(&channel, &thread, &reply, now);
@@ -3584,7 +3724,7 @@ impl Connectors {
             self.runs.lock().unwrap().push(started);
             self.save_runs()?;
             let _ = self.follow(&run.connector, &item.channel, &item.thread, item.cursor.clone());
-            let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+            let _ = self.acknowledge(&run.connector, &item.channel, &item.thread, &item.mentioned).await;
             return Ok(true);
         }
         let input = TriggerInput::Slack { channel, channel_name, thread, posts: item.posts.clone(), note: None, mentioned: item.mentioned.clone(), request: None };
@@ -3608,11 +3748,11 @@ impl Connectors {
         self.save_runs()?;
         let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
         let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
-        let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+        let _ = self.acknowledge(&owner, &item.channel, &item.thread, &item.mentioned).await;
         Ok(true)
     }
 
-    async fn paging_for(&self, connector: &str, group: &str) -> Result<Paging, String> {
+    async fn paging_for(&self, connector: &str, channel: &str, thread: &str, group: &str) -> Result<Paging, String> {
         let (name, category) = {
             let store = self.store.lock().unwrap();
             let c = store.connector(connector)?;
@@ -3622,7 +3762,7 @@ impl Connectors {
             };
             (c.name.clone(), category)
         };
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let token = self.thread_bot(Some(connector), channel, thread)?.token;
         let id = slack::group_id(&token, group).await.map_err(|e| format!("workflow {name:?} could not page {group:?}: {e}"))?;
         let ping = match &category {
             Some(category) => page_text(&id, category),
@@ -3674,8 +3814,8 @@ impl Connectors {
         let mentioned = spec.mentioned.clone();
         match open(Work::Run(spec)).await.taken() {
             Ok(place) => {
-                if let Subject::SlackThread { channel, .. } = &run.subject {
-                    let _ = self.acknowledge(channel, &mentioned).await;
+                if let Subject::SlackThread { channel, thread } = &run.subject {
+                    let _ = self.acknowledge(owner, channel, thread, &mentioned).await;
                 }
                 let _ = self.ack_inbox(owner, &inbox).await;
                 let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
@@ -3778,7 +3918,7 @@ impl Connectors {
         let mention = trigger_of(run).map(|input| trigger_mention(&input)).unwrap_or_default();
         let mut title = render_template(title, run);
         if title.trim().is_empty() {
-            let bot = self.store.lock().unwrap().slack.as_ref().map(|account| account.name.clone());
+            let bot = self.store.lock().unwrap().thread_bot(Some(connector), channel, thread).ok().flatten().map(|bot| bot.name);
             title = fallback_title(&mention, bot.as_deref());
         }
         if title.trim().is_empty() {
@@ -3860,7 +4000,7 @@ impl Connectors {
     async fn ack_inbox(&self, owner: &str, items: &[GraphInbox]) -> Result<(), String> {
         for item in items {
             self.follow(owner, &item.channel, &item.thread, item.cursor.clone())?;
-            self.acknowledge(&item.channel, &item.mentioned).await?;
+            self.acknowledge(owner, &item.channel, &item.thread, &item.mentioned).await?;
         }
         Ok(())
     }
@@ -3944,14 +4084,22 @@ impl Connectors {
 
     /// Removes the Slack bot `bot` and its token, or the default bot when `bot` is empty, which is
     /// what an app from before several bots means. The next bot becomes the default.
-    // TODO(multi-Slack PR 2): refuse while a workflow, paused ones too, is bound to the bot by `Connector.slack_bot`.
+    /// Refused while a workflow, paused ones too, watches Slack with the bot: by naming it, or by
+    /// naming none while it is the default.
     pub fn disconnect_slack(&self, bot: &str) -> Result<(), String> {
-        self.channels.lock().unwrap().clear();
         let mut store = self.store.lock().unwrap();
         let at = match bot {
             "" => (!store.slack_bots.is_empty()).then_some(0),
             id => Some(store.slack_bots.iter().position(|b| b.id == id).ok_or("no such Slack bot")?),
         };
+        if let Some(at) = at {
+            let gone = &store.slack_bots[at];
+            let users = store.workflows_on_bot(&gone.id);
+            if !users.is_empty() {
+                return Err(format!("Slack bot @{} is used by: {}. Move or delete those workflows first.", gone.name, users.join(", ")));
+            }
+        }
+        self.channels.lock().unwrap().clear();
         if let Some(at) = at {
             let gone = store.slack_bots.remove(at);
             self.storage.remove_key(&slack_bot_key(&gone.id));
@@ -3977,7 +4125,70 @@ impl Connectors {
     fn slack_token(&self, bot: &str) -> Option<String> {
         match bot {
             "" => self.key(SLACK_KEY),
-            id => self.key(&slack_bot_key(id)),
+            id => self.key(&slack_bot_key(id)).or_else(|| {
+                let default = self.store.lock().unwrap().default_bot().is_some_and(|b| b.id == id);
+                default.then(|| self.key(SLACK_KEY)).flatten()
+            }),
+        }
+    }
+
+    /// The bot with its token, or None when its token is gone.
+    fn with_token(&self, bot: slack::Bot) -> Option<SlackBot> {
+        let token = self.slack_token(&bot.id)?;
+        Some(SlackBot { id: bot.id, token, user_id: bot.user_id })
+    }
+
+    /// The bot that answers in a Slack thread for `workflow`, by `Store::thread_bot`: the bot that
+    /// claimed the thread, otherwise the workflow's, otherwise the default. Every Slack post and
+    /// read about a thread goes through here, so no thread hears from two bots.
+    fn thread_bot(&self, workflow: Option<&str>, channel: &str, thread: &str) -> Result<SlackBot, String> {
+        let bot = self.store.lock().unwrap().thread_bot(workflow, channel, thread)?.ok_or(SLACK_NOT_CONNECTED)?;
+        self.with_token(bot).ok_or_else(|| SLACK_NOT_CONNECTED.to_owned())
+    }
+
+    /// The bot a workflow watches with, or None while Slack is not connected. Err when the bot the
+    /// workflow names is gone, so its scan stops instead of reading as another bot.
+    fn scan_bot(&self, c: &Connector) -> Result<Option<SlackBot>, String> {
+        let Some(bot) = self.store.lock().unwrap().workflow_bot(c)? else { return Ok(None) };
+        match self.with_token(bot) {
+            None if !c.slack_bot.is_empty() && !matches!(c.trigger, Trigger::Called) => Err(format!("workflow {:?}: {BOT_GONE}", c.name)),
+            bot => Ok(bot),
+        }
+    }
+
+    /// The connected bot `id` with its token.
+    fn bot_by_id(&self, id: &str) -> Option<SlackBot> {
+        let bot = self.store.lock().unwrap().find_bot(id)?;
+        self.with_token(bot)
+    }
+
+    /// Fills the workspace and app ids of bots that lack them, moved over from the single-bot
+    /// store, from `auth.test` and `bots.info`. A bot Slack won't answer for stays as it is; an
+    /// app id Slack won't give (the token may lack the scope) stays empty.
+    async fn fill_bots(&self) {
+        let empty: Vec<String> = self.store.lock().unwrap().slack_bots.iter().filter(|b| b.team_id.is_empty()).map(|b| b.id.clone()).collect();
+        for id in empty {
+            let Some(token) = self.slack_token(&id) else { continue };
+            let Ok((found, bot_id)) = slack::identify(&token).await else { continue };
+            if found.user_id != id {
+                continue;
+            }
+            let app_id = slack::app_id(&token, &bot_id).await.unwrap_or_default();
+            let mut store = self.store.lock().unwrap();
+            let Some(bot) = store.slack_bots.iter_mut().find(|b| b.id == id) else { continue };
+            let filled = slack::Bot {
+                team_id: found.team_id,
+                team: found.team,
+                name: found.name,
+                app_id: if bot.app_id.is_empty() { app_id } else { bot.app_id.clone() },
+                ..bot.clone()
+            };
+            if filled != *bot {
+                *bot = filled;
+                if let Err(e) = self.mirror_slack(&mut store).and_then(|()| self.save(&store)) {
+                    eprintln!("pinned: could not save the Slack bot {id}: {e}");
+                }
+            }
         }
     }
 
@@ -4250,8 +4461,12 @@ impl Connectors {
             true
         };
         if fresh {
-            if let (Subject::SlackThread { channel, thread }, Some(token)) = (subject, self.key(SLACK_KEY)) {
-                if let Err(e) = slack::post(&token, channel, thread, "Pinned wants an Upstash box for this thread. Allow it on the Upstash card in Connectors.").await {
+            if let Subject::SlackThread { channel, thread } = subject {
+                let posted = match self.thread_bot(Some(connector), channel, thread) {
+                    Ok(bot) => slack::post(&bot.token, channel, thread, "Pinned wants an Upstash box for this thread. Allow it on the Upstash card in Connectors.").await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = posted {
                     eprintln!("pinned: could not ask for a box in {channel}/{thread}: {e}");
                 }
             }
@@ -5297,6 +5512,7 @@ mod tests {
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
+            slack_bot: String::new(),
             graph: None,
         }
     }
@@ -5433,6 +5649,7 @@ mod tests {
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
+            slack_bot: String::new(),
             graph: None,
         }
     }
