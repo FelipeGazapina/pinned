@@ -1,0 +1,53 @@
+name: macos
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.rs"
+      - "tauri.conf.json"
+      - "Entitlements.plist"
+      - "Info.plist"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/mic-probe/**"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo test -p pinned dictation
+      # Ad-hoc, as a release without the APPLE_* secrets builds it; no updater signature needed here.
+      - run: npx tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: The app and its dictation helper carry the microphone entitlement
+        run: |
+          app=target/release/bundle/macos/pinned.app
+          helper="$app/Contents/Resources/binaries/dictation-helper"
+          for code in "$app" "$helper"; do
+            echo "== $code"
+            codesign -dv "$code" 2>&1 | grep -E '^(Identifier|CodeDirectory|TeamIdentifier)'
+            codesign -d --entitlements - "$code" 2>&1 | tee entitlements.txt
+            grep -q com.apple.security.device.audio-input entitlements.txt
+          done
+          codesign --verify --strict --verbose=2 "$app"
+          plutil -p "$app/Contents/Info.plist" | grep UsageDescription
+          echo "== helper --permissions, answering for this runner's shell"
+          "$helper" --permissions
+      - name: Microphone request with and without the entitlement
+        run: scripts/mic-probe/run.sh mic-probe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mic-probe
+          path: mic-probe/*.{png,txt}
+          if-no-files-found: warn
