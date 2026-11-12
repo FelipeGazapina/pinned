@@ -2,6 +2,9 @@
 // interim + final results as JSON lines on stdout. Built by build.rs with swiftc.
 //
 // Usage: dictation-helper <locale>, for example en-US or pt-BR.
+//        dictation-helper --permissions — prints one line and exits without prompting:
+//          {"microphone":"granted","speechRecognition":"notDetermined"}
+//          each one notDetermined, denied, restricted or granted.
 //
 // Protocol (stdout, one JSON object per line):
 //   {"type":"ready"}                       — recognizer + mic are up
@@ -35,6 +38,26 @@ func emit(_ obj: [String: Any]) {
 func fail(_ message: String) -> Never {
     emit(["type": "error", "message": message])
     exit(1)
+}
+
+// Read-only: authorizationStatus never prompts. macOS answers for the app that started us.
+if CommandLine.arguments.dropFirst().first == "--permissions" {
+    let microphone: String
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized: microphone = "granted"
+    case .denied: microphone = "denied"
+    case .restricted: microphone = "restricted"
+    default: microphone = "notDetermined"
+    }
+    let speech: String
+    switch SFSpeechRecognizer.authorizationStatus() {
+    case .authorized: speech = "granted"
+    case .denied: speech = "denied"
+    case .restricted: speech = "restricted"
+    default: speech = "notDetermined"
+    }
+    emit(["microphone": microphone, "speechRecognition": speech])
+    exit(0)
 }
 
 let localeId = CommandLine.arguments.dropFirst().first ?? "en-US"
