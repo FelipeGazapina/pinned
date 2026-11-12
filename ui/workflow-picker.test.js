@@ -50,7 +50,9 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
       async hub(call) {
         calls.push(call);
         if (call.cmd === "linear_suggestions") return { labels: [], columns: [], teams: [] };
-        return LISTS.has(call.cmd) ? [] : reply(call);
+        if (LISTS.has(call.cmd)) return [];
+        const got = reply(call);
+        return call.cmd === "get_settings" && !got?.connectors ? context.__settings() : got;
       },
     },
     machines: new Map([["local", { view: { online: true }, projects: [] }]]),
@@ -196,4 +198,26 @@ test("Linear connected elsewhere while the note is up: the note says so and Back
   await env.context.__actions["resume-workflow"]();
   assert.equal(env.state().page, "connectors");
   assert.equal(env.state().view.draft.trigger.kind, "linear-label");
+});
+
+test("Back to the workflow reads settings again, so Linear connected in another window counts", async () => {
+  let linear = null;
+  const env = load({ reply: (call) => (call.cmd === "get_settings" ? { linear, slack: null, slack_bots: [], connectors: [], checked: null } : {}) });
+  await openPicker(env);
+  await env.click("linear-label");
+  linear = LINEAR;
+  await env.context.__actions["resume-workflow"]();
+  assert.equal(env.state().page, "connectors");
+  assert.equal(env.state().view.name, "edit");
+  assert.equal(env.state().view.draft.trigger.kind, "linear-label");
+});
+
+test("Back to the workflow while Linear is still missing returns to the picker, which still says why", async () => {
+  const env = load({});
+  await openPicker(env);
+  await env.click("linear-label");
+  await env.context.__actions["resume-workflow"]();
+  assert.equal(env.state().page, "connectors");
+  assert.equal(env.state().view.name, "pick");
+  assert.match(env.option("linear-label").text, /Connect Linear under Connectors first/);
 });

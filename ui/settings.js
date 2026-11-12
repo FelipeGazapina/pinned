@@ -495,10 +495,16 @@ const connectForHtml = (kind) =>
        <div class="actions"><button class="secondary" data-action="connect-for-trigger" data-kind="${kind}">Connect ${NEEDS[TRIGGERS[kind].needs].name}</button></div>`;
 
 /** Back to the workflow a missing connector interrupted: the draft as it was left, or a new one of
- * the picked kind once its connector is connected (the picker again while it is not). */
-function resumeWorkflow() {
+ * the picked kind once its connector is connected (the picker again while it is not). Settings are
+ * read again first, since the connector may have been connected in another window. */
+async function resumeWorkflow() {
   const kind = pendingWorkflow?.kind;
   pendingWorkflow = null;
+  try {
+    settings = await connectorCall("get_settings");
+  } catch (e) {
+    console.warn("get_settings", e);
+  }
   if (view.name !== "edit") view = { name: "pick" };
   showPage("connectors");
   if (view.name === "pick" && kind && triggerReady(kind)) actions["pick-trigger"]({ dataset: { kind } });
@@ -1807,7 +1813,7 @@ const actions = {
     if (!key.trim()) return;
     try {
       settings.linear = await connectorCall("connect_linear", { key });
-      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return resumeWorkflow();
+      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
       showPage("integrations");
     } catch (e) {
       document.getElementById("linear-error").textContent = e;
@@ -1827,7 +1833,7 @@ const actions = {
       slackNote = found.added === false ? `Updated the token for @${found.name}` : `Added @${found.name} in ${found.team}`;
       slackAdding = false;
       settings = await connectorCall("get_settings");
-      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return resumeWorkflow();
+      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
       showPage("integrations");
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
