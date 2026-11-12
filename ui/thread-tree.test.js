@@ -68,6 +68,7 @@ test("a closed Finished group still lists the finished worker that is open, and 
   const done = new Set(["m:tab-3", "m:tab-6"]);
   assert.deepEqual(lines([plain, worker, early], new Set(), { done, active: early }), ["tab-1 (2)", "  Finished under tab-1 (2)", "  tab-6"]);
   assert.deepEqual(lines([plain, worker, early], new Set(["m:tab-1"]), { done }), ["tab-1 (2)"]);
+  assert.deepEqual(lines([plain, worker, nested, early], new Set(), { done, active: nested }), ["tab-1 (3)", "  Finished under tab-1 (2)", "  tab-3 (1)", "    tab-4"], "the open thread under a finished worker shows too");
 });
 
 test("a worker at work, waiting or failed stays in its place, and with none finished there is no group", () => {

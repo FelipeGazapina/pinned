@@ -591,7 +591,7 @@ function spawnTree(list) {
 /** `tab` and, unless `look.folded(tab)`, the threads under it, as a file manager lists a folder: each
  * `{ tab, depth, under }`, `under` counting every thread below it, folded or not. The workers that
  * `look.finished` come last, behind one `{ finished, of, depth }` group, and list under it once
- * `look.opened(of)`, or alone when `look.shown` picks one. */
+ * `look.opened(of)`, or alone when `look.shown` picks it or a thread under it. */
 function spawnRows(tab, kids, look, depth = 0) {
   const own = kids.get(tab.key) ?? [];
   const under = (t) => (kids.get(t.key) ?? []).reduce((n, k) => n + 1 + under(k), 0);
@@ -599,7 +599,8 @@ function spawnRows(tab, kids, look, depth = 0) {
   if (!own.length || look.folded(tab)) return [row];
   const branch = (k) => spawnRows(k, kids, look, depth + 1);
   const finished = own.filter(look.finished);
-  const group = finished.length ? [{ finished, of: tab, depth: depth + 1 }, ...finished.filter((k) => look.opened(tab) || look.shown(k)).flatMap(branch)] : [];
+  const holds = (k) => look.shown(k) || (kids.get(k.key) ?? []).some(holds);
+  const group = finished.length ? [{ finished, of: tab, depth: depth + 1 }, ...finished.filter((k) => look.opened(tab) || holds(k)).flatMap(branch)] : [];
   return [row, ...own.filter((k) => !look.finished(k)).flatMap(branch), ...group];
 }
 
