@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/release-asset.sh draft|upload|publish <tag> [files...]" >&2
+  echo "usage: scripts/release-asset.sh draft|upload|publish <tag> [files...] | verify <dir>" >&2
   exit 2
 }
 
@@ -79,6 +79,33 @@ tag_is_latest() {
   ! version_is_newer "$current" "$1"
 }
 
+verify_assets() {
+  local assets="$1" pubkey verifier listed digest name _ bundles signature
+  pubkey=$(jq -r .plugins.updater.pubkey "$repo/tauri.conf.json")
+  verifier="$repo/scripts/minisign-verify.mjs"
+  present "$assets" SHA256SUMS
+  present "$assets" SHA256SUMS.minisig
+  node "$verifier" "$pubkey" "$assets/SHA256SUMS" "$assets/SHA256SUMS.minisig" ||
+    refuse "SHA256SUMS.minisig does not verify SHA256SUMS"
+  listed=" "
+  while read -r digest name _; do
+    name="${name#\*}"
+    present "$assets" "$name"
+    [[ "$(hash_of "$assets/$name")" == "$digest" ]] || refuse "$name does not match SHA256SUMS"
+    listed+="$name "
+  done < "$assets/SHA256SUMS"
+  for name in latest.json pinned-server-aarch64-unknown-linux-musl pinned-server-x86_64-unknown-linux-musl; do
+    [[ "$listed" == *" $name "* ]] || refuse "SHA256SUMS does not list $name"
+  done
+  bundles=$(jq -r '[.platforms[] | [(.url | split("/") | last), .signature]] | unique[] | @tsv' "$assets/latest.json")
+  while IFS=$'\t' read -r name signature; do
+    present "$assets" "$name"
+    printf '%s' "$signature" | openssl base64 -d -A > "$work/signature"
+    node "$verifier" "$pubkey" "$assets/$name" "$work/signature" ||
+      refuse "$name does not match its signature in latest.json"
+  done <<< "$bundles"
+}
+
 case "$cmd" in
   draft)
     [[ "$#" -eq 0 ]] || usage
@@ -108,29 +135,7 @@ case "$cmd" in
     trap 'rm -rf "$work"' EXIT
     assets="$work/assets"
     gh release download "$tag" -D "$assets"
-    pubkey=$(jq -r .plugins.updater.pubkey "$repo/tauri.conf.json")
-    verifier="$repo/scripts/minisign-verify.mjs"
-    present "$assets" SHA256SUMS
-    present "$assets" SHA256SUMS.minisig
-    node "$verifier" "$pubkey" "$assets/SHA256SUMS" "$assets/SHA256SUMS.minisig" ||
-      refuse "SHA256SUMS.minisig does not verify SHA256SUMS"
-    listed=" "
-    while read -r digest name _; do
-      name="${name#\*}"
-      present "$assets" "$name"
-      [[ "$(hash_of "$assets/$name")" == "$digest" ]] || refuse "$name does not match SHA256SUMS"
-      listed+="$name "
-    done < "$assets/SHA256SUMS"
-    for name in latest.json pinned-server-aarch64-unknown-linux-musl pinned-server-x86_64-unknown-linux-musl; do
-      [[ "$listed" == *" $name "* ]] || refuse "SHA256SUMS does not list $name"
-    done
-    bundles=$(jq -r '[.platforms[] | [(.url | split("/") | last), .signature]] | unique[] | @tsv' "$assets/latest.json")
-    while IFS=$'\t' read -r name signature; do
-      present "$assets" "$name"
-      printf '%s' "$signature" | openssl base64 -d -A > "$work/signature"
-      node "$verifier" "$pubkey" "$assets/$name" "$work/signature" ||
-        refuse "$name does not match its signature in latest.json"
-    done <<< "$bundles"
+    verify_assets "$assets"
     if [[ "$tag" == *-* ]]; then
       flags=(--prerelease --latest=false)
     elif tag_is_latest "$tag"; then
@@ -139,6 +144,12 @@ case "$cmd" in
       flags=(--latest=false)
     fi
     gh release edit "$tag" --draft=false "${flags[@]}"
+    ;;
+  verify)
+    [[ "$#" -eq 0 ]] || usage
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    verify_assets "$tag"
     ;;
   *)
     usage

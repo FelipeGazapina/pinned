@@ -195,9 +195,51 @@ pub fn dictation_status(dictation: State<Arc<Dictation>>) -> bool {
     dictation.running()
 }
 
+/// The System Settings pane that turns on `permission`, by the name the helper reports it under.
+fn privacy_pane(permission: &str) -> Option<&'static str> {
+    match permission {
+        "microphone" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
+        "speechRecognition" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"),
+        _ => None,
+    }
+}
+
+/// Microphone and Speech Recognition, each notDetermined, denied, restricted or granted. Asked
+/// fresh on every call and never prompts; the UI decides from it what a mic click does.
+#[tauri::command]
+pub async fn dictation_permissions(dictation: State<'_, Arc<Dictation>>) -> Result<serde_json::Value, String> {
+    let path = Dictation::helper_path(&dictation.app)?;
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        process::command(&path).arg("--permissions").stdin(Stdio::null()).stderr(Stdio::null()).output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("could not ask macOS for permissions: {e}"))?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("could not read the permissions: {e}"))
+}
+
+#[tauri::command]
+pub fn open_privacy_settings(permission: String) -> Result<(), String> {
+    let pane = privacy_pane(&permission).ok_or_else(|| format!("no settings pane for {permission:?}"))?;
+    crate::commands::open(pane)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_permission_opens_its_own_privacy_pane() {
+        assert_eq!(
+            privacy_pane("microphone"),
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        );
+        assert_eq!(
+            privacy_pane("speechRecognition"),
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
+        );
+        assert_eq!(privacy_pane("camera"), None);
+    }
 
     #[test]
     fn the_config_line_carries_the_vocabulary_trimmed() {

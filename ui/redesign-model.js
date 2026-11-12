@@ -66,6 +66,13 @@
 //   modelChanged runs, else workersOf(tab). onModelChange returns a function that unsubscribes.
 //
 // glyphHtml(state, size = 10) -> the status dot for a threadState or a worker state (gui-glyph.css).
+//
+// runsInBox(tab) -> boolean
+//   The thread's machine is an Upstash Box: the hub's `MachineView.upstash_box` is set on
+//   `machines.get(tab.machine).view`. A machine the page does not know, or a tab that is not a
+//   thread (a worker row of a task or subagent has none), runs in no box.
+//
+// boxMarkHtml(tab) -> the Upstash mark with its label for a thread in a box (gui-box-mark.css), else "".
 
 function threadState(tab) {
   const phase = phaseOf(tab);
@@ -347,3 +354,5 @@ function modelChanged() {
 
 const GLYPH_LOOKS = { working: "working", needs: "needs", unread: "unread", done: "done", idle: "idle", failed: "failed", stopped: "idle" };
 const glyphHtml = (state, size = 10) => `<span class="status-glyph" data-glyph="${GLYPH_LOOKS[state] ?? "idle"}" style="--glyph-size: ${size}px" aria-hidden="true"></span>`;
+const runsInBox = (tab) => !!machines.get(tab?.machine)?.view?.upstash_box;
+const boxMarkHtml = (tab) => (runsInBox(tab) ? `<span class="box-mark" role="img" aria-label="Running in an Upstash Box" title="Running in an Upstash Box"></span>` : "");

@@ -39,6 +39,7 @@ function page(world) {
     nowS: () => S,
     tabs: [...items.map((i) => i.tab), ...(world.others ?? [])],
     needsYouItems: () => items,
+    machines: new Map(),
     agentConfirmations: world.agents ?? [],
     agentDeciding: new Set(),
     agentShown: world.shown ?? null,
@@ -54,7 +55,7 @@ function page(world) {
     machineName: (id) => ({ mini: "mac-mini", book: "macbook", vps: "vps" })[id] ?? id,
   };
   vm.createContext(context);
-  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), read("gui-needs-you.js")].join("\n"), context);
+  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), read("gui-needs-you.js")].join("\n"), context);
   return (code, args = {}) => {
     Object.assign(context, { args });
     return vm.runInContext(code, context);

@@ -168,6 +168,8 @@ ${between(model, "const STEP_KINDS", "function needsYouItem")}
 ${between(chat, "function waitingKindOf", "/** What a thread blocked")}
 ${between(model, "const GLYPH_LOOKS", "\n")}
 ${between(model, "const glyphHtml", "\n")}
+${between(model, "const runsInBox", "\n")}
+${between(model, "const boxMarkHtml", "\n")}
 ${between(gui, "function hookPhase", "async function fetchWorkspace")}
 ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
 ${between(composer, "function branchBanner", "composerBanners.addEventListener")}

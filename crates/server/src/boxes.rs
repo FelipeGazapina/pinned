@@ -448,10 +448,101 @@ fn token_kept(connectors: &Connectors, account: &str, project: Option<&str>) -> 
     })
 }
 
+/// A project's short name: its repository's, else its folder's.
+fn project_short<'a>(folder: Option<&'a str>, repo: Option<&'a str>) -> Option<&'a str> {
+    repo.and_then(machine::repo_name)
+        .or_else(|| folder.and_then(|f| std::path::Path::new(f).file_name()?.to_str()))
+}
+
 /// A project's name as a refusal reads it: its repository's, else its folder's.
 pub(crate) fn project_name(folder: Option<&str>, repo: Option<&str>) -> String {
-    let named = repo.and_then(machine::repo_name).or_else(|| folder.and_then(|f| std::path::Path::new(f).file_name()?.to_str()));
-    named.unwrap_or("this project").to_owned()
+    project_short(folder, repo)
+        .unwrap_or("this project")
+        .to_owned()
+}
+
+/// Upstash's docs give no limit on a box's name, so a box name stays within this many characters.
+const BOX_NAME_MAX: usize = 40;
+
+/// What a box is for, as its Upstash name says it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BoxRole {
+    Worker,
+    Captain,
+    Workflow,
+    Session,
+}
+
+impl BoxRole {
+    /// The role of a row's box, from the work the row was written with.
+    fn of(row: &BoxRow) -> BoxRole {
+        match &row.work {
+            BoxWork::Delegate { .. } => BoxRole::Worker,
+            BoxWork::Captain { .. } => BoxRole::Captain,
+            BoxWork::Run if row.connector == INTERACTIVE_CONNECTOR => BoxRole::Session,
+            BoxWork::Run => BoxRole::Workflow,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            BoxRole::Worker => "worker",
+            BoxRole::Captain => "captain",
+            BoxRole::Workflow => "workflow",
+            BoxRole::Session => "session",
+        }
+    }
+}
+
+/// The name a box carries on Upstash: `<project>-<role>-<short id>`, where the project is the
+/// repository's short name, else its folder's. Pinned finds its boxes by label, not by this name,
+/// so it only tells the dashboard's reader which project a box works on.
+fn box_name(folder: Option<&str>, repo: Option<&str>, role: BoxRole, row_id: &str) -> String {
+    let short: String = row_id.chars().take(6).collect();
+    let tail = format!("-{}-{short}", role.word());
+    let project = sanitize_project(
+        project_short(folder, repo).unwrap_or(""),
+        BOX_NAME_MAX - tail.len(),
+    );
+    let project = if project.is_empty() {
+        "project"
+    } else {
+        &project
+    };
+    format!("{project}{tail}")
+}
+
+/// `name` as lowercase ASCII letters, digits and `-`: accents folded where simple, every other
+/// character a `-`, repeated `-` collapsed, and the result cut to `max` characters.
+fn sanitize_project(name: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in name.to_lowercase().chars() {
+        let c = match c {
+            'a'..='z' | '0'..='9' => c,
+            _ => fold_accent(c).unwrap_or('-'),
+        };
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
+    }
+    out.truncate(max);
+    out.trim_matches('-').to_owned()
+}
+
+/// The unaccented letter of a lowercase Latin letter with an accent, when it has one.
+fn fold_accent(c: char) -> Option<char> {
+    Some(match c {
+        'à'..='å' => 'a',
+        'ç' => 'c',
+        'è'..='ë' => 'e',
+        'ì'..='ï' => 'i',
+        'ñ' => 'n',
+        'ò'..='ö' | 'ø' => 'o',
+        'ù'..='ü' => 'u',
+        'ý' | 'ÿ' => 'y',
+        _ => return None,
+    })
 }
 
 /// The account's Upstash Box usage for the Usage page, and pinned's own count of the box time its
@@ -1127,7 +1218,12 @@ impl Boxes {
                     Some(listed) => (listed.id, false),
                     None => {
                         let new = NewBox {
-                            name: format!("pinned-{}", row.id),
+                            name: box_name(
+                                Some(row.spec.folder.as_str()).filter(|f| !f.is_empty()),
+                                row.spec.repo.as_deref(),
+                                BoxRole::of(row),
+                                &row.id,
+                            ),
                             labels: vec![self.label.clone(), row_label(&row.id)],
                             size: row.size,
                             init_command: format!("sh {DIR}/start.sh || true"),
@@ -1511,6 +1607,110 @@ mod tests {
     use super::*;
 
     const MIN: Duration = Duration::from_secs(60);
+
+    const ROW_ID: &str = "7fc0a1b2c3d4e5f6";
+
+    #[test]
+    fn a_box_is_named_for_its_project_role_and_row() {
+        assert_eq!(
+            box_name(Some("/home/u/my app"), None, BoxRole::Worker, ROW_ID),
+            "my-app-worker-7fc0a1"
+        );
+        assert_eq!(
+            box_name(None, Some("acme/client-apps"), BoxRole::Captain, ROW_ID),
+            "client-apps-captain-7fc0a1"
+        );
+        assert_eq!(
+            box_name(
+                None,
+                Some("git@github.com:Acme/Site.git"),
+                BoxRole::Session,
+                "0123456789abcdef"
+            ),
+            "site-session-012345"
+        );
+        assert_eq!(
+            box_name(Some("/srv/Site"), None, BoxRole::Workflow, ROW_ID),
+            "site-workflow-7fc0a1"
+        );
+    }
+
+    #[test]
+    fn a_box_name_folds_accents_and_replaces_other_characters() {
+        assert_eq!(
+            box_name(Some("/srv/Clientes Ações"), None, BoxRole::Worker, ROW_ID),
+            "clientes-acoes-worker-7fc0a1"
+        );
+        assert_eq!(sanitize_project("a  --  b__c", 40), "a-b-c");
+    }
+
+    #[test]
+    fn a_box_name_fits_the_limit_and_ends_on_a_letter() {
+        let name = box_name(
+            Some("/srv/client-apps-and-more-stuff-here-yes-indeed-long"),
+            None,
+            BoxRole::Worker,
+            ROW_ID,
+        );
+        assert_eq!(name, "client-apps-and-more-stuff-worker-7fc0a1");
+        assert_eq!(name.len(), BOX_NAME_MAX);
+        assert_eq!(
+            box_name(
+                Some("/srv/aaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbb"),
+                None,
+                BoxRole::Workflow,
+                ROW_ID
+            ),
+            "aaaaaaaaaaaaaaaaaaaaaaa-workflow-7fc0a1"
+        );
+    }
+
+    #[test]
+    fn a_box_name_without_a_usable_project_says_project() {
+        assert_eq!(
+            box_name(None, None, BoxRole::Workflow, ROW_ID),
+            "project-workflow-7fc0a1"
+        );
+        assert_eq!(
+            box_name(Some("/srv/!!! ***"), None, BoxRole::Worker, ROW_ID),
+            "project-worker-7fc0a1"
+        );
+        assert_eq!(
+            box_name(Some(""), None, BoxRole::Captain, ROW_ID),
+            "project-captain-7fc0a1"
+        );
+    }
+
+    #[test]
+    fn a_box_role_comes_from_its_work() {
+        let row = |work: BoxWork, connector: &str| BoxRow {
+            id: ROW_ID.into(),
+            account: Uuid::nil(),
+            machine: Uuid::from_u128(9),
+            upstash: None,
+            connector: connector.into(),
+            subject: Subject::LinearIssue {
+                issue: "box".into(),
+            },
+            spec: spec_with(None),
+            size: BoxSize::Small,
+            phase: Phase::Creating,
+            age: Duration::ZERO,
+            work,
+        };
+        let captain = BoxWork::Captain {
+            request_id: "r".into(),
+            text: "t".into(),
+            sender: "s".into(),
+            busy: None,
+        };
+        assert_eq!(
+            BoxRole::of(&row(captain, CAPTAIN_CONNECTOR)),
+            BoxRole::Captain
+        );
+        assert_eq!(BoxRole::of(&row(BoxWork::Run, INTERACTIVE_CONNECTOR)), BoxRole::Session);
+        assert_eq!(BoxRole::of(&row(BoxWork::Run, "nightly")), BoxRole::Workflow);
+    }
 
     fn policy() -> Policy {
         Policy { idle: 20 * MIN, exited: 20 * MIN, tab_gone: 20 * MIN, offline: 20 * MIN, max_life: 20 * MIN, ..Policy::default() }

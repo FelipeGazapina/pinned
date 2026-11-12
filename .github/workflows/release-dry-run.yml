@@ -1,0 +1,22 @@
+name: release-dry-run
+
+# Run by hand only (Actions › release-dry-run › Run workflow), before each release. It inherits the updater signing
+# key and the Apple secrets, so no pull_request trigger: a PR-triggered run would hand them to the PR's code.
+on:
+  workflow_dispatch:
+
+# release.yml asks for contents: write, so its caller has to grant it. A dry run never uses it: no step that writes
+# a release runs when dry_run is true, and scripts/test-release-rerun.py proves that.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dry-run:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true
+    secrets: inherit

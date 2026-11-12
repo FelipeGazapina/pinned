@@ -274,6 +274,7 @@ mod tests {
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
+            slack_bot: String::new(),
             graph: None,
         }
     }
