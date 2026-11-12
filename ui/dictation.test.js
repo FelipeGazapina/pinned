@@ -227,3 +227,49 @@ test("a caret the user moved away keeps its place while the phrase grows", () =>
   const after = placeDictation(first.value, first.span, [13, 13], "and a half");
   assert.deepEqual([...after.selection], [18, 18]);
 });
+
+function loadDictationButton({ tauri, isMac }) {
+  const src = readFileSync(new URL("./gui-dictation.js", import.meta.url), "utf8");
+  const head = src.slice(src.indexOf("const DICTATION_LANGUAGES"), src.indexOf("/** One transcript from either engine"));
+  const button = {
+    dataset: {},
+    attrs: {},
+    disabled: false,
+    title: "",
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+  };
+  const lang = { ...button, dataset: {}, attrs: {}, setAttribute(name, value) { this.attrs[name] = String(value); } };
+  const document = { getElementById: (id) => (id === "composer-dictate" ? button : id === "composer-dictate-lang" ? lang : null) };
+  const context = {
+    navigator: { language: "en-US" },
+    localStorage: memoryStorage(),
+    document,
+    composer: { dataset: {} },
+    TAURI: tauri ? {} : null,
+    IS_MAC: isMac,
+    dictationState: { want: false },
+    liveDictation: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${head}\nrenderDictationButton();`, context);
+  return { button, context };
+}
+
+test("the desktop app on Linux keeps the dictate button visible but disabled, saying why", () => {
+  const { button } = loadDictationButton({ tauri: true, isMac: false });
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, "Dictation needs macOS");
+  assert.equal(button.attrs["aria-label"], "Dictation needs macOS");
+});
+
+test("the desktop app on a Mac keeps dictation enabled with the fn hint", () => {
+  const { button } = loadDictationButton({ tauri: true, isMac: true });
+  assert.equal(button.disabled, false);
+  assert.equal(button.title, "Dictate with your voice (fn)");
+});
+
+test("the web UI on Linux keeps dictation enabled for the browser's engine", () => {
+  const { button } = loadDictationButton({ tauri: false, isMac: false });
+  assert.equal(button.disabled, false);
+  assert.equal(button.title, "Dictate with your voice");
+});

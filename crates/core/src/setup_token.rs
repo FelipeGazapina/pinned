@@ -44,6 +44,7 @@ impl SetupTokens {
         for (key, value) in env {
             cmd.env(key, value);
         }
+        crate::process::fix_pty_env(&mut cmd);
         let mut child = {
             let mut running = self.0.lock().unwrap();
             if running.contains_key(account) {

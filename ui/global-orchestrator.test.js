@@ -141,6 +141,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     pageView: { addEventListener: (type, fn) => (listeners[type] = fn) },
     viewListeners: [],
     visibleInterval: () => 0,
+    threadState: () => "idle",
     shellPage: () => "global-projects",
     setPage: (html) => pages.push(html),
     headHtml: (title, rest = "") => `<h1>${title}</h1>${rest}`,
@@ -307,6 +308,42 @@ test("the projects page lists every project with its machines, Captain and runni
   assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
   assert.match(html, /<span class="gp-repo">no remote<\/span>/);
   assert.match(html, /<span class="gp-state none">No Captain<\/span><span class="gp-repo">no remote<\/span><\/div>\s*<div class="gp-side"><button[^>]*>Linux VPS<\/button><span class="gp-workers">—<\/span>/);
+});
+
+// The page's number is `projects()`'s: a finished worker, one whose turn ended, is left out. The
+// browser's rule is `threadState(tab) === "done"`, mirrored from `finished` in
+// crates/core/src/global_orchestrator.rs and run here over the same kinds of tab as its test, 6
+// workers of which 3 are done, so the page says 3 where it said 6.
+test("the projects page leaves out the workers whose turn ended, as projects() does", () => {
+  const { context, pages } = projectsPage();
+  const sliceOf = (name, start, end) => {
+    const src = readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+    return src.slice(src.indexOf(start), src.indexOf(end, src.indexOf(start)));
+  };
+  const worker = (view) => ({ machine: "mm", view: { role: "worker", running: true, ...view } });
+  const tabs = [
+    { machine: "mm", view: { id: "cap-1", role: "orchestrator", running: true, status: "done" } },
+    worker({ status: "done" }),
+    worker({ status: "done" }),
+    worker({ status: "needs-input", message: "Claude is waiting for your input" }),
+    worker({ status: "working" }),
+    worker({ status: "needs-input", interrupted: true, message: "Claude needs your permission to use Bash" }),
+    worker({ status: "failed", message: "Usage limit reached" }),
+  ];
+  Object.assign(context, { statusOf: (tab) => tab.view.status ?? "idle", busyUnder: () => 0, unseenDone: () => false });
+  vm.runInContext(
+    [
+      sliceOf("global-chat.js", "function waitingKindOf", "/** What a thread blocked"),
+      sliceOf("gui.js", "function hookPhase", "const turnLive"),
+      sliceOf("redesign-model.js", "function threadState", "const answerChoice"),
+    ].join("\n"),
+    context,
+  );
+  context.projectGroups = () => [{ name: "site", tabs, checkouts: [] }];
+  context.renderGlobalProjectsPage();
+  const html = pages.at(-1);
+  assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
+  assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">3 workers<\/span><\/button>/);
 });
 
 test("a project's machine opens its Captain tab when one is open", () => {

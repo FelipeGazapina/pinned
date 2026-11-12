@@ -3,7 +3,6 @@ use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::login_store::{self, LoginStore};
 use pinned_core::machine::{Event, Listener, Machine};
-use pinned_core::process;
 use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -156,8 +155,24 @@ async fn take_local(machine: Arc<Machine>, work: connectors::Work) -> Result<Opt
     }
 }
 
+/// The name the hub lists this computer under: the one the user gave it in system settings.
+#[cfg(target_os = "linux")]
 fn computer_name() -> String {
-    process::command("scutil")
+    std::fs::read_to_string("/etc/machine-info").ok().and_then(|info| pretty_hostname(&info)).unwrap_or_else(account::hostname)
+}
+
+/// `PRETTY_HOSTNAME` from systemd's /etc/machine-info, which GNOME and KDE settings name the device.
+#[cfg(any(target_os = "linux", test))]
+fn pretty_hostname(info: &str) -> Option<String> {
+    let value = info.lines().find_map(|line| line.trim().strip_prefix("PRETTY_HOSTNAME="))?;
+    let value = value.trim();
+    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+    (!value.trim().is_empty()).then(|| value.replace("\\\"", "\"").trim().to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn computer_name() -> String {
+    pinned_core::process::command("scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()
@@ -262,4 +277,17 @@ fn import_when_empty(app: AppHandle) {
             eprintln!("pinned: could not move this Mac's workflows to the account: {e}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pretty_hostname_is_read_from_machine_info() {
+        assert_eq!(pretty_hostname("CHASSIS=laptop\nPRETTY_HOSTNAME=\"The \\\"Box\\\"\"\n").as_deref(), Some("The \"Box\""));
+        assert_eq!(pretty_hostname("PRETTY_HOSTNAME=studio\n").as_deref(), Some("studio"));
+        assert_eq!(pretty_hostname("PRETTY_HOSTNAME=\"\"\nCHASSIS=desktop\n"), None);
+        assert_eq!(pretty_hostname("CHASSIS=desktop\n"), None);
+    }
 }

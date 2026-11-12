@@ -258,9 +258,23 @@ function dictationActive() {
   return dictationState.want;
 }
 
+/** The desktop app's helper is macOS-only; the web UI falls back to the browser's engine. */
+const DICTATION_NEEDS_MAC = "Dictation needs macOS";
+function dictationUnavailable() {
+  return !!TAURI && !IS_MAC;
+}
+
 function renderDictationButton() {
   const button = document.getElementById("composer-dictate");
   if (!button) return;
+  if (dictationUnavailable()) {
+    button.disabled = true;
+    button.dataset.active = false;
+    button.setAttribute("aria-pressed", false);
+    button.title = DICTATION_NEEDS_MAC;
+    button.setAttribute("aria-label", DICTATION_NEEDS_MAC);
+    return;
+  }
   button.dataset.active = dictationActive();
   button.setAttribute("aria-pressed", dictationActive());
   button.title = `${dictationActive() ? "Stop dictation" : "Dictate with your voice"}${TAURI && IS_MAC ? " (fn)" : ""}`;
@@ -435,7 +449,7 @@ async function dictationAllowed() {
 }
 
 async function startDictation() {
-  if (dictationState.want) return;
+  if (dictationState.want || dictationUnavailable()) return;
   dictationState.want = true;
   dictationState.live = null;
   dictationState.session = { raw: [], cleaned: [], startedAt: Date.now() };

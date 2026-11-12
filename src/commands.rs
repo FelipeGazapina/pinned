@@ -142,7 +142,9 @@ pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String
 pub(crate) fn open(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     let opener = "explorer.exe";
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    #[cfg(not(any(windows, target_os = "linux")))]
     let opener = "open";
     process::command(opener).arg(url).spawn().map(drop).map_err(|e| e.to_string())
 }

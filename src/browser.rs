@@ -120,8 +120,17 @@ fn report<R: Runtime>(app: &AppHandle<R>, id: &str) {
         state.window = window;
         emit(&app, Event::State { id, state });
     });
+    // WebKitGTK has no Navigation API, so its own back-forward list answers.
+    #[cfg(target_os = "linux")]
+    let _ = webview.with_webview(move |pw| {
+        use webkit2gtk::WebViewExt;
+        let view = pw.inner();
+        let title = view.title().map(|t| t.to_string()).unwrap_or_default();
+        let state = State { url, title, back: view.can_go_back(), forward: view.can_go_forward(), loading: view.is_loading(), devtools, audible: view.is_playing_audio(), window };
+        emit(&app, Event::State { id, state });
+    });
     // Elsewhere the page answers for itself, the Navigation API telling whether it can step back.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let _ = webview.eval_with_callback(
         "({ title: document.title, back: !!window.navigation?.canGoBack, forward: !!window.navigation?.canGoForward, loading: document.readyState !== 'complete' })",
         move |out| {

@@ -279,14 +279,31 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
 }
 
 pub fn hostname() -> String {
-    let out = crate::process::command("hostname").stderr(std::process::Stdio::null()).output();
-    let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
-    let name = name.strip_suffix(".local").unwrap_or(&name);
+    let name = system_hostname();
+    let name = name.trim();
+    let name = name.strip_suffix(".local").unwrap_or(name);
     if name.is_empty() {
         "machine".into()
     } else {
         name.to_owned()
     }
+}
+
+/// The kernel's host name, as `hostname` prints it on Linux, without starting a process.
+#[cfg(target_os = "linux")]
+fn system_hostname() -> String {
+    let mut buf = [0u8; 256];
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_hostname() -> String {
+    let out = crate::process::command("hostname").stderr(std::process::Stdio::null()).output();
+    out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
 /// The system the hub lists the machine under: `std::env::consts::OS`, or "wsl" for Linux running
@@ -326,6 +343,13 @@ fn send(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> R
 mod tests {
     use super::*;
     use crate::login_store::fake::{Memory, Reads, Writes};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_host_name_is_the_one_hostname_prints() {
+        let out = crate::process::command("hostname").output().unwrap();
+        assert_eq!(system_hostname(), String::from_utf8_lossy(&out.stdout).trim());
+    }
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
