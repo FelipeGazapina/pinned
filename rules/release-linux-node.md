@@ -59,7 +59,7 @@ The Linux asset name is the signature name without `.sig`. `tauri-action` upload
 
 ## Dry run
 
-`release.yml` also runs from `workflow_call` and `workflow_dispatch` with a boolean `dry_run`. `.github/workflows/release-dry-run.yml` calls it with `dry_run: true` on `workflow_dispatch` and on a pull request that changes the release files. A dry run builds all five legs with updater signing, assembles `latest.json`, signs `SHA256SUMS`, and runs `release-asset.sh verify` on the local files. It uploads the result as the Actions artifacts `dry-run-bundles-<target>` and `dry-run-release`, kept for three days.
+`release.yml` also runs from `workflow_call` and `workflow_dispatch` with a boolean `dry_run`. `.github/workflows/release-dry-run.yml` calls it with `dry_run: true` on `workflow_dispatch` only. Run it by hand before each release; it has no pull request trigger, because it inherits the updater signing key and the Apple secrets. A dry run builds all five legs with updater signing, assembles `latest.json`, signs `SHA256SUMS`, and runs `release-asset.sh verify` on the local files. It uploads the result as the Actions artifacts `dry-run-bundles-<target>` and `dry-run-release`, kept for three days.
 
 It makes no tag, no release, and no change to `latest.json` on GitHub. These steps and jobs carry `if: ${{ !inputs.dry_run }}`:
 
