@@ -31,6 +31,73 @@ test("a remembered choice wins over the Mac's language", () => {
   assert.equal(loadDictation({ language: "en-US", localStorage: unknown }).dictationLocale(), "en-US");
 });
 
+const MIC_DENIED = {
+  action: "explain",
+  settings: "microphone",
+  message: "pinned isn't allowed to use Microphone. Turn on pinned under Privacy & Security > Microphone in System Settings, then click the mic again.",
+};
+
+test("a permission macOS hasn't asked about yet makes the click show the system prompt", () => {
+  const { dictationPermissionAction } = loadDictation();
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "notDetermined", speechRecognition: "notDetermined" }) }, { action: "prompt" });
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "notDetermined", speechRecognition: "granted" }) }, { action: "prompt" });
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "notDetermined" }) }, { action: "prompt" });
+});
+
+test("both permissions granted make the click record", () => {
+  const { dictationPermissionAction } = loadDictation();
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "granted" }) }, { action: "record" });
+});
+
+test("a denied or restricted permission is named, with its own System Settings pane", () => {
+  const { dictationPermissionAction } = loadDictation();
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "granted" }) }, MIC_DENIED);
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "denied" }) }, {
+    action: "explain",
+    settings: "speechRecognition",
+    message: "pinned isn't allowed to use Speech Recognition. Turn on pinned under Privacy & Security > Speech Recognition in System Settings, then click the mic again.",
+  });
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "restricted", speechRecognition: "granted" }) }, {
+    action: "explain",
+    settings: "microphone",
+    message: "Microphone is restricted on this Mac, so pinned can't use it. Screen Time or a profile set by your organization controls this.",
+  });
+  // Both off: the Microphone first; once it's on, the next click names Speech Recognition.
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "denied" }) }, MIC_DENIED);
+  // A denial outranks a pending prompt, which would never come.
+  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "notDetermined" }) }, MIC_DENIED);
+});
+
+test("every click asks macOS again, so a denial explains itself on the second click too", async () => {
+  const { dictationPermissionGate } = loadDictation();
+  const answers = [
+    { microphone: "denied", speechRecognition: "granted" },
+    { microphone: "denied", speechRecognition: "granted" },
+    { microphone: "granted", speechRecognition: "granted" },
+  ];
+  let asked = 0;
+  const ask = async () => answers[asked++];
+  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, MIC_DENIED);
+  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, MIC_DENIED);
+  // Turned on in System Settings: the next click records, with no restart.
+  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, { action: "record" });
+  assert.equal(asked, 3);
+});
+
+test("a failed permission check still starts the helper, which reports its own error", async () => {
+  const { dictationPermissionGate } = loadDictation();
+  assert.deepEqual({ ...(await dictationPermissionGate(async () => Promise.reject(new Error("no helper")))) }, { action: "prompt" });
+});
+
+test("a browser that blocked the microphone gets told how to unblock it", () => {
+  const { webMicBlockedMessage } = loadDictation();
+  assert.equal(
+    webMicBlockedMessage("NotAllowedError"),
+    "Your browser blocked the microphone for this site. Click the lock or site settings icon in the address bar, allow the microphone, then click the mic again.",
+  );
+  assert.equal(webMicBlockedMessage("NotFoundError"), null);
+});
+
 test("the language button cycles English, Portuguese, English and remembers it", () => {
   const storage = memoryStorage();
   const dictation = loadDictation({ language: "en-US", localStorage: storage });
@@ -159,71 +226,4 @@ test("a caret the user moved away keeps its place while the phrase grows", () =>
   assert.deepEqual([...before.selection], [0, 0]);
   const after = placeDictation(first.value, first.span, [13, 13], "and a half");
   assert.deepEqual([...after.selection], [18, 18]);
-});
-
-const MIC_DENIED = {
-  action: "explain",
-  settings: "microphone",
-  message: "pinned isn't allowed to use Microphone. Turn on pinned under Privacy & Security > Microphone in System Settings, then click the mic again.",
-};
-
-test("a permission macOS hasn't asked about yet makes the click show the system prompt", () => {
-  const { dictationPermissionAction } = loadDictation();
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "notDetermined", speechRecognition: "notDetermined" }) }, { action: "prompt" });
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "notDetermined", speechRecognition: "granted" }) }, { action: "prompt" });
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "notDetermined" }) }, { action: "prompt" });
-});
-
-test("both permissions granted make the click record", () => {
-  const { dictationPermissionAction } = loadDictation();
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "granted" }) }, { action: "record" });
-});
-
-test("a denied or restricted permission is named, with its own System Settings pane", () => {
-  const { dictationPermissionAction } = loadDictation();
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "granted" }) }, MIC_DENIED);
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "granted", speechRecognition: "denied" }) }, {
-    action: "explain",
-    settings: "speechRecognition",
-    message: "pinned isn't allowed to use Speech Recognition. Turn on pinned under Privacy & Security > Speech Recognition in System Settings, then click the mic again.",
-  });
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "restricted", speechRecognition: "granted" }) }, {
-    action: "explain",
-    settings: "microphone",
-    message: "Microphone is restricted on this Mac, so pinned can't use it. Screen Time or a profile set by your organization controls this.",
-  });
-  // Both off: the Microphone first; once it's on, the next click names Speech Recognition.
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "denied" }) }, MIC_DENIED);
-  // A denial outranks a pending prompt, which would never come.
-  assert.deepEqual({ ...dictationPermissionAction({ microphone: "denied", speechRecognition: "notDetermined" }) }, MIC_DENIED);
-});
-
-test("every click asks macOS again, so a denial explains itself on the second click too", async () => {
-  const { dictationPermissionGate } = loadDictation();
-  const answers = [
-    { microphone: "denied", speechRecognition: "granted" },
-    { microphone: "denied", speechRecognition: "granted" },
-    { microphone: "granted", speechRecognition: "granted" },
-  ];
-  let asked = 0;
-  const ask = async () => answers[asked++];
-  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, MIC_DENIED);
-  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, MIC_DENIED);
-  // Turned on in System Settings: the next click records, with no restart.
-  assert.deepEqual({ ...(await dictationPermissionGate(ask)) }, { action: "record" });
-  assert.equal(asked, 3);
-});
-
-test("a failed permission check still starts the helper, which reports its own error", async () => {
-  const { dictationPermissionGate } = loadDictation();
-  assert.deepEqual({ ...(await dictationPermissionGate(async () => Promise.reject(new Error("no helper")))) }, { action: "prompt" });
-});
-
-test("a browser that blocked the microphone gets told how to unblock it", () => {
-  const { webMicBlockedMessage } = loadDictation();
-  assert.equal(
-    webMicBlockedMessage("NotAllowedError"),
-    "Your browser blocked the microphone for this site. Click the lock or site settings icon in the address bar, allow the microphone, then click the mic again.",
-  );
-  assert.equal(webMicBlockedMessage("NotFoundError"), null);
 });
