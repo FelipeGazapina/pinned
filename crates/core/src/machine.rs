@@ -83,6 +83,8 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 /// How long a thread held for its delegated tasks stays idle with all of them ended before its own
 /// task ends, so the notice of the last one gets to start the turn that answers it.
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
+/// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
+const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -6164,6 +6166,12 @@ impl Machine {
             let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
             if !idle_notice {
                 t.updated = Some(unix_now());
+            }
+            // Claude Code says it waits for input once its prompt has sat idle: a prompt typed or
+            // handed over by a Stop hook a while before started no turn, and a turn's end won't clear it.
+            let idle_prompt = idle_notice && event.message.as_deref().is_some_and(|m| m.contains("waiting for your input"));
+            if idle_prompt && t.turn_pending.is_some_and(|at| at.elapsed() >= IDLE_NOTICE_GRACE) {
+                t.turn_pending = None;
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.2 (Unreleased)
+
+### Fixed
+
+- A Captain no longer keeps the global Orchestrator's messages queued for hours after its turn ends. When a turn ended just as a message came in, the Captain's end-of-turn hook could give up waiting for pinned before pinned handed the message over. The turn ended without it, while pinned kept counting the Captain as busy, so every later message waited until you typed into the Captain. The hook now waits long enough for the hand-over. If a hand-over still gets lost, the queued messages start a new turn once Claude Code reports the Captain idle, about a minute later.
+
 ## 0.18.1 (2026-11-12)
 
 ### Fixed

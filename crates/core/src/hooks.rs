@@ -30,6 +30,10 @@ type Reply = Result<String, String>;
 /// goes on without it.
 const RECALL_WAIT: Duration = Duration::from_millis(300);
 
+/// How long a Stop hook waits for the machine's reply. The machine counts the queue it hands over
+/// there as delivered, and the turn ends without it when the hook stops waiting first.
+const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
+
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
@@ -223,7 +227,7 @@ fn feed(sock: &str, mut event: AgentEvent, codex_notify: bool, stop_hook_active:
     let mut stream = UnixStream::connect(sock).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap()).ok()?;
-    let _ = stream.set_read_timeout(Some(RECALL_WAIT));
+    let _ = stream.set_read_timeout(Some(if stop { HAND_OVER_WAIT } else { RECALL_WAIT }));
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;
     let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|context| !context.is_empty())?;
