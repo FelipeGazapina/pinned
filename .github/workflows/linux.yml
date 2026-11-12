@@ -21,3 +21,71 @@ jobs:
       - run: bash scripts/test-apple-signing-env.sh
       - run: npm ci
       - run: cargo test -p pinned-server --lib
+
+  # The desktop app, built and packaged as the Linux installers ship.
+  desktop:
+    name: desktop (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf build-essential xvfb dbus
+      # tauri.linux.conf.json asks for 2.44 or newer.
+      - run: dpkg-query -W libwebkit2gtk-4.1-0
+      - run: npm ci
+      - run: cargo test --locked -p pinned
+      # The Linux code pinned-core gained for the app; its whole suite assumes macOS in places.
+      - run: cargo test --locked -p pinned-core --lib -- "shell::" "process::" "account::"
+      # Updater signing belongs to the release; this build makes the installers only.
+      - run: |
+          npx tauri build --bundles appimage,deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Install the .deb and run the CLI of both packages
+        run: |
+          deb=$(ls target/release/bundle/deb/*.deb)
+          appimage=$(ls target/release/bundle/appimage/*.AppImage)
+          ls -l "$deb" "$appimage"
+          dpkg-deb -f "$deb" Depends
+          sudo apt-get install -y "./$deb"
+          ask='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+          for exe in /usr/bin/pinned "$appimage"; do
+            answer=$(printf '%s\n' "$ask" | APPIMAGE_EXTRACT_AND_RUN=1 "$exe" mcp)
+            echo "$answer"
+            test "$(echo "$answer" | jq -c '{id, server: .result.serverInfo.name}')" = '{"id":1,"server":"pinned"}'
+          done
+      - name: Start the app, and a second launch hands over to it
+        run: |
+          cat > smoke.sh <<'SH'
+          set -u
+          /usr/bin/pinned > first.log 2>&1 &
+          first=$!
+          sleep 20
+          kill -0 "$first" || { echo "the app exited"; cat first.log; exit 1; }
+          timeout 30 /usr/bin/pinned > second.log 2>&1
+          second=$?
+          kill -0 "$first" || { echo "the first app went away"; cat first.log; exit 1; }
+          kill "$first"; wait "$first"
+          echo "--- first"; cat first.log; echo "--- second ($second)"; cat second.log
+          test "$second" = 0
+          SH
+          dbus-run-session -- xvfb-run -a sh smoke.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinned-linux-${{ matrix.arch }}
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+          if-no-files-found: error

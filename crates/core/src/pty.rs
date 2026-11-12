@@ -61,11 +61,12 @@ fn close_on_exit(child: &(dyn Child + Send + Sync), master: Master) {
 
 impl Session {
     pub fn spawn(
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         size: PtySize,
         mut on_output: impl FnMut(Vec<u8>) + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Self, String> {
+        crate::process::fix_pty_env(&mut cmd);
         let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);

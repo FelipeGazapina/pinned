@@ -140,7 +140,7 @@ impl Launch {
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
-        let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
+        let path_env = login_shell_path().or_else(inherited_path);
         Ok(Launch {
             exe: exe.to_owned(),
             bins: Provider::ALL.into_iter().map(|p| (p, find_bin(p.spec().bin, path_env.as_deref()))).collect(),
@@ -6735,18 +6735,17 @@ fn find_bin(name: &str, path_env: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| home().join(".local").join("bin").join(&names[0]))
 }
 
-/// Apps opened from Finder inherit launchd's bare PATH. Ask the user's login shell for the
-/// PATH their terminal sees, so claude and the tools it runs (git, node, brew) resolve.
+/// pinned's own PATH, less what an AppImage put on it, for when the login shell gives none.
+fn inherited_path() -> Option<String> {
+    match crate::process::fixes_for_children().into_iter().find(|(key, _)| key == "PATH") {
+        Some((_, path)) => path,
+        None => std::env::var("PATH").ok(),
+    }
+}
+
 #[cfg(unix)]
 fn login_shell_path() -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = process::command(shell)
-        .args(["-ilc", "printf '\\n__PINNED_PATH__%s__PINNED_PATH__' \"$PATH\""])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.split("__PINNED_PATH__").nth(1).map(str::to_owned)
+    crate::shell::login_path()
 }
 
 /// A Windows app inherits the user's whole PATH already.

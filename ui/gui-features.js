@@ -33,7 +33,7 @@ async function featuresSettingsHtml() {
   const toggle = (key, on, title, about, extra = "") => row(key, title, about, `<label class="switch"><input type="checkbox" id="feature-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`, extra);
   return `<section id="features-settings"><h2 class="looks-title">Optional features</h2>
     ${toggle("keepAwake", awake, `Keep this ${COMPUTER} awake`, `While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.`, `<p class="error" id="awake-error"></p>`)}
-    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", "Keep the pinned window above other apps, even in their fullscreen spaces. When off, pinned shows in the Dock so you can bring it back.")}
+    ${toggle("alwaysOnTop", guiFeatures.alwaysOnTop, "Always on top", `Keep the pinned window above other apps, even in their fullscreen spaces. When off, pinned shows in ${IS_MAC ? "the Dock" : "the taskbar"} so you can bring it back.`)}
     ${machineBackgroundHtml(LOCAL, { background })}</section>`;
 }
 function bindFeaturesSettings() {

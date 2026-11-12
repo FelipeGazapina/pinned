@@ -217,11 +217,12 @@ function patchWorkerSteps(tab, rows) {
 }
 
 /** The thread's workers in one block: how many are done, at work and waiting on the user, then a row
- * each. Away from the turn that started them, the block holds only the workers not done yet. */
+ * each. Away from the turn that started them, it lists only the workers not done yet but still counts them all. */
 function workersBlockHtml(tab, t, home = true) {
-  const rows = workersNow(tab).filter((row) => home || row.state !== "done");
+  const all = workersNow(tab);
+  const rows = all.filter((row) => home || row.state !== "done");
   if (!rows.length) return "";
-  const s = workersSummary(rows);
+  const s = workersSummary(all);
   const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since)}` : ""}</span>` : "";
   const needs = s.needs ? `<span class="workers-needs">${s.needs} needs you</span>` : "";
   return `<section class="workers" aria-label="Workers"><div class="workers-head">${icon("worker", "lead")}<span class="workers-title">Workers</span><span class="workers-count">${s.done} of ${s.total} done</span><span class="spacer"></span>${working}${needs}</div>

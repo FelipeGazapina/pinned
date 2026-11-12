@@ -34,6 +34,14 @@ objc2-foundation = { version = "0.3", features = ["NSData", "NSDate", "NSDiction
 objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBitmapImageRep", "NSEvent", "NSImage", "NSImageRep", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow", "block2"] }
 objc2-web-kit = { version = "0.3", features = ["WKNavigation", "WKSnapshotConfiguration", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataRecord", "WKWebsiteDataStore", "block2", "objc2-app-kit"] }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-notification = "2"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-single-instance = "2"
+# Already in the build through wry; the browser panel reads the page's back-forward list from it.
+webkit2gtk = { version = "2.0", features = ["v2_8"] }
+libc = "0.2"

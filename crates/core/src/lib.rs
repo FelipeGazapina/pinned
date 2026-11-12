@@ -49,6 +49,8 @@ pub mod repo_look;
 pub mod scaffold;
 pub mod scripts;
 pub mod sessions;
+#[cfg(unix)]
+pub mod shell;
 pub mod setup_token;
 pub mod skills;
 pub mod slack;
