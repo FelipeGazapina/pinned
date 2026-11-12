@@ -391,10 +391,9 @@ next time it is opened):
 
 **Battery floor (all platforms):** read every 30 s (`IOPSCopyPowerSourcesInfo` on macOS,
 `GetSystemPowerStatus` on Windows, `/sys/class/power_supply/*/capacity` on Linux). Below the floor
-on battery → release; "Stopped keeping awake at 19% battery. It went to sleep." Plugging in again
-while the lid is closed takes the hold back on its own if agents still run (the machine is awake
-for a moment on AC attach? **No**: once asleep, it stays asleep until the lid opens; so after a
-release the next hold waits for the next wake).
+on battery → release; "Stopped keeping awake at 19% battery. It went to sleep." The floor does not
+apply on charger. Once released, the Mac sleeps and stays asleep until the lid opens, so plugging
+it in afterwards does not bring it back; the next hold starts at the next wake.
 
 ---
 
@@ -420,7 +419,7 @@ release the next hold waits for the next wake).
 ### 5.2 What the hub shows for that machine
 
 Precedent: the app already reports Run in the background with `MachineEvent::Background { on }`
-(`wire.rs:1005`), kept by the hub as `MachineView::background` (`wire.rs:1472`, `hub.rs:1156`).
+(`wire.rs:1005`), kept by the hub as `MachineView::background` (`wire.rs:1468`, `hub.rs:1156`).
 Same pattern, with one difference: **the hub keeps the last report after the machine goes
 offline**, because "went to sleep at 19%" matters exactly when it is offline.
 
