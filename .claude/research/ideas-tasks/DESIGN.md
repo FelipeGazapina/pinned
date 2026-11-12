@@ -178,3 +178,82 @@ Everything is additive:
 - `Confirmation` gets `#[serde(default)] held: Option<Held>` for a held step (section 4). Older apps show it as a plain confirmation with its `about` text.
 - New `surface::ACTIONS` rows (they are not wire, but `every_wire_call_has_one_action` requires one per `HubCall`).
 - No HTTP route is removed. Each PR runs `wire-contract -- snapshot current` and `-- check --base origin/main`.
+
+---
+
+## 3. Where and when a task runs
+
+### 3.1 The clock is on the hub
+
+- One loop per hub, `schedule::Scheduler`, beside `Connectors::watch` and started by `Hub::watch_all`. It sleeps until the earliest `next_at` across accounts, or 60 s at most, and wakes early on any save (a `Notify`, like `Connectors::wake`).
+- At due time it **claims** the occurrence in one statement: `insert into task_runs (task, due_at, state) values ($1, $2, 'due') on conflict (task, due_at) do nothing returning ...`. Then it advances `tasks.next_at`. An occurrence is claimed exactly once, even if two hub processes overlap during a Railway deploy.
+- Every delivery carries `request_id = "task:<task id>:<due_at>"`. `send_to_captain` and `enqueue` already deduplicate on it (the Captain request ledger, `LEDGER_FILE`). `prompt`, `tell_orchestrator`, `delegate_task` (`clientRequestId`) and `Target::Me` pushes are given the same key. A redelivery after a crash never acts twice.
+
+### 3.2 Which machine, per target
+
+| Target | Path at due time | Busy | Stopped / closed | Machine offline |
+|---|---|---|---|---|
+| `Me` | Hub push to every device: desktop notification, web push, and an Inbox row | — | — | No machine needed |
+| `Orchestrator` | The machine that hosts it (`global_orchestrator::Settings.host`), typed into its tab like a Captain report | Queued behind its current turn (Orchestrator queue, same as `BusyPolicy::Queue`) | Its tab is opened and started on the prompt | Run is `queued`; delivered when the host comes back, within the grace window (3.3) |
+| `Captain { project, machine }` | `send_to_captain`'s handoff: `Delivered`, `Queued`, `Started` | `Queued` behind its work; `Busy` (policy refuse) is retried every minute until grace ends | `Started` with the prompt (held to the project's tier, effort and worker limits) | If `fallback = box` and the box permission for Captains allows it, `send_to_captain { box: true }` opens it in a box. Otherwise the run waits within grace |
+| `Session { session, machine }` | `prompt` into the tab that holds that Claude session | Waits for its turn to end (the hub watches `TabView.status`), then types | Archived → `unarchive_session` + `start_claude`, then the prompt. Closed and not archived → reopened by `open_run` on its machine | Waits within grace. A session cannot move machines, so there is no box fallback |
+| `Worker { project, model }` | `delegate_task` placement (`placement.rs`, the account's prefer/avoid policy) | — (a new worker) | — | Another online machine with the project, else a box when `fallback = box`, else waits within grace |
+| `Action::Workflow` | `Hub::run_workflow`; the workflow's `RunsOn` decides (`Any` / `Machine` / `FreshBox`) | — | — | `RunsOn::FreshBox` needs no machine; otherwise waits within grace |
+
+- **No machine online at all.** `Me` and box-placed runs still go. Everything else waits. When the grace window ends, the run is `missed` and `on_missed` applies (3.3). The scheduler never invents a box for a target that did not opt in: a box costs money and clones a repo, so `fallback: Fallback::{Wait, Box}` defaults to `Wait`, and `Box` is offered only for `Captain`, `Worker` and workflow runs.
+- **Limits.** A task run is work an agent started, so it goes through the same limits as Run now and `delegate_task` (`starts_work`): workers at once, tier, effort, time limit, budget. A refusal for a limit retries until grace ends and then is `failed` with the refusal text. It never bypasses a limit.
+- **What the target sees.** The prompt starts with one line: `Scheduled task "Release pinned 0.18.2" (created by you / by the Captain of pinned, 12 Nov). Nobody is watching this run; steps that need Felipe will wait for him.` Then the text. The session knows it runs unattended.
+- **Result.** A run is `done` when the target's first turn after delivery ends. The hub reads the last reply (`read_session`) into `TaskRun.detail`, and the Tasks page links to the session. A one-time task then disables itself. It stays listed until deleted, so its history is not lost.
+
+### 3.3 Missed runs and hub restarts
+
+- **On time** means delivered within the task's grace window: 15 minutes by default, set per task.
+- `OnMissed`, per task:
+  - `Ask` — **default for `Once`.** The run becomes `missed`, and an Inbox / Needs you row reads "Release pinned 0.18.2 was due 09:00 and did not run (pinned-mac was offline). **Run now** · **Skip**". A one-time action like a release should not happen hours late without Felipe saying so.
+  - `Skip` — **default for `Cron`.** The run is recorded as `skipped`, and the next occurrence comes as usual. A daily digest at 09:00 should not also run at 15:00.
+  - `RunLate` — run as soon as a path opens, whenever that is.
+- **Never a burst.** Missed occurrences are coalesced: after a week offline, a daily task with `RunLate` runs once, not seven times. Older occurrences are recorded `skipped`.
+- **Hub restart / deploy.** State is all in Postgres (`tasks.next_at`, `task_runs`). On boot the scheduler loads every enabled task and treats each occurrence with `due_at < now` and no row as missed (via `on_missed`). Rows left in `due` or `delivered` stay as they are. Because the `request_id` is stable, the target's dedupe ledger answers "already have it". A delivery whose answer was lost (`Unanswered::Lost`) is marked `lost`, exactly as a workflow run is, and is **never** resent to a second machine. The Tasks page shows it with "Run now" for Felipe to decide.
+- **The task changed while due.** Editing a task deletes its unclaimed future and recomputes `next_at`. Runs already claimed keep the version they started with: the run row stores a copy of the action.
+
+---
+
+## 4. Safety
+
+A scheduled run has no one watching. The rule, as the Orchestrator proposes it to Felipe:
+
+> **Anything that normally needs Felipe's OK stops at that step and waits for him, unless he approved that exact action when he created the task.**
+
+### 4.1 What "needs Felipe's OK" means, concretely
+
+Two existing lists, and nothing new to invent:
+
+1. **`act` actions of class `Confirm`** (`surface.rs`: `delete_session`, `remove_machine`, `update_self`, `disconnect_*`, …). These already wait for the user's decision in the app, whether or not anyone is watching. No change, except that the confirmation carries the task id, so Needs you can say "from scheduled task Release pinned 0.18.2".
+2. **The never list** (`preauth::never::NeverItem`): `DeleteOutside`, `ForcePush`, `PushToMain`, `Release`, `Deploy`, `Production`, `Secrets`, `Payment`, `WriteOutside`, `SelfGrant`, `NetworkInstall`, `MachineWide`. Release and deploy are shell commands (`gh release create`, `git push origin v*`, `railway up`, `vercel --prod`), not `act` calls, so this list is the only thing that catches them. It already parses Bash lines word by word and leans toward a hit when in doubt.
+
+### 4.2 The held step
+
+- While a session works on a task run (`PINNED_SCHEDULE=<task>:<due_at>` in its environment, the way `PINNED_TASK` marks a delegated task), its PreToolUse hook (`hooks.rs`; the Orchestrator's `GUARDED` hook today, extended to every session pinned starts for a task) calls `never()` on each Bash, Write and Edit.
+- **A hit** that no approval covers: the hook answers `deny` with the reason `held for Felipe: release (gh release create v0.18.2) — pinned asked him; wait for the notice, do not work around it`. The machine creates a `Confirmation` with `held: Held { task, item: NeverItem, command }`, and the run goes to `held`. Felipe gets a push notification and a Needs you row: **Approve** · **Deny**.
+- **Approve** records a one-shot allowance for that exact normalized command in that session and sends the existing `notice` ("approved: run it again now"). The hook lets that one command through once.
+- **Deny** sends "denied: stop and report". After 24 hours with no decision, the run is `failed` ("held step expired"), and the session is told to stop.
+- This is the same "show the normal prompt and record that the ask was held for Felipe" that `never.rs` was written for (DESIGN-preauth-approvals). A task run is its first caller.
+- **The bypass setting does not change this.** A Captain that normally runs with permissions skipped still has its never-list hits held during a task run. The never list applies to the run, not to the session's own permission mode.
+
+### 4.3 Approving at creation
+
+- `Task.approvals: Vec<Approval { item: NeverItem, must_contain: String, repo: String }>`. Example: `{ item: Release, must_contain: "v0.18.2", repo: "github.com/FelipeGazapina/pinned" }`. A held command is covered only when its item matches, it runs in that repo's checkout, and its text contains `must_contain`. That is "that exact action": releasing **v0.18.2** of pinned, not "any release". An empty `must_contain` is refused.
+- **Only Felipe grants approvals.** In the UI he ticks "Allowed without asking: ☑ release v0.18.2" in the task editor. When an agent sends `schedule_save` with `approvals`, the save is classified `Confirm`: it becomes a confirmation that shows the task and each approval, and nothing is saved until he approves. A `schedule_save` without approvals is `Write`.
+- An approval never covers `Secrets`, `SelfGrant` or `Payment`. Those always hold. It also never covers what AGENTS.md reserves for the owner: approving the `hub-breaking-change` environment, or deleting or editing a wire snapshot.
+- Approvals are shown on the task card ("✓ may release v0.18.2"). Changing a task's action or target drops its approvals, and Felipe has to grant them again.
+
+### 4.4 Agent-created tasks
+
+- `created_by: Actor { role: ActorRole, machine, tab, session_title }`, or the user. Every `schedule_*` and `idea_*` act goes through `act`, so the existing audit trail (`agent_actions`) already records who, when and with which arguments. Acts inside a task run carry `AuditEntry.task`.
+- **Visible.** A task created by an agent shows a chip ("by Captain · pinned") on its card. Creating one sends an FYI row to the Inbox: "The Orchestrator scheduled *Release pinned 0.18.2* for Fri 13 Nov 09:00 — Open · Pause". There is no approval for a plain prompt task: an agent that can `prompt` or `send_to_captain` now can already do the same thing now, and scheduling adds no power, only a delay.
+- **Guard rails on agents** (not on Felipe):
+  - minimum interval 15 minutes for an agent's cron;
+  - at most 20 enabled agent-created tasks per account (`Refused` with the list);
+  - a task run may create tasks, but one created inside a task run cannot itself create more (`depth ≤ 1`, carried in the environment), so a task cannot keep rescheduling itself;
+  - an agent may edit, pause or delete any task, as the user can. Felipe asked for that, and the audit trail shows it. Deleting a task Felipe created is `Confirm`.
+- **One switch.** "Pause all tasks" on the Tasks page and as `schedule_pause { all: true }` (that one is `Confirm` for agents: a stuck agent must not silence everything).
