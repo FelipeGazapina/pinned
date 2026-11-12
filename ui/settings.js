@@ -2142,6 +2142,22 @@ const actions = {
   },
 };
 
+/** What `hub.askUnlock` rejects with when the user cancels the password prompt: their own choice, not a failure. */
+const PASSWORD_CANCELLED = "this needs your password";
+
+/** Runs an action and shows what escapes it. An action that shows its own error catches it first, so
+ * only a call it never guarded reaches here. */
+function runAction(name, button) {
+  return Promise.resolve()
+    .then(() => actions[name](button))
+    .catch((e) => {
+      const text = String(e?.message ?? e).replace(/^Error:\s*/, "");
+      if (text === PASSWORD_CANCELLED) return;
+      console.error(name, e);
+      if (typeof flash === "function") flash(text, [], 6000);
+    });
+}
+
 let canvasPan = null;
 let canvasPanned = false;
 
@@ -2149,7 +2165,7 @@ settingsPage.addEventListener("click", (e) => {
   const button = e.target.closest("[data-action]");
   if (button) {
     e.preventDefault();
-    return actions[button.dataset.action](button);
+    return runAction(button.dataset.action, button);
   }
   if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu, .graph-picker, .edge-add, .graph-port-add, .port-handle")) return;
   if (view.graphPick) {
@@ -2248,16 +2264,16 @@ settingsPage.addEventListener(
 );
 
 settingsPage.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
-  if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
-  if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
-  if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
-  if (e.key === "Enter" && e.target.id === "box-token") actions["add-box-token"]();
-  if (e.key === "Enter" && e.target.id === "convex-key") actions["connect-convex"]();
+  if (e.key === "Enter" && e.target.id === "linear-key") runAction("connect-linear");
+  if (e.key === "Enter" && e.target.id === "slack-token") runAction("connect-slack");
+  if (e.key === "Enter" && e.target.id === "vercel-key") runAction("connect-vercel");
+  if (e.key === "Enter" && e.target.id === "claude-token") runAction("connect-upstash");
+  if (e.key === "Enter" && e.target.id === "box-token") runAction("add-box-token");
+  if (e.key === "Enter" && e.target.id === "convex-key") runAction("connect-convex");
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
-    actions["save-connector"]();
+    runAction("save-connector");
   }
   if (e.key === "Escape" && view.menu) {
     view.menu = false;

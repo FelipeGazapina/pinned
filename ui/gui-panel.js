@@ -566,7 +566,7 @@ addEventListener("pointerdown", (e) => {
 let panelNoteTimer;
 /** A short note at the bottom of the window, such as what a copy put on the clipboard, with the
  * `actions` buttons a saved capture offers. */
-function flash(text, actions = []) {
+function flash(text, actions = [], ms = actions.length ? 6000 : 2000) {
   let note = document.getElementById("panel-note");
   if (!note) {
     note = Object.assign(document.createElement("div"), { id: "panel-note" });
@@ -582,7 +582,7 @@ function flash(text, actions = []) {
   note.innerHTML = `<span>${esc(text)}</span>${actions.map((a, i) => `<button type="button" class="outline" data-note="${i}">${esc(a.label)}</button>`).join("")}`;
   note.hidden = false;
   clearTimeout(panelNoteTimer);
-  panelNoteTimer = setTimeout(() => (note.hidden = true), actions.length ? 6000 : 2000);
+  panelNoteTimer = setTimeout(() => (note.hidden = true), ms);
 }
 const copyText = (text, note = "Copied") => {
   navigator.clipboard?.writeText(text).then(() => flash(note), () => flash("Couldn't reach the clipboard"));
