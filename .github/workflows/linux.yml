@@ -21,3 +21,12 @@ jobs:
       - run: bash scripts/test-apple-signing-env.sh
       - run: npm ci
       - run: cargo test -p pinned-server --lib
+      # pinned-core's #[cfg(unix)] tests run nowhere else. A clean env: an empty HOME (no git
+      # identity, no ~/.claude) and no PINNED_* or CLAUDE_CONFIG_DIR from a calling session.
+      - name: cargo test -p pinned-core (clean env)
+        timeout-minutes: 20
+        run: |
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          mkdir -p "$RUNNER_TEMP/home"
+          env -u PINNED_ACCOUNT -u PINNED_SOCK -u PINNED_TAB -u PINNED_TASK -u PINNED_ROLE -u PINNED_PROJECT -u CLAUDE_CONFIG_DIR \
+            HOME="$RUNNER_TEMP/home" cargo test -p pinned-core
