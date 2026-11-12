@@ -206,10 +206,10 @@ or `[pinned] The user skipped q-7 (Checkout redesign). Go on with your recommend
 ## 3. How each agent kind gets it, and where the questionnaire shows
 
 Offered to every `Seat` in `tool_definitions` (`reminders.rs:254`): global orchestrator, Captain,
-taste chat, plain thread, worker thread and delegated child (`child == true`). It is the first
-pinned tool a delegated child is offered from `project_tools()`, so `call()` must route it before
-`project_request` demands `PINNED_TAB` (`in_tab`, `reminders.rs:867`): a child sends
-`Message::Project` with `task` set instead of `tab`, and the node resolves the child's display tab.
+taste chat, plain thread, worker thread and delegated child (`child == true`), like the
+`memory_*` tools. Project tools reach the node through `in_tab` (`reminders.rs:867`), which needs
+`PINNED_TAB`; a headless child that has none sends `ProjectTool::QuestionUser` with its
+`PINNED_TASK` instead, and the node resolves the tab that shows that task.
 
 The questionnaire always belongs to **a tab**, and the node puts it on that tab's view (wire §7).
 Every surface reads it from there:
