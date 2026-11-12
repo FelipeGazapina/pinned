@@ -9,6 +9,10 @@
 #composer-note { margin-top: 0; margin-bottom: 6px; padding: 0 12px; font-size: 12px; color: var(--g-muted); }
 #composer-note[data-error] { color: var(--g-error); }
 #composer-note[hidden] { display: none; }
+#dictation-permission { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 6px; padding: 0 12px; font-size: 12px; color: var(--g-error); }
+#dictation-permission[hidden], #dictation-permission button[hidden] { display: none; }
+#dictation-permission button { height: 22px; padding: 0 8px; border: 1px solid var(--g-border); border-radius: 6px; font-size: 12px; color: var(--g-text); }
+#dictation-permission button:hover { background: var(--g-accent); }
 #dictation-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 6px; padding: 0 12px; font-size: 12px; color: var(--g-muted); }
 #dictation-feedback[hidden] { display: none; }
 #dictation-feedback button { height: 22px; padding: 0 8px; border: 1px solid var(--g-border); border-radius: 6px; font-size: 12px; color: var(--g-text); }
@@ -723,7 +727,7 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
 
   #limit-note { gap: 10px; margin-bottom: 8px; padding: 8px 12px; border-radius: 12px; font-size: 12.5px; }
   #limit-note button { height: 26px; border-radius: 7px; }
-  :is(#composer-note, #dictation-feedback) { padding: 0 14px; }
+  :is(#composer-note, #dictation-feedback, #dictation-permission) { padding: 0 14px; }
 
   /* Panel.dc.html: a lane narrowed by the side panel rests as one row. */
   #composer[data-slim="true"] { padding-bottom: 12px; }

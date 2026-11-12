@@ -163,8 +163,49 @@ const dictationState = {
   locale: null, // what the running engine listens in; cleanup follows it, not the button
   noted: false, // a dictation note is up and the next transcript clears it
   restarts: 0,
+  checking: false, // a click is asking for permissions; a second click waits for it
   unlisten: [],
 };
+
+/** The two macOS permissions native dictation needs, in the order a click explains them. */
+const DICTATION_PERMISSIONS = [
+  { key: "microphone", name: "Microphone" },
+  { key: "speechRecognition", name: "Speech Recognition" },
+];
+
+/** What one mic click does, from the helper's report of each permission (notDetermined, denied,
+ * restricted or granted): explain the first one denied or restricted, with a button to its
+ * System Settings pane; record when both are granted; otherwise start the helper, whose request
+ * shows the system prompt. */
+function dictationPermissionAction(status) {
+  for (const { key, name } of DICTATION_PERMISSIONS) {
+    const state = status?.[key];
+    if (state === "denied") {
+      return { action: "explain", settings: key, message: `pinned isn't allowed to use ${name}. Turn on pinned under Privacy & Security > ${name} in System Settings, then click the mic again.` };
+    }
+    if (state === "restricted") {
+      return { action: "explain", settings: key, message: `${name} is restricted on this Mac, so pinned can't use it. Screen Time or a profile set by your organization controls this.` };
+    }
+  }
+  return DICTATION_PERMISSIONS.every(({ key }) => status?.[key] === "granted") ? { action: "record" } : { action: "prompt" };
+}
+
+/** Asks macOS again on every click and remembers nothing, so a grant made in System Settings
+ * counts on the next click. A failed check starts the helper, which reports its own error. */
+async function dictationPermissionGate(ask = () => invoke("dictation_permissions")) {
+  try {
+    return dictationPermissionAction(await ask());
+  } catch {
+    return { action: "prompt" };
+  }
+}
+
+/** The message for a browser that refused the microphone, or null when the failure is not a
+ * block and speech recognition should still try. */
+function webMicBlockedMessage(errorName) {
+  if (errorName !== "NotAllowedError") return null;
+  return "Your browser blocked the microphone for this site. Click the lock or site settings icon in the address bar, allow the microphone, then click the mic again.";
+}
 
 /** Deterministic cleanup for one confirmed phrase, ported from the
  * speech-to-text app's basic_cleanup + glossary. Never translates. */
@@ -338,8 +379,59 @@ function onDictationResult(text, isFinal) {
 
 function onDictationError(message) {
   if (!dictationState.want) return;
+  const native = dictationState.engine === "native";
   stopDictation();
   dictationShow(`Dictation stopped: ${message}`, true);
+  // A prompt the user just answered with Don't Allow ends here; say how to turn it on.
+  if (native && IS_MAC) recheckDictationPermission();
+}
+
+/** The permission message under the composer; `settings` names the System Settings pane its
+ * button opens, and without it the button hides (a browser's settings can't be opened for it). */
+const dictationPermissionNote = document.getElementById("dictation-permission");
+
+function showDictationPermission({ message, settings }) {
+  if (!dictationPermissionNote) return;
+  dictationShow("");
+  dictationPermissionNote.querySelector("span").textContent = message;
+  const button = dictationPermissionNote.querySelector("button");
+  button.hidden = !settings;
+  button.dataset.settings = settings ?? "";
+  dictationPermissionNote.hidden = false;
+}
+
+function hideDictationPermission() {
+  if (dictationPermissionNote) dictationPermissionNote.hidden = true;
+}
+
+async function recheckDictationPermission() {
+  const gate = await dictationPermissionGate();
+  if (gate.action === "explain") return showDictationPermission(gate);
+  if (dictationPermissionNote?.hidden) return;
+  hideDictationPermission();
+  if (gate.action === "record") dictationShow("Microphone and Speech Recognition are on. Click the mic to dictate.");
+}
+
+/** Asked on every click: macOS through the helper, a browser through getUserMedia. */
+async function dictationAllowed() {
+  hideDictationPermission();
+  if (TAURI && IS_MAC) {
+    const gate = await dictationPermissionGate();
+    if (gate.action !== "explain") return true;
+    showDictationPermission(gate);
+    return false;
+  }
+  if (TAURI || !navigator.mediaDevices?.getUserMedia) return true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const track of stream.getTracks()) track.stop();
+    return true;
+  } catch (err) {
+    const message = webMicBlockedMessage(err?.name);
+    if (!message) return true;
+    showDictationPermission({ message });
+    return false;
+  }
 }
 
 async function startDictation() {
@@ -529,9 +621,16 @@ document.getElementById("dictation-feedback")?.addEventListener("click", (e) => 
 });
 
 /** The mic: the only thing besides sending that ends a session. */
-function toggleDictation() {
-  if (dictationActive()) stopDictation();
-  else startDictation();
+async function toggleDictation() {
+  if (dictationActive()) return stopDictation();
+  if (dictationState.checking) return;
+  dictationState.checking = true;
+  try {
+    if (!(await dictationAllowed())) return;
+  } finally {
+    dictationState.checking = false;
+  }
+  startDictation();
 }
 
 function startWebDictation() {
@@ -551,7 +650,9 @@ function startWebDictation() {
     if (interim) onDictationResult(interim, false);
   };
   rec.onerror = (event) => {
-    if (event.error === "not-allowed") onDictationError("microphone blocked by the browser");
+    if (event.error !== "not-allowed") return;
+    onDictationError("microphone blocked by the browser");
+    showDictationPermission({ message: webMicBlockedMessage("NotAllowedError") });
   };
   rec.onend = () => {
     // The browser ends on silence; we don't. Reopen while the session is wanted.
@@ -582,6 +683,13 @@ function dictationRetarget() {
 
 document.getElementById("composer-dictate")?.addEventListener("click", toggleDictation);
 document.getElementById("composer-dictate-lang")?.addEventListener("click", switchDictationLanguage);
+dictationPermissionNote?.querySelector("button").addEventListener("click", (e) => {
+  invoke("open_privacy_settings", { permission: e.currentTarget.dataset.settings }).catch((err) => dictationShow(String(err), true));
+});
+// Back from System Settings: a grant made there shows without a restart.
+addEventListener("focus", () => {
+  if (TAURI && IS_MAC && dictationPermissionNote && !dictationPermissionNote.hidden) recheckDictationPermission();
+});
 // A tap of fn alone, which only the app's native side can see.
 if (TAURI) listen("dictation://toggle", () => {
   toggleDictation();

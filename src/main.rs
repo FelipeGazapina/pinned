@@ -542,6 +542,8 @@ fn main() {
             dictation::dictation_start,
             dictation::dictation_stop,
             dictation::dictation_status,
+            dictation::dictation_permissions,
+            dictation::open_privacy_settings,
             navigation::permit_frame_navigation
         ])
         .setup(move |app| {
