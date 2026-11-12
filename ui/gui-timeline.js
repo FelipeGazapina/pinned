@@ -1236,10 +1236,10 @@ function renderThread() {
   const opening = turns.find((x) => x.user);
   const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
   const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : workerOfHtml(tab);
-  const workers = sub ? "" : workersBlockHtml(tab, t);
-  const spawned = workers && turns.length ? workersHome(turns) : null;
-  // A block whose turn is above the turns shown sits in the last one.
+  const spawned = sub ? null : workersHome(turns);
+  // A block whose turn is not among the turns shown sits in the last one, with the workers still at it.
   const home = spawned && turns.indexOf(spawned) >= first ? spawned : turns.at(-1);
+  const workers = sub ? "" : workersBlockHtml(tab, t, home === spawned || !turns.length);
   const body = turns.length
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)

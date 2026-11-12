@@ -394,6 +394,7 @@ test("an agent with no steps yet shows what it was asked from the spawn brief", 
 
 test("a task another agent started has its own row under that agent's, with its state and its actions", async () => {
   const { tab, s, net } = await opened();
+  s.append({ item: { kind: "tool", at: "t2", id: "toolu_p", name: "mcp__pinned__delegate_task", summary: "Port the updater" } });
   s.agents = [
     { id: "task-1", name: "Port the updater", state: "running", updated: "t5", steps: [] },
     { id: "task-2", parent: "task-1", name: "Port the Windows half", state: "running", updated: "t5", steps: [] },
@@ -449,6 +450,41 @@ test("a Captain's worker threads fill one Workers block after its lead paragraph
   } finally {
     sandbox.threadState = () => "idle";
     sandbox.pendingAsk = () => null;
+  }
+});
+
+test("a Workers block whose turn is not shown follows the thread with only the workers not done", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "tool", at: "t2", id: "toolu_d", name: "mcp__pinned__delegate_task", summary: "Read the docs" } });
+  s.append({ item: { kind: "text", at: "t3", text: "Three readers are on it." } });
+  s.append({ item: { kind: "user", at: "t4", text: "anything else?" } });
+  s.append({ item: { kind: "text", at: "t5", text: "Nothing else for now." } });
+  const worker = (id, title, status) => ({ ...tabFor(id, status), view: { id, status, cwd: "/repo", message: "", title, role: "worker", spawned_by: "tab-1", opened: Number(id.slice(-1)) } });
+  sandbox.threadState = (w) => ({ working: "working", done: "done" })[w.view.status];
+  const api = worker("tab-4", "Read the API", "working");
+  sandbox.tabs = [tab, worker("tab-2", "Read the README", "done"), worker("tab-3", "Read the SDK", "done"), api];
+  const turnWith = (words) => blocks(threadView.innerHTML, '<section class="turn"').filter((x) => x.includes(words));
+  const block = (turn) => {
+    const workers = blocks(turn, '<section class="workers"')[0];
+    return workers ? [textOf(blocks(workers, '<div class="workers-head"')[0]), ...blocks(workers, '<span class="worker-title"').map(textOf)] : null;
+  };
+  try {
+    await poll(tab, net);
+    assert.deepEqual(block(turnWith("Three readers are on it.")[0]), ["Workers2 of 3 done1 working", "Read the README", "Read the SDK", "Read the API"], "the turn that started them lists all three");
+    assert.equal(block(turnWith("Nothing else for now.")[0]), null);
+    tab.thread.limit = 1;
+    sandbox.renderThread();
+    assert.deepEqual(turnWith("Three readers are on it."), []);
+    assert.deepEqual(block(turnWith("Nothing else for now.")[0]), ["Workers0 of 1 done1 working", "Read the API"], "the last turn shows the one still at work");
+    api.view.status = "done";
+    threadView.dataset.key = "";
+    sandbox.renderThread();
+    assert.equal(painted().agents, "", "with every worker done, no block follows the thread");
+    tab.thread.limit = undefined;
+    sandbox.renderThread();
+    assert.deepEqual(block(turnWith("Three readers are on it.")[0]), ["Workers3 of 3 done", "Read the README", "Read the SDK", "Read the API"], "their own turn still lists them");
+  } finally {
+    sandbox.threadState = () => "idle";
   }
 });
 

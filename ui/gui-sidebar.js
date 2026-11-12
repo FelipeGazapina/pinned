@@ -70,6 +70,13 @@ try {
 const isFolded = (tab) => foldedThreads.has(threadKey(tab));
 const saveFolded = () => save("gui-folded", JSON.stringify([...foldedThreads]));
 onRekey((from, to) => foldedThreads.delete(from) && (foldedThreads.add(to), saveFolded()));
+/** Threads whose finished workers are listed under their Finished group, by `threadKey`. */
+let finishedOpen = new Set();
+try {
+  finishedOpen = new Set(JSON.parse(load("gui-finished-open")) ?? []);
+} catch {}
+const saveFinishedOpen = () => save("gui-finished-open", JSON.stringify([...finishedOpen]));
+onRekey((from, to) => finishedOpen.delete(from) && (finishedOpen.add(to), saveFinishedOpen()));
 Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", waitingOpen: load("gui-waiting-open") !== "false", offersOpen: load("gui-offers-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
@@ -581,12 +588,20 @@ function spawnTree(list) {
   for (const list of kids.values()) list.sort((a, b) => a.view.opened - b.view.opened);
   return { roots, kids };
 }
-/** `tab` and, unless `folded(tab)`, the threads under it, as a file manager lists a folder: each
- * `{ tab, depth, under }`, `under` counting every thread below it, folded or not. */
-function spawnRows(tab, kids, folded, depth = 0) {
+/** `tab` and, unless `look.folded(tab)`, the threads under it, as a file manager lists a folder: each
+ * `{ tab, depth, under }`, `under` counting every thread below it, folded or not. The workers that
+ * `look.finished` come last, behind one `{ finished, of, depth }` group, and list under it once
+ * `look.opened(of)`, or alone when `look.shown` picks it or a thread under it. */
+function spawnRows(tab, kids, look, depth = 0) {
   const own = kids.get(tab.key) ?? [];
   const under = (t) => (kids.get(t.key) ?? []).reduce((n, k) => n + 1 + under(k), 0);
-  return [{ tab, depth, under: under(tab) }, ...(own.length && !folded(tab) ? own.flatMap((k) => spawnRows(k, kids, folded, depth + 1)) : [])];
+  const row = { tab, depth, under: under(tab) };
+  if (!own.length || look.folded(tab)) return [row];
+  const branch = (k) => spawnRows(k, kids, look, depth + 1);
+  const finished = own.filter(look.finished);
+  const holds = (k) => look.shown(k) || (kids.get(k.key) ?? []).some(holds);
+  const group = finished.length ? [{ finished, of: tab, depth: depth + 1 }, ...finished.filter((k) => look.opened(tab) || holds(k)).flatMap(branch)] : [];
+  return [row, ...own.filter((k) => !look.finished(k)).flatMap(branch), ...group];
 }
 
 function toggleFold(tab) {
@@ -597,7 +612,8 @@ function toggleFold(tab) {
 }
 /** A thread's row at its depth in the tree, drawn as its own section draws it, with a chevron
  * that folds the threads under it. */
-function spawnRow({ tab, depth, under }) {
+function spawnRow({ tab, depth, under, finished, of }) {
+  if (finished) return finishedHead(of, finished.length, depth);
   const section = sectionOf(tab);
   const row = section === "snoozed" ? slimRow(tab, "wake") : section === "settled" ? slimRow(tab, "unsettle") : depth ? childRow(tab) : cardRow(tab);
   if (depth) {
@@ -615,9 +631,26 @@ function spawnRow({ tab, depth, under }) {
   return row;
 }
 
+/** The group a thread's finished workers fold into: a chevron, "Finished" and how many. */
+function finishedHead(of, count, depth) {
+  const open = finishedOpen.has(threadKey(of));
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "settled-head finished child";
+  head.dataset.finished = of.key;
+  head.dataset.open = open;
+  head.style.setProperty("--depth", depth);
+  head.setAttribute("aria-expanded", open);
+  head.setAttribute("aria-label", `${open ? "Hide" : "Show"} ${count} finished ${count === 1 ? "worker" : "workers"}`);
+  head.innerHTML = `${icon("chevron-right")}<span class="label">Finished</span><span class="count">${count}</span>`;
+  return head;
+}
+
+/** The sidebar's spawnRows: a worker is finished when its turn ended and nothing under it works. */
+const sideLook = { folded: isFolded, finished: (tab) => threadState(tab) === "done", opened: (tab) => finishedOpen.has(threadKey(tab)), shown: (tab) => tab === active };
 function shelfRows(list) {
   const { roots, kids } = spawnTree(list);
-  const branch = (tab) => spawnRows(tab, kids, isFolded).map(spawnRow);
+  const branch = (tab) => spawnRows(tab, kids, sideLook).map(spawnRow);
   const by = { pinned: [], active: [], working: [], snoozed: [], settled: [] };
   for (const tab of roots) by[sectionOf(tab)].push(tab);
   const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[threadKey(t)] ?? 0, sideSettings.working ? Math.max(latestUserAt(t), returnedAt.get(t.key) ?? 0) : 0);
@@ -1569,6 +1602,13 @@ threadList.addEventListener("click", (e) => {
   if (headAct) {
     const tab = tabByKey(headAct.closest(".project-head").dataset.headTab);
     return tab && openOrchestrator(tab.machine, projectPathOf(tab));
+  }
+  const finished = e.target.closest(".settled-head.finished");
+  if (finished) {
+    const of = tabByKey(finished.dataset.finished);
+    if (of && !finishedOpen.delete(threadKey(of))) finishedOpen.add(threadKey(of));
+    saveFinishedOpen();
+    return renderSidebar();
   }
   const head = e.target.closest(".settled-head");
   if (head) {

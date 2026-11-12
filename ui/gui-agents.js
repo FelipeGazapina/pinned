@@ -216,9 +216,10 @@ function patchWorkerSteps(tab, rows) {
   }
 }
 
-/** The thread's workers in one block: how many are done, at work and waiting on the user, then a row each. */
-function workersBlockHtml(tab, t) {
-  const rows = workersNow(tab);
+/** The thread's workers in one block: how many are done, at work and waiting on the user, then a row
+ * each. Away from the turn that started them, the block holds only the workers not done yet. */
+function workersBlockHtml(tab, t, home = true) {
+  const rows = workersNow(tab).filter((row) => home || row.state !== "done");
   if (!rows.length) return "";
   const s = workersSummary(rows);
   const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since)}` : ""}</span>` : "";
@@ -227,9 +228,9 @@ function workersBlockHtml(tab, t) {
     <div class="worker-rows">${rows.map((row) => workerRowHtml(tab, row, t)).join("")}</div></section>`;
 }
 
-/** The turn the Workers block sits in: the last one that started a worker or an agent, else the last. */
+/** The turn the Workers block sits in: the last one that started a worker or an agent. */
 const SPAWNS = /(^|__)delegate_task$|^(Agent|Task)$/;
-const workersHome = (turns) => turns.findLast((x) => x.steps.some((s) => s.kind === "tool" && SPAWNS.test(s.name))) ?? turns.at(-1);
+const workersHome = (turns) => turns.findLast((x) => x.steps.some((s) => s.kind === "tool" && SPAWNS.test(s.name)));
 
 /** The notices pinned types into a thread for its workers, worded as machine.rs report_worker and
  * the delegate registry's notice_line write them: a line that starts one, and what it reads as. */
