@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.2 (Unreleased)
+
+### Added
+
+- Sidebar: a Workflows link under Usage opens the Workflows page.
+
 ## 0.18.1 (2026-11-12)
 
 ### Fixed

@@ -31,6 +31,7 @@ Object.assign(ICON_PATHS, {
   "side-inbox": `<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/>`,
   "side-pr": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/>`,
   "side-usage": `<path d="M5 20V10"/><path d="M12 20V4"/><path d="M19 20v-6"/>`,
+  "side-workflow": `<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>`,
   "side-add-project": `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="M9 13h6"/>`,
   "side-machines": `<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/>`,
   "side-terminal": `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/>`,
@@ -2385,6 +2386,7 @@ function drawNav() {
     usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
   }
   for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
+  navRow("workflows").classList.toggle("active", settingsOpen() && document.body.dataset.settingsPage === "connectors");
   setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
   accountButton.classList.toggle("offline", !counts.machinesOnline);
   const searchKey = document.getElementById("search-key");
@@ -2392,12 +2394,18 @@ function drawNav() {
   searchKey.hidden = !searchKey.textContent;
 }
 navRow("orchestrator").onclick = () => openGlobalChat();
+/** Workflows is a section of Settings, not a page of its own: the row opens Settings on that section, and on a narrow screen the list closes as a page opens. */
+function openWorkflows() {
+  if (narrow(768)) toggleSidebar(false);
+  openSettings("connectors");
+}
+navRow("workflows").onclick = openWorkflows;
 // The model and the page scripts load after this one.
 document.addEventListener("DOMContentLoaded", () => {
   onModelChange(drawNav);
   drawNav();
 }, { once: true });
-new MutationObserver(() => guiOn() && drawNav()).observe(document.body, { attributeFilter: ["data-page"] });
+new MutationObserver(() => guiOn() && drawNav()).observe(document.body, { attributeFilter: ["data-page", "data-settings-page"] });
 
 /** The footer's Account and pages menu: Settings, Way of working, Skills, Projects, Machines,
  * Archive and Check for updates, each with what it holds now. */
