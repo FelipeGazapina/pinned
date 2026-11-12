@@ -44,7 +44,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
       - run: sudo apt-get update
       - run: sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf build-essential xvfb dbus
-      # tauri.linux.conf.json asks for 2.44 or newer.
+      # The WebKitGTK version this runner builds against (the .deb depends on libwebkit2gtk-4.1-0 with no floor).
       - run: dpkg-query -W libwebkit2gtk-4.1-0
       - run: npm ci
       - run: cargo test --locked -p pinned

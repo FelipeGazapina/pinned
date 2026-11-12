@@ -757,7 +757,7 @@ function rowShell(tab, cls) {
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
-  row.setAttribute("aria-label", isOrchestrator(tab) ? `${threadTitle(tab)}, Captain` : tab.view.role === "worker" ? `${threadTitle(tab)}, worker` : threadTitle(tab));
+  row.setAttribute("aria-label", (isOrchestrator(tab) ? `${threadTitle(tab)}, Captain` : tab.view.role === "worker" ? `${threadTitle(tab)}, worker` : threadTitle(tab)) + (runsInBox(tab) ? ", running in an Upstash Box" : ""));
   return row;
 }
 
@@ -967,7 +967,7 @@ function cardRow(tab) {
     pr,
     worked ? `<span class="time">${esc(worked)}</span>` : "",
   ].filter(Boolean).join(`<span class="sep" aria-hidden="true">·</span>`);
-  row.innerHTML = `${glyphHtml(state)}<span class="lines"><span class="l1"><span class="l2">${titleHtml(tab)}</span><span class="slot">${stampHtml(tab)}${rowActs(tab, draft)}</span></span>
+  row.innerHTML = `${glyphHtml(state)}<span class="lines"><span class="l1"><span class="l2">${titleHtml(tab)}</span>${boxMarkHtml(tab)}<span class="slot">${stampHtml(tab)}${rowActs(tab, draft)}</span></span>
     <span class="l3">${roleMark(tab)}${pinMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}${terminalPulse(tab)}${sub}${phoneSubHtml(tab, state, draft, pr)}</span></span>`;
   return row;
 }
@@ -986,7 +986,7 @@ function childRow(tab) {
   const row = rowShell(tab, "line");
   toneRow(row, tab, state);
   const draft = tab !== active && hasDraft(tab);
-  row.innerHTML = `${glyphHtml(state, 9)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${terminalPulse(tab)}<span class="slot">${stampHtml(tab, true)}${rowActs(tab, draft)}</span>`;
+  row.innerHTML = `${glyphHtml(state, 9)}<span class="l2">${titleHtml(tab)}</span>${boxMarkHtml(tab)}${pinMark(tab)}${terminalPulse(tab)}<span class="slot">${stampHtml(tab, true)}${rowActs(tab, draft)}</span>`;
   return row;
 }
 
@@ -997,7 +997,7 @@ function slimRow(tab, action) {
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
-  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${roleMark(tab)}${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
+  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${boxMarkHtml(tab)}${roleMark(tab)}${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
   return row;
 }
 

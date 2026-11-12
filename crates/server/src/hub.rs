@@ -531,8 +531,8 @@ impl Hub {
             HubCall::DisconnectLinear => (json(c().await?.disconnect_linear()?), true),
             HubCall::LinearSuggestions => (json(c().await?.linear_suggestions().await?), false),
             HubCall::ConnectSlack { token } => (json(c().await?.connect_slack(&token).await?), true),
-            HubCall::DisconnectSlack => (json(c().await?.disconnect_slack()?), true),
-            HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
+            HubCall::DisconnectSlack { bot } => (json(c().await?.disconnect_slack(&bot)?), true),
+            HubCall::SlackSuggestions { bot } => (json(c().await?.slack_suggestions(&bot).await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
@@ -546,8 +546,9 @@ impl Hub {
                 let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
                 (json(self.boxes.extend_box(self, account, machine, extra_usd).await?), false)
             }
-            HubCall::Import { store, linear_key, slack_key, github_key, vercel_key } => {
-                let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key })?;
+            HubCall::Import { store, linear_key, slack_key, slack_keys, github_key, vercel_key } => {
+                let keys = Keys { linear: linear_key, slack: slack_key, slack_bots: slack_keys, github: github_key, vercel: vercel_key };
+                let imported = c().await?.import(store, keys)?;
                 (json(imported), imported)
             }
             HubCall::SharedProjects => return json(self.db.shared_projects(account.id).await?),
