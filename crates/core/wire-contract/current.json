@@ -7523,6 +7523,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -7558,7 +7563,8 @@
               "proof",
               "machine",
               "repo",
-              "account"
+              "account",
+              "slackBot"
             ]
           },
           "Trigger": {
@@ -17509,6 +17515,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -23706,6 +23717,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -23741,7 +23757,8 @@
               "proof",
               "machine",
               "repo",
-              "account"
+              "account",
+              "slackBot"
             ]
           },
           "Trigger": {
@@ -30490,6 +30507,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -35151,6 +35173,11 @@
             "type": "string",
             "default": ""
           },
+          "slackBot": {
+            "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+            "type": "string",
+            "default": ""
+          },
           "graph": {
             "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
             "anyOf": [
@@ -35186,7 +35213,8 @@
           "proof",
           "machine",
           "repo",
-          "account"
+          "account",
+          "slackBot"
         ],
         "$defs": {
           "Trigger": {
@@ -36377,6 +36405,11 @@
           },
           "account": {
             "description": "The account its sessions run under; empty runs them under their project's.",
+            "type": "string",
+            "default": ""
+          },
+          "slackBot": {
+            "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
             "type": "string",
             "default": ""
           },
@@ -43908,6 +43941,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -43943,7 +43981,8 @@
               "proof",
               "machine",
               "repo",
-              "account"
+              "account",
+              "slackBot"
             ]
           },
           "Trigger": {
@@ -45610,6 +45649,11 @@
               },
               "account": {
                 "description": "The account its sessions run under; empty runs them under their project's.",
+                "type": "string",
+                "default": ""
+              },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
                 "type": "string",
                 "default": ""
               },
@@ -51093,6 +51137,11 @@
                 "type": "string",
                 "default": ""
               },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
+                "type": "string",
+                "default": ""
+              },
               "graph": {
                 "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
                 "anyOf": [
@@ -51128,7 +51177,8 @@
               "proof",
               "machine",
               "repo",
-              "account"
+              "account",
+              "slackBot"
             ]
           },
           "Trigger": {
@@ -54324,6 +54374,11 @@
               },
               "account": {
                 "description": "The account its sessions run under; empty runs them under their project's.",
+                "type": "string",
+                "default": ""
+              },
+              "slackBot": {
+                "description": "The id of the Slack bot that watches and answers for it; empty is the default bot. A called\nworkflow answers with the bot of the thread it was handed instead.",
                 "type": "string",
                 "default": ""
               },

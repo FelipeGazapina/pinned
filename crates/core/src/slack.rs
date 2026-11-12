@@ -171,12 +171,17 @@ async fn answer(response: reqwest::Response) -> Result<Value, String> {
 
 /// The bot a token belongs to, with no key hint.
 pub async fn bot(token: &str) -> Result<Bot, String> {
+    identify(token).await.map(|(bot, _)| bot)
+}
+
+/// The bot a token belongs to, with no key hint, and its bot id (`B…`), which `app_id` takes.
+pub async fn identify(token: &str) -> Result<(Bot, String), String> {
     let body = call(token, "auth.test", &[]).await?;
-    if body["bot_id"].as_str().is_none() {
+    let Some(bot_id) = body["bot_id"].as_str() else {
         return Err("that is not a bot token; use the one that starts with xoxb-".into());
-    }
+    };
     let field = |k: &str| body[k].as_str().unwrap_or_default().to_owned();
-    Ok(Bot {
+    Ok((Bot {
         id: field("user_id"),
         team_id: field("team_id"),
         team: field("team"),
@@ -184,7 +189,13 @@ pub async fn bot(token: &str) -> Result<Bot, String> {
         name: field("user"),
         app_id: String::new(),
         key_hint: String::new(),
-    })
+    }, bot_id.to_owned()))
+}
+
+/// The Slack app id of the bot `bot_id`. Needs the `users:read` scope.
+pub async fn app_id(token: &str, bot_id: &str) -> Result<String, String> {
+    let body = call(token, "bots.info", &[("bot", bot_id)]).await?;
+    Ok(body["bot"]["app_id"].as_str().unwrap_or_default().to_owned())
 }
 
 /// Every channel the token can see, public and private, as (id, name, the bot is a member).
