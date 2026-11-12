@@ -241,8 +241,10 @@ and adds the structured questionnaire beside it (`TabView.questions`, §7). So w
 "Question → Open" card all work. The new UI only adds the one-click questionnaire on top.
 
 The node must hold that status against Claude Code's hooks while the MCP call waits (hooks report
-`Working`): the view is computed as "open questionnaire ⇒ needs-input", the same way `interrupted`
-already overrides status. `waiting_kind()` keeps returning `None` for `orchestrator_global`; its own
+`Working`) and against `clear_answered_asks` (`machine.rs:5682`, which clears a menu ask once the
+screen moves on). So the override is applied where the view is built ("open questionnaire ⇒
+needs-input, interrupted"), never written into the tab's raw `status`; the few places that read raw
+status for "waits on the user" (`note_user_waits`, §5) also ask the questions store. `waiting_kind()` keeps returning `None` for `orchestrator_global`; its own
 questionnaire shows in its chat and in Needs you from `TabView.questions` directly.
 
 ### 3.2 A worker's question: directly to the user (recommended)
@@ -388,10 +390,11 @@ Default: **the run waits on the user and shows in `waiting()`; it never skips by
   (`machine.rs:449`, `:1838`, `:5326`) becomes "its first finished turn **with no open
   questionnaire**": a turn that ends while one is open does not end the task, the answer's notice
   starts the next turn, and that turn's end does.
-* Time limits: the tab reports a mid-turn `needs-input` (§3.1), so the existing pause applies:
-  the node already feeds tasks that wait on the user into `Delegates::note_user_waits`, which stops
-  the task's clock (`delegate/mod.rs:2848`, "ten minutes on an approval are not work"). PR 1 adds
-  a test that an open questionnaire is such a wait. Budget is unaffected: a waiting session spends
+* Time limits: `Machine::note_user_waits` (`machine.rs:5564`) pauses the clock of every task
+  whose tab waits on the user mid-turn (`status == NeedsInput && interrupted`), and
+  `Delegates::note_user_waits` keeps it stopped (`delegate/mod.rs:2848`, "ten minutes on an
+  approval are not work"). Its filter reads the tab's raw status, not the view, so PR 2 adds
+  `|| questions.open_on(tab)` there, with a test. Budget is unaffected: a waiting session spends
   nothing.
 * Boxes: the hub's box watcher ends a worker's or Captain's box after `idle` (10 min) of `quiet`,
   and `quiet` is "no tab is `Working`" (`crates/server/src/hub.rs:1096` `seen`, `:1106`
@@ -584,8 +587,8 @@ PR 2 offers it, harmless before), and runs `cargo run -p pinned-server --bin wir
 | 2 | `mcp: question_user for every agent` | tool definition (`Audience::Everyone`), validation (§2.1), blocking poll + progress, `pending` + notice fallback, `StopTurn`/close/archive cancel, delegated-child routing via `task`, "first finished turn with no open questionnaire", `MCP_TOOL_TIMEOUT` in session env, `permissions()` | `reminders.rs` over-socket tests: blocks, progresses, returns `answered`/`skipped`/`cancelled`/`pending`; offered to all six seats; refused shapes (recommended not first, two recommended, 5 questions); `machine.rs` test that a worker's turn ending with an open questionnaire does not end its task | **opus** |
 | 3 | `orchestrator: ask before send_to_captain` | gate in `project_tool` (§4.2), `projects` required for the global seat, prompt rule 2b and the Opções note, `captain_prompt` sentence | tests 1–8 of §4.3, all in `cargo test -p pinned-core`; the PR body pastes the refusals' exact text | **opus** (enforcement and prompt wording) |
 | 4 | `hub: questions keep a box and relay answers` | `Hub::seen`/`seen_any` treat a tab with questions as not quiet; `crates/server/tests/hub.rs` relay of `Call::AnswerQuestions` to another machine and `waiting()` listing a Captain's questionnaire | `boxes.rs` verdict test (a questioning tab never idles); the two hub tests | **sonnet** |
-| 5 | `ui: questionnaire card in the conversation` | `ui/gui-questions.js` + `.css` (renderer, pre-selected recommendation, Accept recommended, Send, typed answers, multi-select, Skip with its warning), `shownHtml` branch and answered row in `gui-timeline.js`, composer placeholder, phone stepper | `ui/gui-questions.test.js` (node vm like the other `*.test.js`): renders, one-tap accept sends `answer_questions` with every recommended label, a typed answer, skip needs the second tap and sends `skipped`, a stale card shows the "missed" note; screenshots at 1280 px and 390 px, light and dark | **sonnet** |
-| 6 | `ui: questions in Needs you, the worker banner and the Orchestrator strip` | `NEEDS_YOU_KINDS.questions`, card from `view.questions` (Orchestrator included, plain `question` card deduped), worker banner "has questions" + Accept recommended, Orchestrator strip | `gui-needs-you` and `gui-worker-banner` tests (a worker's and a workflow run's questionnaire answered from Needs you; one card per tab); screenshots at 390 px | **sonnet** |
+| 5 | `ui: questionnaire card in the conversation` | `ui/gui-questions.js` + `.css` (renderer, pre-selected recommendation, Accept recommended, Send, typed answers, multi-select, Skip with its warning), `shownHtml` branch and answered row in `gui-timeline.js`, composer placeholder, phone stepper | `ui/questions.test.js` (node vm, like `ui/needs-you.test.js`): renders, one-tap accept sends `answer_questions` with every recommended label, a typed answer, skip needs the second tap and sends `skipped`, a stale card shows the "missed" note; screenshots at 1280 px and 390 px, light and dark | **sonnet** |
+| 6 | `ui: questions in Needs you, the worker banner and the Orchestrator strip` | `NEEDS_YOU_KINDS.questions`, card from `view.questions` (Orchestrator included, plain `question` card deduped), worker banner "has questions" + Accept recommended, Orchestrator strip | `ui/needs-you.test.js` and `ui/worker-banner.test.js` (a worker's and a workflow run's questionnaire answered from Needs you; one card per tab); screenshots at 390 px | **sonnet** |
 | 7 | `proof: tutorial video and changelog 0.18.2` | recorded with the `pinned:tutorial-video` skill (visible clicks through the sidebar and Needs you, no URL jumps), attached with `pinned evidence`; CHANGELOG 0.18.2 entries | one video, three chapters: **answer** (Orchestrator asks two questions, user picks the non-recommended option and types a note, one complete `[Orchestrator]` message reaches the Captain, no second message); **accept recommendation** (a worker under a Captain asks; answered with one tap from Needs you at phone width on hub web; the worker goes on); **skip** (a workflow run asks; skip shows its warning; the run goes on and its reply lists "Suposições/Assumptions"). Plus a shot of `send_to_captain` refused while open | **sonnet** |
 
 Order: 1 → 2 → 3 (core; 3 can be reviewed in parallel with 2 against 1), then 4, 5, 6 in parallel,
