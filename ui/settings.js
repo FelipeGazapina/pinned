@@ -162,6 +162,8 @@ function onHubSettings(latest) {
   if (page === "integrations") {
     const asks = document.getElementById("box-asks");
     if (asks) asks.innerHTML = boxAskRows();
+    const note = document.getElementById("pending-workflow");
+    if (note && pendingWorkflow) note.outerHTML = pendingWorkflowHtml();
     return;
   }
   if (page !== "connectors") return;
@@ -477,8 +479,9 @@ function pendingWorkflowHtml() {
   const { text, needs } = TRIGGERS[pendingWorkflow.kind];
   const name = NEEDS[needs].name;
   const back = view.name === "edit" ? "takes you back to it as you left it" : "takes you back to set it up";
-  return `<div class="card pending-workflow" role="status">
-      <p>You were creating the workflow “${esc(text)}”, which needs ${name}. Connect ${name} below, and pinned ${back}.</p>
+  const now = triggerReady(pendingWorkflow.kind) ? `${name} is connected now.` : `Connect ${name} below, and pinned ${back}.`;
+  return `<div class="card pending-workflow" id="pending-workflow" role="status">
+      <p>You were creating the workflow “${esc(text)}”, which needs ${name}. ${now}</p>
       <div class="actions"><button class="primary" data-action="resume-workflow">Back to the workflow</button>
         <button class="secondary" data-action="forget-pending-workflow">Dismiss</button></div>
     </div>`;

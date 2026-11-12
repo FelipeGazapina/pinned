@@ -185,3 +185,15 @@ test("leaving the detour drops the note: Connectors opened on its own shows no w
   await env.context.__actions["forget-pending-workflow"]();
   assert.doesNotMatch(env.html(), /creating the workflow/i);
 });
+
+test("Linear connected elsewhere while the note is up: the note says so and Back opens the new workflow", async () => {
+  const env = load({});
+  await openPicker(env);
+  await env.click("linear-label");
+  assert.match(env.context.pendingWorkflowHtml(), /Connect Linear below/);
+  env.context.onHubSettings({ ...env.context.__settings(), linear: LINEAR });
+  assert.match(env.context.pendingWorkflowHtml(), /Linear is connected now/);
+  await env.context.__actions["resume-workflow"]();
+  assert.equal(env.state().page, "connectors");
+  assert.equal(env.state().view.draft.trigger.kind, "linear-label");
+});
