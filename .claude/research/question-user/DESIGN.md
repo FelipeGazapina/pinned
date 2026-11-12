@@ -2,6 +2,17 @@
 
 Status: draft design, no implementation. Base: main @ 5af27835 (v0.18.1).
 
+**In one paragraph.** A pinned MCP tool, `question_user`, offered to every session pinned starts
+(Orchestrator, Captain, loose thread, worker, headless child, box session, workflow run). The agent
+passes 1–4 questions, each with 2–4 options, its recommendation first and marked; the call
+**blocks** until the user answers, accepts the recommendations with one click, types an answer, or
+skips (with a warning). The questionnaire is stored on the node, travels on `TabView.questions`, and
+turns the tab into a mid-turn `needs-input`, so `waiting()`, Needs you, the sidebar, notifications
+and the hub web light up with no new plumbing; a new `Call::AnswerQuestions` carries the answer back.
+For the global Orchestrator, `send_to_captain` to a project its open questionnaire names is refused
+in code, so the Captain gets one complete message. Unattended runs wait; they never skip by
+themselves. All wire changes are additive.
+
 ## 1. Where it lands today
 
 ### 1.1 The Orchestrator asks after the fact
@@ -373,17 +384,20 @@ Default: **the run waits on the user and shows in `waiting()`; it never skips by
   Orchestrator's `waiting()` (`ask: question`, `detail` = first question), with a desktop
   notification.
 * It does not time out into a skip. The MCP call returns `pending` after 23 h; the agent ends its
-  turn; for a task (worker, `RunNow`) the node does **not** count that ending turn as the task's end
-  while its questionnaire is open: the delegation registry treats "first finished turn" as
-  "first finished turn with no open questionnaire" (`delegate/registry.rs`, where a finished turn
-  ends a task). The answer's notice starts the next turn, and that turn's end ends the task.
-* Time limits: the minutes a tab spends with an open questionnaire do not count against the task's
-  `time_limit_min` (the user, not the agent, is slow). Budget is unaffected: a waiting session
-  spends nothing.
-* Headless boxes: a box session's questionnaire keeps the box's Captain "not idle", so the
-  "box is deleted when the Captain is idle" rule (`send_to_captain` box, rule 4b) waits too.
-  The hub's box idle check counts a tab with an open questionnaire as working. A box that
-  idles out anyway (hard budget) closes the questionnaire as `cancelled` with a line in Needs you.
+  turn. For a task (a worker thread, `RunNow`), "its first finished turn ends the task"
+  (`machine.rs:449`, `:1838`, `:5326`) becomes "its first finished turn **with no open
+  questionnaire**": a turn that ends while one is open does not end the task, the answer's notice
+  starts the next turn, and that turn's end does.
+* Time limits: the tab reports a mid-turn `needs-input` (§3.1), so the existing pause applies:
+  the node already feeds tasks that wait on the user into `Delegates::note_user_waits`, which stops
+  the task's clock (`delegate/mod.rs:2848`, "ten minutes on an approval are not work"). PR 1 adds
+  a test that an open questionnaire is such a wait. Budget is unaffected: a waiting session spends
+  nothing.
+* Boxes: the hub's box watcher ends a worker's or Captain's box after `idle` (10 min) of `quiet`,
+  and `quiet` is "no tab is `Working`" (`crates/server/src/hub.rs:1096` `seen`, `:1106`
+  `seen_any`; `boxes.rs:404`). A tab with an open questionnaire counts as not quiet there, so a box
+  session that asks keeps its box until `max_life` or its budget ends it; then the questionnaire
+  closes as `cancelled` and Needs you shows the box's end as it does today.
 * A per-workflow setting "When it asks: wait for me | go on with its recommendation" is a later,
   separate change (it is a user choice that makes skipping automatic, so it must be explicit and
   visible on the workflow's page). Not in 0.18.2.
@@ -559,4 +573,31 @@ No hub route changes; no DB migration (questionnaires live on the node, persiste
 dir). The hub only relays the `Call` and carries `TabView` as it already does.
 
 ## 8. PR split, proof, model tier
-_(in progress)_
+
+Each PR is small enough to review in one sitting, lands behind nothing (the tool is useless until
+PR 2 offers it, harmless before), and runs `cargo run -p pinned-server --bin wire-contract -- check
+--base main` clean (PRs 1 and 4 also run `snapshot current`).
+
+| # | PR | Scope | Proof | Tier |
+|---|---|---|---|---|
+| 1 | `wire: questionnaires on tabs` | `crates/core/src/questions.rs` (store, persisted `questions.json`); `Questionnaire`/`Question`/`QOption`/`QuestionsReply`/`Answer`; `TabView.questions`; `Call::AnswerQuestions` on `Machine::call`; view override to mid-turn `needs-input` (§3.1); `Waiting.questions`; surface manifest `Excluded`; `snapshot current` | serde round-trips in `wire.rs` tests (old JSON without the field reads; a `Call::AnswerQuestions` round-trip); `waiting_kind`/`ask_of` on a tab with questions; `waiting_cases.json` gains the case so `ui/global-chat.js` and Rust agree; reload test; `note_user_waits` pauses a task's clock | **opus** (wire design, back-compat) |
+| 2 | `mcp: question_user for every agent` | tool definition (`Audience::Everyone`), validation (§2.1), blocking poll + progress, `pending` + notice fallback, `StopTurn`/close/archive cancel, delegated-child routing via `task`, "first finished turn with no open questionnaire", `MCP_TOOL_TIMEOUT` in session env, `permissions()` | `reminders.rs` over-socket tests: blocks, progresses, returns `answered`/`skipped`/`cancelled`/`pending`; offered to all six seats; refused shapes (recommended not first, two recommended, 5 questions); `machine.rs` test that a worker's turn ending with an open questionnaire does not end its task | **opus** |
+| 3 | `orchestrator: ask before send_to_captain` | gate in `project_tool` (§4.2), `projects` required for the global seat, prompt rule 2b and the Opções note, `captain_prompt` sentence | tests 1–8 of §4.3, all in `cargo test -p pinned-core`; the PR body pastes the refusals' exact text | **opus** (enforcement and prompt wording) |
+| 4 | `hub: questions keep a box and relay answers` | `Hub::seen`/`seen_any` treat a tab with questions as not quiet; `crates/server/tests/hub.rs` relay of `Call::AnswerQuestions` to another machine and `waiting()` listing a Captain's questionnaire | `boxes.rs` verdict test (a questioning tab never idles); the two hub tests | **sonnet** |
+| 5 | `ui: questionnaire card in the conversation` | `ui/gui-questions.js` + `.css` (renderer, pre-selected recommendation, Accept recommended, Send, typed answers, multi-select, Skip with its warning), `shownHtml` branch and answered row in `gui-timeline.js`, composer placeholder, phone stepper | `ui/gui-questions.test.js` (node vm like the other `*.test.js`): renders, one-tap accept sends `answer_questions` with every recommended label, a typed answer, skip needs the second tap and sends `skipped`, a stale card shows the "missed" note; screenshots at 1280 px and 390 px, light and dark | **sonnet** |
+| 6 | `ui: questions in Needs you, the worker banner and the Orchestrator strip` | `NEEDS_YOU_KINDS.questions`, card from `view.questions` (Orchestrator included, plain `question` card deduped), worker banner "has questions" + Accept recommended, Orchestrator strip | `gui-needs-you` and `gui-worker-banner` tests (a worker's and a workflow run's questionnaire answered from Needs you; one card per tab); screenshots at 390 px | **sonnet** |
+| 7 | `proof: tutorial video and changelog 0.18.2` | recorded with the `pinned:tutorial-video` skill (visible clicks through the sidebar and Needs you, no URL jumps), attached with `pinned evidence`; CHANGELOG 0.18.2 entries | one video, three chapters: **answer** (Orchestrator asks two questions, user picks the non-recommended option and types a note, one complete `[Orchestrator]` message reaches the Captain, no second message); **accept recommendation** (a worker under a Captain asks; answered with one tap from Needs you at phone width on hub web; the worker goes on); **skip** (a workflow run asks; skip shows its warning; the run goes on and its reply lists "Suposições/Assumptions"). Plus a shot of `send_to_captain` refused while open | **sonnet** |
+
+Order: 1 → 2 → 3 (core; 3 can be reviewed in parallel with 2 against 1), then 4, 5, 6 in parallel,
+then 7 on the release candidate. Ship as 0.18.2 only when 1–6 are merged; 1 alone is wire-safe to
+ship early.
+
+## 9. Open points for Felipe
+
+1. **Worker questions go straight to you** (§3.2), not through the Captain and the Orchestrator.
+   The Captain sees them in its worker banner. Say if you want `to: "parent"` routing later.
+2. **Unattended runs wait forever by default** (§5); a per-workflow "go on with its
+   recommendation" switch is left for later.
+3. **Opções: stays** for end-of-turn offers; `question_user` is for anything that decides what is
+   sent or done.
+4. **The hub's external MCP** (`crates/server/src/mcp.rs`) does not get the tool in 0.18.2.
