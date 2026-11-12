@@ -1,11 +1,6 @@
 {
   "bundle": {
     "targets": ["appimage", "deb"],
-    "resources": [],
-    "linux": {
-      "deb": {
-        "depends": ["libayatana-appindicator3-1", "libwebkit2gtk-4.1-0 (>= 2.44)"]
-      }
-    }
+    "resources": []
   }
 }

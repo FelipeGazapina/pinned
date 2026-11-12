@@ -4,7 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 fragment="$root/scripts/updater-fragment.sh"
 assemble="$root/scripts/assemble-latest-json.sh"
-notes="On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. On Linux, run the .AppImage or install the .deb. Or click the update button in a running pinned."
+notes="On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. On Linux (beta), use the AppImage or the .deb, for x86_64 and arm64. The AppImage needs FUSE, or run it with APPIMAGE_EXTRACT_AND_RUN=1. On Linux, dictation and browser-panel screenshots need macOS. Untested so far on Linux are the tray icon on a real desktop including GNOME, Wayland (it runs through XWayland), notifications, keep awake and the updater. Beta testers, please report problems with those. Or click the update button in a running pinned."
 legacy="darwin-aarch64,darwin-aarch64-app,darwin-x86_64,darwin-x86_64-app,windows-x86_64,windows-x86_64-nsis"
 pub_date="2026-10-30T22:10:25.111Z"
 repo="FelipeGazapina/pinned"

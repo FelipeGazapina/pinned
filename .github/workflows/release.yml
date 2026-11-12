@@ -25,7 +25,7 @@ concurrency:
 
 env:
   GH_REPO: ${{ github.repository }}
-  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. On Linux, run the .AppImage or install the .deb. Or click the update button in a running pinned.
+  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. On Linux (beta), use the AppImage or the .deb, for x86_64 and arm64. The AppImage needs FUSE, or run it with APPIMAGE_EXTRACT_AND_RUN=1. On Linux, dictation and browser-panel screenshots need macOS. Untested so far on Linux are the tray icon on a real desktop including GNOME, Wayland (it runs through XWayland), notifications, keep awake and the updater. Beta testers, please report problems with those. Or click the update button in a running pinned.
 
 jobs:
   draft:
