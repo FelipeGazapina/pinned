@@ -257,3 +257,168 @@ Two existing lists, and nothing new to invent:
   - a task run may create tasks, but one created inside a task run cannot itself create more (`depth ≤ 1`, carried in the environment), so a task cannot keep rescheduling itself;
   - an agent may edit, pause or delete any task, as the user can. Felipe asked for that, and the audit trail shows it. Deleting a task Felipe created is `Confirm`.
 - **One switch.** "Pause all tasks" on the Tasks page and as `schedule_pause { all: true }` (that one is `Confirm` for agents: a stuck agent must not silence everything).
+
+---
+
+## 5. UI
+
+Both features are **shell pages** (`SHELL_PAGES` in `ui/gui-shell.js`). They open beside the sidebar like Needs you, Pull requests and Usage, not inside Settings, because they are daily work and not setup. The hub web app serves the same `ui/`, so desktop and web are one implementation. The cards reuse the Workflows look (`.flow-card`, `.new-card`, `.switch`, `.run-now-outcome`; `ui/style.css:279`, `ui/gui-settings.css:58-66`), so no new visual language is needed.
+
+### 5.1 Sidebar (`ui/index.html` `#side-nav`, drawn by `drawNav` in `ui/gui-sidebar.js`)
+
+Two `nav-row`s go between Needs you and Pull requests. `count` and `meta` follow the existing rows: Tasks shows the next run time in `meta` and a `count` of runs waiting on Felipe (held or missed). Ideas shows the number of open ideas in `meta`.
+
+```
+┌ sidebar ─────────────────────────────┐
+│ ◉ Orchestrator        pinned-mac   2 │
+│ ▢ Needs you                        3 │
+│ ⏱ Tasks               next 09:00   1 │  ← new: count = held/missed runs
+│ ✎ Ideas                       12 open│  ← new
+│ ⇅ Pull requests            2 to review│
+│ ▤ Usage               5h 41% ▓▓░░░░  │
+│ ──────────────────────────────────── │
+│ [project ▾]                       ＋ │
+│ threads…                             │
+```
+
+Held and missed runs also appear on **Needs you** (`gui-needs-you.js`) as rows with a "Scheduled task" chip and their buttons. Felipe acts on them where he already looks.
+
+### 5.2 Tasks page
+
+```
+┌ Tasks ──────────────────────────────────────────────── [Pause all] ┐
+│ A task has an agent do something at a time: once, or on a repeat. │
+│                                                                   │
+│ ┌───────────────────────────────────────────────────────────────┐ │
+│ │ ⏱ Release pinned 0.18.2                     [Run now]  (●on)  │ │
+│ │   Once · Fri 13 Nov 09:00 BRT · Captain of pinned             │ │
+│ │   ✓ may release v0.18.2   · by the Orchestrator               │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+│ ┌───────────────────────────────────────────────────────────────┐ │
+│ │ ⟳ Morning PR digest                         [Run now]  (●on)  │ │
+│ │   Weekdays 08:30 · Orchestrator · last: done 08:31 ▸ Open     │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+│ ┌───────────────────────────────────────────────────────────────┐ │
+│ │ ⟳ Triage Slack bugs (workflow)              [Run now]  (○off) │ │
+│ │   Every day 18:00 · runs workflow “Slack bugs” · paused       │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+│ ┌ held ─────────────────────────────────────────────────────────┐ │
+│ │ ⚠ Deploy docs — waits on you: deploy (vercel --prod)          │ │
+│ │                                   [Approve] [Deny] ▸ Session  │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+│ [＋ New task]                                                     │
+│ Reminders (just notify me): 2 · show                              │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- Card click opens the editor. Expanding a card's history lists its last 20 `task_runs` (state, machine, link to the session).
+- `Target::Me` tasks (the old reminders) fold into a "Reminders" line at the bottom, so notification pings do not crowd out the agent work.
+
+**Editor** (the page's own view, like the workflow editor's `view.name === "edit"`):
+
+```
+┌ ← New task ──────────────────────────────────────────────────────┐
+│ Title    [Release pinned 0.18.2                               ]  │
+│ Who      [Captain ▾] [pinned ▾]       (Me · Orchestrator ·       │
+│                                         Captain · Session · New  │
+│                                         worker · Workflow)       │
+│ What     [Release the app as v0.18.2: bump, tag, changelog… ]   │
+│ When     (•) Once   [2026-11-13] [09:00]                         │
+│          ( ) Repeat [Weekdays ▾] [08:30]   ( ) Cron [0 9 * * 1] │
+│          Time zone  America/Sao_Paulo ▾                          │
+│          Next: Fri 13 Nov 09:00 · —  · —                         │
+│ If missed  [Ask me ▾]   Grace [15] min   If offline [Wait ▾]     │
+│ Allowed without asking (only you can tick these):                │
+│          ☑ release   containing [v0.18.2]  in [pinned ▾]        │
+│          ☐ deploy  ☐ push to main  ☐ delete outside worktree    │
+│                                        [Delete]  [Cancel] [Save] │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+The "Next:" line comes from the hub's answer to a dry-run `SaveSchedule { dry_run: true }`, so the UI never re-implements cron or DST.
+
+### 5.3 Ideas page
+
+```
+┌ Ideas ─────────────────────────── [All projects ▾] [Open ▾] [🔍 ] ┐
+│ Things you might do. Agents read them only when asked; facts      │
+│ you want agents to always know go in memory instead.              │
+│ ┌ Quick idea… ───────────────────────────────────────── [Save] ┐ │
+│ ┌───────────────────────────────────────────────────────────────┐ │
+│ │ iPad layout for the sidebar                       pinned · 2d │ │
+│ │ Split view with threads left, …           [Schedule…] [⋯]    │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+│ ┌───────────────────────────────────────────────────────────────┐ │
+│ │ Cheaper box tier                     — · by the Orchestrator  │ │
+│ │ Scheduled: Fri 09:00 ▸                    [Schedule…] [⋯]    │ │
+│ └───────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- The quick-add field saves a title only. Opening an idea gives a title + text editor with autosave, the way the taste chat saves.
+- The `⋯` menu holds: Edit, Send to Captain now, Mark done, Drop, Delete.
+
+### 5.4 Phone width (≤ 768 px, `ui/gui-phone.js`)
+
+The tab bar stays at four tabs: Threads, Needs you, Orchestrator, More. Tasks and Ideas are **the first rows of More's first list** (`MORE_LISTS[0]`), with hints from `moreHints` ("next 09:00 · 1 waits", "12 open"). Held and missed runs already reach Needs you, which has its own tab.
+
+```
+┌ More ───────────────────────┐
+│ Usage  5h ▓▓▓░░ 41%          │
+│ ┌─────────────────────────┐ │
+│ │ Tasks     next 09:00 ›  │ │
+│ │ Ideas        12 open ›  │ │
+│ │ Pull requests 2 to rev ›│ │
+│ │ Projects …            › │ │
+│ └─────────────────────────┘ │
+├─────────────────────────────┤
+│ Threads  Needs you  Orch  More│
+└─────────────────────────────┘
+
+┌ ← Tasks          [＋]       ┐   cards go full width; Run now and the
+│ ⏱ Release pinned 0.18.2     │   switch wrap under the title; the
+│   Once · Fri 09:00 · Captain│   editor's rows stack one per line;
+│   [Run now]          (●on)  │   date/time use native inputs.
+│ ⟳ Morning PR digest         │
+│   Weekdays 08:30 · Orch     │
+│   [Run now]          (●on)  │
+└─────────────────────────────┘
+```
+
+- On the phone, Ideas' quick-add sits pinned above the keyboard, so capturing an idea is one tap from More.
+- The Orchestrator tab is the other quick path: "anota: iPad layout" → `idea_save`.
+
+### 5.5 Workflows page
+
+Each `flow-card` (`ui/settings.js` `cardHtml`) gets a line under its sentence, "⏱ Weekdays 09:00 · next Mon 09:00", when tasks run it. The editor gets a **Schedule…** button beside **Run now**. It opens the task editor with `Who = Workflow` locked to this workflow. A workflow that cannot Run now (`runNowBlocked`) cannot be scheduled either, and shows the same reason.
+
+---
+
+## 6. Pull requests, in order
+
+Each PR runs `cargo run -p pinned-server --bin wire-contract -- snapshot current` and `-- check --base origin/main`, and must show **no new breaks**. UI PRs add `ui/*.test.js` and a tutorial video (the `pinned:tutorial-video` skill: real clicks through the sidebar, desktop width and 390 px phone width).
+
+| # | PR | Contents | Proof | Model |
+|---|---|---|---|---|
+| 1 | `core: schedule and idea types` | `crates/core/src/schedule.rs` (`Task`, `Schedule`, `Target`, `Action`, `OnMissed`, `Fallback`, `Approval`, `TaskRun`, `next_after(schedule, tz, after)`), `ideas.rs` (`Idea`). Deps: `chrono-tz`, `croner` (cron with DST-safe evaluation). No callers yet | Unit tests: once / cron / weekdays; DST gap (São Paulo, New York) and overlap; leap day; "tomorrow 09:00" across midnight; invalid cron refused with a readable error; serde round-trip with defaults (an older JSON without the new fields) | **sonnet** |
+| 2 | `hub: ideas store and calls` | Tables `ideas`; `HubCall::{ListIdeas, SaveIdea, DeleteIdea}`; `Settings.ideas` push field; `surface::ACTIONS` rows `list_ideas`/`save_idea`/`delete_idea` (Read/Write/Write, wired); `idea_*` tools for the Orchestrator and every session; Orchestrator prompt split memory vs idea (`global_orchestrator.rs:802`) | `crates/server/tests/hub.rs`: save, list by project, edit, delete, another account cannot see; `surface.rs` tests (`every_wire_call_has_one_action`); wire-contract check additive | **sonnet** |
+| 3 | `ui: Ideas page` | Shell page `ideas`, sidebar nav row, More row on phone, quick-add, editor, filters | `ui/ideas.test.js` (render, filters, quick-add sends `save_idea`); tutorial video: sidebar → Ideas → add → edit → delete, then the same at phone width via More | **sonnet** |
+| 4 | `hub: schedule store and calls` | Tables `tasks`, `task_runs` (`unique (task, due_at)`); `HubCall::{ListSchedules, SaveSchedule{dry_run}, PauseSchedule, DeleteSchedule, ScheduleRuns}`; `Settings.schedules`; actions `list_schedules` (Read), `save_schedule` (Write; **Confirm** when it carries approvals, through a `.checks()` like `marks::agent_check`), `pause_schedule`, `delete_schedule` (Confirm for a user-created task); agent caps (15-min interval, 20 tasks) | Hub tests: CRUD; dry-run answers next 3 times in tz; agent with approvals → confirmation, not saved; caps refused; audit rows carry the creator | **sonnet** |
+| 5 | `hub: the scheduler` | `schedule::Scheduler` loop in `Hub::watch_all`; claim-once insert; delivery per target (`Me` push, `Orchestrator`, `Captain` via the `send_to_captain` handoff, `Session` via `prompt` with wait-for-idle / unarchive, `Worker` via delegate placement, `Workflow` via `run_workflow`); `request_id = task:<id>:<due>`; grace, `OnMissed`, coalescing; restart recovery; `RunScheduleNow` + `run_schedule_now` action (`starts_work`) | Hub tests with a paused tokio clock: fires once; two schedulers on one DB fire once; host offline → waits → delivered in grace / missed after; `Ask` creates a Needs-you row; `Skip` and coalescing after a 7-day gap; hub restart mid-run does not resend (`Lost`); busy Captain → queued; limits refusal → retried then failed | **opus** |
+| 6 | `safety: held steps in task runs` | `PINNED_SCHEDULE` env; PreToolUse guard on task-run sessions calling `preauth::never`; `Confirmation.held` (`serde(default)`); `HubCall::DecideHeld` via the existing decision path; one-shot allowance; approvals match (item + repo + `must_contain`); 24 h expiry; never-coverable items | Unit tests on the matcher (exact version only; Secrets never covered); hook tests (`hooks.rs` style: hit → deny + confirmation; approved → passes once; second time held again); hub test end to end with a fake session; wire check | **opus** |
+| 7 | `ui: Tasks page` | Shell page `tasks`, nav row with next run and held count, cards, editor (dry-run Next line, tz picker, approvals only in the user's UI), history, Pause all; Needs you rows for held and missed; More row on phone | `ui/tasks.test.js` (card sentences, editor builds `Schedule`, held row buttons); tutorial video: create "release at 09:00" task with an approval, Run now, see it held for an unapproved deploy, approve from Needs you; phone width via More | **sonnet** |
+| 8 | `ui+hub: workflows ↔ tasks, ideas → tasks` | Schedule… on workflow cards/editor, "⏱ next" line; Schedule… on ideas (`task.idea`), idea `Done` when its one-time task finishes | UI tests; hub test idea status follows its task; tutorial video: schedule a workflow, schedule an idea | **sonnet** |
+| 9 | `reminders → tasks` | `remind_me`/`list_reminders`/`cancel_reminder` become aliases over `Target::Me` tasks; `reminders.json` migration on first signed-in start; nodes offer them; `Target::Me` push to desktop + web push | `crates/core/tests/delegate_mcp.rs` updated: same tool names and arguments, now land on the hub; migration test (file → tasks → `.migrated`); desktop notification still shows (manual note in PR) | **sonnet** |
+| 10 | `docs + changelog` | CHANGELOG 0.18.2 entries, Orchestrator help text, `docs/global-orchestrator/CONTRACTS.md` section for `schedule_*`/`idea_*` | Review only | **haiku** |
+| 11 | *(0.19)* `remove reminders store` | Delete `Reminders`, `watch_reminders`, `--no-reminders` handling; later the alias tools | Tests still green; wire check | **haiku** |
+
+Order and parallelism: 1 → (2, 4) in parallel → 3 after 2 → 5 after 4 → 6 after 5 → 7 after 5 (held UI after 6) → 8, 9 → 10. Ideas (1–3) can ship alone if Tasks slip.
+
+---
+
+## Open questions for Felipe
+
+1. Default grace window: 15 minutes. Long enough for a laptop that is waking up?
+2. When an agent creates a task, should it need his OK (a Confirm), or is the FYI row enough? This design says FYI, because scheduling gives an agent no power it does not already have.
+3. Should a `Once` task's `Ask` row also send a push notification at the missed time, or only show in Needs you?
+4. Ideas: should a project's Captain see its project's ideas in its opening context, or only on request? This design says on request only, to keep ideas apart from memory.
