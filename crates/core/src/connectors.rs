@@ -27,6 +27,11 @@ const VERCEL_KEY: &str = "vercel-key";
 const UPSTASH_KEY: &str = "upstash-box-key";
 const CLAUDE_TOKEN: &str = "claude-oauth-token";
 
+/// Where the token of the Slack bot `id` is kept. `SLACK_KEY` mirrors the default bot's.
+pub fn slack_bot_key(id: &str) -> String {
+    format!("{SLACK_KEY}:{id}")
+}
+
 /// Where the Claude token kept for the pinned account `name` is stored.
 fn named_claude_key(name: &str) -> String {
     format!("{CLAUDE_TOKEN}:{name}")
@@ -757,8 +762,13 @@ impl Columns {
 #[derive(Serialize, Deserialize, Default, schemars::JsonSchema)]
 struct Store {
     linear: Option<linear::Account>,
+    /// The default Slack bot as older apps and hubs read it: always `slack_bots[0]`, and None when
+    /// there is no bot.
     #[serde(default)]
     slack: Option<slack::Account>,
+    /// Every connected Slack bot, the default first. Their tokens are keys, under `slack_bot_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    slack_bots: Vec<slack::Bot>,
     #[serde(default)]
     github: Option<github::Account>,
     #[serde(default)]
@@ -1035,6 +1045,9 @@ pub struct Check {
 pub struct Settings {
     pub linear: Option<linear::Account>,
     pub slack: Option<slack::Account>,
+    /// Every connected Slack bot, the default first, with its token's last characters only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slack_bots: Vec<slack::Bot>,
     #[serde(default)]
     pub github: Option<github::Account>,
     #[serde(default)]
@@ -1065,7 +1078,10 @@ pub struct Settings {
 #[derive(Default, Debug, PartialEq)]
 pub struct Keys {
     pub linear: Option<String>,
+    /// The default Slack bot's token, the only one an app before several bots sends.
     pub slack: Option<String>,
+    /// Each Slack bot's token by bot id.
+    pub slack_bots: BTreeMap<String, String>,
     pub github: Option<String>,
     pub vercel: Option<String>,
 }
@@ -1474,7 +1490,12 @@ pub struct Connectors {
 
 impl Connectors {
     pub fn new(storage: impl Storage + 'static, exe: String) -> Self {
-        let store = storage.load().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut store: Store = storage.load().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if migrate_slack(&storage, &mut store) {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&store) {
+                let _ = storage.save(&bytes);
+            }
+        }
         let (runs, runs_broken) = read_runs(storage.load_runs());
         let checked = runs_broken.as_ref().map(|why| Check { at: Utc::now().to_rfc3339(), error: Some(why.clone()) });
         Self {
@@ -3849,6 +3870,7 @@ impl Connectors {
         Settings {
             linear: store.linear.clone(),
             slack: store.slack.clone(),
+            slack_bots: store.slack_bots.clone(),
             github: store.github.clone(),
             vercel: store.vercel.clone(),
             upstash: store.upstash.clone(),
@@ -3890,25 +3912,73 @@ impl Connectors {
         })
     }
 
-    /// Checks the bot token against Slack before keeping it.
-    pub async fn connect_slack(&self, token: &str) -> Result<slack::Account, String> {
+    /// Checks the bot token against Slack before keeping it. A token for a bot already kept, the
+    /// same user in the same workspace, replaces that bot's token in place; any other adds a bot,
+    /// and the first one becomes the default.
+    pub async fn connect_slack(&self, token: &str) -> Result<slack::Connected, String> {
         let token = token.trim();
-        let account = slack::account(token).await?;
-        self.storage.write_key(SLACK_KEY, token)?;
+        let mut bot = slack::bot(token).await?;
+        bot.key_hint = upstash::hint(token);
+        self.storage.write_key(&slack_bot_key(&bot.id), token)?;
         self.channels.lock().unwrap().clear();
         let mut store = self.store.lock().unwrap();
-        store.slack = Some(account.clone());
+        let same = |b: &slack::Bot| b.user_id == bot.user_id && (b.team_id == bot.team_id || b.team_id.is_empty());
+        let added = match store.slack_bots.iter_mut().find(|b| same(b)) {
+            Some(kept) => {
+                if bot.app_id.is_empty() {
+                    bot.app_id = kept.app_id.clone();
+                }
+                *kept = bot.clone();
+                false
+            }
+            None => {
+                store.slack_bots.push(bot.clone());
+                true
+            }
+        };
+        self.mirror_slack(&mut store)?;
         self.save(&store)?;
         self.wake.notify_one();
-        Ok(account)
+        Ok(slack::Connected { account: bot.account(), bot, added })
     }
 
-    pub fn disconnect_slack(&self) -> Result<(), String> {
-        self.storage.remove_key(SLACK_KEY);
+    /// Removes the Slack bot `bot` and its token, or the default bot when `bot` is empty, which is
+    /// what an app from before several bots means. The next bot becomes the default.
+    // TODO(multi-Slack PR 2): refuse while a workflow, paused ones too, is bound to the bot by `Connector.slack_bot`.
+    pub fn disconnect_slack(&self, bot: &str) -> Result<(), String> {
         self.channels.lock().unwrap().clear();
         let mut store = self.store.lock().unwrap();
-        store.slack = None;
+        let at = match bot {
+            "" => (!store.slack_bots.is_empty()).then_some(0),
+            id => Some(store.slack_bots.iter().position(|b| b.id == id).ok_or("no such Slack bot")?),
+        };
+        if let Some(at) = at {
+            let gone = store.slack_bots.remove(at);
+            self.storage.remove_key(&slack_bot_key(&gone.id));
+        }
+        self.mirror_slack(&mut store)?;
         self.save(&store)
+    }
+
+    /// Writes the default bot to `Store.slack` and its token to `SLACK_KEY`, which every Slack
+    /// read uses and older apps and hubs know, or clears both when there is no bot.
+    fn mirror_slack(&self, store: &mut Store) -> Result<(), String> {
+        store.slack = store.slack_bots.first().map(slack::Bot::account);
+        match store.slack_bots.first().and_then(|b| self.key(&slack_bot_key(&b.id))) {
+            Some(token) => self.storage.write_key(SLACK_KEY, &token),
+            None => {
+                self.storage.remove_key(SLACK_KEY);
+                Ok(())
+            }
+        }
+    }
+
+    /// The token of the Slack bot `bot`, or the default bot's when `bot` is empty.
+    fn slack_token(&self, bot: &str) -> Option<String> {
+        match bot {
+            "" => self.key(SLACK_KEY),
+            id => self.key(&slack_bot_key(id)),
+        }
     }
 
     /// Checks the token against GitHub before keeping it.
@@ -4240,9 +4310,10 @@ impl Connectors {
         Ok(())
     }
 
-    /// Channels the bot was invited to, which a Slack connector can watch.
-    pub async fn slack_suggestions(&self) -> Result<Vec<String>, String> {
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+    /// Channels the bot `bot` was invited to, which a Slack connector can watch; the default bot's
+    /// when `bot` is empty.
+    pub async fn slack_suggestions(&self, bot: &str) -> Result<Vec<String>, String> {
+        let token = self.slack_token(bot).ok_or("Slack is not connected")?;
         slack::member_channels(&token).await
     }
 
@@ -4347,7 +4418,7 @@ impl Connectors {
     pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
+        if current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
             return Ok(false);
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
@@ -4355,9 +4426,29 @@ impl Connectors {
         if linear_key.is_none() {
             imported.linear = None;
         }
-        if slack_key.is_none() {
-            imported.slack = None;
+        // A store from before several bots has `slack` only; its bot is the default one.
+        if imported.slack_bots.is_empty() {
+            if let Some(account) = &imported.slack {
+                imported.slack_bots.push(legacy_bot(account, slack_key.as_deref()));
+            }
         }
+        let mut bot_keys: BTreeMap<String, String> =
+            keys.slack_bots.into_iter().filter_map(|(id, key)| Some((id, present(Some(key))?))).collect();
+        if let (Some(first), Some(key)) = (imported.slack_bots.first(), &slack_key) {
+            bot_keys.entry(first.id.clone()).or_insert_with(|| key.clone());
+        }
+        imported.slack_bots.retain(|b| bot_keys.contains_key(&b.id));
+        for bot in &mut imported.slack_bots {
+            bot.key_hint = upstash::hint(&bot_keys[&bot.id]);
+        }
+        for bot in &current.slack_bots {
+            self.storage.remove_key(&slack_bot_key(&bot.id));
+        }
+        for bot in &imported.slack_bots {
+            self.storage.write_key(&slack_bot_key(&bot.id), &bot_keys[&bot.id])?;
+        }
+        let slack_key = imported.slack_bots.first().map(|b| bot_keys[&b.id].clone());
+        imported.slack = imported.slack_bots.first().map(slack::Bot::account);
         if github_key.is_none() {
             imported.github = None;
         }
@@ -4382,8 +4473,47 @@ impl Connectors {
     /// The store and the integrations' keys, as `import` takes them.
     pub fn export(&self) -> (serde_json::Value, Keys) {
         let store = serde_json::to_value(&*self.store.lock().unwrap()).unwrap();
-        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY), vercel: self.key(VERCEL_KEY) })
+        let slack_bots = self.store.lock().unwrap().slack_bots.iter().filter_map(|b| Some((b.id.clone(), self.key(&slack_bot_key(&b.id))?))).collect();
+        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), slack_bots, github: self.key(GITHUB_KEY), vercel: self.key(VERCEL_KEY) })
     }
+}
+
+/// The default bot of a store from before several bots, whose token is the `SLACK_KEY` one. Its
+/// workspace id and app id stay empty until its token is checked again.
+fn legacy_bot(account: &slack::Account, key: Option<&str>) -> slack::Bot {
+    slack::Bot {
+        id: account.user_id.clone(),
+        team_id: String::new(),
+        team: account.team.clone(),
+        user_id: account.user_id.clone(),
+        name: account.name.clone(),
+        app_id: String::new(),
+        key_hint: key.map(upstash::hint).unwrap_or_default(),
+    }
+}
+
+/// Moves a store from before several Slack bots to `slack_bots`: its one bot becomes the default,
+/// and its token is copied to the bot's key, `SLACK_KEY` staying as it is. No network; true when
+/// it changed something to save. A second run changes nothing.
+fn migrate_slack(storage: &dyn Storage, store: &mut Store) -> bool {
+    let legacy = storage.key(SLACK_KEY);
+    let mut created = false;
+    if store.slack_bots.is_empty() {
+        let Some(account) = &store.slack else { return false };
+        store.slack_bots.push(legacy_bot(account, legacy.as_deref()));
+        created = true;
+    }
+    // A hub rolled back to a single-bot release drops `slack_bots` but keeps the bots' keys, so a
+    // bot made again from `slack` takes `SLACK_KEY` even over a key it finds.
+    let first = &store.slack_bots[0];
+    let name = slack_bot_key(&first.id);
+    if let Some(key) = legacy.filter(|_| store.slack.as_ref().is_some_and(|a| a.user_id == first.id)) {
+        let kept = storage.key(&name);
+        if kept.is_none() || (created && kept.as_deref() != Some(key.as_str())) {
+            let _ = storage.write_key(&name, &key);
+        }
+    }
+    created
 }
 
 /// The subject a Run now's session carries. It names no Linear issue or Slack thread: it keeps one
@@ -5129,7 +5259,7 @@ mod tests {
         let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), vercel: Some(" vck_1 ".into()), ..Keys::default() };
         assert_eq!(connectors.import(exported.clone(), keys), Ok(true));
         let (store, keys) = connectors.export();
-        assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()), vercel: Some("vck_1".into()) });
+        assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()), vercel: Some("vck_1".into()), ..Keys::default() });
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
         assert_eq!(store["vercel"], serde_json::json!({ "key_hint": "…ck_1" }));
         assert_eq!(std::fs::read_to_string(dir.join("vercel-key")).unwrap(), "vck_1");
@@ -8283,5 +8413,293 @@ mod tests {
         let sizeless = step(serde_json::json!({ "kind": "upstash-box" }));
         assert_eq!(sized(&sizeless, "https://github.com/acme/site.git"), (BoxSize::Large, BoxSizeSource::Project));
         assert_eq!(sized(&sizeless, "https://github.com/acme/api.git"), (BoxSize::Medium, BoxSizeSource::Account));
+    }
+
+    mod slack_bots {
+        use super::*;
+
+        /// A store as a single-bot release saved it, with its `slack-key`.
+        fn legacy(name: &str) -> (PathBuf, Vec<u8>) {
+            let dir = temp_dir(name);
+            let store = serde_json::json!({
+                "linear": null,
+                "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
+                "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
+            });
+            let bytes = serde_json::to_vec_pretty(&store).unwrap();
+            let storage = FileStorage::new(dir.clone());
+            storage.save(&bytes).unwrap();
+            storage.write_key(SLACK_KEY, "xoxb-test-legacy1234").unwrap();
+            (dir, bytes)
+        }
+
+        fn load(dir: &Path) -> Connectors {
+            Connectors::new(FileStorage::new(dir.to_path_buf()), "/bin/pinned".into())
+        }
+
+        fn key(dir: &Path, name: &str) -> Option<String> {
+            FileStorage::new(dir.to_path_buf()).key(name)
+        }
+
+        fn bot(id: &str, team_id: &str, key_hint: &str) -> slack::Bot {
+            slack::Bot {
+                id: id.into(),
+                team_id: team_id.into(),
+                team: "Acme".into(),
+                user_id: id.into(),
+                name: format!("bot-{id}"),
+                app_id: String::new(),
+                key_hint: key_hint.into(),
+            }
+        }
+
+        /// Answers `auth.test` for the tokens `bots` names, as Slack would for each bot.
+        fn serve_auth(bots: Vec<(&'static str, &'static str, &'static str)>) -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while let Ok(n) = std::io::Read::read(&mut stream, &mut tmp) {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_lowercase();
+                    let body = bots
+                        .iter()
+                        .find(|(token, _, _)| req.contains(&format!("bearer {}", token.to_lowercase())))
+                        .map_or_else(
+                            || r#"{"ok":false,"error":"invalid_auth"}"#.to_owned(),
+                            |(_, team, user)| {
+                                serde_json::json!({ "ok": true, "bot_id": "B1", "team": format!("Team {team}"), "team_id": team, "user_id": user, "user": format!("bot-{user}") })
+                                    .to_string()
+                            },
+                        );
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                }
+            });
+            format!("http://{address}/")
+        }
+
+        #[test]
+        fn a_single_bot_store_moves_to_slack_bots_once() {
+            let (dir, before) = legacy("slack-migrate");
+            let connectors = load(&dir);
+            let settings = connectors.get_settings();
+            let first = &settings.slack_bots[0];
+            assert_eq!(settings.slack_bots.len(), 1);
+            assert_eq!((first.id.as_str(), first.user_id.as_str(), first.team.as_str(), first.name.as_str()), ("UBOT", "UBOT", "Acme", "pinned"));
+            assert_eq!((first.team_id.as_str(), first.app_id.as_str(), first.key_hint.as_str()), ("", "", "…1234"));
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-legacy1234"), "the legacy key stays");
+            assert_eq!(key(&dir, &slack_bot_key("UBOT")).as_deref(), Some("xoxb-test-legacy1234"));
+            let old: serde_json::Value = serde_json::from_slice(&before).unwrap();
+            assert_eq!(serde_json::to_value(&settings.slack).unwrap(), old["slack"], "settings.slack is unchanged");
+            let saved = std::fs::read(dir.join("connectors.json")).unwrap();
+            assert_ne!(saved, before, "the move was saved");
+            drop(connectors);
+            let again = load(&dir);
+            assert_eq!(again.get_settings().slack_bots, settings.slack_bots, "a second load changes nothing");
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), saved, "and saves nothing new");
+            again.save(&again.store.lock().unwrap()).unwrap();
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), saved, "a second save is byte-identical");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_bot_made_again_after_a_rollback_takes_the_legacy_key() {
+            let (dir, _) = legacy("slack-rollback");
+            FileStorage::new(dir.clone()).write_key(&slack_bot_key("UBOT"), "xoxb-test-stale").unwrap();
+            load(&dir);
+            assert_eq!(key(&dir, &slack_bot_key("UBOT")).as_deref(), Some("xoxb-test-legacy1234"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_store_without_slack_is_not_touched() {
+            let (connectors, dir) = stored("slack-none", vec![]);
+            let before = std::fs::read(dir.join("connectors.json")).unwrap();
+            drop(connectors);
+            assert!(load(&dir).get_settings().slack_bots.is_empty());
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn connecting_updates_a_kept_bot_and_appends_a_new_one() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            install_rustls();
+            slack::set_api_root(Some(serve_auth(vec![
+                ("xoxb-test-old0001", "T1", "UBOT"),
+                ("xoxb-test-new0002", "T1", "UBOT"),
+                ("xoxb-test-two0003", "T2", "UTWO"),
+                ("xoxb-test-oth0004", "T1", "UOTH"),
+            ])));
+            let (dir, _) = legacy("slack-connect");
+            let connectors = load(&dir);
+
+            let first = block_on(connectors.connect_slack("xoxb-test-old0001")).unwrap();
+            assert!(!first.added, "the migrated bot matches on its user id");
+            let bots = connectors.get_settings().slack_bots;
+            assert_eq!(bots.len(), 1);
+            assert_eq!((bots[0].id.as_str(), bots[0].team_id.as_str(), bots[0].key_hint.as_str()), ("UBOT", "T1", "…0001"), "its workspace id is filled in");
+
+            let same = block_on(connectors.connect_slack("xoxb-test-old0001")).unwrap();
+            assert!(!same.added);
+            assert_eq!(connectors.get_settings().slack_bots.len(), 1, "the same token twice keeps one bot");
+
+            let rotated = block_on(connectors.connect_slack(" xoxb-test-new0002 ")).unwrap();
+            assert!(!rotated.added, "a new token for the same bot updates it");
+            assert_eq!((rotated.bot.id.as_str(), rotated.account.user_id.as_str()), ("UBOT", "UBOT"));
+            let bots = connectors.get_settings().slack_bots;
+            assert_eq!((bots.len(), bots[0].id.as_str(), bots[0].key_hint.as_str()), (1, "UBOT", "…0002"));
+            assert_eq!(key(&dir, &slack_bot_key("UBOT")).as_deref(), Some("xoxb-test-new0002"));
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-new0002"), "the default's token is mirrored");
+
+            let two = block_on(connectors.connect_slack("xoxb-test-two0003")).unwrap();
+            assert!(two.added);
+            let other = block_on(connectors.connect_slack("xoxb-test-oth0004")).unwrap();
+            assert!(other.added, "another bot in the same workspace is its own");
+            let settings = connectors.get_settings();
+            let ids: Vec<&str> = settings.slack_bots.iter().map(|b| b.id.as_str()).collect();
+            assert_eq!(ids, ["UBOT", "UTWO", "UOTH"], "new bots are appended");
+            assert_eq!(settings.slack.as_ref().unwrap().user_id, "UBOT", "the default is unchanged");
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-new0002"));
+            assert_eq!(key(&dir, &slack_bot_key("UTWO")).as_deref(), Some("xoxb-test-two0003"));
+
+            let json = serde_json::to_string(&settings).unwrap();
+            for token in ["xoxb-test-new0002", "xoxb-test-two0003", "xoxb-test-oth0004", "xoxb-test-legacy1234"] {
+                assert!(!json.contains(token), "settings never carry a token");
+            }
+            assert!(block_on(connectors.connect_slack("xoxb-test-unknown")).is_err());
+            assert_eq!(connectors.get_settings().slack_bots.len(), 3);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_first_bot_ever_becomes_the_default() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            install_rustls();
+            slack::set_api_root(Some(serve_auth(vec![("xoxb-test-first001", "T1", "UONE")])));
+            let (connectors, dir) = stored("slack-first", vec![]);
+            let connected = block_on(connectors.connect_slack("xoxb-test-first001")).unwrap();
+            assert!(connected.added);
+            let wire = serde_json::to_value(&connected).unwrap();
+            assert_eq!((wire["userId"].as_str(), wire["team"].as_str(), wire["added"].as_bool()), (Some("UONE"), Some("Team T1"), Some(true)), "the old account fields stay on top");
+            assert_eq!(connectors.get_settings().slack.unwrap().user_id, "UONE");
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-first001"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        fn three(name: &str) -> (Connectors, PathBuf) {
+            let (connectors, dir) = stored(name, vec![]);
+            let storage = FileStorage::new(dir.clone());
+            {
+                let mut store = connectors.store.lock().unwrap();
+                store.slack_bots = vec![bot("UA", "T1", "…kA"), bot("UB", "T1", "…kB"), bot("UC", "T2", "…kC")];
+                for id in ["UA", "UB", "UC"] {
+                    storage.write_key(&slack_bot_key(id), &format!("xoxb-test-{id}")).unwrap();
+                }
+                connectors.mirror_slack(&mut store).unwrap();
+                connectors.save(&store).unwrap();
+            }
+            (connectors, dir)
+        }
+
+        #[test]
+        fn removing_the_default_makes_the_next_bot_the_default() {
+            let (connectors, dir) = three("slack-remove-default");
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-UA"));
+            connectors.disconnect_slack("UA").unwrap();
+            let settings = connectors.get_settings();
+            assert_eq!(settings.slack_bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["UB", "UC"]);
+            assert_eq!(settings.slack.unwrap().user_id, "UB");
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-UB"));
+            assert_eq!(key(&dir, &slack_bot_key("UA")), None);
+            let reloaded = load(&dir).get_settings();
+            assert_eq!(reloaded.slack.unwrap().user_id, "UB", "the new default was saved in the same write");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn removing_another_bot_leaves_the_default() {
+            let (connectors, dir) = three("slack-remove-other");
+            connectors.disconnect_slack("UB").unwrap();
+            let settings = connectors.get_settings();
+            assert_eq!(settings.slack_bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["UA", "UC"]);
+            assert_eq!(settings.slack.unwrap().user_id, "UA");
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-UA"));
+            assert_eq!(key(&dir, &slack_bot_key("UB")), None);
+            assert_eq!(key(&dir, &slack_bot_key("UC")).as_deref(), Some("xoxb-test-UC"));
+            assert!(connectors.disconnect_slack("UZ").is_err(), "an unknown bot is an error");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_old_app_removes_only_the_default_and_the_last_clears_the_mirror() {
+            let (connectors, dir) = three("slack-remove-old");
+            let call: crate::wire::HubCall = serde_json::from_value(serde_json::json!({ "cmd": "disconnect_slack" })).unwrap();
+            let crate::wire::HubCall::DisconnectSlack { bot } = call else { panic!("not a disconnect") };
+            connectors.disconnect_slack(&bot).unwrap();
+            let settings = connectors.get_settings();
+            assert_eq!(settings.slack_bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["UB", "UC"]);
+            connectors.disconnect_slack("").unwrap();
+            connectors.disconnect_slack("").unwrap();
+            let settings = connectors.get_settings();
+            assert!(settings.slack_bots.is_empty() && settings.slack.is_none());
+            assert_eq!(key(&dir, SLACK_KEY), None);
+            assert_eq!(key(&dir, &slack_bot_key("UC")), None);
+            connectors.disconnect_slack("").unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn import_takes_the_legacy_shape_and_export_carries_every_bot() {
+            let (connectors, dir) = stored("slack-import", vec![]);
+            let legacy = serde_json::json!({ "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" }, "connectors": [] });
+            assert_eq!(connectors.import(legacy, Keys { slack: Some(" xoxb-test-imp0001 ".into()), ..Keys::default() }), Ok(true));
+            let settings = connectors.get_settings();
+            assert_eq!(settings.slack_bots.len(), 1);
+            assert_eq!((settings.slack_bots[0].id.as_str(), settings.slack_bots[0].key_hint.as_str()), ("UBOT", "…0001"));
+            assert_eq!(key(&dir, SLACK_KEY).as_deref(), Some("xoxb-test-imp0001"));
+            assert_eq!(key(&dir, &slack_bot_key("UBOT")).as_deref(), Some("xoxb-test-imp0001"));
+            let (store, keys) = connectors.export();
+            assert_eq!(store["slackBots"].as_array().map(Vec::len).or(store["slack_bots"].as_array().map(Vec::len)), Some(1));
+            assert_eq!(keys.slack_bots, BTreeMap::from([("UBOT".to_owned(), "xoxb-test-imp0001".to_owned())]));
+            assert_eq!(keys.slack.as_deref(), Some("xoxb-test-imp0001"));
+            let _ = std::fs::remove_dir_all(dir);
+
+            let (source, source_dir) = three("slack-export");
+            let (store, keys) = source.export();
+            let (target, target_dir) = stored("slack-import-many", vec![]);
+            assert_eq!(target.import(store, keys), Ok(true));
+            let settings = target.get_settings();
+            assert_eq!(settings.slack_bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["UA", "UB", "UC"]);
+            assert_eq!(settings.slack.unwrap().user_id, "UA");
+            assert_eq!(key(&target_dir, SLACK_KEY).as_deref(), Some("xoxb-test-UA"));
+            assert_eq!(key(&target_dir, &slack_bot_key("UC")).as_deref(), Some("xoxb-test-UC"));
+            let _ = std::fs::remove_dir_all(source_dir);
+            let _ = std::fs::remove_dir_all(target_dir);
+        }
+
+        #[test]
+        fn a_bot_whose_key_did_not_come_along_is_not_imported() {
+            let (connectors, dir) = stored("slack-import-keyless", vec![]);
+            let legacy = serde_json::json!({ "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" }, "connectors": [] });
+            assert_eq!(connectors.import(legacy, Keys::default()), Ok(true));
+            let settings = connectors.get_settings();
+            assert!(settings.slack_bots.is_empty() && settings.slack.is_none());
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

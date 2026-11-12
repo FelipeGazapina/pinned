@@ -1002,11 +1002,19 @@ pub enum HubCall {
     DisconnectLinear,
     /// `connectors::Suggestions`.
     LinearSuggestions,
-    /// `slack::Account`.
+    /// `slack::Connected`: `slack::Account` with the bot and whether the token added it.
     ConnectSlack { token: String },
-    DisconnectSlack,
+    DisconnectSlack {
+        /// The bot to remove; empty for the default bot, which is what an app before several bots means.
+        #[serde(default)]
+        bot: String,
+    },
     /// Channel names.
-    SlackSuggestions,
+    SlackSuggestions {
+        /// The bot whose channels to list; empty for the default bot.
+        #[serde(default)]
+        bot: String,
+    },
     /// `github::Account`.
     ConnectGithub { token: String },
     DisconnectGithub,
@@ -1099,6 +1107,9 @@ pub enum HubCall {
         store: Value,
         linear_key: Option<String>,
         slack_key: Option<String>,
+        /// Each Slack bot's token by bot id. `slack_key` stays the default bot's.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        slack_keys: BTreeMap<String, String>,
         #[serde(default)]
         github_key: Option<String>,
         #[serde(default)]
@@ -2015,7 +2026,7 @@ mod tests {
             json!({ "cmd": "run_set", "connector": "c2", "channel": "C1", "thread": "1.2", "name": "title", "value": "Export 500s" }),
         );
         round_trip(
-            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: Some("vck_1".into()) },
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, slack_keys: BTreeMap::new(), github_key: None, vercel_key: Some("vck_1".into()) },
             json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": "vck_1" }),
         );
         round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
@@ -2108,7 +2119,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
