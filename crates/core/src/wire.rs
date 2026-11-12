@@ -427,8 +427,18 @@ pub enum Call {
     /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
     /// account signed in here and resumes it there, continuing a turn a usage limit stopped.
     SwitchAccount { tab: TabId, account: AccountId, cols: u16, rows: u16 },
-    /// `ThreadPage`: the conversation's items from byte `from` of its transcript on.
-    Thread { tab: TabId, from: u64 },
+    /// `ThreadPage`: the conversation's items from byte `from` of its transcript on. With `limit`,
+    /// the newest whole turns holding at least `limit` items before byte `before` instead, or
+    /// before the end, read back from there; `from` is then unused and the page's `start` is the
+    /// `before` of the page older than it.
+    Thread {
+        tab: TabId,
+        from: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
     /// `null`. Types `text` into the session as one prompt and submits it.
     Prompt { tab: TabId, text: String },
     /// `workspace::Workspace` of the tab's folder.
@@ -900,6 +910,14 @@ pub struct ThreadPage {
     pub todos: Option<thread::Todos>,
     /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
     pub agents: Vec<subagents::Subagent>,
+    /// For a read with `limit`: where its items start in the transcript, the `before` of the page
+    /// older than it. 0: nothing is older. A machine on an older pinned leaves it out and answers
+    /// from `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+    /// For a read with `limit` that does not reach the start: the conversation's first prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening: Option<String>,
 }
 
 /// A connector's session, the same on any machine.

@@ -358,7 +358,7 @@ async fn read_session(hub: &Hub, account: &Account, from: Source<'_>, tab: Strin
 async fn read_tab(hub: &Hub, account: &Account, machine: &str, tab: &TabView, items: Option<usize>) -> Result<Value, Unanswered> {
     match hub.call_machine(account, machine, Call::ReadSession { tab: tab.id.clone(), items }, RELAY_WAIT).await {
         Err(Unanswered::Refused(e)) if is_unknown_command(&e) => {
-            let page = hub.call_machine(account, machine, Call::Thread { tab: tab.id.clone(), from: 0 }, RELAY_WAIT).await;
+            let page = hub.call_machine(account, machine, Call::Thread { tab: tab.id.clone(), from: 0, limit: None, before: None }, RELAY_WAIT).await;
             Ok(reading::read(tab, page.map_err(String::from), items.unwrap_or(reading::DEFAULT_ITEMS)))
         }
         answer => answer,
