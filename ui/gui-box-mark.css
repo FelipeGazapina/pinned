@@ -1,0 +1,11 @@
+/* The Upstash mark beside a thread that runs in an Upstash Box (boxMarkHtml in redesign-model.js).
+ * The symbol is Upstash's own, unmodified, from their brand page https://upstash.com/brand
+ * (https://upstash.com/logo/upstash-icon-dark-bg.svg and .../upstash-icon-white-bg.svg). The dark-bg
+ * file (#00E9A3) reads on the dark themes; the white-bg file (#00C98D) on the light ones. That page
+ * states no usage terms for the symbol. The files are 118 units tall and draw the mark in the
+ * middle 88 of the 118 across, so a square box at the glyph's height shows it whole. */
+.box-mark { display: inline-block; flex: none; width: 12px; height: 12px; background: url("brand/upstash-icon-dark-bg.svg") center / contain no-repeat; }
+html[data-appearance="light"] .box-mark { background-image: url("brand/upstash-icon-white-bg.svg"); }
+/* A phone's two-line row is a grid, so the mark gets its own column between the title and the clock. */
+body[data-phone-screen="threads"] #thread-list .thread-row.tall:has(.box-mark) { grid-template-columns: 12px minmax(0, 1fr) auto auto; grid-template-areas: "glyph title mark slot" "glyph sub sub slot"; }
+body[data-phone-screen="threads"] #thread-list .thread-row.tall .box-mark { grid-area: mark; }

@@ -12,4 +12,5 @@
 - Upstash Box: a default box size for each account and each project, set under Delegation limits on the Way of working page. Already on main (#195).
 - Slack: a triage session can set the ticket's title and summary before the workflow files it, with `pinned run set` and `{{vars.*}}` in the workflow's ticket fields. Already on main (#196).
 - Usage page: an Upstash Box section with what Upstash reports for this month's boxes, pinned's own count of box hours, and the boxes running now. Already on main (#199).
+- Sessions that run in an Upstash Box show the Upstash mark beside their name: in the sidebar (threads, Captains and workers), the Workers card, the phone Workers sheet and Needs you. The mark comes from the machine's Upstash Box field, not its name, and reads "Running in an Upstash Box" to screen readers.
 - Upstash Box: a box pinned opens is named after its project and role, e.g. `pinned-worker-7fc0a1`, in the Upstash dashboard. Boxes already running keep their old `pinned-<id>` names until they end.

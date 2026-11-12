@@ -87,7 +87,7 @@ function needsYouHeadHtml(card) {
   const kind = NEEDS_YOU_KINDS[card.kind];
   const limit = card.limit;
   const when = limit ? `<span class="ny-when">${limit.held ? "Resets" : "Continues"} at ${esc(clock.format(limit.resumesAt))}</span>` : card.since ? `<span class="ticker ny-when" data-since="${card.since}"></span>` : "";
-  return `<div class="ny-head">${glyphHtml(kind.glyph)}<span class="ny-kind">${kind.label}</span><span class="ny-where">${esc(card.where)}</span>${when}</div>`;
+  return `<div class="ny-head">${glyphHtml(kind.glyph)}<span class="ny-kind">${kind.label}</span><span class="ny-where">${esc(card.where)}</span>${boxMarkHtml(card.tab)}${when}</div>`;
 }
 
 /** The card's controls. */
@@ -129,7 +129,7 @@ function needsYouCardHtml(card, answer = null) {
   if (card.kind === "shown") return `<article ${attrs} aria-label="${esc(label)}">${agentShownHtml()}</article>`;
   if (card.kind === "review" || card.kind === "offer") {
     const sub = card.kind === "review" ? ["Finished", card.line].filter(Boolean).join(" · ") : `Asked · ${card.line}`;
-    return `<article ${attrs} aria-label="${esc(`${label}, ${card.where}`)}">${glyphHtml(NEEDS_YOU_KINDS[card.kind].glyph)}<span class="ny-texts"><span class="ny-name">${esc(card.title)}</span><span class="ny-sub">${esc(sub)}</span></span>${nyOpen()}</article>`;
+    return `<article ${attrs} aria-label="${esc(`${label}, ${card.where}`)}">${glyphHtml(NEEDS_YOU_KINDS[card.kind].glyph)}<span class="ny-texts"><span class="ny-name">${esc(card.title)}</span><span class="ny-sub">${esc(sub)}</span></span>${boxMarkHtml(card.tab)}${nyOpen()}</article>`;
   }
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
