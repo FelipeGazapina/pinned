@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/assemble-latest-json.sh --notes NOTES --pub-date ISO --tag TAG --out FILE DIR" >&2
+  echo "usage: scripts/assemble-latest-json.sh --notes NOTES --pub-date ISO --tag TAG --out FILE [--version VERSION] [--required KEY,KEY,...] DIR" >&2
   exit 2
 }
 
@@ -10,6 +10,8 @@ notes=""
 pub_date=""
 tag=""
 out=""
+version=""
+required_keys=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,6 +19,8 @@ while [[ $# -gt 0 ]]; do
     --pub-date) pub_date="${2-}"; shift 2 ;;
     --tag) tag="${2-}"; shift 2 ;;
     --out) out="${2-}"; shift 2 ;;
+    --version) version="${2-}"; shift 2 ;;
+    --required) required_keys="${2-}"; shift 2 ;;
     --) shift; break ;;
     -*) usage ;;
     *) break ;;
@@ -30,7 +34,10 @@ dir="${1-}"
   exit 1
 }
 
-required='["darwin-aarch64","darwin-aarch64-app","darwin-x86_64","darwin-x86_64-app","windows-x86_64","windows-x86_64-nsis"]'
+if [[ -z "$required_keys" ]]; then
+  required_keys="darwin-aarch64,darwin-aarch64-app,darwin-x86_64,darwin-x86_64-app,linux-aarch64,linux-aarch64-appimage,linux-aarch64-deb,linux-x86_64,linux-x86_64-appimage,linux-x86_64-deb,windows-x86_64,windows-x86_64-nsis"
+fi
+required=$(jq -c -n --arg keys "$required_keys" '$keys | split(",")')
 
 files=()
 while IFS= read -r fragment; do
@@ -49,6 +56,7 @@ trap 'rm -f "$merged"' EXIT
 if ! jq -s \
   --argjson required "$required" \
   --arg tag "$tag" \
+  --arg expected "$version" \
   '
     if any(.[]; (.platforms | type) != "object") then
       error("updater fragment has no platforms")
@@ -75,11 +83,11 @@ if ! jq -s \
         error("latest.json is missing \($missing | join(", "))")
       else . end
     | $versions[0] as $version
-    | ($tag | if startswith("v") then .[1:] else . end) as $bare
+    | (if $expected != "" then $expected else ($tag | if startswith("v") then .[1:] else . end) end) as $bare
     | if $version != $bare then
         error("latest.json version \($version) does not match tag \($tag)")
       else
-        {version: $version, platforms: $platforms}
+        {version: $version, platforms: ($platforms | to_entries | sort_by(.key) | from_entries)}
       end
   ' "${files[@]}" > "$merged"; then
   exit 1
