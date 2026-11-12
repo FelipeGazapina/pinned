@@ -4904,19 +4904,22 @@ mod tests {
             let _ = std::fs::remove_dir_all(&copy);
         }
 
+        /// A key the old code wrote under its raw name: a plain file on Unix, an alternate data stream
+        /// of `claude-oauth-token` on Windows. It is read, then moved to the escaped file.
         #[test]
         fn a_raw_named_file_is_read_then_replaced() {
             let dir = temp_dir("fs-raw");
             std::fs::create_dir_all(&dir).unwrap();
             let storage = FileStorage::new(dir.clone());
-            #[cfg(unix)]
-            {
-                std::fs::write(dir.join("mcp:abc"), "xoxb-test-old").unwrap();
-                assert_eq!(storage.key("mcp:abc").as_deref(), Some("xoxb-test-old"));
-            }
-            storage.write_key("mcp:abc", "xoxb-test-new").unwrap();
-            assert_eq!(storage.key("mcp:abc").as_deref(), Some("xoxb-test-new"));
-            assert_eq!(files(&dir), vec!["mcp%3Aabc".to_string()]);
+            let name = "claude-oauth-token:x";
+            std::fs::write(dir.join(name), "test-token-old").unwrap();
+            assert_eq!(storage.key(name).as_deref(), Some("test-token-old"));
+            storage.write_key(name, "test-token-new").unwrap();
+            assert_eq!(storage.key(name).as_deref(), Some("test-token-new"));
+            assert!(std::fs::read(dir.join(name)).is_err(), "the raw file or stream is removed");
+            assert!(files(&dir).contains(&"claude-oauth-token%3Ax".to_string()));
+            // On Windows the stream's empty host file stays behind; it reads as no key.
+            assert_eq!(storage.key("claude-oauth-token"), None);
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
