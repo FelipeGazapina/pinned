@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.2 (Unreleased)
+
+### Fixed
+
+- Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.
+
 ## 0.18.1 (2026-11-12)
 
 ### Fixed

@@ -50,6 +50,8 @@ const sessionSteps = (c, event) => [["ask", event], ["agent", ""], ["reply", ""]
 const TRIGGERS = {
   "linear-label": {
     text: "A Linear issue gets a label",
+    pitch: "Claude resolves the issue, opens a pull request and moves the issue through your columns.",
+    needs: "linear",
     step: "linear-trigger",
     steps: () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
     subject: "issue",
@@ -61,6 +63,8 @@ const TRIGGERS = {
   },
   "slack-mention": {
     text: "The bot is @mentioned in Slack",
+    pitch: "Claude answers in the thread, and can file a Linear issue and fix the bug.",
+    needs: "slack",
     step: "slack-trigger",
     steps: (c) => sessionSteps(c, "new thread"),
     subject: "thread",
@@ -71,6 +75,8 @@ const TRIGGERS = {
   },
   "slack-message": {
     text: "A Slack message, sorted by a decision model",
+    pitch: "A model on the Vercel AI Gateway puts each new message in a category, and each category pings a group, runs its own workflow or stops.",
+    needs: "slack",
     step: "message-trigger",
     steps: () => [["decide", "new message"]],
     subject: "thread",
@@ -91,6 +97,8 @@ const TRIGGERS = {
   },
   called: {
     text: "Called by another workflow",
+    pitch: "A Slack message workflow hands it the threads of one category, and Claude answers them as it does a mention.",
+    needs: "slack",
     step: "called-trigger",
     steps: (c) => sessionSteps(c, "routed thread"),
     subject: "thread",
@@ -157,7 +165,7 @@ function onHubSettings(latest) {
     return;
   }
   if (page !== "connectors") return;
-  if (view.name === "list") return redraw();
+  if (view.name === "list" || view.name === "pick") return redraw();
   const line = document.getElementById("checked");
   if (line) line.textContent = checkedText();
 }
@@ -172,6 +180,7 @@ function showPage(name) {
   const section = settingsSectionOf(name) ?? settingsSections[0];
   name = page = section.page;
   save("settings-page", name);
+  if (name === "connectors") pendingWorkflow = null;
   delete settingsPage.dataset.view;
   renderSettingsNav();
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
@@ -247,6 +256,7 @@ function integrationsHtml() {
        <p class="error" id="linear-error"></p>`;
   return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
+    ${pendingWorkflowHtml()}
     ${agentConsentHtml()}
     <div class="card">
       <div class="card-head"><span class="logo" data-tone="linear" data-logo="linear">${LOGOS.linear}</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
@@ -451,6 +461,46 @@ function vercelCardHtml() {
 const slackBots = () => settings.slack_bots ?? (settings.slack ? [settings.slack] : []);
 const hasSlack = () => !!(settings.slack_bots?.length || settings.slack);
 
+/** The connector each trigger's `needs` names, and whether it is connected now. */
+const NEEDS = {
+  linear: { name: "Linear", connected: () => !!settings.linear },
+  slack: { name: "Slack", connected: () => hasSlack() },
+};
+const triggerReady = (kind) => NEEDS[TRIGGERS[kind]?.needs]?.connected() ?? true;
+/** The workflow a missing connector sent the user away from, as `{ kind }`, until they connect it,
+ * go back or dismiss the note. The draft itself stays in `view`. */
+let pendingWorkflow = null;
+
+/** The note on Connectors that says which workflow sent the user here and takes them back. */
+function pendingWorkflowHtml() {
+  if (!pendingWorkflow) return "";
+  const { text, needs } = TRIGGERS[pendingWorkflow.kind];
+  const name = NEEDS[needs].name;
+  const back = view.name === "edit" ? "takes you back to it as you left it" : "takes you back to set it up";
+  return `<div class="card pending-workflow" role="status">
+      <p>You were creating the workflow “${esc(text)}”, which needs ${name}. Connect ${name} below, and pinned ${back}.</p>
+      <div class="actions"><button class="primary" data-action="resume-workflow">Back to the workflow</button>
+        <button class="secondary" data-action="forget-pending-workflow">Dismiss</button></div>
+    </div>`;
+}
+
+/** In a trigger's panel, a way to Connectors that comes back to this draft. */
+const connectForHtml = (kind) =>
+  triggerReady(kind)
+    ? ""
+    : `<p class="hint">${NEEDS[TRIGGERS[kind].needs].name} isn't connected. Connect it and pinned brings you back to this workflow as you left it.</p>
+       <div class="actions"><button class="secondary" data-action="connect-for-trigger" data-kind="${kind}">Connect ${NEEDS[TRIGGERS[kind].needs].name}</button></div>`;
+
+/** Back to the workflow a missing connector interrupted: the draft as it was left, or a new one of
+ * the picked kind once its connector is connected (the picker again while it is not). */
+function resumeWorkflow() {
+  const kind = pendingWorkflow?.kind;
+  pendingWorkflow = null;
+  if (view.name !== "edit") view = { name: "pick" };
+  showPage("connectors");
+  if (view.name === "pick" && kind && triggerReady(kind)) actions["pick-trigger"]({ dataset: { kind } });
+}
+
 /** The channels the editor suggests belong to one bot: the one the workflow picks, the default when it picks none. */
 function loadSlackChannels(bot) {
   return connectorCall("slack_suggestions", { bot }).then((channels) => {
@@ -578,7 +628,7 @@ const STEPS = {
     trigger: true,
     summary: (c) => (c.trigger.label.trim() ? `Label “${c.trigger.label.trim()}”` : "Name a label"),
     issues: (c) => [!settings.linear && "Connect Linear under Connectors.", !c.trigger.label.trim() && "Name the label that starts a session."].filter(Boolean),
-    fields: (c) => `${kindHtml(c)}
+    fields: (c) => `${kindHtml(c)}${connectForHtml("linear-label")}
       <label>Label ${input("trigger.label", c.trigger.label, 'list="linear-labels" placeholder="claude"')}</label>
       <p class="hint">pinned checks Linear every minute, only for issues created after the workflow is saved, and starts each issue once.</p>`,
   },
@@ -590,7 +640,7 @@ const STEPS = {
     trigger: true,
     summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
     issues: (c) => [!hasSlack() && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
-    fields: (c) => `${kindHtml(c)}
+    fields: (c) => `${kindHtml(c)}${connectForHtml(c.trigger.kind)}
 ${slackBotSelect(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Each new thread that mentions it starts one session, checked every minute.</p>`,
@@ -603,7 +653,7 @@ ${slackBotSelect(c)}
     trigger: true,
     summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
     issues: (c) => [!hasSlack() && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
-    fields: (c) => `${kindHtml(c)}
+    fields: (c) => `${kindHtml(c)}${connectForHtml(c.trigger.kind)}
 ${slackBotSelect(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Every new message a person posts in the channel is sorted once, checked every minute. Thread replies and bots are skipped.</p>`,
@@ -618,7 +668,7 @@ ${slackBotSelect(c)}
     issues: () => [!hasSlack() && "Connect Slack under Connectors."].filter(Boolean),
     fields: (c) => {
       const from = routesTo(c).map((r) => `“${esc(r.router)}” sorts a message into “${esc(r.category)}”`);
-      return `${kindHtml(c)}
+      return `${kindHtml(c)}${connectForHtml("called")}
         <p class="hint">${
           from.length
             ? `Runs when ${orList(from)}. Claude answers in that message's thread as it does a mention.`
@@ -922,10 +972,10 @@ function triggerChoiceHtml() {
     <p class="hint">Pick what starts the agent. You set up the rest of the flow next.</p>
     ${Object.entries(TRIGGERS)
       .map(([kind, { text, pitch, needs, step }]) => {
-        const connected = settings[needs];
-        return `<button class="template" data-action="${connected ? "pick-trigger" : "go-integrations"}" data-kind="${kind}">
+        const connected = triggerReady(kind);
+        return `<button class="template" data-action="${connected ? "pick-trigger" : "connect-for-trigger"}" data-kind="${kind}">
         ${iconHtml(STEPS[step])}
-        <span><b>${text}</b><span class="hint">${connected ? pitch : `Connect ${needs === "slack" ? "Slack" : "Linear"} under Connectors first.`}</span></span>
+        <span><b>${text}</b><span class="hint">${connected ? pitch : `Connect ${NEEDS[needs].name} under Connectors first.`}</span></span>
       </button>`;
       })
       .join("")}`;
@@ -1754,6 +1804,7 @@ const actions = {
     if (!key.trim()) return;
     try {
       settings.linear = await connectorCall("connect_linear", { key });
+      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return resumeWorkflow();
       showPage("integrations");
     } catch (e) {
       document.getElementById("linear-error").textContent = e;
@@ -1773,6 +1824,7 @@ const actions = {
       slackNote = found.added === false ? `Updated the token for @${found.name}` : `Added @${found.name} in ${found.team}`;
       slackAdding = false;
       settings = await connectorCall("get_settings");
+      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return resumeWorkflow();
       showPage("integrations");
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
@@ -1952,6 +2004,15 @@ const actions = {
         button.textContent = "Generate";
       }
     };
+  },
+  "connect-for-trigger"(button) {
+    pendingWorkflow = { kind: button.dataset.kind };
+    showPage("integrations");
+  },
+  "resume-workflow": () => resumeWorkflow(),
+  "forget-pending-workflow"() {
+    pendingWorkflow = null;
+    showPage("integrations");
   },
   "pick-trigger"(button) {
     const draft = blank(button.dataset.kind);
