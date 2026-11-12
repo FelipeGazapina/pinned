@@ -13576,6 +13576,42 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A Stop hook hand-over that never reached Claude Code, as when the hook gave up waiting for
+    /// the reply, leaves no turn running. Claude Code's idle notification says so, and the queue
+    /// that waited on that turn is typed as a new one.
+    #[test]
+    #[cfg(unix)]
+    fn a_hand_over_claude_code_never_got_does_not_strand_the_queue() {
+        let root = temp("notice-lost-hand-over");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        let handed = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Handed over");
+        let mut message = serde_json::to_value(Message::Agent(done_event(&tab))).unwrap();
+        message["hook_feedback"] = json!(true);
+        assert!(ask(&sock, &message.to_string()).unwrap().contains(&handed));
+        let queued = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "After the turn");
+        m.maybe_deliver(&tab);
+        let idle = || AgentEvent { status: AgentStatus::NeedsInput, message: Some("Claude is waiting for your input".into()), ..done_event(&tab) };
+        m.record_event(idle());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!read_pty(&file).contains(&queued), "typed into the turn the hand-over continues: {}", read_pty(&file));
+        assert!(m.tab(&tab, |t| t.turn_pending.is_some()).unwrap(), "an idle notice right after a submit may predate it");
+
+        // A minute on, Claude Code's prompt sat idle: the turn the hand-over was to continue never ran.
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), Some(Instant::now() - Duration::from_secs(61)))).unwrap();
+        m.record_event(idle());
+        let needle = format!("[pinned] Delegated task {queued} \"After the turn\"");
+        wait_for("the queue after the idle notification", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Submitting the draft must carry a notice that typing would have clobbered.
     #[test]
     #[cfg(unix)]

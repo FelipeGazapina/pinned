@@ -684,6 +684,27 @@ mod tests {
         let _ = std::fs::remove_file(sock);
     }
 
+    /// The machine hands its queue over in the Stop hook's reply and counts it delivered. A reply
+    /// slower than a prompt's recall wait still reaches Claude Code, or the queue is lost.
+    #[test]
+    fn a_stop_hook_waits_for_a_slow_hand_over() {
+        let sock = std::env::temp_dir().join(format!("pinned-hand-over-{}.sock", std::process::id()));
+        listen(sock.clone(), |message| match message {
+            Message::Agent(AgentEvent { status: AgentStatus::Done, .. }) => {
+                std::thread::sleep(Duration::from_secs(1));
+                Ok("[Orquestrador] Ship the form.".into())
+            }
+            _ => Ok(String::new()),
+        })
+        .unwrap();
+        let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        assert_eq!(
+            deliver(&sock.display().to_string(), event),
+            Some(r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"[Orquestrador] Ship the form."}}"#.into())
+        );
+        let _ = std::fs::remove_file(sock);
+    }
+
     #[test]
     fn statusline_usage_is_read_from_rate_limits() {
         let both = r#"{"session_id":"s1","model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1792400000},"seven_day":{"used_percentage":41.2,"resets_at":1792900000}}}"#;
