@@ -8921,4 +8921,305 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+
+    mod slack_routing {
+        use super::*;
+
+        /// One bot's workspace in `serve_workspaces`: its token, ids, the id its #support has
+        /// there, and that channel's top-level `history` and `threads` by thread ts.
+        struct Workspace {
+            token: &'static str,
+            team: &'static str,
+            user: &'static str,
+            channel: &'static str,
+            history: Value,
+            threads: Value,
+        }
+
+        fn workspace(token: &'static str, team: &'static str, user: &'static str, channel: &'static str) -> Workspace {
+            Workspace { token, team, user, channel, history: json!([]), threads: json!({}) }
+        }
+
+        /// A stand-in for Slack with one workspace per bot token. It records every call as
+        /// `<bearer token> <path>`. A token in `limited` is rate limited on all but `auth.test`, and
+        /// `bots.info` always lacks its scope.
+        fn serve_workspaces(spaces: Vec<Workspace>, limited: Vec<&'static str>, seen: std::sync::Arc<Mutex<Vec<String>>>) -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let complete = |buf: &[u8]| {
+                        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+                        let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                        let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse::<usize>().ok()).unwrap_or(0);
+                        buf.len() >= end + 4 + length
+                    };
+                    while !complete(&buf) {
+                        match std::io::Read::read(&mut stream, &mut tmp) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&buf).to_string();
+                    let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                    let token = request
+                        .lines()
+                        .find_map(|line| line.to_ascii_lowercase().starts_with("authorization: bearer ").then(|| line["authorization: bearer ".len()..].trim().to_owned()))
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push(format!("{token} {path}"));
+                    let param = |name: &str| path.split(['?', '&']).find_map(|pair| pair.strip_prefix(&format!("{name}="))).unwrap_or_default().to_owned();
+                    let space = spaces.iter().find(|w| w.token == token);
+                    let (status, answer) = match space {
+                        None => ("200 OK", json!({ "ok": false, "error": "invalid_auth" })),
+                        Some(w) if path.starts_with("/auth.test") => {
+                            ("200 OK", json!({ "ok": true, "bot_id": format!("B{}", w.user), "team": format!("Team {}", w.team), "team_id": w.team, "user_id": w.user, "user": format!("bot-{}", w.user) }))
+                        }
+                        Some(w) if limited.contains(&w.token) => ("429 Too Many Requests", json!({ "ok": false, "error": "ratelimited" })),
+                        Some(_) if path.starts_with("/bots.info") => ("200 OK", json!({ "ok": false, "error": "missing_scope" })),
+                        Some(w) if path.starts_with("/conversations.list") => ("200 OK", json!({ "ok": true, "channels": [{ "id": w.channel, "name": "support", "is_member": true }] })),
+                        Some(w) if path.starts_with("/conversations.history") => {
+                            let oldest: f64 = param("oldest").parse().unwrap_or(0.0);
+                            let after: Vec<&Value> =
+                                w.history.as_array().into_iter().flatten().filter(|m| m["ts"].as_str().and_then(|ts| ts.parse::<f64>().ok()).is_some_and(|ts| ts > oldest)).collect();
+                            ("200 OK", json!({ "ok": true, "messages": after }))
+                        }
+                        Some(w) if path.starts_with("/conversations.replies") => ("200 OK", json!({ "ok": true, "messages": w.threads[param("ts")].clone() })),
+                        Some(_) if path.starts_with("/users.info") => ("200 OK", json!({ "ok": true, "user": { "name": "ana" } })),
+                        Some(_) => ("200 OK", json!({ "ok": true })),
+                    };
+                    let answer = answer.to_string();
+                    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                }
+            });
+            format!("http://{address}/")
+        }
+
+        fn bot(id: &str, team_id: &str) -> slack::Bot {
+            slack::Bot {
+                id: id.into(),
+                team_id: team_id.into(),
+                team: format!("Team {team_id}"),
+                user_id: id.into(),
+                name: format!("bot-{id}"),
+                app_id: String::new(),
+                key_hint: String::new(),
+            }
+        }
+
+        /// Connectors with bots UA (workspace TA, the default) and UB (workspace TB), whose tokens
+        /// are xoxb-test-A and xoxb-test-B.
+        fn two_bots(name: &str, workflows: Vec<Connector>) -> (Connectors, PathBuf) {
+            let (connectors, dir) = stored(name, workflows);
+            let storage = FileStorage::new(dir.clone());
+            for (id, token) in [("UA", "xoxb-test-A"), ("UB", "xoxb-test-B")] {
+                storage.write_key(&slack_bot_key(id), token).unwrap();
+            }
+            {
+                let mut store = connectors.store.lock().unwrap();
+                store.slack_bots = vec![bot("UA", "TA"), bot("UB", "TB")];
+                connectors.mirror_slack(&mut store).unwrap();
+            }
+            (connectors, dir)
+        }
+
+        fn watching(id: &str, name: &str, bot: &str) -> Connector {
+            let since = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+            Connector { id: id.into(), name: name.into(), slack_bot: bot.into(), since, ..slack_connector() }
+        }
+
+        /// The calls made with `token`.
+        fn calls(seen: &Mutex<Vec<String>>, token: &str) -> Vec<String> {
+            seen.lock().unwrap().iter().filter_map(|call| call.strip_prefix(&format!("{token} ")).map(str::to_owned)).collect()
+        }
+
+        fn serve(spaces: Vec<Workspace>, limited: Vec<&'static str>) -> std::sync::Arc<Mutex<Vec<String>>> {
+            install_rustls();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+            slack::set_api_root(Some(serve_workspaces(spaces, limited, seen.clone())));
+            seen
+        }
+
+        const THREAD: &str = "1792400050.000200";
+
+        #[test]
+        fn each_workflow_scans_with_its_own_bot_and_its_bot_claims_the_thread() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let now = Utc::now();
+            let ts = slack_ts(now - chrono::Duration::seconds(60));
+            let asked = [slack_message(&ts, &ts, "U1", "<@UB> the export fails")];
+            let b = Workspace { history: json!([asked[0].clone()]), threads: json!({ ts.clone(): asked }), ..workspace("xoxb-test-B", "TB", "UB", "CB1") };
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), b], vec![]);
+            let (connectors, dir) = two_bots("routing-scan", vec![watching("ca", "Watch A", "UA"), watching("cb", "Watch B", "UB")]);
+            let (work, error) = block_on(connectors.poll());
+            assert_eq!(error, None);
+            assert!(calls(&seen, "xoxb-test-A").iter().any(|c| c.starts_with("/conversations.history?channel=CA1")), "{seen:?}");
+            assert!(calls(&seen, "xoxb-test-B").iter().any(|c| c.starts_with("/conversations.history?channel=CB1")), "{seen:?}");
+            assert!(!calls(&seen, "xoxb-test-A").iter().any(|c| c.contains("CB1")) && !calls(&seen, "xoxb-test-B").iter().any(|c| c.contains("CA1")), "{seen:?}");
+            // Only bot B's user id is mentioned, so only B's workflow finds the message.
+            let runs: Vec<&str> = work.iter().filter_map(|w| match w { Work::Run(run) => Some(run.connector.as_str()), _ => None }).collect();
+            assert_eq!(runs, ["cb"]);
+            assert_eq!(connectors.store.lock().unwrap().slack_threads, BTreeMap::from([(format!("CB1:{ts}"), "UB".to_owned())]));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_same_channel_name_in_two_workspaces_is_two_channels() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let _seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-channels", vec![watching("ca", "Watch A", "UA"), watching("cb", "Watch B", "UB")]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            let cached = connectors.channels.lock().unwrap().clone();
+            assert_eq!(cached.get(&("UA".to_owned(), "#support".to_owned())).map(String::as_str), Some("CA1"));
+            assert_eq!(cached.get(&("UB".to_owned(), "#support".to_owned())).map(String::as_str), Some("CB1"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_unbound_workflow_scans_and_replies_with_the_default_bot() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-legacy", vec![watching("c2", "Legacy", "")]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert!(calls(&seen, "xoxb-test-A").iter().any(|c| c.starts_with("/conversations.history?channel=CA1")), "{seen:?}");
+            assert_eq!(block_on(connectors.slack_reply("c2", "CA1", THREAD, "on it")), Ok("posted the reply in the Slack thread".into()));
+            assert!(calls(&seen, "xoxb-test-A").iter().any(|c| c.starts_with("/chat.postMessage")), "{seen:?}");
+            assert!(calls(&seen, "xoxb-test-B").is_empty(), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_called_workflow_replies_with_the_bot_of_the_router_that_handed_it_the_thread() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            // The called workflow names bot A, which it ignores: it answers with the thread's bot.
+            let called = Connector { slack_bot: "UA".into(), ..called() };
+            let (connectors, dir) = two_bots("routing-called", vec![Connector { slack_bot: "UB".into(), ..router() }, called]);
+            let settled = connectors.store.lock().unwrap().settle(&[], vec![("c5".into(), routed("doubt", "c6", None))], Utc::now(), "/bin/pinned", &[]);
+            assert_eq!(settled.work.len(), 1);
+            assert_eq!(connectors.store.lock().unwrap().slack_threads.get(&format!("C0123ABCD:{THREAD}")).map(String::as_str), Some("UB"));
+            assert_eq!(block_on(connectors.slack_reply("c6", "C0123ABCD", THREAD, "here is how")), Ok("posted the reply in the Slack thread".into()));
+            assert!(calls(&seen, "xoxb-test-B").iter().any(|c| c.starts_with("/chat.postMessage")), "{seen:?}");
+            assert!(calls(&seen, "xoxb-test-A").is_empty(), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_first_bot_to_claim_a_thread_answers_it_alone() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-first-claim", vec![watching("ca", "Watch A", "UA"), watching("cb", "Watch B", "UB")]);
+            let mention = |at| Found::Mention {
+                channel: "C0123ABCD".into(),
+                channel_name: "support".into(),
+                mention: slack::Mention { thread: THREAD.into(), ts: THREAD.into(), at },
+                posts: posts().into(),
+            };
+            let now = Utc::now();
+            let first = connectors.store.lock().unwrap().settle(&[], vec![("ca".into(), mention(now))], now, "/bin/pinned", &[]);
+            let later = connectors.store.lock().unwrap().settle(&[], vec![("cb".into(), mention(now))], now, "/bin/pinned", &[]);
+            assert_eq!((first.work.len(), later.work.len()), (1, 0));
+            let key = format!("C0123ABCD:{THREAD}");
+            assert_eq!(connectors.store.lock().unwrap().slack_threads.get(&key).map(String::as_str), Some("UA"));
+            // Even B's workflow posting in it goes out as A.
+            assert!(block_on(connectors.slack_reply("cb", "C0123ABCD", THREAD, "hi")).is_ok());
+            assert!(calls(&seen, "xoxb-test-A").iter().any(|c| c.starts_with("/chat.postMessage")), "{seen:?}");
+            assert!(calls(&seen, "xoxb-test-B").is_empty(), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_rate_limit_on_one_bot_still_lets_the_other_scan() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec!["xoxb-test-A"]);
+            let workflows = vec![watching("ca", "Watch A", "UA"), watching("ca2", "Watch A again", "UA"), watching("cb", "Watch B", "UB")];
+            let (connectors, dir) = two_bots("routing-limited", workflows);
+            let (_, error) = block_on(connectors.poll());
+            assert_eq!(error.as_deref(), Some(slack::RATE_LIMITED));
+            assert_eq!(calls(&seen, "xoxb-test-A").len(), 1, "the second workflow on bot A waits for the next check: {seen:?}");
+            assert!(calls(&seen, "xoxb-test-B").iter().any(|c| c.starts_with("/conversations.history?channel=CB1")), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_workflow_whose_bot_is_gone_stops_instead_of_reading_as_another_bot() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-gone", vec![watching("cg", "Orphan", "UGONE")]);
+            let (work, error) = block_on(connectors.poll());
+            assert!(work.is_empty());
+            assert_eq!(error, Some(format!("workflow \"Orphan\": {BOT_GONE}")));
+            assert!(seen.lock().unwrap().is_empty(), "no token was used: {seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_thread_whose_bot_is_gone_gets_no_reply_from_another_bot() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-thread-gone", vec![watching("cb", "Watch B", "UB")]);
+            {
+                let mut store = connectors.store.lock().unwrap();
+                store.connectors[0].handled.push(format!("C0123ABCD:{THREAD}"));
+                store.slack_threads.insert(format!("C0123ABCD:{THREAD}"), "UGONE".into());
+            }
+            assert_eq!(block_on(connectors.slack_reply("cb", "C0123ABCD", THREAD, "hi")), Err(THREAD_BOT_GONE.into()));
+            assert!(seen.lock().unwrap().is_empty(), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_bot_a_workflow_uses_paused_or_not_is_not_removed() {
+            let paused = Connector { enabled: false, ..watching("cb", "Paused B", "UB") };
+            let (connectors, dir) = two_bots("routing-refuse", vec![watching("ca", "Watch A", "UA"), paused, Connector { slack_bot: "UC".into(), ..called() }]);
+            FileStorage::new(dir.clone()).write_key(&slack_bot_key("UC"), "xoxb-test-C").unwrap();
+            connectors.store.lock().unwrap().slack_bots.push(bot("UC", "TC"));
+            assert_eq!(connectors.disconnect_slack("UA"), Err("Slack bot @bot-UA is used by: Watch A. Move or delete those workflows first.".into()));
+            assert_eq!(connectors.disconnect_slack(""), Err("Slack bot @bot-UA is used by: Watch A. Move or delete those workflows first.".into()), "an old app removes the default");
+            assert_eq!(connectors.disconnect_slack("UB"), Err("Slack bot @bot-UB is used by: Paused B. Move or delete those workflows first.".into()));
+            // A called workflow answers with each thread's bot, so it holds none.
+            assert_eq!(connectors.disconnect_slack("UC"), Ok(()));
+            let ids: Vec<String> = connectors.get_settings().slack_bots.iter().map(|b| b.id.clone()).collect();
+            assert_eq!(ids, ["UA", "UB"]);
+            assert_eq!(FileStorage::new(dir.clone()).key(&slack_bot_key("UC")), None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_default_bot_is_not_removed_while_an_unbound_workflow_watches_with_it() {
+            let (connectors, dir) = two_bots("routing-refuse-default", vec![Connector { enabled: false, ..watching("c2", "Legacy", "") }]);
+            assert_eq!(connectors.disconnect_slack("UA"), Err("Slack bot @bot-UA is used by: Legacy. Move or delete those workflows first.".into()));
+            assert_eq!(connectors.disconnect_slack("UB"), Ok(()), "bot B is no one's");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn the_first_check_fills_a_moved_bot_from_slack() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let seen = serve(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("routing-fill", vec![]);
+            connectors.store.lock().unwrap().slack_bots[0] = slack::Bot { team_id: String::new(), name: "old-name".into(), ..bot("UA", "") };
+            assert_eq!(block_on(connectors.poll()).1, None, "a missing bots.info scope fails nothing");
+            let a = connectors.get_settings().slack_bots[0].clone();
+            assert_eq!((a.team_id.as_str(), a.team.as_str(), a.name.as_str(), a.app_id.as_str()), ("TA", "Team TA", "bot-UA", ""));
+            assert_eq!(calls(&seen, "xoxb-test-A").iter().map(|c| c.split('?').next().unwrap()).collect::<Vec<_>>(), ["/auth.test", "/bots.info"]);
+            assert!(calls(&seen, "xoxb-test-B").is_empty(), "a bot with its workspace is not asked again");
+            let saved: Store = serde_json::from_slice(&FileStorage::new(dir.clone()).load().unwrap()).unwrap();
+            assert_eq!(saved.slack_bots[0].team_id, "TA");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
