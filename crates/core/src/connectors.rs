@@ -4441,9 +4441,6 @@ impl Connectors {
         for bot in &mut imported.slack_bots {
             bot.key_hint = upstash::hint(&bot_keys[&bot.id]);
         }
-        for bot in &current.slack_bots {
-            self.storage.remove_key(&slack_bot_key(&bot.id));
-        }
         for bot in &imported.slack_bots {
             self.storage.write_key(&slack_bot_key(&bot.id), &bot_keys[&bot.id])?;
         }
