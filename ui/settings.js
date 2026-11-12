@@ -182,12 +182,7 @@ function showPage(name) {
       fillList("linear-teams", found.teams);
     }, console.warn);
   }
-  if (name === "connectors" && settings.slack && !suggestions.channels.length) {
-    connectorCall("slack_suggestions").then((channels) => {
-      suggestions.channels = channels;
-      fillList("slack-channels", channels);
-    }, console.warn);
-  }
+  if (name === "connectors" && hasSlack() && !suggestions.channels.length) loadSlackChannels("");
   if (name === "connectors" && settings.github && !suggestions.repos.length) {
     connectorCall("github_repos").then((repos) => {
       suggestions.repos = repos.map((r) => r.full_name);
@@ -452,24 +447,66 @@ function vercelCardHtml() {
     </div>`;
 }
 
+/** Every connected Slack bot, the default first. An older hub only answers the one `slack`. */
+const slackBots = () => settings.slack_bots ?? (settings.slack ? [settings.slack] : []);
+const hasSlack = () => !!(settings.slack_bots?.length || settings.slack);
+
+/** The channels the editor suggests belong to one bot: the one the workflow picks, the default when it picks none. */
+function loadSlackChannels(bot) {
+  return connectorCall("slack_suggestions", { bot }).then((channels) => {
+    suggestions.channels = channels;
+    fillList("slack-channels", channels);
+  }, console.warn);
+}
+
+const watchesSlack = (c) => [c.trigger?.kind, ...(c.graph?.nodes ?? []).map((n) => n.watch?.kind)].some((k) => k === "slack-mention" || k === "slack-message");
+/** The workflows that run through a bot; one with no bot of its own runs through the default. */
+const slackBotUsers = (bot, isDefault) =>
+  (settings.connectors ?? []).filter((c) => (c.slackBot ? c.slackBot === bot.id : isDefault && watchesSlack(c))).map((c) => c.name);
+
+/** What the card says about the last connect, and why the last remove was refused, until the next one. */
+let slackNote = "";
+let slackRowErrors = {};
+let slackAdding = false;
+
+function slackBotRow(bot, isDefault) {
+  const users = slackBotUsers(bot, isDefault);
+  const error = slackRowErrors[bot.id];
+  return `<div class="slack-bot" data-bot="${esc(bot.id)}">
+      <div><b>@${esc(bot.name)}</b>${isDefault ? ` <span class="badge" data-on="true">Default</span>` : ""}
+        <span class="hint">${esc(bot.keyHint)}</span></div>
+      <div class="hint">${users.length ? `Used by: ${users.map(esc).join(", ")}` : "Not used by a workflow"}</div>
+      <div class="actions"><button class="secondary" data-action="remove-slack-bot" data-bot="${esc(bot.id)}">Remove</button></div>
+      ${error ? `<p class="error">${esc(error)}</p>` : ""}
+    </div>`;
+}
+
+function slackBotsHtml() {
+  const bots = slackBots();
+  const teams = [...new Set(bots.map((b) => b.team))];
+  return teams
+    .map((team) => `<div class="slack-workspace"><h3>${esc(team)}</h3>${bots.filter((b) => b.team === team).map((b) => slackBotRow(b, b === bots[0])).join("")}</div>`)
+    .join("");
+}
+
 function slackCardHtml() {
-  const account = settings.slack;
-  const body = account && !agentAsking("connect_slack")
-    ? `<p class="connected">Connected as <b>@${esc(account.name)}</b> in ${esc(account.team)}.</p>
-       <div class="actions"><button class="secondary" data-action="disconnect-slack">Disconnect</button></div>`
-    : `${agentAskingHtml("connect_slack")}<ol class="steps">
+  const bots = slackBots();
+  const adding = !bots.length || slackAdding || agentAsking("connect_slack");
+  const note = slackNote ? `<p class="connected" id="slack-note">${esc(slackNote)}</p>` : "";
+  const body = `${note}${bots.length ? slackBotsHtml() : ""}${bots.length && !adding ? `<div class="actions"><button class="secondary" data-action="add-slack-bot">Add a bot</button></div>` : ""}${adding
+    ? `${agentAskingHtml("connect_slack")}<ol class="steps">
          <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
            <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
            <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
          <li>Invite the bot to the channel it should watch, with <code>/invite @your-bot</code>.</li>
          <li>Paste the Bot User OAuth Token here.
            <div class="row"><input id="slack-token" type="password" placeholder="xoxb-…" autocomplete="off">
-           <button class="primary" data-action="connect-slack">Connect</button></div></li>
+           <button class="primary" data-action="connect-slack">${bots.length ? "Add" : "Connect"}</button></div></li>
        </ol>
-       <p class="error" id="slack-error"></p>`;
+       <p class="error" id="slack-error"></p>` : ""}`;
   return `<div class="card">
-      <div class="card-head"><span class="logo" data-logo="slack">${LOGOS.slack}</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
-        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      <div class="card-head"><span class="logo" data-logo="slack">${LOGOS.slack}</span><div><b>Slack</b><div class="hint">Mentions of a bot, answered in their thread</div></div>
+        <span class="badge" data-on="${!!bots.length}">${bots.length ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
 }
@@ -506,6 +543,16 @@ const LOGOS = {
 };
 const iconHtml = (step = {}) =>
   `<span class="icon" data-tone="${step.tone ?? ""}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app ?? "Step"}: ${step.title ?? "Unknown step"}`)}">${LOGOS[step.tone] ?? step.icon ?? "?"}</span>`;
+/** Which bot a workflow's Slack trigger listens through, with 2 or more bots. The default bot saves as an empty string. */
+function slackBotSelect(c) {
+  const bots = slackBots();
+  if (bots.length < 2) return "";
+  const ids = ["", ...bots.slice(1).map((b) => b.id)];
+  const label = (id) => { const b = id ? bots.find((x) => x.id === id) : bots[0]; return `@${b.name} in ${b.team}${id ? "" : " (default)"}`; };
+  const selected = c.slackBot === bots[0].id ? "" : (c.slackBot ?? "");
+  return `<label>Bot ${select("slackBot", ids, label, selected)}</label>`;
+}
+
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
 /** A column the session moves the Linear issue to, matching the backend's `Stage`. The session
@@ -542,8 +589,9 @@ const STEPS = {
     title: "Bot is @mentioned",
     trigger: true,
     summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
-    issues: (c) => [!settings.slack && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
+    issues: (c) => [!hasSlack() && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
     fields: (c) => `${kindHtml(c)}
+${slackBotSelect(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Each new thread that mentions it starts one session, checked every minute.</p>`,
   },
@@ -554,8 +602,9 @@ const STEPS = {
     title: "Message in channel",
     trigger: true,
     summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
-    issues: (c) => [!settings.slack && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
+    issues: (c) => [!hasSlack() && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
     fields: (c) => `${kindHtml(c)}
+${slackBotSelect(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Every new message a person posts in the channel is sorted once, checked every minute. Thread replies and bots are skipped.</p>`,
   },
@@ -566,7 +615,7 @@ const STEPS = {
     title: "Called by another workflow",
     trigger: true,
     summary: (c) => (routesTo(c).length ? `from ${[...new Set(routesTo(c).map((r) => r.router))].join(", ")}` : "No workflow routes here yet"),
-    issues: () => [!settings.slack && "Connect Slack under Connectors."].filter(Boolean),
+    issues: () => [!hasSlack() && "Connect Slack under Connectors."].filter(Boolean),
     fields: (c) => {
       const from = routesTo(c).map((r) => `“${esc(r.router)}” sorts a message into “${esc(r.category)}”`);
       return `${kindHtml(c)}
@@ -801,7 +850,7 @@ function connectorsHtml() {
   if (view.name === "pick") return triggerChoiceHtml();
   const intro = `<h2>Workflows</h2>
     <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
-  if (!settings.linear && !settings.slack) {
+  if (!settings.linear && !hasSlack()) {
     return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
       <div class="actions"><button class="primary" data-action="go-integrations">Go to Connectors</button></div></div>`;
   }
@@ -1536,6 +1585,7 @@ function edit(index, draft = clone(settings.connectors[index]), open = null) {
   if (trigger?.watch) syncTriggerFromWatch(draft, trigger.watch);
   const first = draft.graph?.nodes?.[0]?.id ?? null;
   view = { name: "edit", index, draft, original: JSON.stringify(draft), open: open ?? first, zoom: null, pan: null, menu: false, graphPick: null, selectedEdge: null, connectFrom: null, drag: null };
+  if (slackBots().length > 1) loadSlackChannels(draft.slackBot ?? "");
   loadFolders(draft);
 }
 
@@ -1719,7 +1769,10 @@ const actions = {
     const token = document.getElementById("slack-token").value;
     if (!token.trim()) return;
     try {
-      settings.slack = await connectorCall("connect_slack", { token });
+      const found = await connectorCall("connect_slack", { token });
+      slackNote = found.added === false ? `Updated the token for @${found.name}` : `Added @${found.name} in ${found.team}`;
+      slackAdding = false;
+      settings = await connectorCall("get_settings");
       showPage("integrations");
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
@@ -1841,10 +1894,21 @@ const actions = {
     view.draft.ask.questions.splice(Number(button.dataset.index), 1);
     redraw();
   },
-  async "disconnect-slack"() {
-    await connectorCall("disconnect_slack");
-    settings.slack = null;
-    suggestions.channels = [];
+  "add-slack-bot"() {
+    slackAdding = true;
+    showPage("integrations");
+  },
+  async "remove-slack-bot"(button) {
+    const bot = button.dataset.bot;
+    slackNote = "";
+    slackRowErrors = {};
+    try {
+      await connectorCall("disconnect_slack", { bot });
+      suggestions.channels = [];
+      settings = await connectorCall("get_settings");
+    } catch (e) {
+      slackRowErrors[bot] = String(e);
+    }
     showPage("integrations");
   },
   "new-connector"() {
@@ -2078,6 +2142,22 @@ const actions = {
   },
 };
 
+/** What `hub.askUnlock` rejects with when the user cancels the password prompt: their own choice, not a failure. */
+const PASSWORD_CANCELLED = "this needs your password";
+
+/** Runs an action and shows what escapes it. An action that shows its own error catches it first, so
+ * only a call it never guarded reaches here. */
+function runAction(name, button) {
+  return Promise.resolve()
+    .then(() => actions[name](button))
+    .catch((e) => {
+      const text = String(e?.message ?? e).replace(/^Error:\s*/, "");
+      if (text === PASSWORD_CANCELLED) return;
+      console.error(name, e);
+      if (typeof flash === "function") flash(text, [], 6000);
+    });
+}
+
 let canvasPan = null;
 let canvasPanned = false;
 
@@ -2085,7 +2165,7 @@ settingsPage.addEventListener("click", (e) => {
   const button = e.target.closest("[data-action]");
   if (button) {
     e.preventDefault();
-    return actions[button.dataset.action](button);
+    return runAction(button.dataset.action, button);
   }
   if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu, .graph-picker, .edge-add, .graph-port-add, .port-handle")) return;
   if (view.graphPick) {
@@ -2184,16 +2264,16 @@ settingsPage.addEventListener(
 );
 
 settingsPage.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
-  if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
-  if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
-  if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
-  if (e.key === "Enter" && e.target.id === "box-token") actions["add-box-token"]();
-  if (e.key === "Enter" && e.target.id === "convex-key") actions["connect-convex"]();
+  if (e.key === "Enter" && e.target.id === "linear-key") runAction("connect-linear");
+  if (e.key === "Enter" && e.target.id === "slack-token") runAction("connect-slack");
+  if (e.key === "Enter" && e.target.id === "vercel-key") runAction("connect-vercel");
+  if (e.key === "Enter" && e.target.id === "claude-token") runAction("connect-upstash");
+  if (e.key === "Enter" && e.target.id === "box-token") runAction("add-box-token");
+  if (e.key === "Enter" && e.target.id === "convex-key") runAction("connect-convex");
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
-    actions["save-connector"]();
+    runAction("save-connector");
   }
   if (e.key === "Escape" && view.menu) {
     view.menu = false;
@@ -2259,6 +2339,7 @@ settingsPage.addEventListener("change", async (e) => {
   const path = e.target.dataset.bind;
   if (path in RESHAPES) return reshape((c) => RESHAPES[path](c, e.target.value));
   if (path === "folder") return fillRepo();
+  if (path === "slackBot") return void loadSlackChannels(e.target.value);
   if (e.target.dataset.toggle !== "enabled") return;
   // The list's switch saves right away, as the connector's other fields are already saved.
   const i = e.target.closest(".flow-card").dataset.index;
