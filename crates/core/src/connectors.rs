@@ -1579,6 +1579,8 @@ pub struct Connectors {
     runs_broken: Mutex<Option<String>>,
     /// The latest tab list each machine has sent, with the unix millis it was observed.
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
+    /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
+    bots_filled: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1612,6 +1614,7 @@ impl Connectors {
             driving: tokio::sync::Mutex::new(()),
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
+            bots_filled: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -4168,11 +4171,14 @@ impl Connectors {
     }
 
     /// Fills the workspace and app ids of bots that lack them, moved over from the single-bot
-    /// store, from `auth.test` and `bots.info`. A bot Slack won't answer for stays as it is; an
+    /// store, from `auth.test` and `bots.info`, once per bot. A bot Slack won't answer for stays as it is; an
     /// app id Slack won't give (the token may lack the scope) stays empty.
     async fn fill_bots(&self) {
         let empty: Vec<String> = self.store.lock().unwrap().slack_bots.iter().filter(|b| b.team_id.is_empty()).map(|b| b.id.clone()).collect();
         for id in empty {
+            if !self.bots_filled.lock().unwrap().insert(id.clone()) {
+                continue;
+            }
             let Some(token) = self.slack_token(&id) else { continue };
             let Ok((found, bot_id)) = slack::identify(&token).await else { continue };
             if found.user_id != id {
