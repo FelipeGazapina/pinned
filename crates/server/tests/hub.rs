@@ -7101,6 +7101,9 @@ fn an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_t
         assert_eq!(done["outcome"], "done", "{done}");
         let mut bob_after = bobs.clone();
         bob_after[name] = Value::Null;
+        if name == "slack" {
+            bob_after.as_object_mut().unwrap().remove("slack_bots");
+        }
         assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: bob lost {name} and nothing else");
         assert_eq!(connections(&mut ana.client), anas, "{disconnect}: bob's disconnect left ana's connections and settings as they were");
         assert_eq!(waiting_actions(&mut ana.client), [disconnect], "ana's still waits for her");
@@ -7108,6 +7111,9 @@ fn an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_t
         assert_eq!(done["outcome"], "done", "{done}");
         let mut ana_after = anas.clone();
         ana_after[name] = Value::Null;
+        if name == "slack" {
+            ana_after.as_object_mut().unwrap().remove("slack_bots");
+        }
         assert_eq!(connections(&mut ana.client), ana_after, "{disconnect}: ana lost {name} and nothing else");
         assert_eq!(connections(&mut bob.client), bob_after, "{disconnect}: and bob's are as they were");
 
@@ -7138,6 +7144,36 @@ fn an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_t
     let reached = outside_world().lock().unwrap().clone();
     assert!(reached.iter().all(|target| target == "proxy-check.invalid:443" || SERVICES.iter().any(|s| s.host == target)), "the hub asked only the services' own hosts: {reached:?}");
     assert_eq!(reached.len(), 1 + 2 * SERVICES.len(), "one failed check per typed key: {reached:?}");
+}
+
+#[test]
+fn a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_key() {
+    let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("slack_bots");
+    let key = "xoxb-test-ana-hubkey-71c3".to_owned();
+    let store = json!({
+        "slack": { "team": "ana team", "userId": "Uana", "name": "ana-bot" },
+        "connectors": [{
+            "id": "c1", "name": "Answer", "enabled": false, "trigger": { "kind": "slack-mention", "channel": "#support" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+        }],
+    });
+    assert_eq!(ana.client.hub(json!({ "cmd": "import", "store": store, "linear_key": null, "slack_key": key })), Ok(json!(true)));
+
+    let settings = connections(&mut ana.client);
+    assert_eq!(settings["slack"], json!({ "team": "ana team", "userId": "Uana", "name": "ana-bot" }), "the single-bot shape is unchanged");
+    assert_eq!(
+        settings["slack_bots"],
+        json!([{ "id": "Uana", "teamId": "", "team": "ana team", "userId": "Uana", "name": "ana-bot", "appId": "", "keyHint": "…71c3" }]),
+        "the imported bot is the default"
+    );
+    holds_none_of(&[key.clone()], "ana's settings", &settings.to_string());
+    assert!(connections(&mut bob.client).get("slack_bots").is_none(), "bob has no bot");
+
+    let reached = asked_of("slack.com:443");
+    let reply = act(&ana.dir, &ana.tab, "slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "on it" })).unwrap_err();
+    assert!(reply.starts_with("Slack unreachable"), "the reply goes out with the default bot's key: {reply}");
+    assert_eq!(asked_of("slack.com:443"), reached + 1);
+    holds_none_of(&[key], "the reply's error", &reply);
 }
 
 #[test]
