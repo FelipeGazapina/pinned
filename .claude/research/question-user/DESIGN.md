@@ -308,22 +308,38 @@ impl Questions {
 
 In `Machine::project_tool()` (`machine.rs:3283`) both `SendToCaptain` arms
 (`machine.rs:3317` with `box`, `:3321` without) check the gate **after** `only_global()` and
-**before** any routing, resolving `project` to its key the same way `projects()` lists it:
+**before** any routing (edition 2021, so a plain check inside the arm, not an `if let` guard):
 
 ```rust
-ProjectTool::SendToCaptain { project, .. } if let Some(open) = self.questions_holding(tab, &project) =>
-    Err(format!("questions {} are open in this conversation about {}: wait for the answers or the skip, then send one complete message", open.id, open.project_name)),
+ProjectTool::SendToCaptain { project, message, request_id, machine, boxed } => {
+    only_global()?;
+    self.questions_gate(tab, &project, machine.as_deref())?;   // new
+    match boxed { Some(boxed) => …send_to_captain_box…, None => …send_to_captain… }
+}
+
+/// Refuses a send while this conversation's open questions hold `project` back.
+fn questions_gate(&self, tab: &str, project: &str, machine: Option<&str>) -> Result<(), String> {
+    let key = self.project_key(project, machine);           // same resolution projects() lists
+    match self.questions.lock().unwrap().holding(tab, &key) {
+        Some(open) => Err(format!("questions {} are open in this conversation about {}: wait for the answers or the skip, then send one complete message", open.id, open.name_of(&key))),
+        None => Ok(()),
+    }
+}
 ```
 
-The gate keys on the **resolved** project (repo key), so `site`, `github.com/o/site` and
-`m-book:/w/site` all hit it. A questionnaire without `projects` cannot come from the Orchestrator
-(validation refuses it), so the gate never blocks everything by accident, and other projects in the
-same user message go out.
+The gate keys on the **resolved** project (its repo key, falling back to `<machine>:<path>`), so
+`site`, `github.com/o/site` and `m-book:/w/site` all hit it. A questionnaire from the Orchestrator
+without `projects` is refused at `question_user`, so the gate never blocks everything by accident,
+and other projects in the same user message go out.
 
-`question_user` itself, for the Orchestrator, also refuses a project that already has an in-flight
-request from this conversation in the ledger (`Ledger::in_flight`): "the Capitão of site already
-works on r-3; ask before you send, not after". That turns "send, then ask, then steer" into an error
-the model sees, which is the behaviour Felipe described.
+Since `question_user` blocks the Orchestrator's turn, the gate is mostly hit in three cases, which
+is exactly what it is for: a `send_to_captain` issued in the same parallel tool batch as
+`question_user`; a send after the wait returned `pending` and the model did not end its turn; a new
+user message typed while the questionnaire is open (Claude Code feeds it to the model mid-turn).
+
+Considered and left out: refusing `question_user` for a project that already has an in-flight
+request (`Ledger::in_flight`). It would catch "send, then ask", but it also blocks a real new
+request to a busy Captain. The prompt and the gate cover the case Felipe described.
 
 ### 4.3 Tests (PR 2), next to the existing ones in `machine.rs`
 
@@ -337,7 +353,7 @@ Modelled on `global_orchestrator_routes…` at `machine.rs:10600` (real socket, 
 3. …after `reply: skipped`, same; the tool's result is `skipped` with the `next` text.
 4. `Call::StopTurn` on the global tab cancels it and frees the gate.
 5. A plain thread or Captain passing `projects` is refused; the Orchestrator omitting it is refused.
-6. A second `question_user` while one is open is refused; a project already in flight is refused.
+6. A second `question_user` while one is open is refused, with the open one's id.
 7. The gate survives a reload of `questions.json` (new `Machine` on the same config dir).
 8. `global_orchestrator.rs`: the prompt names `question_user` before `send_to_captain`, the gate
    and "Suposições"; the `captain_prompt` test (`:1193`) gets the new sentence.
@@ -348,14 +364,199 @@ Modelled on `global_orchestrator_routes…` at `machine.rs:10600` (real socket, 
 10. `crates/server/tests/hub.rs`: an answer sent from a hub client to a tab on another machine
     reaches it (relay), and the Orchestrator's `waiting()` lists the Captain's open questionnaire.
 
-## 5. No user there: scheduled and workflow runs
-_(in progress)_
+## 5. No user there: workflow runs and other unattended sessions
 
-## 6. UI (desktop and hub web, phone width)
-_(in progress)_
+Default: **the run waits on the user and shows in `waiting()`; it never skips by itself.**
 
-## 7. Wire changes (additive)
-_(in progress)_
+* The run's tab gets the questionnaire like any tab (§3), so it is `needs-input`, in Needs you with
+  its workflow's name as the card's `where` ("Workflow · Fix Linear bugs · Mac mini"), in the
+  Orchestrator's `waiting()` (`ask: question`, `detail` = first question), with a desktop
+  notification.
+* It does not time out into a skip. The MCP call returns `pending` after 23 h; the agent ends its
+  turn; for a task (worker, `RunNow`) the node does **not** count that ending turn as the task's end
+  while its questionnaire is open: the delegation registry treats "first finished turn" as
+  "first finished turn with no open questionnaire" (`delegate/registry.rs`, where a finished turn
+  ends a task). The answer's notice starts the next turn, and that turn's end ends the task.
+* Time limits: the minutes a tab spends with an open questionnaire do not count against the task's
+  `time_limit_min` (the user, not the agent, is slow). Budget is unaffected: a waiting session
+  spends nothing.
+* Headless boxes: a box session's questionnaire keeps the box's Captain "not idle", so the
+  "box is deleted when the Captain is idle" rule (`send_to_captain` box, rule 4b) waits too.
+  The hub's box idle check counts a tab with an open questionnaire as working. A box that
+  idles out anyway (hard budget) closes the questionnaire as `cancelled` with a line in Needs you.
+* A per-workflow setting "When it asks: wait for me | go on with its recommendation" is a later,
+  separate change (it is a user choice that makes skipping automatic, so it must be explicit and
+  visible on the workflow's page). Not in 0.18.2.
+* Slack-triggered workflows could post the questionnaire into their Slack thread with buttons; out
+  of scope for 0.18.2, noted because the questionnaire's shape (header, options, recommended) maps
+  onto Block Kit one-to-one.
+
+## 6. UI (desktop app and hub web; same `ui/` code)
+
+The hub serves the same `ui/` folder (`crates/server/src/http.rs:137` `ServeDir`), and `callOn()`
+(`ui/main.js:50`) reaches a tab's machine locally or through the hub, so there is one
+implementation. A new `ui/gui-questions.js` (+ `gui-questions.css`) renders one questionnaire from
+`tab.view.questions` and is used by three surfaces. Visual language: the `plan-card` shell
+(`ui/gui-timeline.css:160`, 22 px radius, raised background, "Plan" badge → "Questions" badge) and
+the Needs you option buttons (`.ny-option`, `.ny-label`, `.ny-about`, 48 px min height, 44 px tap
+targets, `.ny-typed` free-text row) so it looks like what is already there.
+
+### 6.1 Inline in the conversation (`gui-timeline.js`)
+
+`shownHtml()` (`gui-timeline.js:782`) gets a branch for the `mcp__pinned__question_user` tool step:
+while the tab's `view.questions.id` matches the step and it is open, draw the live card; once
+answered or skipped, draw a compact `tool answered` row like `questionHtml()` (`:728`) does for
+`AskUserQuestion` ("Questions · Branch: main · Scope: Only the desktop…" / "Questions · Skipped").
+The live card also pins to the bottom of a running turn (`liveHtml`), so the questions are where
+the eye is.
+
+Desktop width (thread column ≤ 760 px):
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ [Questions]  Checkout redesign                     1 of 2 ●○ │
+│                                                              │
+│ BRANCH                                                       │
+│ Base the fix on main or on release/0.18?                     │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ ◉ main                                    Recommended    │ │
+│ │   Ships in 0.18.2 with the rest                          │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ ○ release/0.18                                           │ │
+│ │   Hotfix now, merge forward later                        │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│   Type another answer…                                       │
+│                                                              │
+│ SCOPE                                                        │
+│ Also fix the phone layout?                                   │
+│ ┌ ◉ No, desktop only           Recommended ┐ ┌ ○ Yes ┐       │
+│   Type another answer…                                       │
+│                                                              │
+│ ⓘ Changes: which branch the Capitão bases the PR on.  (why)  │
+│                                                              │
+│  Skip                            [ Accept recommended ]  [Send]│
+╰──────────────────────────────────────────────────────────────╯
+```
+
+Behaviour:
+
+* Each question starts **pre-selected on its recommendation** (`options[0]`, "Recommended" tag in
+  `--g-warning-fg`'s neighbour token, like `.ny-kind`). So **Accept recommended** is one click and
+  sends everything as recommended; changing any choice turns the primary button into **Send**.
+  With one question, tapping an option sends at once (like the Needs you `option` button today).
+* Free text: a `.ny-typed` row under each question; typing selects "typed" for that question.
+  Dictation works because it is a normal input (`gui-dictation.js` binds to inputs).
+* `multi_select` questions use checkboxes, recommended pre-checked.
+* The "changes" line is behind a small ⓘ per question (collapsed by default; it is for the user
+  who wants to know why).
+* **Skip** is a quiet text button (`.ny-quiet`). It asks once, inline, not a modal:
+
+```
+│  Skip these questions?                                       │
+│  The agent goes on with its own assumptions (its             │
+│  recommendations), which can lead to wrong actions.          │
+│                                   [ Back ]  [ Skip anyway ]  │
+```
+
+* While sending: the fieldset is disabled ("Sending…", `NEEDS_YOU_NOTES`); after: the card
+  collapses to the answered row. If the questionnaire changed or closed meanwhile, the same
+  "missed" note as Needs you.
+* The composer stays usable. Its placeholder becomes "Answer the questions above, or type to add
+  to them"; a typed message goes to the session as today (Claude Code queues it until the tool
+  returns), and the gate still holds for the Orchestrator.
+
+### 6.2 Phone width (hub web and the desktop app's narrow layout, ≤ 400 px)
+
+Options stack full width, the action row sticks to the card bottom, the header compresses, the
+"1 of N" dots step through questions one at a time (one question per screen) so nothing scrolls
+sideways:
+
+```
+┌ 390px ───────────────────────────┐
+│ ‹ Orchestrator                ⋯  │
+│                                  │
+│ ╭──────────────────────────────╮ │
+│ │ [Questions] Checkout   1/2 ●○│ │
+│ │                              │ │
+│ │ BRANCH                       │ │
+│ │ Base the fix on main or on   │ │
+│ │ release/0.18?                │ │
+│ │ ┌──────────────────────────┐ │ │
+│ │ │◉ main        Recommended │ │ │
+│ │ │  Ships in 0.18.2         │ │ │
+│ │ └──────────────────────────┘ │ │
+│ │ ┌──────────────────────────┐ │ │
+│ │ │○ release/0.18            │ │ │
+│ │ │  Hotfix now              │ │ │
+│ │ └──────────────────────────┘ │ │
+│ │  Type another answer…        │ │
+│ │                              │ │
+│ │ ┌──────────────────────────┐ │ │
+│ │ │   Accept recommended     │ │ │   ← .ny-primary, 44px
+│ │ └──────────────────────────┘ │ │
+│ │   Skip            Next ›     │ │   ← .ny-quiet / .ny-link
+│ ╰──────────────────────────────╯ │
+│ [ composer …                  ]  │
+└──────────────────────────────────┘
+```
+
+"Accept recommended" stays on every step and answers **all** questions (remaining ones as
+recommended), so one tap still finishes. Uses the existing `@media (max-width: 767px)` and
+`(pointer: coarse)` rules; no new breakpoints.
+
+### 6.3 Needs you (`ui/gui-needs-you.js`)
+
+A new card kind `questions` (`NEEDS_YOU_KINDS.questions = { label: "Questions", glyph: "needs",
+rank: 0 }`), built from every tab with an open `view.questions` (including the Orchestrator's own,
+which `needsYouItems()` otherwise skips), drawn with the same `gui-questions.js` renderer inside
+`.ny-card`. Its `where` says who asks: "Worker · <Captain project> · MacBook", "Workflow · <name> ·
+Mac mini", "Orchestrator". Answering calls `Call::AnswerQuestions` (not `answerAsk`, which is the
+screen-menu path), so it works for headless children and the phone. Such a tab is filtered out of
+the plain `question` card kind so it shows once.
+
+```
+╭ Needs you ───────────────────────────╮
+│ ● Questions  site · Worker · MacBook │
+│ Fix the checkout form                │
+│ Base the fix on main or release?  1/2│
+│ [◉ main  Recommended]  [○ release]   │
+│ [ Accept recommended ]   Skip   Open │
+╰──────────────────────────────────────╯
+```
+
+### 6.4 Where a parent shows its children's questions
+
+* **Worker banner** (`ui/gui-worker-banner.js`): `ASK_WORDS.questions = "has questions"`; the
+  banner's one-tap button is "Accept recommended" and "Open" goes to the worker. The parent
+  (Captain or loose thread) sees it over its composer, as it does a worker's approval today.
+* **Orchestrator chat strip**: above the Orchestrator composer, a one-line strip
+  "Capitão site has questions · Answer" when a Captain or one of its workers in a project the
+  Orchestrator sent to has an open questionnaire. "Answer" expands the same card in place. It reuses
+  the worker banner's element and stepping ("1 of N").
+
+## 7. Wire changes (all additive)
+
+Rules from `AGENTS.md`: add variants, add `#[serde(default)]` fields, rename nothing, drop no
+route. `wire-contract snapshot current` after each wire PR; `wire-contract check --base main`
+must list no new break.
+
+| Type (`crates/core/src/wire.rs` / `global_orchestrator.rs`) | Change | Who sends / reads | Old peers |
+|---|---|---|---|
+| `TabView` | `+ questions: Option<Questionnaire>` `#[serde(default, skip_serializing_if = "Option::is_none")]` | node → app, node → hub overview → other machines and hub web | ignore it; still see `status: needs-input`, `message: "Claude has questions"` and answer by opening the thread (which shows the tool call as a pending tool step) |
+| `Questionnaire` (new struct) | `{ id, title?, questions: Vec<Question>, projects: Vec<String> #[default], at: u64 }`; `Question { header?, question, changes, options: Vec<QOption>, multi_select #[default] }`; `QOption { label, description?, recommended #[default] }` | inside `TabView` | — |
+| `Call` | `+ AnswerQuestions { tab: TabId, id: String, reply: QuestionsReply }` | app / hub web → node (relayed by the hub like any `Call`) | an old node answers "unknown variant" → the app falls back to Open |
+| `QuestionsReply` (new enum, `#[serde(tag = "kind", rename_all = "snake_case")]`) | `Answered { answers: Vec<Answer> }`, `Skipped` | inside `Call::AnswerQuestions` | — |
+| `Answer` | `{ chosen: Vec<String> /* labels */, text: Option<String> }`, positional with the questions | inside the reply | — |
+| `Waiting` | `+ questions: Option<String>` (the questionnaire id) `#[serde(default, skip_serializing_if)]`. **No new `AskKind` variant**: `ask` stays `question`, because an older node deserialising the hub's overview would fail on an unknown `AskKind` | hub overview → node's `waiting()` | ignore it |
+| `ProjectTool::QuestionUser { .. }`, `ProjectTool::QuestionStatus { id }` (`crates/core/src/agent.rs:70`) | new variants | MCP child → its own node over the local socket, same binary | not on the wire contract (local socket only) |
+
+`Call::AnswerQuestions` also gets its line in the agent surface manifest
+(`crates/core/src/surface.rs`, next to `write_input`) as **`Excluded`**: "only the user answers an
+agent's questions". An agent can never answer another agent's questionnaire through `act`.
+
+No hub route changes; no DB migration (questionnaires live on the node, persisted in its config
+dir). The hub only relays the `Call` and carries `TabView` as it already does.
 
 ## 8. PR split, proof, model tier
 _(in progress)_
