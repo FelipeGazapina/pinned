@@ -373,7 +373,8 @@ pub struct OverviewCheckout {
     pub captain: CaptainState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captain_tab: Option<TabId>,
-    /// Worker tabs of the project running on that machine.
+    /// Worker tabs of the project at work on that machine: running a turn, waiting on the user or
+    /// failed. A worker whose turn ended is not counted.
     #[serde(default)]
     pub workers: u32,
     /// How busy that machine is, as it last reported. Absent while it is offline or too old to report.
@@ -572,7 +573,7 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
             let captain = captain_tab(tabs, &project.path);
-            let workers = tabs.iter().filter(|t| (t.running || t.status == Some(AgentStatus::Working)) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            let workers = tabs.iter().filter(|t| (t.running || t.status == Some(AgentStatus::Working)) && !finished(t) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
             let checkout = OverviewCheckout {
                 machine: machine.id.to_owned(),
                 machine_name: machine.name.to_owned(),
@@ -623,6 +624,12 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned), state: None })
         .collect();
     Overview { projects, waiting, machines, sessions: Some(sessions) }
+}
+
+/// Whether a tab's turn ended and nothing waits on it: idle with a status, unlike a session that
+/// started and has not reported yet. A worker in this state already reported to its parent.
+fn finished(tab: &TabView) -> bool {
+    tab.status.is_some() && SessionState::of(tab) == SessionState::Idle
 }
 
 /// One session of the account, as the global orchestrator's `sessions` tool lists it.
@@ -941,6 +948,37 @@ mod tests {
                     { "id": "m-book", "name": "MacBook", "online": true, "version": "0.17.18", "problem": "precisa atualizar o pinned" },
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn a_worker_whose_turn_ended_leaves_the_count_and_one_at_work_waiting_failed_or_starting_stays() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let tabs = [
+            view("tab-d-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::Done)),
+            view("tab-d-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Done)),
+            TabView { message: Some("Claude is waiting for your input".into()), ..view("tab-d-3", "/w/site", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) },
+            view("tab-d-4", "/w/site/.claude/worktrees/pinned-2", Some(Role::Worker), true, Some(AgentStatus::Working)),
+            TabView { interrupted: true, ..view("tab-d-5", "/w/site", Some(Role::Worker), true, Some(AgentStatus::NeedsInput)) },
+            view("tab-d-6", "/w/site", Some(Role::Worker), true, Some(AgentStatus::Failed)),
+            view("tab-d-7", "/w/site", Some(Role::Worker), true, None),
+            view("tab-d-8", "/w/site", Some(Role::Worker), false, Some(AgentStatus::Done)),
+        ];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.0", projects: &site, tabs: &tabs, problem: None }];
+        let overview = overview(&machines);
+        assert_eq!(overview.projects[0].checkouts[0].workers, 4);
+        let states: Vec<(&str, SessionState)> = overview.sessions.as_deref().unwrap().iter().filter(|s| s.role == SessionRole::Worker).map(|s| (s.id.as_str(), s.state)).collect();
+        assert_eq!(
+            states,
+            [
+                ("tab-d-2", SessionState::Idle),
+                ("tab-d-3", SessionState::Idle),
+                ("tab-d-4", SessionState::Running),
+                ("tab-d-5", SessionState::WaitingOnInput),
+                ("tab-d-6", SessionState::Error),
+                ("tab-d-7", SessionState::Idle),
+                ("tab-d-8", SessionState::Settled),
+            ]
         );
     }
 

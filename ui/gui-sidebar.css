@@ -67,8 +67,8 @@
 .thread-row .role { flex: none; padding: 0 5px; border-radius: 4px; background: rgb(var(--g-primary-rgb) / 0.2); color: var(--g-link); font-size: 10.5px; font-weight: 600; line-height: 16px; }
 .thread-row .role.worker { background: var(--g-input); color: var(--g-text); }
 /* A worker sits under its Captain on a guide line, 16px further in for each level. */
-#thread-list .thread-row.child { padding-left: calc(27px + (var(--depth) - 1) * 16px); }
-.thread-row.child::before { content: ""; position: absolute; left: calc(12px + (var(--depth) - 1) * 16px); top: 0; bottom: 0; border-left: 1px solid rgb(var(--g-ink-rgb) / 0.12); }
+#thread-list :is(.thread-row, .settled-head).child { padding-left: calc(27px + (var(--depth) - 1) * 16px); }
+:is(.thread-row, .settled-head).child::before { content: ""; position: absolute; left: calc(12px + (var(--depth) - 1) * 16px); top: 0; bottom: 0; border-left: 1px solid rgb(var(--g-ink-rgb) / 0.12); }
 .thread-row .fold { flex: none; display: flex; align-items: center; gap: 1px; height: 16px; margin-left: auto; padding: 0 2px; border-radius: 4px; color: var(--g-side-muted); cursor: pointer; }
 /* The fold shows while its workers are folded away, and otherwise only where the pointer is. */
 #thread-list .thread-row .fold:not(.folded) { display: none; }

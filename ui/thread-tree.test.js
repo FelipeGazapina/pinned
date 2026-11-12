@@ -12,9 +12,12 @@ vm.runInContext(agents.slice(agents.indexOf("function spawnerKey"), agents.index
 vm.runInContext(`${src.slice(src.indexOf("function spawnTree"), src.indexOf("function toggleFold"))}\nthis.spawnTree = spawnTree; this.spawnRows = spawnRows;`, context);
 
 const tab = (machine, id, opened, spawned_by) => ({ key: `${machine}:${id}`, machine, view: { id, opened, ...(spawned_by ? { spawned_by } : {}) } });
-const lines = (list, folded = new Set()) => {
+const lines = (list, folded = new Set(), { done = new Set(), opened = new Set(), active = null } = {}) => {
   const { roots, kids } = context.spawnTree(list);
-  return Array.from(roots).flatMap((root) => Array.from(context.spawnRows(root, kids, (t) => folded.has(t.key)))).map(({ tab, depth, under }) => `${"  ".repeat(depth)}${tab.view.id}${under ? ` (${under})` : ""}`);
+  const look = { folded: (t) => folded.has(t.key), finished: (t) => done.has(t.key), opened: (t) => opened.has(t.key), shown: (t) => t === active };
+  return Array.from(roots)
+    .flatMap((root) => Array.from(context.spawnRows(root, kids, look)))
+    .map(({ tab, depth, under, finished, of }) => (finished ? `${"  ".repeat(depth)}Finished under ${of.view.id} (${finished.length})` : `${"  ".repeat(depth)}${tab.view.id}${under ? ` (${under})` : ""}`));
 };
 
 const plain = tab("m", "tab-1", 1);
@@ -52,4 +55,21 @@ test("a thread that names itself as its spawner, or two that name each other, st
   assert.deepEqual(lines([self]), ["tab-8"]);
   assert.deepEqual(lines([a, b]), ["tab-9", "tab-10"]);
   assert.deepEqual(lines([a, b, under]), ["tab-9 (1)", "  tab-11", "tab-10"]);
+});
+
+test("a thread's finished workers fold into one Finished group after the ones still at work", () => {
+  const third = tab("m", "tab-12", 12, "tab-1");
+  const done = new Set(["m:tab-3", "m:tab-12"]);
+  assert.deepEqual(lines([plain, worker, nested, early, third], new Set(), { done }), ["tab-1 (4)", "  tab-6", "  Finished under tab-1 (2)"]);
+  assert.deepEqual(lines([plain, worker, nested, early, third], new Set(), { done, opened: new Set(["m:tab-1"]) }), ["tab-1 (4)", "  tab-6", "  Finished under tab-1 (2)", "  tab-3 (1)", "    tab-4", "  tab-12"]);
+});
+
+test("a closed Finished group still lists the finished worker that is open, and a folded thread hides the group", () => {
+  const done = new Set(["m:tab-3", "m:tab-6"]);
+  assert.deepEqual(lines([plain, worker, early], new Set(), { done, active: early }), ["tab-1 (2)", "  Finished under tab-1 (2)", "  tab-6"]);
+  assert.deepEqual(lines([plain, worker, early], new Set(["m:tab-1"]), { done }), ["tab-1 (2)"]);
+});
+
+test("a worker at work, waiting or failed stays in its place, and with none finished there is no group", () => {
+  assert.deepEqual(lines([plain, worker, early], new Set(), { done: new Set() }), ["tab-1 (2)", "  tab-3", "  tab-6"]);
 });

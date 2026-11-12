@@ -394,6 +394,7 @@ test("an agent with no steps yet shows what it was asked from the spawn brief", 
 
 test("a task another agent started has its own row under that agent's, with its state and its actions", async () => {
   const { tab, s, net } = await opened();
+  s.append({ item: { kind: "tool", at: "t2", id: "toolu_p", name: "mcp__pinned__delegate_task", summary: "Port the updater" } });
   s.agents = [
     { id: "task-1", name: "Port the updater", state: "running", updated: "t5", steps: [] },
     { id: "task-2", parent: "task-1", name: "Port the Windows half", state: "running", updated: "t5", steps: [] },
