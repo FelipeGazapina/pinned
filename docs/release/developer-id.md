@@ -135,7 +135,7 @@ Make these changes in one pull request, and test them with a signed local build:
      Tauri strips the target from the name and puts the helper at `Contents/MacOS/dictation-helper`.
      `src/dictation.rs` already looks for it next to the executable.
    - Keep the stub that `build.rs` writes for other systems, or move `resources` into the macOS file.
-2. **Give the hardened runtime the microphone.** Notarization requires the hardened runtime, which
+2. **Give the hardened runtime the microphone.** Done in #207 for ad-hoc builds too: without it, macOS refused the microphone with no prompt. Notarization requires the hardened runtime, which
    Tauri turns on for every signed executable (`bundle.macOS.hardenedRuntime`, `true` by default).
    It blocks the microphone unless the binary has an entitlement. Add `Entitlements.plist`:
 

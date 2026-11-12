@@ -189,7 +189,7 @@ function workerRowHtml(tab, row, t) {
   const review = row.state === "needs" && row.tab ? `<button type="button" class="worker-review" data-worker-open="${id}">Review</button>` : "";
   const head = `<div class="worker-head"><button type="button" class="worker-toggle" data-toggle="${esc(key)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(row.title)}"></button>${glyphHtml(row.state, 12)}
     <span class="worker-text"><span class="worker-title">${esc(row.title || "Agent")}</span>${line.text ? `<span class="worker-step${line.tone ? ` ${line.tone}` : ""}" title="${esc(line.text)}">${esc(line.text)}</span>` : ""}</span>
-    ${review}${model ? `<span class="worker-model">${esc(model)}</span>` : ""}${time ? `<span class="worker-time">${time}</span>` : ""}${icon("chevron-right", "chev")}</div>`;
+    ${boxMarkHtml(row.tab)}${review}${model ? `<span class="worker-model">${esc(model)}</span>` : ""}${time ? `<span class="worker-time">${time}</span>` : ""}${icon("chevron-right", "chev")}</div>`;
   const attrs = `${row.agent ? ` data-agent="${esc(row.agent.id)}"` : ""}${row.depth ? ` data-depth="${row.depth}" style="--depth: ${row.depth}"` : ""}`;
   if (!open) return `<div class="worker-row" data-worker="${id}" data-state="${row.state}"${attrs}>${head}</div>`;
   const steps = workerSteps(row);

@@ -1477,6 +1477,18 @@ impl FileStorage {
     }
 }
 
+/// The file a key lives in. Every byte outside `[A-Za-z0-9._-]` becomes `%XX`, so `slack-key:U123` is a plain file on Windows (where `:` would name an alternate data stream that copies and backups drop) and the name stays reversible.
+fn key_file(name: &str) -> String {
+    let mut file = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => file.push(byte as char),
+            _ => file.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    file
+}
+
 impl Storage for FileStorage {
     fn load(&self) -> Option<Vec<u8>> {
         std::fs::read(self.dir.join("connectors.json")).ok()
@@ -1488,23 +1500,34 @@ impl Storage for FileStorage {
     }
 
     fn key(&self, name: &str) -> Option<String> {
-        let key = std::fs::read_to_string(self.dir.join(name)).ok()?;
+        let key = std::fs::read_to_string(self.dir.join(key_file(name)))
+            .or_else(|_| std::fs::read_to_string(self.dir.join(name)))
+            .ok()?;
         Some(key.trim().to_owned()).filter(|k| !k.is_empty())
     }
 
     fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
         use std::io::Write;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let file = key_file(name);
         crate::private::file()
             .create(true)
             .truncate(true)
-            .open(self.dir.join(name))
+            .open(self.dir.join(&file))
             .and_then(|mut f| f.write_all(key.as_bytes()))
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if file != name {
+            let _ = std::fs::remove_file(self.dir.join(name));
+        }
+        Ok(())
     }
 
     fn remove_key(&self, name: &str) {
-        let _ = std::fs::remove_file(self.dir.join(name));
+        let file = key_file(name);
+        let _ = std::fs::remove_file(self.dir.join(&file));
+        if file != name {
+            let _ = std::fs::remove_file(self.dir.join(name));
+        }
     }
 
     fn load_runs(&self) -> Option<Vec<u8>> {
@@ -5055,6 +5078,75 @@ mod tests {
         }
         fn save_runs(&self, _: &[u8]) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    mod file_storage_keys {
+        use super::*;
+
+        fn files(dir: &Path) -> Vec<String> {
+            let mut names: Vec<String> =
+                std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn safe_names_map_to_themselves() {
+            for name in ["slack-key", "linear-key", "a.b_c-D9"] {
+                assert_eq!(key_file(name), name);
+            }
+            assert_eq!(key_file("slack-key:U123"), "slack-key%3AU123");
+            assert_eq!(key_file("100%"), "100%25");
+        }
+
+        #[test]
+        fn keys_are_plain_files_that_round_trip_and_delete() {
+            for name in ["slack-key:U123", "mcp:abc:headers:Authorization", "claude-oauth-token:x"] {
+                let dir = temp_dir("fs-keys");
+                let storage = FileStorage::new(dir.clone());
+                storage.write_key(name, "xoxb-test-1234").unwrap();
+                assert_eq!(storage.key(name).as_deref(), Some("xoxb-test-1234"));
+                assert_eq!(files(&dir), vec![key_file(name)]);
+                storage.remove_key(name);
+                assert_eq!(storage.key(name), None);
+                assert!(files(&dir).is_empty());
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+
+        #[test]
+        fn a_copied_folder_keeps_the_key() {
+            let dir = temp_dir("fs-copy-src");
+            let copy = temp_dir("fs-copy-dst");
+            FileStorage::new(dir.clone()).write_key("slack-key:U123", "xoxb-test-1234").unwrap();
+            std::fs::create_dir_all(&copy).unwrap();
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                std::fs::copy(entry.path(), copy.join(entry.file_name())).unwrap();
+            }
+            assert_eq!(FileStorage::new(copy.clone()).key("slack-key:U123").as_deref(), Some("xoxb-test-1234"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&copy);
+        }
+
+        /// A key the old code wrote under its raw name: a plain file on Unix, an alternate data stream
+        /// of `claude-oauth-token` on Windows. It is read, then moved to the escaped file.
+        #[test]
+        fn a_raw_named_file_is_read_then_replaced() {
+            let dir = temp_dir("fs-raw");
+            std::fs::create_dir_all(&dir).unwrap();
+            let storage = FileStorage::new(dir.clone());
+            let name = "claude-oauth-token:x";
+            std::fs::write(dir.join(name), "test-token-old").unwrap();
+            assert_eq!(storage.key(name).as_deref(), Some("test-token-old"));
+            storage.write_key(name, "test-token-new").unwrap();
+            assert_eq!(storage.key(name).as_deref(), Some("test-token-new"));
+            assert!(std::fs::read(dir.join(name)).is_err(), "the raw file or stream is removed");
+            assert!(files(&dir).contains(&"claude-oauth-token%3Ax".to_string()));
+            // On Windows the stream's empty host file stays behind; it reads as no key.
+            assert_eq!(storage.key("claude-oauth-token"), None);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 

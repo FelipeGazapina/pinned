@@ -2,7 +2,7 @@
 
 Claude Code in a small panel that stays on top of everything on macOS, including fullscreen
 videos and fullscreen apps. When the agent finishes or needs your approval, the panel tells you
-even while you're watching something else. It runs on Windows too.
+even while you're watching something else. It runs on Windows and Linux too.
 
 pinned hosts the official `claude` CLI in a terminal. It uses your existing Claude Code login,
 and it never reads your credentials or calls the Anthropic API.
@@ -43,6 +43,34 @@ The installer isn't signed, so SmartScreen warns on its first run. Click **More 
 
 On Windows the tray icon in the taskbar takes the place of the menu-bar icon, and Ctrl takes
 the place of ⌘ in every shortcut below.
+
+### Linux
+
+1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and log in with `claude`.
+2. Download one package for your CPU from
+   [Releases](https://github.com/FelipeGazapina/pinned/releases/latest). `amd64` and `x86_64` are
+   Intel and AMD; `arm64` and `aarch64` are ARM.
+   - **AppImage**: `pinned_<version>_amd64.AppImage` or `pinned_<version>_aarch64.AppImage`.
+     Make it executable and run it:
+
+     ```sh
+     chmod +x pinned_<version>_amd64.AppImage
+     ./pinned_<version>_amd64.AppImage
+     ```
+
+   - **.deb**: `pinned_<version>_amd64.deb` or `pinned_<version>_arm64.deb`. Install it with apt,
+     which also installs its dependencies:
+
+     ```sh
+     sudo apt install ./pinned_<version>_amd64.deb
+     ```
+
+We build on Ubuntu 22.04, so the packages are expected to work on Ubuntu 22.04 and later and on
+Debian 12 and later. Both update from inside pinned. Do not confuse them with
+`pinned-server-<target>` on the same release. That is the headless node binary for a server and
+has no window.
+
+Ctrl takes the place of ⌘ in every shortcut below.
 
 ## Use
 
@@ -753,7 +781,11 @@ cargo run -p pinned-dev           # isolated dev app, rebuilds and restarts on c
 cargo run -- ~/path/to/project    # debug build on the normal config
 npm run tauri build               # .app and .dmg in target/release/bundle
 npm run tauri build -- --bundles nsis   # on Windows: the setup .exe in target/release/bundle/nsis
+npm run tauri build -- --bundles appimage,deb   # on Linux: the AppImage and .deb in target/release/bundle
 ```
+
+On Debian or Ubuntu, a Linux build needs `libwebkit2gtk-4.1-dev libgtk-3-dev
+libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf build-essential`.
 
 `cargo run -p pinned-dev` keeps the app's config under `.dev/home`, so it never shares accounts,
 projects, sessions, history or the hub sign-in with the installed app. It watches `src`, `crates` and
@@ -772,7 +804,8 @@ scripts/release.sh 0.2.0
 
 The script runs only from a clean `main` that matches `origin/main`. It bumps the version
 in `Cargo.toml`, tags `v0.2.0`, and pushes `main` and the tag in one atomic push. The `release`
-workflow builds both Mac architectures, the Windows installer, and the Linux musl node
+workflow builds both Mac architectures, the Windows installer, the Linux AppImage and .deb for
+x86_64 and arm64 (on `ubuntu-22.04` and `ubuntu-22.04-arm`), and the Linux musl node
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads
 `SHA256SUMS`, `SHA256SUMS.minisig`, both binaries, and `latest.json` in one

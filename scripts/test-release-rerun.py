@@ -41,21 +41,44 @@ VERSION_ORDER = (
     ("v0.17.0", "v0.17.0", False),
     ("v0.17.0", "windows-preview", True),
 )
+X86_LINUX = "x86_64-unknown-linux-gnu"
+ARM_LINUX = "aarch64-unknown-linux-gnu"
 TAURI_BUNDLES = {
-    "aarch64-apple-darwin": ("macos/pinned.app.tar.gz", ARM_BUNDLE, ("darwin-aarch64", "darwin-aarch64-app")),
-    "x86_64-apple-darwin": ("macos/pinned.app.tar.gz", "pinned_x64.app.tar.gz", ("darwin-x86_64", "darwin-x86_64-app")),
+    "aarch64-apple-darwin": (("macos/pinned.app.tar.gz", ARM_BUNDLE, ("darwin-aarch64", "darwin-aarch64-app")),),
+    "x86_64-apple-darwin": (("macos/pinned.app.tar.gz", "pinned_x64.app.tar.gz", ("darwin-x86_64", "darwin-x86_64-app")),),
     "x86_64-pc-windows-msvc": (
-        "nsis/pinned_{version}_x64-setup.exe",
-        "pinned_{version}_x64-setup.exe",
-        ("windows-x86_64", "windows-x86_64-nsis"),
+        (
+            "nsis/pinned_{version}_x64-setup.exe",
+            "pinned_{version}_x64-setup.exe",
+            ("windows-x86_64", "windows-x86_64-nsis"),
+        ),
+    ),
+    X86_LINUX: (
+        (
+            "appimage/pinned_{version}_amd64.AppImage",
+            "pinned_{version}_amd64.AppImage",
+            ("linux-x86_64", "linux-x86_64-appimage"),
+        ),
+        ("deb/pinned_{version}_amd64.deb", "pinned_{version}_amd64.deb", ("linux-x86_64-deb",)),
+    ),
+    ARM_LINUX: (
+        (
+            "appimage/pinned_{version}_aarch64.AppImage",
+            "pinned_{version}_aarch64.AppImage",
+            ("linux-aarch64", "linux-aarch64-appimage"),
+        ),
+        ("deb/pinned_{version}_arm64.deb", "pinned_{version}_arm64.deb", ("linux-aarch64-deb",)),
     ),
 }
+PLATFORM_KEYS = sorted(key for bundles in TAURI_BUNDLES.values() for _, _, keys in bundles for key in keys)
+DRY_REF = "12/merge"
+DRY_VERSION = TAG[1:]
 ARM = b"arm-old " * 2048
 X86 = b"x86-old " * 2048
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
 FULL = "*"
-JOB_KEYS = {"needs", "runs-on", "strategy", "defaults", "steps", "env", "concurrency", "permissions"}
-STEP_KEYS = {"name", "id", "uses", "run", "with", "env", "shell"}
+JOB_KEYS = {"needs", "if", "runs-on", "strategy", "defaults", "steps", "env", "concurrency", "permissions"}
+STEP_KEYS = {"name", "id", "if", "uses", "run", "with", "env", "shell"}
 VERIFIER = ROOT / "scripts" / "minisign-verify.mjs"
 CRATE_KEY = "untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n"
 CRATE_PREHASHED = (
@@ -175,6 +198,8 @@ def resolved_repo():
 
 def main():
     argv = sys.argv[1:]
+    with open(os.environ["REPLAY_GH_LOG"], "a") as log:
+        log.write(" ".join(argv) + "\n")
     if len(argv) < 2 or argv[0] != "release":
         sys.stderr.write("fake gh: " + " ".join(sys.argv) + "\n")
         return 2
@@ -421,28 +446,86 @@ def runner_shell(label):
     return None
 
 
-def context(tag, matrix=None):
-    return {"tag": tag, "matrix": matrix or {}, "env": {}, "steps": {}}
+def context(tag, matrix=None, inputs=None, ref_type="tag", runner_os="Linux"):
+    return {
+        "tag": tag,
+        "matrix": matrix or {},
+        "env": {},
+        "steps": {},
+        "inputs": inputs or {},
+        "ref_type": ref_type,
+        "runner_os": runner_os,
+    }
+
+
+def truthy(value):
+    return value not in (None, False, "", 0)
+
+
+def lookup(expr, ctx):
+    expr = expr.strip()
+    if expr[:1] == "'" and expr.endswith("'") and len(expr) > 1:
+        return expr[1:-1]
+    head, _, rest = expr.partition(".")
+    step_id, _, output = rest.partition(".outputs.")
+    if expr == "github.repository":
+        return REPO
+    if expr == "github.ref_name":
+        return ctx["tag"]
+    if expr == "github.ref_type":
+        return ctx["ref_type"]
+    if expr == "runner.os":
+        return ctx["runner_os"]
+    if head == "inputs":
+        return ctx["inputs"].get(rest)
+    if head == "secrets":
+        return "replay"
+    if head in ("matrix", "env") and rest in ctx[head]:
+        return ctx[head][rest]
+    if head == "steps" and step_id in ctx["steps"]:
+        return ctx["steps"][step_id].get(output, "")
+    raise SystemExit(f"the replay cannot expand ${{{{ {expr} }}}}")
+
+
+def atom(expr, ctx):
+    expr = expr.strip()
+    if expr.startswith("!"):
+        return not truthy(atom(expr[1:], ctx))
+    compare = re.fullmatch(r"(.+?)\s*(==|!=)\s*(.+)", expr)
+    if compare:
+        same = lookup(compare.group(1), ctx) == lookup(compare.group(3), ctx)
+        return same if compare.group(2) == "==" else not same
+    return lookup(expr, ctx)
+
+
+def evaluate(expr, ctx):
+    """The `||` and `&&` of a GitHub expression over the names the replay knows, with GitHub's value rules."""
+    result = None
+    for alternative in expr.split("||"):
+        result = None
+        for part in alternative.split("&&"):
+            result = atom(part, ctx)
+            if not truthy(result):
+                break
+        if truthy(result):
+            return result
+    return result
+
+
+def rendered(value):
+    return "true" if value is True else "false" if value is False else "" if value is None else str(value)
 
 
 def expand(value, ctx):
-    def one(match):
-        expr = match.group(1)
-        head, _, rest = expr.partition(".")
-        step_id, _, output = rest.partition(".outputs.")
-        if expr == "github.repository":
-            return REPO
-        if expr == "github.ref_name":
-            return ctx["tag"]
-        if head == "secrets":
-            return "replay"
-        if head in ("matrix", "env") and rest in ctx[head]:
-            return ctx[head][rest]
-        if head == "steps" and output in ctx["steps"].get(step_id, {}):
-            return ctx["steps"][step_id][output]
-        raise SystemExit(f"the replay cannot expand ${{{{ {expr} }}}}")
+    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: rendered(evaluate(match.group(1), ctx)), value)
 
-    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", one, value)
+
+def enabled(node, ctx):
+    condition = node.get("if")
+    if condition is None:
+        return True
+    match = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", condition.strip())
+    return truthy(evaluate(match.group(1) if match else condition, ctx))
 
 
 def expanded(values, ctx):
@@ -609,6 +692,9 @@ class Replay:
         self.pubkey = json.loads(self.key.read_text())["pubkey"]
         self.forged_pubkey = json.loads(self.forger.read_text())["pubkey"]
         self.state_path = self.root / "state.json"
+        self.gh_log = self.root / "gh.log"
+        self.inputs = {}
+        self.ref_type = "tag"
         self.actions = {
             "actions/checkout": self.checkout,
             "actions/setup-node": self.nothing,
@@ -641,14 +727,16 @@ class Replay:
         files = {}
         platforms = {}
         artifacts = {}
-        for target, (local, asset, keys) in TAURI_BUNDLES.items():
-            asset = asset.format(version=version)
-            bundle = bundle_bytes(target, build)
-            signature = self.tauri_signature(bundle, pathlib.Path(local).name.format(version=version), key)
-            files[asset] = bundle
-            files[f"{asset}.sig"] = signature.encode()
-            entry = {"signature": signature, "url": f"https://github.com/{REPO}/releases/download/{tag}/{asset}"}
-            leg = {platform: entry for platform in keys}
+        for target, bundles in TAURI_BUNDLES.items():
+            leg = {}
+            for local, asset, keys in bundles:
+                asset = asset.format(version=version)
+                bundle = bundle_bytes(f"{target} {asset}", build)
+                signature = self.tauri_signature(bundle, pathlib.Path(local).name.format(version=version), key)
+                files[asset] = bundle
+                files[f"{asset}.sig"] = signature.encode()
+                entry = {"signature": signature, "url": f"https://github.com/{REPO}/releases/download/{tag}/{asset}"}
+                leg.update({platform: entry for platform in keys})
             platforms.update(leg)
             fragment = json.dumps({"version": version, "platforms": leg}).encode()
             artifacts[f"updater-{target}"] = {"updater-fragment.json": b64(fragment)}
@@ -689,6 +777,7 @@ class Replay:
                 "REPLAY_ROOT": str(self.root),
                 "REPLAY_REPO": REPO,
                 "REPLAY_STATE": str(self.state_path),
+                "REPLAY_GH_LOG": str(self.gh_log),
                 "REPLAY_SIGNER": str(self.signer),
                 "REPLAY_KEY": str(self.key),
                 "REPLAY_BINARIES": str(self.binaries),
@@ -703,8 +792,11 @@ class Replay:
         work.mkdir()
         return work
 
-    def run(self, job_names, state, extra_env, tag):
+    def run(self, job_names, state, extra_env, tag, inputs=None, ref_type="tag"):
+        self.inputs = inputs or {}
+        self.ref_type = ref_type
         self.save_state(state)
+        self.gh_log.write_text("")
         work = self.fresh_work()
         env = self.runner(tag)
         for index, name in enumerate(job_names):
@@ -720,15 +812,26 @@ class Replay:
             if any(need in failed for need in needs_of(self.jobs[name])):
                 failed.add(name)
                 continue
+            if not enabled(self.jobs[name], self.context(tag)):
+                failed.add(name)
+                continue
             job_code, err = self.job(name, env, extra_env, tag, work)
             stderr.append(err)
             if job_code:
                 failed.add(name)
                 code = code or job_code
         assembled = next((path.read_bytes() for path in work.glob("*/node-release/latest.json")), None)
-        return code, "".join(stderr), self.load_state(), assembled
+        after = self.load_state()
+        after["gh_log"] = [line for line in self.gh_log.read_text().splitlines() if line]
+        return code, "".join(stderr), after, assembled
+
+    def context(self, tag, matrix=None):
+        return context(tag, matrix, self.inputs, self.ref_type)
 
     def run_script(self, script, state, extra_env, tag):
+        self.inputs = {}
+        self.ref_type = "tag"
+        self.gh_log.write_text("")
         self.save_state(state)
         work = self.fresh_work()
         self.checkout({}, context(tag), {}, work)
@@ -754,15 +857,21 @@ class Replay:
         return code, "".join(stderr)
 
     def leg(self, name, job, matrix, env, extra_env, tag, work):
-        ctx = context(tag, matrix)
+        ctx = self.context(tag, matrix)
         ctx["env"] = expanded(self.wf.get("env"), ctx)
         ctx["env"].update(expanded(job.get("env"), ctx))
-        job_env = {**env, **ctx["env"], **runner_files(expand(job["runs-on"], ctx), work)}
+        files = runner_files(expand(job["runs-on"], ctx), work)
+        ctx["runner_os"] = files["RUNNER_OS"]
+        job_env = {**env, **ctx["env"], **files}
         stderr = []
         for index, step in enumerate(job["steps"], start=1):
             unknown = sorted(set(step) - STEP_KEYS)
             if unknown:
                 return 1, "".join(stderr) + f"the replay does not model {', '.join(unknown)} on {name} step {index}\n"
+            if not enabled(step, ctx):
+                if step.get("id"):
+                    ctx["steps"][step["id"]] = {}
+                continue
             step_env = {**job_env, **expanded(step.get("env"), ctx), **extra_env}
             outputs = {}
             if step.get("uses"):
@@ -801,8 +910,9 @@ class Replay:
         inputs = expanded(step.get("with"), ctx)
         name = inputs["name"]
         paths = [line.strip() for line in inputs["path"].splitlines() if line.strip()]
-        files = [work / path for path in paths]
-        missing = [path for path, file in zip(paths, files) if not file.is_file()]
+        folder = work / paths[0] if len(paths) == 1 and (work / paths[0]).is_dir() else None
+        files = sorted(file for file in folder.rglob("*") if file.is_file()) if folder else [work / path for path in paths]
+        missing = [path for path, file in zip(paths, files) if not file.is_file()] if files else paths
         if missing:
             if inputs.get("if-no-files-found", "warn") == "error":
                 return 1, f"No files were found with the provided path: {' '.join(missing)}. No artifacts will be uploaded.\n", {}
@@ -813,7 +923,7 @@ class Replay:
                 "Failed to CreateArtifact: Received non-retryable error: Failed request: (409) Conflict: "
                 f"an artifact with this name already exists on the workflow run: {name}\n"
             ), {}
-        base = pathlib.Path(os.path.commonpath([str(file.parent) for file in files]))
+        base = folder or pathlib.Path(os.path.commonpath([str(file.parent) for file in files]))
         state["artifacts"][name] = {str(file.relative_to(base)): b64(file.read_bytes()) for file in files}
         self.save_state(state)
         return 0, "", {}
@@ -839,33 +949,39 @@ class Replay:
 
     def tauri(self, step, ctx, env, work):
         inputs = expanded(step.get("with"), ctx)
-        if inputs.get("tagName") != ctx["tag"]:
+        release = bool(inputs.get("tagName") or inputs.get("releaseId"))
+        if release and inputs.get("tagName") != ctx["tag"]:
             return 1, f"tauri-action tagName {inputs.get('tagName')} is not {ctx['tag']}\n", {}
         args = inputs.get("args", "").split()
         target = args[args.index("--target") + 1] if "--target" in args else None
         if target not in TAURI_BUNDLES:
             return 1, f"the replay does not build {target}\n", {}
-        version = ctx["tag"][1:]
-        local, asset, _ = TAURI_BUNDLES[target]
-        local = local.format(version=version)
-        asset = asset.format(version=version)
+        version = ctx["tag"][1:] if release else DRY_VERSION
         build = self.load_state()["builds"] + 1
-        bundle = work / "target" / target / "release" / "bundle" / local
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        bundle.write_bytes(bundle_bytes(target, build))
-        signature = bundle.parent / f"{bundle.name}.sig"
-        signature.write_text(self.tauri_signature(bundle.read_bytes(), bundle.name))
         staged = work / "tauri-upload"
         staged.mkdir()
-        shutil.copyfile(bundle, staged / asset)
-        shutil.copyfile(signature, staged / f"{asset}.sig")
-        uploads = [staged / asset, staged / f"{asset}.sig"]
+        built = []
+        uploads = []
+        for local, asset, _ in TAURI_BUNDLES[target]:
+            local = local.format(version=version)
+            asset = asset.format(version=version)
+            bundle = work / "target" / target / "release" / "bundle" / local
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            bundle.write_bytes(bundle_bytes(f"{target} {asset}", build))
+            signature = bundle.parent / f"{bundle.name}.sig"
+            signature.write_text(self.tauri_signature(bundle.read_bytes(), bundle.name))
+            shutil.copyfile(bundle, staged / asset)
+            shutil.copyfile(signature, staged / f"{asset}.sig")
+            uploads += [staged / asset, staged / f"{asset}.sig"]
+            built += [str(bundle), str(signature)]
+            if env.get("REPLAY_TAMPER") == target:
+                bundle.write_bytes(b"tampered after signing\n")
         if (inputs.get("includeUpdaterJson") or "true").lower() != "false":
             (staged / "latest.json").write_text(json.dumps({"version": version, "pub_date": "tauri"}))
             uploads.append(staged / "latest.json")
         action_env = {**env, "GH_REPO": REPO}
         err = ""
-        for upload in uploads:
+        for upload in uploads if release else []:
             step_code, step_err = self.shell(
                 ["bash", "-e"], f'gh release upload "$GITHUB_REF_NAME" "{upload}" --clobber\n', action_env, work
             )
@@ -875,7 +991,7 @@ class Replay:
         state = self.load_state()
         state["builds"] = build
         self.save_state(state)
-        return 0, err, {"artifactPaths": json.dumps([str(bundle), str(signature)]), "appVersion": version}
+        return 0, err, {"artifactPaths": json.dumps(built), "appVersion": version}
 
 
 def unchanged(before, after):
@@ -927,8 +1043,22 @@ def scenario_errors(code, stderr, state, assembled, expect):
                 errors.append(f"stderr missing [{value}]: {stderr.strip()}")
         elif key == "uploaded":
             names = [item["name"] for item in state["uploads"]]
-            if value not in names:
-                errors.append(f"did not upload {value}")
+            for wanted in [value] if isinstance(value, str) else value:
+                if wanted not in names:
+                    errors.append(f"did not upload {wanted}")
+        elif key == "gh_calls":
+            if len(state.get("gh_log", [])) != value:
+                errors.append(f"gh ran {state.get('gh_log')}, want {value} calls")
+        elif key == "release_exists":
+            if bool(state["exists"]) != value:
+                errors.append(f"release exists={state['exists']}, want {value}")
+        elif key == "platform_keys":
+            keys = sorted(json.loads(assembled)["platforms"]) if assembled else None
+            if keys != value:
+                errors.append(f"assembled latest.json has {keys}, want {value}")
+        elif key == "artifact":
+            if value not in state["artifacts"]:
+                errors.append(f"no artifact {value}")
         else:
             raise AssertionError(key)
     return errors
@@ -987,6 +1117,7 @@ def public_clobber_errors(replay):
     env.update(
         {
             "REPLAY_STATE": str(state_path),
+            "REPLAY_GH_LOG": str(replay.gh_log),
             "REPLAY_ROOT": str(replay.root),
             "REPLAY_REPO": REPO,
             "GH_REPO": REPO,
@@ -1036,6 +1167,33 @@ def report(label, errors):
 
 
 
+def dry_run_guard_problems(wf):
+    """Every step that writes a release is skipped in a dry run, and the dry-run build step has no release to write."""
+    problems = []
+    triggers = wf.get("on") or {}
+    if (triggers.get("push") or {}).get("tags") != ["v*"]:
+        problems.append(f"the tag trigger is {(triggers.get('push') or {}).get('tags')}, want ['v*']")
+    for name, job in wf["jobs"].items():
+        for index, step in enumerate(job["steps"], start=1):
+            where = f"{name} step {index}"
+            script = step.get("run") or ""
+            uses = step.get("uses") or ""
+            has_tag = "tagName" in (step.get("with") or {}) or "releaseId" in (step.get("with") or {})
+            writes = (
+                re.search(r"\bgh\s", script) is not None
+                or re.search(r"release-asset\.sh\s+(draft|upload|publish)", script) is not None
+                or (uses.startswith("tauri-apps/tauri-action") and has_tag)
+            )
+            guards = [(job.get("if") or ""), (step.get("if") or "")]
+            if writes and not any("!inputs.dry_run" in guard for guard in guards):
+                problems.append(f"{where} writes a release and has no !inputs.dry_run guard")
+            if uses.startswith("tauri-apps/tauri-action") and not has_tag and step.get("if") != "${{ inputs.dry_run }}":
+                problems.append(f"{where} builds without a release and does not run only in a dry run")
+            if step.get("if") and "inputs.dry_run" in step["if"] and "!" not in step["if"] and has_tag:
+                problems.append(f"{where} runs in a dry run and names a release")
+    return problems
+
+
 def concurrent_publish_errors(replay, tags, want_latest):
     queued = queued_runs(replay.wf, "publish", tags)
     before = "v0.16.0"
@@ -1071,6 +1229,11 @@ def main():
     if not problems:
         print("ok: shells")
     orders = run_orders(wf["jobs"])
+    guard_problems = dry_run_guard_problems(wf)
+    for problem in guard_problems:
+        print(f"FAIL dry-run guard: {problem}")
+    if not guard_problems:
+        print("ok: dry-run guards")
     sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True).strip()
     print(f"replay at {sha}")
     for order in orders:
@@ -1101,14 +1264,95 @@ def main():
 
         cases = []
 
-        def add(title, runs, state, expect, tag=TAG):
-            cases.append((title, runs, state, expect, tag))
+        def add(title, runs, state, expect, tag=TAG, inputs=None, ref_type="tag"):
+            cases.append((title, runs, state, expect, tag, inputs, ref_type))
 
         add(
             "full run on a new tag",
             [(FULL, {})],
             empty_state(),
-            {"code": 0, "draft": False, "prerelease": False, "latest_flag": True, "consistent": True, "latest_assembled": True},
+            {
+                "code": 0,
+                "draft": False,
+                "prerelease": False,
+                "latest_flag": True,
+                "consistent": True,
+                "latest_assembled": True,
+                "platform_keys": PLATFORM_KEYS,
+                "uploaded": [
+                    f"pinned_{TAG[1:]}_amd64.AppImage",
+                    f"pinned_{TAG[1:]}_amd64.deb",
+                    f"pinned_{TAG[1:]}_aarch64.AppImage",
+                    f"pinned_{TAG[1:]}_arm64.deb",
+                ],
+            },
+        )
+        dry = {"dry_run": True}
+        add(
+            "dry run on a pull request writes no release",
+            [(FULL, {})],
+            empty_state(),
+            {
+                "code": 0,
+                "gh_calls": 0,
+                "release_exists": False,
+                "platform_keys": PLATFORM_KEYS,
+                "artifact": "dry-run-release",
+            },
+            tag=DRY_REF,
+            inputs=dry,
+            ref_type="branch",
+        )
+        add(
+            "dry run leaves a public release as it was",
+            [(FULL, {})],
+            public(),
+            {"code": 0, "gh_calls": 0, "draft": False, "unchanged_from": public(), "consistent": True},
+            tag=DRY_REF,
+            inputs=dry,
+            ref_type="branch",
+        )
+        add(
+            "dry run on a tag name still writes no release",
+            [(FULL, {})],
+            empty_state(),
+            {"code": 0, "gh_calls": 0, "release_exists": False},
+            inputs=dry,
+        )
+        add(
+            "dry run with a bundle changed after it was signed",
+            [(FULL, {"REPLAY_TAMPER": X86_LINUX})],
+            empty_state(),
+            {
+                "gh_calls": 0,
+                "release_exists": False,
+                "stderr_has": f"pinned_{DRY_VERSION}_amd64.AppImage does not match its signature in latest.json",
+            },
+            tag=DRY_REF,
+            inputs=dry,
+            ref_type="branch",
+        )
+        add(
+            "dry run, signer fails",
+            [(FULL, {"REPLAY_SIGN_FAIL": "1"})],
+            empty_state(),
+            {"gh_calls": 0, "release_exists": False, "stderr_has": "tauri signer sign failed"},
+            tag=DRY_REF,
+            inputs=dry,
+            ref_type="branch",
+        )
+        add(
+            "real run that is not on a tag is refused",
+            [(FULL, {})],
+            empty_state(),
+            {
+                "gh_calls": 0,
+                "release_exists": False,
+                "stderr_has": "a real release runs on a v* tag only",
+            },
+            tag="main",
+            inputs={"dry_run": False},
+            ref_type="branch",
         )
         add(
             "full run, then re-run all jobs",
@@ -1202,7 +1446,7 @@ def main():
             public(),
             {
                 "draft": True,
-                "stderr_has": f"pinned_{TAG[1:]}_x64-setup.exe does not match its signature in latest.json",
+                "stderr_has": f"pinned_{TAG[1:]}_aarch64.AppImage does not match its signature in latest.json",
                 "consistent": True,
                 "unchanged_from": public(),
             },
@@ -1343,7 +1587,7 @@ def main():
         )
 
         ran = 0
-        for title, runs, state, expect, tag in cases:
+        for title, runs, state, expect, tag, inputs, ref_type in cases:
             expansions = expand_runs(runs, orders)
             for expansion in expansions:
                 code, stderr, after, assembled = 0, "", state, None
@@ -1352,7 +1596,7 @@ def main():
                     if isinstance(job_names, str):
                         code, stderr, after, assembled = replay.run_script(job_names, carried, extra_env, tag)
                     else:
-                        code, stderr, after, assembled = replay.run(job_names, carried, extra_env, tag)
+                        code, stderr, after, assembled = replay.run(job_names, carried, extra_env, tag, inputs, ref_type)
                     if after["violations"]:
                         break
                 shown = title
@@ -1364,7 +1608,7 @@ def main():
         print(f"{failed} check(s) failed")
     else:
         print(f"ok: {ran} scenarios")
-    if failed or problems:
+    if failed or problems or guard_problems:
         return 1
     return 0
 
