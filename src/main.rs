@@ -133,15 +133,20 @@ fn get_background(machine: State<Arc<Machine>>) -> Option<bool> {
     machine.background()
 }
 
-/// Shows or hides the app in the Dock and the Cmd-Tab switcher (macOS). The window is an
-/// always-on-top panel with no Dock presence by default; when Always on top is off the app
-/// becomes a regular app so a buried window can be brought back from the Dock.
+/// Shows or hides the app in the Dock and the Cmd-Tab switcher (macOS), or in the taskbar (Linux).
+/// The window is an always-on-top panel with no Dock presence by default; when Always on top is
+/// off the app becomes a regular app so a buried window can be brought back from the Dock.
 #[tauri::command]
 fn set_dock_shown(app: AppHandle, shown: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     app.set_activation_policy(if shown { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory })
         .map_err(|e| e.to_string())?;
-    #[cfg(not(target_os = "macos"))]
+    // The window starts out of the taskbar, so a buried one would have no way back there.
+    #[cfg(target_os = "linux")]
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_skip_taskbar(!shown).map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
     let _ = (app, shown);
     Ok(())
 }
@@ -393,14 +398,14 @@ fn watch_reminders(app: AppHandle) {
     });
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn notify(_app: &AppHandle, message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
     let _ = pinned_core::process::command("osascript").args(["-e", &script]).status();
 }
 
-#[cfg(windows)]
+#[cfg(not(target_os = "macos"))]
 fn notify(app: &AppHandle, message: &str) {
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title("Reminder").body(message).show();
@@ -427,15 +432,27 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     let level_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = levels.iter().map(|i| i as _).collect();
     let opacity = Submenu::with_items(app, "Opacity", true, &level_refs)?;
     let quit = MenuItem::with_id(app, "quit", "Quit pinned", true, None::<&str>)?;
+    // Linux tray icons only open their menu and never report a click, so the menu carries what
+    // the click does elsewhere.
+    #[cfg(not(target_os = "macos"))]
+    let show = MenuItem::with_id(app, "show", "Show pinned", true, None::<&str>)?;
+    #[cfg(not(target_os = "macos"))]
+    let items: [&dyn tauri::menu::IsMenuItem<_>; 3] = [&show, &opacity, &quit];
+    #[cfg(target_os = "macos")]
+    let items: [&dyn tauri::menu::IsMenuItem<_>; 2] = [&opacity, &quit];
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
-        .menu(&Menu::with_items(app, &[&opacity, &quit])?)
+        .menu(&Menu::with_items(app, &items)?)
         .on_tray_icon_event(|tray, event| {
             if matches!(event, tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. }) {
                 settle(tray.app_handle(), Moment::Reopen);
             }
         })
         .on_menu_event(move |app, e| {
+            if e.id() == "show" {
+                settle(app, Moment::Reopen);
+                return;
+            }
             if e.id() == "quit" {
                 app.state::<Arc<Machine>>().quit();
                 app.exit(0);
@@ -460,7 +477,26 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Without a tray the app still runs: Linux loads the tray library when the first icon is made,
+/// and panics when the system has none (no libayatana-appindicator3).
+fn add_tray_or_go_without(app: &tauri::App) -> tauri::Result<()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| add_tray(app))) {
+        Ok(added) => added,
+        Err(_) => {
+            eprintln!("pinned: no tray icon on this system; reopen the window by launching pinned again");
+            Ok(())
+        }
+    }
+}
+
 fn main() {
+    // GTK's native Wayland backend can't keep a window above others, on every workspace, or where
+    // the app puts it, all of which the panel needs. XWayland can, so run there unless the user
+    // chose a backend. This must happen before GTK starts. The programs pinned starts don't get it.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        pinned_core::process::set_own_env("GDK_BACKEND", "x11");
+    }
     // The updater, the Linear client and the statusline's OpenCode Go usage share reqwest's
     // rustls, which ships without a crypto provider. The statusline runs as a subcommand below.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -469,12 +505,18 @@ fn main() {
     }
     let exe = std::env::current_exe().expect("could not find pinned's own binary");
     let launch = Launch::prepare(&exe).expect("could not prepare claude launch");
-    let builder = tauri::Builder::default()
+    // A second launch hands over to the running app, which shows its window, instead of starting
+    // a second process that would take over the same sessions and hub link. It must come first.
+    #[cfg(target_os = "linux")]
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| settle(app, Moment::Reopen)));
+    #[cfg(not(target_os = "linux"))]
+    let builder = tauri::Builder::default();
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     builder
         .invoke_handler(tauri::generate_handler![
@@ -553,10 +595,11 @@ fn main() {
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             machine.set_installer(Arc::new(DesktopUpdate { app: updater }));
             app.manage(Background::load(config.clone()));
-            // Only macOS brings the window back when the app is opened again. Elsewhere a second
-            // launch is a second process, which would come up with no window too and take over the
-            // same sessions and the same hub link, so the setting is not offered there.
-            if cfg!(target_os = "macos") {
+            // macOS and Linux (through the single-instance plugin) bring the window back when the
+            // app is opened again. On Windows a second launch is a second process, which would come
+            // up with no window too and take over the same sessions and the same hub link, so the
+            // setting is not offered there.
+            if cfg!(any(target_os = "macos", target_os = "linux")) {
                 machine.set_window(Arc::new(DesktopWindow { app: app.handle().clone() }));
             }
             app.manage(machine.clone());
@@ -577,7 +620,7 @@ fn main() {
             fn_key::watch(app.handle());
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            add_tray(app)?;
+            add_tray_or_go_without(app)?;
             let handle = app.handle().clone();
             machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
