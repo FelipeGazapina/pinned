@@ -599,3 +599,9 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 .sign-in .retry[hidden], #login .retry[hidden] { display: none; }
 #settings .machine-row button:disabled { opacity: 0.45; cursor: default; }
 #settings .machine-row .hint[data-standing="behind"] { color: var(--g-warning-fg, #d9822b); }
+
+/* The Slack card: one block per workspace, one row per bot. */
+.slack-workspace h3 { margin: 14px 0 2px; font-size: 13px; color: var(--muted, inherit); }
+.slack-bot { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px; padding: 6px 0; }
+.slack-bot .actions { grid-column: 2; grid-row: 1 / 3; margin: 0; }
+.slack-bot .error { grid-column: 1 / -1; margin: 4px 0 0; }
