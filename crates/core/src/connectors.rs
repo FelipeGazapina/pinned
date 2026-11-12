@@ -4142,8 +4142,13 @@ impl Connectors {
     /// claimed the thread, otherwise the workflow's, otherwise the default. Every Slack post and
     /// read about a thread goes through here, so no thread hears from two bots.
     fn thread_bot(&self, workflow: Option<&str>, channel: &str, thread: &str) -> Result<SlackBot, String> {
-        let bot = self.store.lock().unwrap().thread_bot(workflow, channel, thread)?.ok_or(SLACK_NOT_CONNECTED)?;
-        self.with_token(bot).ok_or_else(|| SLACK_NOT_CONNECTED.to_owned())
+        let found = self.store.lock().unwrap().thread_bot(workflow, channel, thread)?;
+        let bot = match found {
+            Some(bot) => self.with_token(bot),
+            // A token kept without its account still posts, as before several bots.
+            None => self.key(SLACK_KEY).map(|token| SlackBot { id: String::new(), token, user_id: String::new() }),
+        };
+        bot.ok_or_else(|| SLACK_NOT_CONNECTED.to_owned())
     }
 
     /// The bot a workflow watches with, or None while Slack is not connected. Err when the bot the
@@ -5431,7 +5436,7 @@ mod tests {
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })), Ok(()));
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
-        assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
+        assert_eq!(block_on(connectors.acknowledge("c2", "C0123ABCD", "1792400050.000200", &[])), Ok(()), "nothing to react to needs no Slack");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6326,7 +6331,7 @@ mod tests {
         let (connectors, dir) = stored("fallback", vec![router(), called()]);
         assert_eq!(block_on(connectors.fallback(&delivery)).err(), Some("the workflow no longer answers Slack threads".into()));
         let called = Delivery { connector: "c6".into(), ..delivery };
-        assert_eq!(block_on(connectors.fallback(&called)).err(), Some("Slack is not connected".into()));
+        assert_eq!(block_on(connectors.fallback(&called)).err(), Some(SLACK_NOT_CONNECTED.into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7678,7 +7683,7 @@ mod tests {
             std::fs::write(dir.join(name), key).unwrap();
         }
         connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
-        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
         let (work, error) = block_on(connectors.poll());
         assert_eq!((work.len(), error), (0, None));
         block_on(connectors.drive(&|work: Work| placed(work))).unwrap();
@@ -7798,7 +7803,7 @@ mod tests {
         }
         let bot = || Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
         connectors.store.lock().unwrap().slack = bot();
-        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
         let typed = Mutex::new(Vec::<String>::new());
         let open = |work: Work| {
             match &work {
@@ -7954,7 +7959,7 @@ mod tests {
             std::fs::write(dir.join(name), key).unwrap();
         }
         connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
-        connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
         let typed = Mutex::new(Vec::<String>::new());
         let open = |work: Work| {
             match &work {
@@ -8148,7 +8153,7 @@ mod tests {
         }
         let prepare = |connectors: &Connectors| {
             connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
-            connectors.channels.lock().unwrap().insert("#support".into(), "C0123ABCD".into());
+            connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
         };
         prepare(&connectors);
         let key = format!("C0123ABCD:{old}");
