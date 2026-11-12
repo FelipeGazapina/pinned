@@ -1218,7 +1218,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1233,7 +1233,8 @@ function renderThread() {
   const key = JSON.stringify([content, win.lo, win.hi]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const changes = sub ? new Map() : changesByTurn(t.history, turns);
-  const opening = turns.find((x) => x.user);
+  // A thread holding only its newest pages does not hold its opening prompt.
+  const opening = !(t.start > 0) && turns.find((x) => x.user);
   const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
   const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : workerOfHtml(tab);
   const spawned = sub ? null : workersHome(turns);
@@ -1241,7 +1242,7 @@ function renderThread() {
   const home = spawned && turns.indexOf(spawned) >= first ? spawned : turns.at(-1);
   const workers = sub ? "" : workersBlockHtml(tab, t, home === spawned || !turns.length);
   const body = turns.length
-    ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
+    ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : sub ? "" : olderHtml(t)}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
         .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1, turn === home ? workers : ""))
         .join("")}<div class="spacer" style="height:${win.below}px"></div>`
@@ -1281,6 +1282,29 @@ function renderThread() {
   showScrollEnd();
   renderMinimap(shown, t);
   renderComposer(tab);
+  // Turns that do not fill the screen leave nothing to scroll up by, so the page before them is read now.
+  if (!sub && !first && t.start > 0 && !t.olderError && threadView.scrollHeight <= threadView.clientHeight) fetchOlder(tab);
+}
+
+/** The top of a thread that opened on its newest pages: the page before them being read, a way to
+ * read it, or, once pages were read back to it, the start of the conversation. */
+function olderHtml(t) {
+  if (!t.loaded || t.start == null) return "";
+  if (t.fetchingOlder) return `<div class="older loading" role="status"><span class="spin"></span><span>Loading earlier messages…</span></div>`;
+  if (t.olderError) return `<button type="button" class="earlier" data-older><span>Couldn't load earlier messages. Try again</span></button>`;
+  if (t.start > 0) return `<button type="button" class="earlier" data-older><span>Load earlier messages</span></button>`;
+  return t.readBack ? `<div class="older start">Start of conversation</div>` : "";
+}
+
+/** Scrolling up near the first turn drawn shows the earlier turns held, then reads the page before them. */
+function readEarlier() {
+  const t = threadOf(active);
+  if (finder.open || !t.loaded || subagentShown()) return;
+  if (turnsFor(t).length > (t.limit ?? TURNS_SHOWN)) {
+    t.limit = (t.limit ?? TURNS_SHOWN) + TURNS_SHOWN;
+    return renderThread();
+  }
+  fetchOlder(active);
 }
 
 const DIALOG_KEYS = { "shift-tab": "\x1b[Z", tab: "\t", left: "\x1b[D", right: "\x1b[C", up: "\x1b[A", down: "\x1b[B", enter: "\r", esc: "\x1b" };
@@ -1375,6 +1399,8 @@ threadView.addEventListener("scroll", () => {
   windowFrame = requestAnimationFrame(() => {
     windowFrame = 0;
     if (active && windowStale()) renderThread();
+    // Once the turns at the top are drawn, so the page read back keeps one of them on screen.
+    if (active && threadView.scrollTop < threadView.clientHeight) readEarlier();
   });
 }, { passive: true });
 
@@ -1946,6 +1972,7 @@ threadView.addEventListener("click", (e) => {
     t.limit = (t.limit ?? TURNS_SHOWN) + TURNS_SHOWN;
     return rerender();
   }
+  if (e.target.closest("[data-older]")) return fetchOlder(active);
   const subagent = e.target.closest("button[data-subagent]");
   if (subagent) {
     e.preventDefault();
@@ -2288,6 +2315,9 @@ function openFind() {
   finder.open = true;
   finder.bar.hidden = false;
   if (reveal) rerender();
+  // A search goes through the whole thread, so the pages not read yet are read back.
+  const tab = active;
+  if (reveal) olderUntil(tab, () => !finder.open || active !== tab).then(() => finder.open && active === tab && rerender());
   findInput.focus();
   findInput.select();
 }
@@ -2576,7 +2606,10 @@ window.addEventListener("keydown", (e) => {
 
 async function goToCitation(c) {
   const t = threadOf(active);
-  const turn = turnsFor(t).find((x) => x.steps.some((s) => s.id === c.messageId));
+  const has = () => turnsFor(t).find((x) => x.steps.some((s) => s.id === c.messageId));
+  // A quote of a message older than the pages held reads pages back until one holds it.
+  await olderUntil(active, has);
+  const turn = has();
   if (turn) scrollToTurn(turn.id);
   const find = () => threadView.querySelector(`[data-cite-source="${CSS.escape(c.messageId)}"]`);
   if (!find()) return flash("The quoted reply isn't in this thread anymore");

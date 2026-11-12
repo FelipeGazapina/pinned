@@ -159,6 +159,7 @@ let restoringBranch = null;
 let bannersOpen = false;
 
 ${between(gui, "const THREAD_READ_GAP_MS", "\n")}
+${between(gui, "const THREAD_PAGE", "\n")}
 ${between(main, "const tilde =", "\n")}
 ${between(timeline, "const PLAN_TOOL", "let uploadImages = null;")}
 ${between(timeline, "function userHtml", "const DIALOG_KEYS")}
@@ -933,4 +934,120 @@ test("a permission prompt on the open thread is read when another tab's screen t
     sandbox.terminalMenu = read;
     delete sandbox.console;
   }
+});
+
+/** A machine holding a transcript of `count` turns, a prompt and a reply each, that answers a
+ * `thread` read with a limit as a newer pinned does: whole turns back from `before` or the end. */
+function pagedMachine(count) {
+  const turns = Array.from({ length: count }, (_, i) => [
+    { kind: "user", id: `p-${i + 1}`, at: `t${i}`, text: `ask ${i + 1}` },
+    { kind: "text", at: `t${i}`, text: `answer ${i + 1}` },
+  ]);
+  const machine = { calls: [], pending: [] };
+  machine.grow = (n) => {
+    for (let i = 0; i < n; i++) turns.push([{ kind: "user", id: `p-${turns.length + 1}`, at: "t", text: `ask ${turns.length + 1}` }, { kind: "text", at: "t", text: `answer ${turns.length + 1}` }]);
+  };
+  sandbox.callOn = (_machine, call) => {
+    if (call.cmd !== "thread") return Promise.resolve(null);
+    machine.calls.push(call);
+    let page;
+    if (call.limit) {
+      const end = call.before ?? turns.length;
+      let start = end;
+      while (start > 0 && (end - start) * 2 < call.limit) start--;
+      page = { items: turns.slice(start, end).flat(), next: end, start };
+    } else page = { items: turns.slice(call.from).flat(), next: turns.length };
+    const answer = structuredClone({ session: "s-paged", reset: false, agents: [], ...page });
+    return new Promise((resolve) => machine.pending.push(() => resolve(answer)));
+  };
+  machine.answer = async () => {
+    while (machine.pending.length) machine.pending.shift()();
+    await settle();
+  };
+  return machine;
+}
+
+test("a long thread opens on its newest page, reads the page before it as the reader scrolls up keeping the turn on screen, and ends at the start", async () => {
+  const plain = sandbox.threadView;
+  const view = laidOutView();
+  sandbox.threadView = view;
+  sandbox.CSS = { escape: (text) => text };
+  try {
+    const PAGE = vm.runInContext("THREAD_PAGE", sandbox);
+    const total = PAGE + 10;
+    const machine = pagedMachine(total);
+    const tab = tabFor("tab-paged", "idle");
+    sandbox.tabs = [tab];
+    sandbox.active = tab;
+    sandbox.fetchThread(tab);
+    await machine.answer();
+    const t = tab.thread;
+    assert.deepEqual(machine.calls.map((c) => [c.from, c.limit, c.before]), [[0, PAGE, undefined]], "it asks for the newest page only");
+    assert.equal(t.items.length, PAGE, "and holds that page");
+    assert.equal(t.items[0].text, `ask ${total - PAGE / 2 + 1}`);
+    assert.equal(t.start, total - PAGE / 2);
+    assert.equal(view.firstOnScreen(), `p-${total - 5}`, "it opens at the latest turn");
+
+    // The reader scrolls up: the turns held come in first, then the page before them is read.
+    vm.runInContext("threadAtEnd = false", sandbox);
+    const scrollUp = () => {
+      view.scrollTop = 0;
+      // As the scroll handler does: the turns now in view are drawn (the harness's windowStale says
+      // no, so the drawn window is dropped), then the earlier ones asked for.
+      view.dataset.content = "";
+      sandbox.renderThread();
+      const anchor = view.firstOnScreen();
+      if (view.scrollTop < view.clientHeight) sandbox.readEarlier();
+      return anchor;
+    };
+    for (let i = 0; i < 10 && machine.calls.length === 1; i++) {
+      const anchor = scrollUp();
+      assert.equal(view.firstOnScreen(), anchor, "turns drawn above keep the turn on screen");
+    }
+    assert.deepEqual(machine.calls.slice(1).map((c) => [c.limit, c.before]), [[PAGE, total - PAGE / 2]], "one page, the one before those held");
+    assert.match(view.innerHTML, /class="older loading"[^]*Loading earlier messages/, "the top shows the page loading");
+    const anchor = view.firstOnScreen();
+    const before = t.items.length;
+    // A turn arrives while the older page is out.
+    machine.grow(1);
+    sandbox.fetchThread(tab);
+    await settle();
+    while (clock.timers.length) clock.next();
+    await settle();
+    await machine.answer();
+    assert.equal(view.firstOnScreen(), anchor, "the page put in front keeps the turn on screen");
+    assert.equal(t.items.length, before + PAGE + 2, "the older page and the new turn, each once");
+    assert.equal(t.items.at(-2).text, `ask ${total + 1}`);
+    assert.equal(t.start, 10);
+    assert.doesNotMatch(view.innerHTML, /Loading earlier messages/);
+
+    for (let i = 0; i < 20 && t.start > 0; i++) {
+      scrollUp();
+      await machine.answer();
+    }
+    assert.equal(t.start, 0);
+    assert.deepEqual([...t.items.filter((i) => i.kind === "user").map((i) => i.text)], Array.from({ length: total + 1 }, (_, i) => `ask ${i + 1}`), "every turn once, in order");
+    for (let i = 0; i < 20 && !/Start of conversation/.test(view.innerHTML); i++) scrollUp();
+    assert.match(view.innerHTML, /class="older start">Start of conversation/, "the top says the conversation starts there");
+    assert.equal(machine.calls.length, 4, "no read past the start");
+  } finally {
+    vm.runInContext("threadAtEnd = true", sandbox);
+    sandbox.threadView = plain;
+  }
+});
+
+test("a thread from a machine that ignores the limit holds all of it and reads no page back", async () => {
+  const machine = pagedMachine(5);
+  const call = sandbox.callOn;
+  sandbox.callOn = (m, c) => call(m, { ...c, limit: undefined });
+  const tab = tabFor("tab-old", "idle");
+  sandbox.tabs = [tab];
+  sandbox.active = tab;
+  sandbox.fetchThread(tab);
+  await machine.answer();
+  assert.equal(tab.thread.items.length, 10);
+  assert.equal(tab.thread.start, 0);
+  await sandbox.fetchOlder(tab);
+  assert.equal(machine.calls.length, 1);
+  assert.doesNotMatch(threadView.innerHTML, /Start of conversation|earlier messages/);
 });

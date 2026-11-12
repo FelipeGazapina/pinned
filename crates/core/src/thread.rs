@@ -208,6 +208,133 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     Ok(Page { items, next, reset: replaced, context, branch, todos })
 }
 
+/// How much a read from the end takes from the file at a time.
+const BACK_CHUNK: u64 = 256 << 10;
+
+/// The lines of a file before a place in it, newest first, read back from there a chunk at a time.
+struct BackLines {
+    f: std::fs::File,
+    /// Where `held` starts in the file.
+    pos: u64,
+    /// The bytes from `pos` up to the lines given out, the newline before those left out.
+    held: Vec<u8>,
+    /// The line being read back is longer than `READ_LIMIT`, so none of it is kept.
+    oversized: bool,
+    finished: bool,
+}
+
+impl BackLines {
+    fn new(file: &Path, end: u64) -> std::io::Result<Self> {
+        Ok(BackLines { f: std::fs::File::open(file)?, pos: end, held: vec![], oversized: false, finished: false })
+    }
+
+    /// The line before the last one given out and where it starts, without its bytes when it is
+    /// too long to keep; `None` past the file's start. The first is what follows the last newline,
+    /// which is empty or a line still being written.
+    fn line(&mut self) -> std::io::Result<Option<(u64, Option<Vec<u8>>)>> {
+        if self.finished {
+            return Ok(None);
+        }
+        loop {
+            if !self.oversized {
+                if let Some(i) = self.held.iter().rposition(|b| *b == b'\n') {
+                    let line = self.held.split_off(i + 1);
+                    self.held.pop();
+                    // As a read from the start, which reads a page at a time, leaves it out.
+                    let kept = line.len() as u64 + 1 <= READ_LIMIT;
+                    return Ok(Some((self.pos + i as u64 + 1, kept.then_some(line))));
+                }
+            }
+            if self.pos == 0 {
+                self.finished = true;
+                let line = std::mem::take(&mut self.held);
+                return Ok(Some((0, (!self.oversized).then_some(line))));
+            }
+            let at = self.pos.saturating_sub(BACK_CHUNK);
+            let mut chunk = vec![0; (self.pos - at) as usize];
+            self.f.seek(SeekFrom::Start(at))?;
+            self.f.read_exact(&mut chunk)?;
+            self.pos = at;
+            if self.oversized {
+                if let Some(i) = chunk.iter().rposition(|b| *b == b'\n') {
+                    self.oversized = false;
+                    chunk.truncate(i);
+                    self.held = chunk;
+                    return Ok(Some((at + i as u64 + 1, None)));
+                }
+                continue;
+            }
+            chunk.append(&mut self.held);
+            self.held = chunk;
+            if self.held.len() as u64 > READ_LIMIT && !self.held.contains(&b'\n') {
+                self.held.clear();
+                self.oversized = true;
+            }
+        }
+    }
+}
+
+/// A read from the end: the page and where its first line starts, which the read of the page
+/// before it takes as `before`. 0: the page reaches the start of the conversation.
+pub struct Back {
+    pub page: Page,
+    pub start: u64,
+}
+
+/// The whole lines just before byte `before` of `file`, or before its end, holding at least `limit`
+/// items, read back from there so a long transcript is not read from its start. The page starts at
+/// a prompt when it can, so it holds whole turns: it reaches back to the turn's prompt up to four
+/// times `limit` items. `next` is where the lines read end, so a read from there goes on after them.
+pub fn read_back(file: &Path, before: Option<u64>, limit: usize) -> std::io::Result<Back> {
+    let len = std::fs::metadata(file)?.len();
+    let replaced = before.is_some_and(|b| b > len);
+    let end = before.filter(|_| !replaced).unwrap_or(len);
+    let mut back = BackLines::new(file, end)?;
+    // What follows the last newline is a line still being written.
+    let next = back.line()?.map_or(end, |(at, _)| at);
+    let mut lines: Vec<(Option<Value>, Vec<Item>)> = vec![];
+    let (mut start, mut held) = (next, 0);
+    while held < limit * 4 {
+        let Some((at, bytes)) = back.line()? else { break };
+        start = at;
+        let (line, items) = match bytes {
+            Some(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(line) if line["isSidechain"].as_bool() != Some(true) => {
+                    let items = items_of(&line);
+                    (Some(line), items)
+                }
+                _ => continue,
+            },
+            None => (None, vec![Item::Note { id: format!("skipped:{at}"), at: String::new(), text: "An entry too large to show was left out.".into() }]),
+        };
+        let opens = line.as_ref().is_some_and(opens_turn);
+        held += items.len();
+        lines.push((line, items));
+        if held >= limit && opens {
+            break;
+        }
+    }
+    let newest = || lines.iter().filter_map(|(line, _)| line.as_ref());
+    let context = newest().find_map(context_of);
+    let branch = newest().find_map(|l| l["gitBranch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned));
+    let todos = newest().find_map(todos_of);
+    let items = lines.iter().rev().flat_map(|(_, items)| items.iter().cloned()).collect();
+    Ok(Back { page: Page { items, next, reset: replaced, context, branch, todos }, start })
+}
+
+/// The first prompt of the conversation in `file`, from its first lines.
+pub fn opening(file: &Path) -> Option<String> {
+    let mut f = std::fs::File::open(file).ok()?;
+    let mut bytes = vec![];
+    Read::take(&mut f, REPLY_LOOK * 4).read_to_end(&mut bytes).ok()?;
+    bytes.split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).find_map(|line| {
+        items_of(&line).into_iter().find_map(|item| match item {
+            Item::User { text, .. } if !text.is_empty() => Some(text),
+            _ => None,
+        })
+    })
+}
+
 /// The latest tool call among `items` that has no result yet, as its name and one-line summary:
 /// what a session blocked on a permission prompt or a question waits on.
 pub fn pending_tool(items: &[Item]) -> Option<(&str, &str)> {
@@ -1141,6 +1268,166 @@ mod tests {
         assert_eq!(texts(three), [&["x".repeat(20), "x".repeat(20), "x".repeat(20)][..], &["what is running?".into(), "Two Slack threads.".into()]].concat(), "4 MiB back, it starts at the first whole line");
         let all = read_end(file.path(), |_| false).unwrap();
         assert_eq!(all.items.len(), 9, "it grows no wider than a page");
+    }
+
+    /// A transcript of `turns` turns: each a prompt `p{n}`, a Bash call and its result, and a reply `r{n}`.
+    fn turns_file(file: &mut impl Write, from: usize, turns: usize) {
+        for n in from..from + turns {
+            writeln!(file, r#"{{"type":"user","uuid":"p{n}","timestamp":"t","message":{{"content":"p{n}"}}}}"#).unwrap();
+            writeln!(file, r#"{{"type":"assistant","uuid":"a{n}","timestamp":"t","message":{{"content":[{{"type":"tool_use","id":"tool{n}","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#).unwrap();
+            writeln!(file, r#"{{"type":"user","uuid":"o{n}","timestamp":"t","message":{{"content":[{{"type":"tool_result","tool_use_id":"tool{n}","content":"out{n}"}}]}}}}"#).unwrap();
+            writeln!(file, r#"{{"type":"assistant","uuid":"r{n}","timestamp":"t","message":{{"content":[{{"type":"text","text":"r{n}"}}]}}}}"#).unwrap();
+        }
+    }
+
+    /// Each item's id, a result's as `=tool`.
+    fn ids(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::User { id, .. } | Item::Text { id, .. } | Item::Tool { id, .. } | Item::Note { id, .. } => id.clone(),
+                Item::Result { tool, .. } => format!("={tool}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Every page from the end back to the start, newest first, as the app asks for them.
+    fn pages_back(file: &Path, limit: usize) -> Vec<Back> {
+        let mut pages = vec![read_back(file, None, limit).unwrap()];
+        while pages.last().unwrap().start > 0 {
+            let before = pages.last().unwrap().start;
+            let page = read_back(file, Some(before), limit).unwrap();
+            assert!(page.start < before, "each page reaches further back");
+            assert_eq!(page.page.next, before, "an older page ends where the newer one starts");
+            pages.push(page);
+        }
+        pages
+    }
+
+    #[test]
+    fn pages_read_back_hold_the_whole_conversation_in_order_once() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        turns_file(&mut file, 0, 50);
+        let whole = read(file.path(), 0).unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        let pages = pages_back(file.path(), 10);
+        let newest = &pages[0];
+        assert_eq!(newest.page.next, len, "the newest page goes on from the end");
+        assert_eq!(ids(&newest.page.items)[..4], ["p47", "tool47", "=tool47", "r47:0"], "it starts at a prompt, holding at least 10 items: three turns of four");
+        assert_eq!(ids(&newest.page.items).last().unwrap(), "r49:0", "and ends with the latest reply");
+        assert_eq!(pages.len(), 17, "50 turns, three a page: the last page holds two");
+        assert_eq!(pages.last().unwrap().start, 0, "the last page reaches the start");
+        assert_eq!(ids(&pages.last().unwrap().page.items)[0], "p0");
+
+        let joined: Vec<Item> = pages.iter().rev().flat_map(|p| p.page.items.clone()).collect();
+        assert_eq!(joined, whole.items, "the pages, oldest first, are the read from the start: no item twice, none missing");
+        assert!(pages.iter().all(|p| ids(&p.page.items)[0].starts_with('p')), "every page starts at a prompt");
+    }
+
+    #[test]
+    fn a_page_read_back_holds_the_newest_context_branch_and_tasks() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"type":"assistant","uuid":"old","timestamp":"t0","gitBranch":"old","message":{{"content":[{{"type":"text","text":"old"}}],"usage":{{"input_tokens":1}}}}}}"#).unwrap();
+        turns_file(&mut file, 0, 3);
+        writeln!(file, r#"{{"type":"assistant","uuid":"new","timestamp":"t1","gitBranch":"main","message":{{"content":[{{"type":"tool_use","id":"todo","name":"TodoWrite","input":{{"todos":[{{"content":"ship","status":"pending"}}]}}}}],"usage":{{"input_tokens":5,"cache_read_input_tokens":10}}}}}}"#).unwrap();
+        let back = read_back(file.path(), None, 1).unwrap();
+        assert_eq!(back.page.branch.as_deref(), Some("main"));
+        assert_eq!(back.page.todos.map(|t| t.steps.len()), Some(1));
+        assert_eq!(read(file.path(), 0).unwrap().context, back.page.context, "the latest context, as a read of the whole file finds it");
+    }
+
+    #[test]
+    fn paging_back_while_the_transcript_grows_skips_and_repeats_nothing() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        turns_file(&mut file, 0, 20);
+        let newest = read_back(file.path(), None, 8).unwrap();
+        // New turns come while the older pages load: they follow `next`, and the older pages end at `start`.
+        turns_file(&mut file, 20, 5);
+        write!(file, r#"{{"type":"user","uuid":"half"#).unwrap();
+        let after = read(file.path(), newest.page.next).unwrap();
+        assert_eq!(ids(&after.items)[0], "p20");
+        let mut held: Vec<Item> = newest.page.items.clone();
+        held.extend(after.items);
+        let mut before = newest.start;
+        while before > 0 {
+            let older = read_back(file.path(), Some(before), 8).unwrap();
+            held.splice(0..0, older.page.items);
+            before = older.start;
+        }
+        let mut whole = tempfile::NamedTempFile::new().unwrap();
+        turns_file(&mut whole, 0, 25);
+        assert_eq!(held, read(whole.path(), 0).unwrap().items);
+
+        let tail = read_back(file.path(), None, 8).unwrap();
+        assert_eq!(ids(&tail.page.items).last().unwrap(), "r24:0", "a line still being written waits");
+        assert_eq!(tail.page.next, std::fs::metadata(file.path()).unwrap().len() - r#"{"type":"user","uuid":"half"#.len() as u64);
+    }
+
+    #[test]
+    fn lines_longer_than_a_chunk_read_back_whole_and_one_past_a_page_is_left_out() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        turns_file(&mut file, 0, 2);
+        let long = "y".repeat(BACK_CHUNK as usize * 3);
+        writeln!(file, r#"{{"type":"assistant","uuid":"long","timestamp":"t","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#).unwrap();
+        turns_file(&mut file, 2, 1);
+        let all = read_back(file.path(), None, 1000).unwrap();
+        assert_eq!(all.start, 0);
+        assert_eq!(all.page.items, read(file.path(), 0).unwrap().items, "a line three chunks long reads back whole");
+
+        let huge = "z".repeat(READ_LIMIT as usize + 10);
+        writeln!(file, r#"{{"type":"assistant","uuid":"huge","timestamp":"t","message":{{"content":[{{"type":"text","text":"{huge}"}}]}}}}"#).unwrap();
+        turns_file(&mut file, 3, 1);
+        let pages = pages_back(file.path(), 1000);
+        let items: Vec<Item> = pages.iter().rev().flat_map(|p| p.page.items.clone()).collect();
+        let ids = ids(&items);
+        let at = ids.iter().position(|id| id.starts_with("skipped:")).expect("the huge line is a note");
+        assert_eq!((&ids[at - 1], &ids[at + 1]), (&"r2:0".to_owned(), &"p3".to_owned()), "in its place");
+        assert_eq!(ids.iter().filter(|id| id.starts_with('p')).count(), 4);
+    }
+
+    #[test]
+    fn reading_back_an_empty_or_replaced_transcript() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let empty = read_back(file.path(), None, 10).unwrap();
+        assert_eq!((empty.page.items.len(), empty.page.next, empty.start), (0, 0, 0));
+        let mut file = file;
+        turns_file(&mut file, 0, 2);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+        let replaced = read_back(file.path(), Some(len + 100), 10).unwrap();
+        assert!(replaced.page.reset, "a page older than the file's end means the file was replaced");
+        assert_eq!(replaced.page.next, len);
+    }
+
+    #[test]
+    fn the_opening_prompt_is_read_from_the_start() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"type":"user","uuid":"meta","isMeta":true,"message":{{"content":"meta"}}}}"#).unwrap();
+        turns_file(&mut file, 0, 3);
+        assert_eq!(opening(file.path()).as_deref(), Some("p0"));
+    }
+
+    /// Times a read of the transcript `PINNED_BENCH_TRANSCRIPT` names from its start to its end, as
+    /// the app read a thread, and its newest page read back.
+    #[test]
+    #[ignore]
+    fn time_reading_a_long_transcript_forward_and_back() {
+        let file = std::path::PathBuf::from(std::env::var_os("PINNED_BENCH_TRANSCRIPT").expect("PINNED_BENCH_TRANSCRIPT names a transcript"));
+        let t = std::time::Instant::now();
+        let (mut from, mut items) = (0, 0);
+        loop {
+            let page = read(&file, from).unwrap();
+            items += page.items.len();
+            if page.next == from {
+                break;
+            }
+            from = page.next;
+        }
+        eprintln!("forward: {items} items in {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let back = read_back(&file, None, 300).unwrap();
+        eprintln!("back: {} items, start {} in {:?}", back.page.items.len(), back.start, t.elapsed());
     }
 
     #[test]

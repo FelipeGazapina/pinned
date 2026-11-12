@@ -346,7 +346,7 @@ fn may_type(state: &str) -> bool {
 async fn read_tab(ctx: &Ctx<'_>, machine: &str, tab: &TabView, args: &Value) -> Value {
     let limit = args["limit"].as_u64().map_or(DEFAULT_ITEMS, |l| (l as usize).clamp(1, MAX_ITEMS));
     let from = args["cursor"].as_u64().unwrap_or(0);
-    let page = ctx.hub.call_machine(&ctx.account, machine, Call::Thread { tab: tab.id.clone(), from }, CALL_WAIT).await;
+    let page = ctx.hub.call_machine(&ctx.account, machine, Call::Thread { tab: tab.id.clone(), from, limit: None, before: None }, CALL_WAIT).await;
     reading::read(tab, page.map_err(unanswered), limit)
 }
 

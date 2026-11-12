@@ -40,6 +40,8 @@ const FIRST_RUN_LOOKS: u32 = 10;
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
+/// The most items a `Call::Thread` with a limit asks for that a machine reads back.
+const THREAD_PAGE_MAX: usize = 5000;
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
@@ -1215,7 +1217,7 @@ impl Machine {
             Call::SetupToken { .. } => Err("only the hub asks this machine for a Claude token for boxes".into()),
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
-            Call::Thread { tab, from } => json(self.thread(&tab, from)?),
+            Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -1492,14 +1494,29 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
+        self.thread_page(tab, from, None, None)
+    }
+
+    /// `Call::Thread`: from byte `from` on, or with `limit` the newest turns before `before`, read
+    /// back from there. A page holds at most `THREAD_PAGE_MAX` items asked for.
+    pub fn thread_page(&self, tab: &str, from: u64, limit: Option<u32>, before: Option<u64>) -> Result<ThreadPage, String> {
         let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = self.transcript_of(tab)? else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
+            let start = limit.map(|_| 0);
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab), start, opening: None });
         };
-        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let failed = |e: std::io::Error| format!("could not read the transcript: {e}");
+        let (page, start) = match limit {
+            Some(limit) => {
+                let back = thread::read_back(&file, before, (limit as usize).clamp(1, THREAD_PAGE_MAX)).map_err(failed)?;
+                (back.page, Some(back.start))
+            }
+            None => (thread::read(&file, from).map_err(failed)?, None),
+        };
+        let opening = start.filter(|s| *s > 0).and_then(|_| thread::opening(&file));
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents, start, opening })
     }
 
     /// The tab's transcript, once claude reported a session that has one.

@@ -244,6 +244,9 @@ svg.pierre { color-scheme: var(--g-scheme); }
 #thread .resume-banner .primary { flex: none; }
 #thread .earlier::before, #thread .earlier::after { content: ""; flex: 1; height: 1px; background: var(--g-border); background: var(--g-hover); }
 #thread .earlier:hover { color: var(--g-fg); }
+#thread .older { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0 0 16px; color: var(--g-muted); font-size: 12px; }
+#thread .older.start::before, #thread .older.start::after { content: ""; flex: 1; height: 1px; background: var(--g-hover); }
+#thread .older .spin { width: 12px; height: 12px; border: 2px solid var(--g-hover); border-top-color: var(--g-muted); border-radius: 50%; animation: spin 0.8s linear infinite; }
 
 #scroll-end { position: absolute; left: 50%; transform: translateX(-50%); z-index: 4; display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
   border-radius: 8px; font-size: 12px; font-weight: 500; color: var(--g-fg); background: rgb(var(--g-canvas-rgb) / 0.8); backdrop-filter: blur(16px) saturate(1.08);
